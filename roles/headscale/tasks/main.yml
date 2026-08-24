@@ -150,6 +150,19 @@
     - headscale_policy_check is not skipped
   tags: [headscale]
 
+# In --check mode the staging template above renders nothing to the host, so
+# this copy aborts with "Source /opt/headscale/config/.policy.hujson.staged
+# does not exist" and kills the play. The staged file is also removed at the
+# end of every real run, so it is never left behind for a later dry run to
+# find. Nothing to install in a dry run — the staging task already showed the
+# rendered policy as a diff, and installing is exactly the host write that
+# check mode must not perform.
+#
+# NOT guarded on the staging task's registered result: `template` supports
+# check mode, so it reports "changed" rather than "skipped" and `is not
+# skipped` would let this run anyway. `ansible_check_mode` is the only honest
+# signal here. (The validation chain above is a `command`, which IS skipped,
+# and is guarded with `headscale_policy_check is not skipped`.)
 - name: Install validated headscale ACL policy
   ansible.builtin.copy:
     src: /opt/headscale/config/.policy.hujson.staged
@@ -157,7 +170,9 @@
     remote_src: true
     owner: "{{ app_user }}"
     mode: "0644"
-  when: headscale_acl_policy is defined
+  when:
+    - headscale_acl_policy is defined
+    - not ansible_check_mode
   notify: Restart headscale
   tags: [headscale]
 

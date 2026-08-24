@@ -73,11 +73,30 @@
       become: true
       become_user: root
 
+    # In --check mode `Verify snapshot exists` is SKIPPED, so `stdout` is empty
+    # and `from_json` raises — the play dies with exit 2 instead of dry-running.
+    # Deliberately NOT `rc is defined`: a command task skipped by check mode
+    # still registers rc 0, so that guard passes and the crash happens anyway.
+    #
+    # `_snap` therefore stays undefined in check mode, and every task that
+    # dereferences it carries `_snap is defined`. A restore cannot be dry-run
+    # in any useful sense — without the snapshot metadata there is nothing to
+    # restore FROM — so the correct behaviour is to skip, loudly.
     - name: Parse snapshot details
       ansible.builtin.set_fact:
         _snap: "{{ (_snapshot_info.stdout | from_json | last) }}"
+      when: _snapshot_info is not skipped
+
+    - name: Explain skipped restore in check mode
+      ansible.builtin.debug:
+        msg: >-
+          Check mode: the snapshot lookup did not run, so there is no snapshot
+          metadata to restore from and every restore step below is skipped.
+          Re-run without --check to perform the restore.
+      when: _snap is not defined
 
     - name: Display restore plan
+      when: _snap is defined
       ansible.builtin.debug:
         msg: |
           ====================================================
@@ -130,7 +149,9 @@
       environment: "{{ _restic_env }}"
       become: true
       become_user: root
-      when: _restore_method == 'pg_dump'
+      when:
+        - _restore_method == 'pg_dump'
+        - _snap is defined
 
     - name: Restore MySQL database
       ansible.builtin.shell:
@@ -147,12 +168,16 @@
       environment: "{{ _restic_env }}"
       become: true
       become_user: root
-      when: _restore_method == 'mysql'
+      when:
+        - _restore_method == 'mysql'
+        - _snap is defined
 
     - name: Stop Redis container for restore
       ansible.builtin.command:
         cmd: "docker stop {{ accessory }}"
-      when: _restore_method == 'redis'
+      when:
+        - _restore_method == 'redis'
+        - _snap is defined
 
     - name: Restore Redis RDB file
       ansible.builtin.shell:
@@ -168,12 +193,16 @@
       environment: "{{ _restic_env }}"
       become: true
       become_user: root
-      when: _restore_method == 'redis'
+      when:
+        - _restore_method == 'redis'
+        - _snap is defined
 
     - name: Start Redis container after restore
       ansible.builtin.command:
         cmd: "docker start {{ accessory }}"
-      when: _restore_method == 'redis'
+      when:
+        - _restore_method == 'redis'
+        - _snap is defined
 
     - name: Restore file backup
       ansible.builtin.shell:
@@ -188,7 +217,9 @@
       environment: "{{ _restic_env }}"
       become: true
       become_user: root
-      when: _restore_method == 'file'
+      when:
+        - _restore_method == 'file'
+        - _snap is defined
 
     # -- Validation --------------------------------------------------------
 
@@ -233,4 +264,6 @@
           parse_mode: HTML
           disable_web_page_preview: true
       ignore_errors: true
-      when: (docker_monitor_telegram_bot_token | default('')) | length > 0
+      when:
+        - (docker_monitor_telegram_bot_token | default('')) | length > 0
+        - _snap is defined

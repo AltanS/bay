@@ -22,12 +22,22 @@
 
 # -- Determine registration need ------------------------------------------------
 
+# In --check mode the status command above is SKIPPED, so `stdout` is empty and
+# `from_json` raises — the play dies with exit 2. Guarded with `is not skipped`.
+# Deliberately NOT `rc is defined`: a command task skipped by check mode still
+# registers rc 0, so that guard passes and the crash happens anyway.
+#
+# When the fact is not set, every task below falls back to
+# `_needs_registration | default(false)` — the role must never register a node
+# in a dry run, and it cannot know whether registration is needed without the
+# status probe.
 - name: Set registration needed fact
   ansible.builtin.set_fact:
     _needs_registration: >-
       {{ tailscale_status_result.rc != 0 or
          ('BackendState' in (tailscale_status_result.stdout | from_json) and
           (tailscale_status_result.stdout | from_json).BackendState != 'Running') }}
+  when: tailscale_status_result is not skipped
   tags: [tailscale_register]
 
 # == Local path (control region — headscale_server is true) ====================
@@ -42,7 +52,7 @@
   changed_when: false
   become: true
   become_user: root
-  when: _needs_registration and (headscale_server | default(true) | bool)
+  when: (_needs_registration | default(false)) and (headscale_server | default(true) | bool)
   tags: [tailscale_register]
 
 - name: Create headscale server user
@@ -54,7 +64,7 @@
     headscale_user_result.rc != 0 and
     'already exists' not in headscale_user_result.stderr and
     'UNIQUE constraint failed' not in headscale_user_result.stderr
-  when: _needs_registration and (headscale_server | default(true) | bool)
+  when: (_needs_registration | default(false)) and (headscale_server | default(true) | bool)
   tags: [tailscale_register]
 
 - name: Get server user ID
@@ -67,7 +77,7 @@
     executable: /bin/bash
   register: headscale_user_id_result
   changed_when: false
-  when: _needs_registration and (headscale_server | default(true) | bool)
+  when: (_needs_registration | default(false)) and (headscale_server | default(true) | bool)
   tags: [tailscale_register]
 
 - name: Generate pre-auth key
@@ -76,7 +86,7 @@
     --user {{ headscale_user_id_result.stdout | trim }} --expiration 5m
   register: headscale_preauth_result
   no_log: true
-  when: _needs_registration and (headscale_server | default(true) | bool)
+  when: (_needs_registration | default(false)) and (headscale_server | default(true) | bool)
   tags: [tailscale_register]
 
 - name: Connect tailscale to headscale
@@ -88,7 +98,7 @@
   become: true
   become_user: root
   no_log: true
-  when: _needs_registration and (headscale_server | default(true) | bool)
+  when: (_needs_registration | default(false)) and (headscale_server | default(true) | bool)
   tags: [tailscale_register]
 
 # == Remote path (non-control region — headscale_server is false) ==============
@@ -100,7 +110,8 @@
       headscale_api_key is required in the secrets dict for remote region registration.
       Generate one with: bin/bay gateway apikey
   when: >-
-    _needs_registration and not (headscale_server | default(true) | bool) and
+    (_needs_registration | default(false)) and
+    not (headscale_server | default(true) | bool) and
     (secrets.headscale_api_key is not defined or secrets.headscale_api_key | length == 0)
   tags: [tailscale_register]
 
@@ -116,7 +127,7 @@
     status_code: [200, 409, 500]
   register: _create_user_result
   no_log: true
-  when: _needs_registration and not (headscale_server | default(true) | bool)
+  when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
   tags: [tailscale_register]
 
 - name: Fail if user creation returned unexpected error
@@ -137,7 +148,7 @@
     status_code: [200]
   register: _user_list_result
   no_log: true
-  when: _needs_registration and not (headscale_server | default(true) | bool)
+  when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
   tags: [tailscale_register]
 
 - name: Extract server user ID
@@ -146,7 +157,7 @@
       {{ (_user_list_result.json.users
           | selectattr('name', 'equalto', headscale_server_user)
           | first).id }}
-  when: _needs_registration and not (headscale_server | default(true) | bool)
+  when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
   tags: [tailscale_register]
 
 - name: Generate pre-auth key (API)
@@ -164,7 +175,7 @@
     status_code: [200]
   register: _headscale_preauthkey_api
   no_log: true
-  when: _needs_registration and not (headscale_server | default(true) | bool)
+  when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
   tags: [tailscale_register]
 
 - name: Connect tailscale to headscale (API path)
@@ -177,5 +188,5 @@
   become: true
   become_user: root
   no_log: true
-  when: _needs_registration and not (headscale_server | default(true) | bool)
+  when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
   tags: [tailscale_register]
