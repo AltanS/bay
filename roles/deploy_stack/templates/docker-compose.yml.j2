@@ -1,0 +1,25 @@
+# {{ ansible_managed }}
+# WARNING: This file is for reference only.
+# Container lifecycle is managed by Bay's deploy system.
+# Do not run 'docker compose up' manually.
+{% import '_macros.j2' as macros with context %}
+
+services:
+{% include '_traefik.j2' %}
+{% for name, svc in active_services.items() %}
+{% include '_service.j2' %}
+{% endfor %}
+{% for name, acc in active_accessories.items() %}
+{% include '_accessory.j2' %}
+{% endfor %}
+{% include '_watchtower.j2' %}
+{% include '_headscale.j2' %}
+{% include '_zot.j2' %}
+{% include '_webhook_receiver.j2' %}
+{% include '_tailnet_identity.j2' %}
+
+networks:
+  {{ traefik_docker_network }}:
+    external: true
+
+{% include '_volumes.j2' %}

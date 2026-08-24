@@ -1,0 +1,8 @@
+[Unit]
+Description=Bay disk pressure alert probe
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bay-disk-alert
+User=root

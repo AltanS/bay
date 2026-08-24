@@ -1,0 +1,13 @@
+---
+# SSH daemon hardening defaults
+# Supplements geerlingguy.security with directives it doesn't support
+
+sshd_hardening_enabled: true
+
+# MaxStartups: start:rate:full
+# 10:30:60 = accept 10 unauthenticated connections, then randomly drop 30%
+# of new ones, dropping 100% once 60 pending connections are reached.
+sshd_hardening_max_startups: "10:30:60"
+
+# LoginGraceTime: seconds allowed for authentication before disconnect
+sshd_hardening_login_grace_time: "30"

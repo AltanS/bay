@@ -1,0 +1,74 @@
+# {{ project_name }}
+
+Infrastructure managed by [Bay](https://github.com/AltanS/bay).
+
+## Setup
+
+```bash
+# Install framework
+make bay:setup
+
+# Create vault password
+echo 'your-vault-password' > .vault_pass
+```
+
+## Configuration
+
+Edit these files before your first deploy:
+
+| File | Purpose |
+|------|---------|
+| `hosts/production` | Server IP address(es) |
+| `group_vars/all/services.yml` | Service and accessory definitions |
+| `group_vars/all/users.yml` | SSH keys for server access |
+| `group_vars/production/domains.yml` | Domain name and SSL email |
+| `group_vars/production/secrets.yml` | Encrypted credentials |
+
+## DNS Setup
+{% if not multi_region %}
+
+Create a wildcard DNS A record pointing to your server:
+
+```
+*.{{ domain_base }} → {{ server_ip }}
+```
+
+This allows Traefik to route traffic for all service subdomains (e.g., `status.{{ domain_base }}`) to your server.
+{% else %}
+
+Each region needs its own wildcard DNS A record:
+
+| Region | DNS Record | Server IP |
+|--------|-----------|-----------|
+{% for region in regions %}
+| {{ region.name }} | `*.{{ region.name }}.{{ domain_base }}` | {{ region.server_ip }} |
+{% endfor %}
+
+Bay's multi-region mode uses per-region subdomain prefixes (e.g., `status.eu.{{ domain_base }}`).
+{% if regions|length == 1 %}
+
+When you add more regions, create additional wildcard A records:
+`*.newregion.{{ domain_base }} → <new-region-ip>`
+{% endif %}
+{% endif %}
+
+## Deploy
+
+```bash
+# First time — provision and harden the server
+bin/bay provision production
+
+# Deploy services (auto-detects if infrastructure rig is needed)
+bin/bay deploy production
+
+# Force full deploy including infrastructure roles
+bin/bay deploy --rig production
+
+# Dry run (preview changes)
+bin/bay deploy production -- --check --diff
+```
+
+## More
+
+- [Bay documentation](https://github.com/AltanS/bay)
+- `bin/bay --help` for all available commands

@@ -1,0 +1,117 @@
+{#- Shared macros for docker-compose partials -#}
+
+{%- macro container_base(name, cfg) %}
+{% if cfg.build is defined %}
+    image: argo-{{ stack_name }}-{{ name }}:latest  # legacy-argo: live image tag on hosts, migrate separately
+    pull_policy: never
+{% else %}
+    image: {{ cfg.image }}
+{% endif %}
+    container_name: {{ name }}
+    restart: unless-stopped
+{% if cfg.port is defined %}
+    ports:
+{#   `expose:` is authoritative for the bind IP. Any IP prefix in `port:` is #}
+{#   stripped first. If `expose:` is absent, loopback is the safe default — #}
+{#   accessories communicate in-stack via Docker service DNS, they don't     #}
+{#   need a public host bind. `links:` has no port side effects (severed in  #}
+{#   M83-S7).                                                                 #}
+{%   set _port_pair = cfg.port | regex_replace('^\\d+\\.\\d+\\.\\d+\\.\\d+:', '') %}
+{%   set _expose = cfg.expose | default('loopback') %}
+{%   if _expose == 'loopback' %}
+      - "127.0.0.1:{{ _port_pair }}"
+{%   elif _expose == 'tailnet' %}
+      - "{{ gateway_bind_ip }}:{{ _port_pair }}"
+{%   elif _expose == 'host' %}
+      - "0.0.0.0:{{ _port_pair }}"
+{%   endif %}
+{% elif cfg.ports is defined and cfg.ports.expose is defined %}
+    ports:
+{#   Service ports.expose path (M87): Traefik-fronted services declare their #}
+{#   container port as `ports.internal` for label generation. To make the    #}
+{#   service reachable on a host interface (e.g. tailnet for cross-region    #}
+{#   links), the operator opts in via `ports.expose:`. Host port equals      #}
+{#   internal port — no remapping. Mutually exclusive with the string `port:` #}
+{#   form above (string `port:` wins for backwards compat).                  #}
+{%   set _internal = cfg.ports.internal %}
+{%   if cfg.ports.expose == 'loopback' %}
+      - "127.0.0.1:{{ _internal }}:{{ _internal }}"
+{%   elif cfg.ports.expose == 'tailnet' %}
+      - "{{ gateway_bind_ip }}:{{ _internal }}:{{ _internal }}"
+{%   elif cfg.ports.expose == 'host' %}
+      - "0.0.0.0:{{ _internal }}:{{ _internal }}"
+{%   endif %}
+{% endif %}
+{% if cfg.env is defined %}
+    env_file:
+      - {{ stack_dir }}/env/{{ name }}.env
+{% endif %}
+{% if cfg.volumes is defined %}
+    volumes:
+{% for vol in cfg.volumes %}
+      - {{ vol }}
+{% endfor %}
+{% endif %}
+{% if cfg.mem_limit is defined %}
+    mem_limit: {{ cfg.mem_limit }}
+{% endif %}
+{#- command/entrypoint live here, not in _service.j2, so accessories get them  #}
+{#- too. Both are accepted on accessories by services.schema.json but were     #}
+{#- never emitted, so an accessory relying on `command:` to stay alive ran the #}
+{#- image's default CMD and crash-looped under restart: unless-stopped (#26).  #}
+{% if cfg.command is defined %}
+    command: {{ cfg.command }}
+{% endif %}
+{% if cfg.entrypoint is defined %}
+    entrypoint: {{ cfg.entrypoint }}
+{% endif %}
+{{ logging_block(cfg) }}
+{%- endmacro %}
+
+{#-
+    logging_block(cfg)
+
+    Emits a compose-level `logging:` block that overrides daemon log-opts for
+    this one container. Merge rules:
+
+      - cfg.log_rotation == false        → emit nothing (inherit daemon defaults)
+      - cfg.log_rotation is a dict       → merge onto log_rotation_defaults
+      - cfg.log_rotation absent and
+        log_rotation_defaults is a dict  → emit from defaults verbatim
+      - cfg.log_rotation absent and
+        log_rotation_defaults == false   → emit nothing (consumer opted out globally)
+
+    `cfg` is the full service/accessory dict; pass `{}` for infra containers
+    that want defaults only, or `{'log_rotation': <override>}` to feed a
+    framework-variable override (e.g. traefik_log_rotation).
+-#}
+{%- macro logging_block(cfg) %}
+{% set _svc_override = cfg.log_rotation | default('__unset__') %}
+{% if _svc_override == '__unset__' %}
+{%   set _emit = log_rotation_defaults is mapping %}
+{% else %}
+{%   set _emit = _svc_override is mapping %}
+{% endif %}
+{% if _emit %}
+{%   set _defaults = log_rotation_defaults if log_rotation_defaults is mapping else {} %}
+{%   set _override = _svc_override if _svc_override is mapping else {} %}
+{%   set _merged = _defaults | combine(_override) %}
+    logging:
+      driver: {{ _merged.driver }}
+      options:
+        max-size: "{{ _merged.max_size }}"
+        max-file: "{{ _merged.max_file }}"
+{% endif %}
+{%- endmacro %}
+
+{%- macro render_healthcheck(hc, port, default_interval='30s') %}
+    healthcheck:
+{% if hc.test is defined %}
+      test: {{ hc.test | to_json }}
+{% else %}
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:{{ port }}{{ hc.path }}"]
+{% endif %}
+      interval: {{ hc.interval | default(default_interval) }}
+      timeout: {{ hc.timeout | default('10s') }}
+      retries: {{ hc.retries | default(3) }}
+{%- endmacro %}

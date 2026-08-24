@@ -1,0 +1,86 @@
+---
+# Integration test: verify rebuild.sh.j2 renders without error for a service
+# with build.token set, and that CLONE_TOKEN_KEY is populated correctly.
+#
+# Run from the framework repo root:
+#   ANSIBLE_FILTER_PLUGINS=filter_plugins uv run ansible-playbook \
+#     --vault-password-file /dev/null -i localhost, -c local \
+#     tests/test_git_deploy_rebuild.yml
+
+- name: Test rebuild.sh.j2 renders with build.token
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - "{{ playbook_dir }}/../roles/git_deploy/defaults/main.yml"
+  vars:
+    # Core consumer/stack vars
+    stack_name: teststack
+    stack_dir: /tmp/bay-test-rebuild
+    app_user: "{{ lookup('env', 'USER') }}"
+    hostname: localhost
+
+    # Services with a private repo using build.token (token already resolved, as Ansible would)
+    services:
+      myapp:
+        build:
+          repo: git@github.com:TestOrg/myapp.git
+          token: "ghp_test_token_value"
+          branch: main
+        port: 3000
+        domains:
+          - myapp.example.com
+    accessories: {}
+    active_services: "{{ services }}"
+    active_accessories: "{{ accessories }}"
+
+    # Vault secrets dict for CLONE_TOKEN_KEY reverse-lookup
+    secrets:
+      TESTORG_GIT_TOKEN: "ghp_test_token_value"
+
+    # Build variables used by template
+    _build_services:
+      - myapp
+    _pull_only_services: []
+    _is_build_server: false
+
+    # Telegram webhook vars (required by template)
+    webhook:
+      secret: test_webhook_secret
+
+    # Multi-region (empty for unit test)
+    git_deploy_peer_urls: {}
+    git_deploy_image_regions: {}
+
+    # Build lock path override for test
+    git_deploy_build_lock_path: /tmp/bay-test-rebuild/build.lock
+
+  tasks:
+    - name: Ensure test output directory exists
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/bin"
+        state: directory
+        mode: "0755"
+
+    - name: Render rebuild.sh from template
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/git_deploy/templates/rebuild.sh.j2"
+        dest: "{{ stack_dir }}/bin/rebuild.sh"
+        mode: "0700"
+
+    - name: Verify CLONE_TOKEN_KEY rendered (not empty or 'unknown')
+      ansible.builtin.shell:
+        cmd: grep 'CLONE_TOKEN_KEY=' "{{ stack_dir }}/bin/rebuild.sh"
+      register: token_key_check
+      failed_when: >-
+        token_key_check.rc != 0 or
+        'CLONE_TOKEN_KEY=""' in token_key_check.stdout
+
+    - name: Show CLONE_TOKEN_KEY lines
+      ansible.builtin.debug:
+        msg: "{{ token_key_check.stdout_lines }}"
+
+    - name: Clean up test artifacts
+      ansible.builtin.file:
+        path: "{{ stack_dir }}"
+        state: absent

@@ -1,0 +1,16 @@
+[Unit]
+Description=Bay per-service log rotation + prune timer ({{ '%i' }})
+Documentation=https://github.com/AltanS/bay/blob/main/docs/adr/002-log-archival.md
+
+[Timer]
+# Fire at UTC midnight so the rotated file is named for the calendar
+# day it actually covers (yesterday from the timer's POV). Do NOT move
+# this to 04:15 or "daily" — the archive filename convention
+# (YYYY-MM-DD.log.gz) would no longer match the contents.
+OnCalendar=*-*-* 00:00:00 UTC
+Persistent=true
+AccuracySec=1s
+Unit=bay-logrotate@{{ '%i' }}.service
+
+[Install]
+WantedBy=timers.target

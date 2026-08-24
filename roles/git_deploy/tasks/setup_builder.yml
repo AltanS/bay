@@ -1,0 +1,43 @@
+---
+# Provision a buildx builder using the docker-container driver.
+# The container driver isolates builds in their own cgroup, enabling
+# memory limits via `docker update --memory` on the builder container.
+#
+# Idempotent: checks for existing builder before creating.
+# Called once from main.yml after strategy resolution, before any builds.
+
+- name: Check if buildx builder exists
+  ansible.builtin.command:
+    cmd: docker buildx inspect {{ bay_buildx_builder }}
+  register: _buildx_inspect
+  failed_when: false
+  changed_when: false
+
+- name: Create buildx builder
+  ansible.builtin.command:
+    cmd: >-
+      docker buildx create
+      --name {{ bay_buildx_builder }}
+      --driver docker-container
+      --driver-opt network=host
+      --bootstrap
+  register: _buildx_create
+  when: _buildx_inspect.rc != 0
+  changed_when: _buildx_create.rc == 0
+
+- name: Ensure buildx builder is running
+  ansible.builtin.command:
+    cmd: docker buildx inspect --bootstrap {{ bay_buildx_builder }}
+  register: _buildx_bootstrap
+  when: _buildx_inspect.rc == 0
+  changed_when: "'starting container' in (_buildx_bootstrap.stderr | default(''))"
+
+- name: Apply memory limit to builder container
+  ansible.builtin.command:
+    cmd: "docker update --memory {{ git_deploy_buildkit_memory_max }} --memory-swap {{ git_deploy_buildkit_memory_max }} buildx_buildkit_{{ bay_buildx_builder }}0"
+  when: git_deploy_buildkit_memory_max | default('') | length > 0
+  register: _buildx_mem_update
+  changed_when: _buildx_mem_update.rc == 0
+  failed_when:
+    - _buildx_mem_update.rc != 0
+    - "'No such container' not in (_buildx_mem_update.stderr | default(''))"

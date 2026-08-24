@@ -1,0 +1,82 @@
+---
+# rename_migration — converge a host provisioned before the M108 rename
+# onto the new artifact names.
+#
+# EVERY old-name literal in this role is tagged `# legacy-argo:` on purpose:
+# the role's whole job is to name pre-1.0 artifacts so it can remove them.
+# `grep -rn legacy-argo roles/rename_migration` is the complete inventory.
+# As of v1.4.1 this role is still deployed on every host: deleting it deletes
+# the last host-facing reference to the old name, but only once every host
+# has actually converged. Removal is deferred to a future major release, not
+# v1.1 as earlier notes claimed — see docs/rename-map.md.
+#
+# The role never globs. Only the unit basenames enumerated below are stopped,
+# disabled and deleted — a pre-1.0-prefixed unit a consumer created by hand is
+# left alone.
+
+rename_migration_enabled: true
+
+# Pre-1.0 systemd unit basenames rendered by the framework, exactly as they
+# appeared in /etc/systemd/system. Template units (`@`) are listed in their
+# template form; live instances are discovered at run time and matched back to
+# these templates, so an instantiated backup timer is covered without any
+# glob deletion.
+rename_migration_units:
+  - argo-backup@.service  # legacy-argo: pre-1.0 unit basename
+  - argo-backup@.timer  # legacy-argo: pre-1.0 unit basename
+  - argo-backup-maintenance@.service  # legacy-argo: pre-1.0 unit basename
+  - argo-backup-maintenance@.timer  # legacy-argo: pre-1.0 unit basename
+  - argo-infra-boot.service  # legacy-argo: pre-1.0 unit basename
+  - argo-build@.path  # legacy-argo: pre-1.0 unit basename
+  - argo-build@.service  # legacy-argo: pre-1.0 unit basename
+  - argo-build-alert@.service  # legacy-argo: pre-1.0 unit basename
+  - argo-trigger-watchdog.service  # legacy-argo: pre-1.0 unit basename
+  - argo-trigger-watchdog.timer  # legacy-argo: pre-1.0 unit basename
+  - argo-logarchive@.service  # legacy-argo: pre-1.0 unit basename
+  - argo-logarchive@.timer  # legacy-argo: pre-1.0 unit basename
+  - argo-logrotate@.service  # legacy-argo: pre-1.0 unit basename
+  - argo-logrotate@.timer  # legacy-argo: pre-1.0 unit basename
+  - argo-disk-alert.service  # legacy-argo: pre-1.0 unit basename
+  - argo-disk-alert.timer  # legacy-argo: pre-1.0 unit basename
+  - argo-outbound-check.service  # legacy-argo: pre-1.0 unit basename
+  - argo-outbound-check.timer  # legacy-argo: pre-1.0 unit basename
+
+# Pre-1.0 scripts and drop-in config files. Their replacements are rendered by
+# the owning role in the same run, so removing them here cannot leave a host
+# without the behaviour — only without the duplicate.
+rename_migration_files:
+  - /usr/local/bin/argo-infra-ensure.sh  # legacy-argo: pre-1.0 script path
+  - /usr/local/bin/argo-docker-builder-prune  # legacy-argo: pre-1.0 script path
+  - /usr/local/bin/argo-outbound-check  # legacy-argo: pre-1.0 script path
+  - /usr/local/bin/argo-disk-alert  # legacy-argo: pre-1.0 script path
+  - /etc/systemd/journald.conf.d/99-argo-max-use.conf  # legacy-argo: pre-1.0 drop-in
+  - /etc/update-motd.d/99-argo-logs  # legacy-argo: pre-1.0 motd snippet
+
+# State directories whose contents must survive the rename. Copied with `cp -a`
+# (contents and permissions preserved) and only then removed. The alert-override
+# file under the config dir is the exception: it is derived from group_vars and
+# alert_policy re-renders it later in the same run (see tasks/main.yml).
+rename_migration_moves:
+  - src: /etc/argo  # legacy-argo: pre-1.0 config dir
+    dest: /etc/bay
+  - src: /var/lib/argo-outbound-check  # legacy-argo: pre-1.0 probe state dir
+    dest: /var/lib/bay-outbound-check
+
+# Pre-1.0 container name. deploy_stack brings up `bay-webhook` in the same
+# run, so the old container is removed rather than renamed.
+rename_migration_container: argo-webhook  # legacy-argo: pre-1.0 container name
+
+# Pre-1.0 builder-prune cron job. The cronjobs role rewrites the entry under
+# the same Ansible marker later in a deploy run; this only clears an entry that
+# still points at the removed script.
+rename_migration_cron_name: docker-builder-prune
+rename_migration_cron_old_job: /usr/local/bin/argo-docker-builder-prune  # legacy-argo: pre-1.0 script path
+
+# systemd discovery inputs. The glob only *finds* candidates; the explicit
+# rename_migration_units list above decides what is actually touched.
+rename_migration_unit_glob: "argo-*"  # legacy-argo: pre-1.0 unit prefix
+rename_migration_unit_prefix: "argo-"  # legacy-argo: pre-1.0 unit prefix
+
+# Rendered under {{ stack_dir }}/bin, so it carries a variable path and cannot
+# live in rename_migration_files.
+rename_migration_watchdog_script: argo-trigger-watchdog.sh  # legacy-argo: pre-1.0 script name

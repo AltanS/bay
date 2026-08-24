@@ -1,0 +1,294 @@
+---
+# Converge a pre-1.0 host onto the current names. Runs in both deploy.yml and
+# provision.yml because several owners of the old units (outbound_monitor,
+# common) live in provision only — cleanup that relied on deploy alone would
+# never reach them (the GH#33 class of bug).
+#
+# Everything here is guarded on the old artifact actually existing, so a clean
+# host walks the whole role without a single change, and a second run on a
+# migrated host does the same.
+
+- name: Discover loaded pre-1.0 systemd units
+  ansible.builtin.command:
+    cmd: >-
+      systemctl list-units --all --no-legend --plain --no-pager
+      {{ rename_migration_unit_glob }}
+  register: _rm_loaded_units
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+
+- name: Discover enabled pre-1.0 systemd unit files
+  ansible.builtin.command:
+    cmd: >-
+      systemctl list-unit-files --state=enabled --no-legend --plain --no-pager
+      {{ rename_migration_unit_glob }}
+  register: _rm_enabled_units
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+
+# `systemctl list-units --all --no-legend --plain` prints
+# "UNIT LOAD ACTIVE SUB DESCRIPTION". Both columns matter, so the raw lines are
+# normalised once (bullet stripped, runs of spaces collapsed) and only then
+# split by LOAD state below. `list-unit-files` prints "UNIT STATE [PRESET]",
+# whose second column is never "not-found" — a unit file that is listed exists.
+- name: Normalise the discovered pre-1.0 unit lines
+  ansible.builtin.set_fact:
+    _rm_discovered: >-
+      {{
+        ((_rm_loaded_units.stdout_lines | default([]))
+         + (_rm_enabled_units.stdout_lines | default([])))
+        | map('regex_replace', '^[^A-Za-z0-9]*', '')
+        | map('regex_replace', '[ \t]+', ' ')
+        | map('trim')
+        | select('match', '^' ~ rename_migration_unit_prefix)
+        | reject('search', '@[.]')
+        | unique | list
+      }}
+
+# A unit name is kept only when collapsing its instance back to the template
+# form ("<old>-backup@pg.timer" -> "<old>-backup@.timer") lands in the explicit
+# rename_migration_units list. That is what keeps this from being a glob: a
+# unit the framework never rendered is discovered and then dropped.
+- name: Select the pre-1.0 units this role manages
+  ansible.builtin.set_fact:
+    _rm_units: >-
+      {{
+        _rm_discovered
+        | reject('match', '^[^ ]+ not-found( |$)')
+        | map('regex_replace', ' .*$', '')
+        | unique | list
+      }}
+
+# A template instance that had FAILED before its unit file was removed stays
+# resident in systemd with LOAD state "not-found": it still shows up in
+# `list-units --all`, but `systemctl stop` on it errors with "Could not find
+# the requested service". Handing those to the stop/disable task above bricks
+# every later run of this role — and the role is tagged `always`, so it bricks
+# the whole deploy. They are cleared with `reset-failed` instead, which drops
+# the residue from the manager entirely (so the next run discovers nothing).
+- name: Select the pre-1.0 units left resident by a failed instance
+  ansible.builtin.set_fact:
+    _rm_orphan_units: >-
+      {{
+        _rm_discovered
+        | select('match', '^[^ ]+ not-found( |$)')
+        | map('regex_replace', ' .*$', '')
+        | unique | list
+      }}
+
+# `failed_when` tolerates exactly the "unit is gone" message: discovery and
+# stop are two round trips, and anything that removes a unit in between (this
+# role's own reset-failed included) must not be able to fail the run. Every
+# other systemd error stays fatal.
+- name: Stop and disable pre-1.0 systemd units
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ _rm_units }}"
+  when: (item | regex_replace('@[^.]*[.]', '@.')) in rename_migration_units
+  register: _rm_stopped
+  failed_when:
+    - _rm_stopped is failed
+    - "'Could not find the requested service' not in (_rm_stopped.msg | default(''))"
+  become: true
+  become_user: root
+
+- name: Clear pre-1.0 systemd units left resident by a failed instance
+  ansible.builtin.command:
+    cmd: systemctl reset-failed {{ item }}
+  loop: "{{ _rm_orphan_units }}"
+  when: (item | regex_replace('@[^.]*[.]', '@.')) in rename_migration_units
+  changed_when: true
+  register: _rm_reset_orphans
+  become: true
+  become_user: root
+
+# Items dropped by the membership check carry `skip_reason`; items skipped
+# because `command` has no check mode do not — so this reports the same set in
+# both modes, which is the point of running --check at all.
+- name: Report the pre-1.0 units cleared with reset-failed
+  ansible.builtin.debug:
+    msg: >-
+      rename_migration:
+      {{ 'would clear' if ansible_check_mode | default(false) else 'cleared' }}
+      resident not-found pre-1.0 systemd units
+      {{ _rm_reset_orphans.results | default([])
+         | rejectattr('skip_reason', 'defined')
+         | map(attribute='item') | list }}
+  when: >-
+    _rm_reset_orphans.results | default([])
+    | rejectattr('skip_reason', 'defined') | list | length > 0
+
+- name: Remove pre-1.0 systemd unit files
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{ item }}"
+    state: absent
+  loop: >-
+    {{ (rename_migration_units
+        + (_rm_units | select('match', '^' ~ rename_migration_unit_prefix) | list))
+       | unique | list }}
+  when: (item | regex_replace('@[^.]*[.]', '@.')) in rename_migration_units
+  register: _rm_removed_units
+  become: true
+  become_user: root
+
+- name: Reload systemd after removing pre-1.0 units
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+  when: _rm_removed_units is changed or _rm_stopped is changed
+  become: true
+  become_user: root
+
+- name: Report the pre-1.0 units removed
+  ansible.builtin.debug:
+    msg: >-
+      rename_migration: removed pre-1.0 systemd units
+      {{ _rm_removed_units.results | default([])
+         | selectattr('changed', 'defined') | selectattr('changed')
+         | map(attribute='item') | list }}
+  when: _rm_removed_units is changed
+
+# ── Scripts and drop-in config ───────────────────────────────────────────
+# Each replacement is rendered by its owning role in this same run, so the
+# host is never left without the behaviour — only without the duplicate.
+
+- name: Remove pre-1.0 scripts and drop-in config files
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop: "{{ rename_migration_files }}"
+  register: _rm_removed_files
+  become: true
+  become_user: root
+
+- name: Remove the pre-1.0 build-trigger watchdog script
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/bin/{{ rename_migration_watchdog_script }}"
+    state: absent
+  when: stack_dir is defined and (stack_dir | length) > 0
+  become: true
+  become_user: root
+
+- name: Report the pre-1.0 files removed
+  ansible.builtin.debug:
+    msg: >-
+      rename_migration: removed pre-1.0 files
+      {{ _rm_removed_files.results | default([])
+         | selectattr('changed', 'defined') | selectattr('changed')
+         | map(attribute='item') | list }}
+  when: _rm_removed_files is changed
+
+# ── State directories ────────────────────────────────────────────────────
+# The move carries the tree over with `cp -a`, so ownership, modes and any
+# unknown file under the old dir survive — that is all it guarantees.
+#
+# It specifically does NOT preserve the alert-override file: mutes live in the
+# consumer's group_vars (`bin/bay alerts disable` writes them there), and
+# alert_policy re-renders `alert-overrides` from those vars LATER IN THE SAME
+# RUN, in both playbooks. Whatever this move copies to the new path is
+# overwritten minutes later by the declared state. The file is derived, not
+# host-owned; the move matters for the rest of the directory.
+
+- name: Check for pre-1.0 state directories
+  ansible.builtin.stat:
+    path: "{{ item.src }}"
+  loop: "{{ rename_migration_moves }}"
+  loop_control:
+    label: "{{ item.src }}"
+  register: _rm_move_stat
+  check_mode: false
+  become: true
+  become_user: root
+
+# `shell` rather than `copy`/`file`: the point is to move an unknown tree with
+# its ownership and modes intact, which no single module does. Guarded on the
+# source existing, and the source is gone afterwards, so the second run skips.
+- name: Move pre-1.0 state directories to their new paths
+  ansible.builtin.shell:
+    cmd: >-
+      set -e;
+      if [ -e "{{ item.item.dest }}" ]; then
+        cp -a "{{ item.item.src }}/." "{{ item.item.dest }}/";
+        rm -rf "{{ item.item.src }}";
+      else
+        mv "{{ item.item.src }}" "{{ item.item.dest }}";
+      fi
+    executable: /bin/bash
+  loop: "{{ _rm_move_stat.results }}"
+  loop_control:
+    label: "{{ item.item.src }} -> {{ item.item.dest }}"
+  when: item.stat.exists | default(false)
+  changed_when: true
+  become: true
+  become_user: root
+
+- name: Report the pre-1.0 state directories moved
+  ansible.builtin.debug:
+    msg: >-
+      rename_migration: moved pre-1.0 state
+      {{ _rm_move_stat.results | default([])
+         | selectattr('stat.exists', 'defined') | selectattr('stat.exists')
+         | map(attribute='item') | list }}
+  when: >-
+    _rm_move_stat.results | default([])
+    | selectattr('stat.exists', 'defined') | selectattr('stat.exists')
+    | list | length > 0
+
+# ── Builder-prune cron entry ─────────────────────────────────────────────
+# The cronjobs role rewrites this entry under the same Ansible marker later in
+# a deploy run. Removing it here only matters for the entry that still points
+# at the script deleted above (and for a provision-only run, where cronjobs
+# never executes).
+
+- name: Read the root crontab
+  ansible.builtin.command:
+    cmd: crontab -l -u root
+  register: _rm_crontab
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+
+- name: Remove the stale builder-prune cron entry
+  ansible.builtin.cron:
+    name: "{{ rename_migration_cron_name }}"
+    user: root
+    state: absent
+  when: rename_migration_cron_old_job in (_rm_crontab.stdout | default(''))
+  become: true
+  become_user: root
+
+# ── Webhook container ────────────────────────────────────────────────────
+# deploy_stack brings `bay-webhook` up in the same run; the two cannot
+# coexist (same published port), so the old one is removed rather than kept.
+
+- name: Check for the pre-1.0 webhook container
+  ansible.builtin.command:
+    cmd: docker ps -aq --filter name=^/{{ rename_migration_container }}$
+  register: _rm_webhook
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+
+- name: Remove the pre-1.0 webhook container
+  ansible.builtin.command:
+    cmd: docker rm -f {{ rename_migration_container }}
+  when: (_rm_webhook.stdout | default('') | trim | length) > 0
+  changed_when: true
+  become: true
+  become_user: root
+
+- name: Report the pre-1.0 webhook container removed
+  ansible.builtin.debug:
+    msg: "rename_migration: removed container {{ rename_migration_container }}"
+  when: (_rm_webhook.stdout | default('') | trim | length) > 0

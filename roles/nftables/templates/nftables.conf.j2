@@ -1,0 +1,91 @@
+# {{ ansible_managed }}
+# nftables firewall configuration for Bay
+#
+# Chain priority order:
+#   -10  crowdsec/crowdsec6 (bouncer-managed — CAPI + local bans)
+#     0  filter (base firewall — port allowlist + default drop)
+#
+# Trusted admin IPs are excluded via the bouncer's exclude_ips config
+# (not nftables chains — accept in one chain doesn't prevent drop in the next).
+#
+# Traefik uses network_mode: host, so traffic hits nftables directly.
+# Static CIDR blocklist loaded from /etc/nftables.d/ (managed by crowdsec role).
+#
+# Only flush our own tables — Docker's ip family tables (DOCKER-FORWARD, etc.)
+# are created once at daemon startup and must not be destroyed.
+
+{% if crowdsec_trusted_ips | default([]) | length > 0 %}
+# Clean up legacy bypass table (nftables accept doesn't prevent later chains from dropping)
+table inet crowdsec_bypass {}
+delete table inet crowdsec_bypass
+
+{% endif %}
+table inet filter {}
+delete table inet filter
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        # Allow established and related connections
+        ct state established,related accept
+
+        # Drop invalid connections
+        ct state invalid drop
+
+        # Allow loopback
+        iif lo accept
+
+        # Allow Docker container traffic to host (DNS, health checks)
+        iifname "docker*" accept
+        iifname "br-*" accept
+        iifname "veth*" accept
+
+        # Allow ICMP (ping, path MTU discovery)
+        ip protocol icmp accept
+        ip6 nexthdr icmpv6 accept
+
+        # Allow configured TCP ports
+{% for port in firewall_allowed_tcp_ports %}
+        tcp dport {{ port }} accept
+{% endfor %}
+
+        # Allow configured UDP ports
+{% for port in firewall_allowed_udp_ports %}
+        udp dport {{ port }} accept
+{% endfor %}
+
+        # NOTE (M83-S3): a loop here previously emitted
+        #   iifname "tailscale0" tcp dport <port> accept
+        # for every cross-region link target, intending to restrict
+        # tailnet-linked accessories to tailnet-only access. It never
+        # enforced anything — Docker-published ports bypass the input
+        # chain via iptables DNAT (PREROUTING -> DOCKER / DOCKER-USER),
+        # so the input chain is never consulted for published traffic.
+        # The enforcement that actually prevents public access is
+        # Docker's destination-IP scoping of its DNAT rule, triggered
+        # by binding to a tailnet IP via `expose: tailnet` on the
+        # accessory stanza.
+
+        # Log and drop everything else
+        log prefix "nftables-drop: " flags all counter drop
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+
+        # Allow Docker container traffic (forwarded by Docker)
+        ct state established,related accept
+
+        # Docker manages its own forward rules via iptables/nftables
+        # This chain is permissive for container networking
+        accept
+    }
+
+    chain output {
+        type filter hook output priority 0; policy accept;
+    }
+}
+
+# Include additional nftables configs (CrowdSec CIDR blocklist, etc.)
+include "/etc/nftables.d/*.conf"

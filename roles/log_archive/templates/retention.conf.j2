@@ -1,0 +1,7 @@
+# {{ ansible_managed }}
+# Per-service log_retention config for {{ _svc }}.
+# Sourced by archive-logs.sh and rotate-logs.sh.
+mode={{ _retention.mode | default(log_archive_default_mode) }}
+days={{ _retention.days | default('') }}
+max_total_size={{ _retention.max_total_size | default('') }}
+compress={{ (_retention.compress | default(log_archive_default_compress)) | string | lower }}

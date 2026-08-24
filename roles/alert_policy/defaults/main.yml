@@ -1,0 +1,39 @@
+---
+# Alert policy overrides — operator mutes that take effect WITHOUT a full deploy.
+#
+# Scope is deliberately tiny. Recipient topology, credentials and adapters stay
+# baked into the rendered emitter scripts; this file carries mute state only.
+# Two production scars set that boundary:
+#
+#   * `{{ stack_dir }}/state` is created mode 0777 (roles/git_deploy/tasks/
+#     webhook.yml) so the webhook container and app_user can both write it.
+#     backup.sh and the disk-alert cron run privileged. Sourcing a
+#     world-writable file from them is local root code execution reachable from
+#     any compromised container holding the state mount. Hence /etc/bay,
+#     root-owned, PARSED as whitelisted KEY=value and never sourced.
+#
+#   * Fail-open has a direction. If recipients lived only here, a torn write or
+#     a missing file would silently drop EVERY alert — GH#33 reachable from a
+#     failed mv. The invariant is the other way round: absence of this file can
+#     only produce MORE alerts, never fewer.
+#
+# The role is included by BOTH provision.yml and deploy.yml. That is the actual
+# fix for the GH#33 class of bug: outbound_monitor lives in provision.yml, so
+# `bin/bay deploy` never re-rendered it and it shipped an empty webhook URL
+# for ~3 months while every other emitter worked.
+alert_policy_path: /etc/bay/alert-overrides
+
+# Alert IDs to suppress. Valid IDs are in alerts/registry.yml.
+alert_policy_mute: []
+
+# Epoch seconds after which every mute above is inert. A mute with no expiry is
+# GH#33 with extra steps: alerts are the only observability, and one set during
+# a storm and forgotten is indistinguishable from a broken emitter. 0 disables
+# the whole override file.
+alert_policy_mute_until: 0
+
+# Bumped only on an incompatible change to the file format. A reader that does
+# not recognise the major ignores the file entirely and falls back to baked
+# behaviour, because `bin/bay install` can check out an older framework while
+# the host keeps a newer file.
+alert_policy_schema_version: 1

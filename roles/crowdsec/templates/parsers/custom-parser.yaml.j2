@@ -1,0 +1,8 @@
+# Custom CrowdSec Parser
+# Managed by Ansible - do not edit manually
+
+name: custom/{{ item.name }}
+{% if item.description is defined %}
+description: "{{ item.description }}"
+{% endif %}
+{{ item.body | trim }}

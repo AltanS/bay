@@ -1,0 +1,36 @@
+# CrowdSec Log Acquisition Configuration
+# Managed by Ansible - do not edit manually
+
+{% for acq in crowdsec_acquisition %}
+{% if acq.source | default('file') == 'docker' %}
+source: docker
+{% if acq.container_name is defined %}
+container_name:
+{% for name in acq.container_name %}
+  - {{ name }}
+{% endfor %}
+{% endif %}
+{% if acq.container_name_regexp is defined %}
+container_name_regexp:
+{% for pattern in acq.container_name_regexp %}
+  - {{ pattern }}
+{% endfor %}
+{% endif %}
+{% if acq.docker_host is defined %}
+docker_host: {{ acq.docker_host }}
+{% endif %}
+{% else %}
+filenames:
+{% for filename in acq.filenames %}
+  - {{ filename }}
+{% endfor %}
+{% endif %}
+labels:
+{% for key, value in acq.labels.items() %}
+  {{ key }}: {{ value }}
+{% endfor %}
+{% if not loop.last %}
+
+---
+{% endif %}
+{% endfor %}

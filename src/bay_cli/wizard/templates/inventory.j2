@@ -1,0 +1,14 @@
+{% if multi_region %}
+{% for region in regions %}
+[{{ region.name }}]
+{{ region.server_ip }}
+
+{% endfor %}
+[production:children]
+{% for region in regions %}
+{{ region.name }}
+{% endfor %}
+{% else %}
+[production]
+{{ server_ip }}
+{% endif %}

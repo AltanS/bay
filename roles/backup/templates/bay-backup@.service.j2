@@ -1,0 +1,14 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Bay backup for %i
+After=docker.service
+
+[Service]
+Type=oneshot
+User={{ app_user }}
+ExecStart={{ backup_scripts_dir }}/backup-%i.sh
+Environment=HOME=/home/{{ app_user }}
+
+# Resource limits — be nice to the system
+Nice=10
+IOSchedulingClass=idle

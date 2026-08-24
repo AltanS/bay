@@ -1,0 +1,8 @@
+---
+- name: Restart headscale
+  community.docker.docker_container:
+    name: headscale
+    state: started
+    restart: true
+  become: true
+  become_user: root

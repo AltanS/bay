@@ -1,0 +1,79 @@
+---
+# Deliver one control-node deploy alert to every recipient that wants it.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# deploy.complete and deploy.failed are the only alerts Bay sends from the
+# CONTROL NODE. Every other alert is emitted on the host by bay_notify(), which
+# checks the mute file and routes by registry level. These two could not: they
+# were two hard-coded `uri` tasks that POSTed to the legacy Telegram + webhook
+# variables directly, guarded only by "is the URL set".
+#
+# That made them unroutable and unmutable. `_bay_alert_id` was set beside them
+# purely to satisfy the registry drift test — nothing ever read it, so
+# `bin/bay alerts disable deploy.complete` silently did nothing.
+#
+# Now the same three inputs decide delivery here as on the host: the registry's
+# enabled_by_default, the recipient's min_level, and the alerts_disabled /
+# alerts_enabled force lists. deploy.complete ships default-off; deploy.failed
+# is critical and reaches every recipient.
+#
+# Callers set _bay_alert_id and _bay_deploy_alert, then include this file.
+#
+# Best-effort throughout: a dead sink must never fail — or un-fail — a deploy.
+
+- name: Resolve deploy alert recipients
+  ansible.builtin.set_fact:
+    _bay_deploy_sinks: >-
+      {{ (alert_recipients | default([]))
+         | bay_alert_recipients(
+             alert_webhook_url | default(''),
+             alert_webhook_format | default('campfire'),
+             docker_monitor_telegram_bot_token | default(''),
+             docker_monitor_telegram_chat_id | default('')) }}
+
+- name: Send deploy alert to Telegram recipients
+  ansible.builtin.uri:
+    url: "https://api.telegram.org/bot{{ item.config.bot_token }}/sendMessage"
+    method: POST
+    body_format: json
+    body:
+      chat_id: "{{ item.config.chat_id }}"
+      text: "{{ _bay_deploy_alert }}"
+      parse_mode: HTML
+      disable_web_page_preview: true
+  loop: "{{ _bay_deploy_sinks | selectattr('adapter', 'eq', 'telegram') | list }}"
+  loop_control:
+    label: "{{ item.name | default('unnamed') }}"
+  ignore_errors: true
+  # token_env/chat_id_env are resolved from the HOST's systemd environment and
+  # mean nothing on the control node, so those recipients are skipped here
+  # rather than POSTed to a bot id of "".
+  when:
+    - (item.config.bot_token | default('')) | length > 0
+    - (item.config.chat_id | default('')) | length > 0
+    - _bay_alert_id in (item | bay_alert_ids_for(alerts_disabled | default([]),
+                                                 alerts_enabled | default([])))
+
+- name: Send deploy alert to webhook recipients
+  ansible.builtin.uri:
+    url: "{{ item.config.url }}"
+    method: "{{ item.config.method | default('POST') }}"
+    body: >-
+      {{ _bay_deploy_alert | bay_alert_body(item.config.format | default('campfire'),
+                                            alert_webhook_max_chars | default(3500)) }}
+    headers: >-
+      {{ {'Content-Type': item.config.content_type
+                          | default(item.config.format | default('campfire')
+                                    | bay_alert_content_type)}
+         | combine(item.config.headers | default({})) }}
+    timeout: "{{ alert_webhook_timeout | default(10) | int }}"
+    status_code: [200, 201, 202, 204]
+  loop: "{{ _bay_deploy_sinks | selectattr('adapter', 'eq', 'webhook') | list }}"
+  loop_control:
+    label: "{{ item.name | default('unnamed') }}"
+  ignore_errors: true
+  when:
+    - (item.config.url | default('')) | length > 0
+    - _bay_alert_id in (item | bay_alert_ids_for(alerts_disabled | default([]),
+                                                 alerts_enabled | default([])))

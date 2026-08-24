@@ -1,0 +1,111 @@
+---
+# Integration test for build_specs.yml
+#
+# Verifies that container specs are correctly generated from services.yml.
+# Does NOT deploy anything — only builds specs and asserts their structure.
+#
+# Run from a consumer with dev-link:
+#   uv run --project .bay ansible-playbook .bay/tests/test_build_specs.yml \
+#     -i ../hosts/production -l eu -e target_host=eu
+#
+# NOTE: Must be symlinked/copied to .bay/ level for group_vars auto-discovery.
+# The wrapper .bay/test_build_specs.yml handles this.
+
+- name: Test container spec generation
+  hosts: "{{ target_host | default('eu') }}"
+  become: true
+  become_user: "{{ app_user }}"
+  vars_files:
+    - version.yml
+  tasks:
+
+    # ── Simulate deploy.yml pre_tasks (compute active services) ──────
+    - name: Initialize active services
+      ansible.builtin.set_fact:
+        active_services: {}
+        active_accessories: {}
+
+    - name: Compute active services for this host
+      ansible.builtin.set_fact:
+        active_services: "{{ active_services | combine({item.key: item.value}) }}"
+      loop: "{{ (services | default({})) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: >-
+        item.value.regions is not defined
+        or item.value.regions | length == 0
+        or (item.value.regions | intersect(group_names) | length > 0)
+
+    - name: Compute active accessories for this host
+      ansible.builtin.set_fact:
+        active_accessories: "{{ active_accessories | combine({item.key: item.value}) }}"
+      loop: "{{ (accessories | default({})) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: >-
+        item.value.regions is not defined
+        or item.value.regions | length == 0
+        or (item.value.regions | intersect(group_names) | length > 0)
+
+    - name: Show active services
+      ansible.builtin.debug:
+        msg: "Active services: {{ active_services.keys() | list }} | Accessories: {{ active_accessories.keys() | list }}"
+
+    # ── Run build_specs ──────────────────────────────────────────────
+    - name: Build container specs
+      ansible.builtin.include_role:
+        name: container_lifecycle
+        tasks_from: build_specs.yml
+
+    - name: Show generated specs
+      ansible.builtin.debug:
+        msg: "{{ item.name }} ({{ item.type }}): image={{ item.image }}"
+      loop: "{{ container_specs }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # ── Assertions ───────────────────────────────────────────────────
+    - name: "ASSERT: container_specs is a non-empty list"
+      ansible.builtin.assert:
+        that:
+          - container_specs is defined
+          - container_specs | length > 0
+        success_msg: "Generated {{ container_specs | length }} container specs"
+
+    - name: "ASSERT: infra containers present"
+      ansible.builtin.assert:
+        that:
+          - container_specs | selectattr('type', 'eq', 'infra') | list | length > 0
+        success_msg: "Infra specs present"
+
+    - name: "ASSERT: service containers have Traefik labels"
+      ansible.builtin.assert:
+        that:
+          - item.labels['traefik.enable'] == 'true'
+          - item.labels['traefik.docker.network'] is defined
+        success_msg: "{{ item.name }}: Traefik labels OK"
+      loop: "{{ container_specs | selectattr('type', 'eq', 'service') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: "ASSERT: service containers have router labels"
+      ansible.builtin.assert:
+        that: >-
+          (item.labels.keys() | select('match', 'traefik\\.http\\.routers\\.') | list | length) > 0
+        success_msg: "{{ item.name }}: router labels present"
+      loop: "{{ container_specs | selectattr('type', 'eq', 'service') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: "ASSERT: service containers have loadbalancer port"
+      ansible.builtin.assert:
+        that: >-
+          (item.labels.keys() | select('match', 'traefik\\.http\\.services\\..*\\.loadbalancer') | list | length) > 0
+        success_msg: "{{ item.name }}: loadbalancer port present"
+      loop: "{{ container_specs | selectattr('type', 'eq', 'service') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: "ALL ASSERTIONS PASSED"
+      ansible.builtin.debug:
+        msg: "build_specs.yml: all assertions passed for {{ container_specs | length }} specs"

@@ -1,0 +1,32 @@
+---
+# Docker monitor role defaults
+
+docker_monitor_enabled: true
+docker_monitor_script_path: /usr/local/bin/docker-monitor.py
+
+# Traefik defaults (must match traefik role — used in logrotate and prometheus templates)
+traefik_container_name: traefik
+traefik_access_log_path: "{{ stack_dir }}/logs/traefik/access.log"
+traefik_metrics_port: 8082
+
+# Telegram transport
+docker_monitor_telegram_bot_token: ""
+docker_monitor_telegram_chat_id: ""
+
+# Per-alert toggles (all guarded by empty bot token)
+docker_monitor_alert_container_crash: true
+docker_monitor_alert_restart_loop: true
+docker_monitor_alert_healthcheck_failure: true
+
+# Restart loop tuning
+docker_monitor_restart_loop_threshold: 3
+docker_monitor_restart_loop_window: 300  # seconds
+
+# Containers to ignore (list of name patterns)
+# Canary containers (-new suffix) are transient and should not trigger alerts
+docker_monitor_ignore_containers:
+  - "-new"
+
+# Alert message branding
+docker_monitor_alert_header: "════════════════\n⛵ <b>BAY</b>\n════════════════\n\n"
+docker_monitor_alert_footer: ""

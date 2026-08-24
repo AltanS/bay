@@ -1,0 +1,245 @@
+---
+# Integration test for container_lifecycle role
+#
+# Run from a consumer with dev-link:
+#   bin/bay dev-link
+#   cd .bay && uv run ansible-playbook tests/test_container_lifecycle.yml \
+#     -i ../hosts/production -l eu -e target_host=eu
+#
+# NOTE (M85-S8): container_lifecycle now delegates to the bay_reconcile
+# engine (reconcile.yml); the per-container Ansible deploy loops were retired.
+# This playbook still drives the role end-to-end, so create / recreate /
+# canary-swap / orphan-cleanup now run server-side via the reconciler.
+#
+# Tests:
+#   1. First deploy — service with healthcheck
+#   2. Zero-downtime canary swap — label change triggers update
+#   3. Service without healthcheck — canary skips health gate
+#   4. Accessory with named volume — standard recreate
+#   5. Cleanup — orphaned containers removed
+#   6. Network attachment verified throughout
+
+- name: Test container_lifecycle role
+  hosts: "{{ target_host | default('eu') }}"
+  become: true
+  become_user: "{{ app_user }}"
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all/main.yml"
+    - "{{ playbook_dir }}/../group_vars/all/users.yml"
+  tasks:
+
+    # ── Pre-clean: ensure no leftover containers from prior runs ────────
+    - name: "PRE-CLEAN: Remove leftover test containers"
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - lifecycle-test
+        - lifecycle-test-new
+        - lifecycle-test-nohc
+        - lifecycle-test-vol
+
+    - name: "PRE-CLEAN: Remove leftover test volume"
+      community.docker.docker_volume:
+        name: lifecycle_test_data
+        state: absent
+
+    # ── Test 1: First deploy ────────────────────────────────────────────
+    - name: "TEST 1: First deploy — service with healthcheck"
+      ansible.builtin.include_role:
+        name: container_lifecycle
+      vars:
+        container_lifecycle_cleanup: false
+        container_specs:
+          - name: lifecycle-test
+            type: service
+            image: nginx:alpine
+            networks: [services]
+            labels:
+              traefik.enable: "false"
+            healthcheck:
+              test: ["CMD", "wget", "--spider", "-q", "http://localhost/"]
+              interval: "10s"
+              timeout: "5s"
+              retries: 3
+              start_period: "5s"
+            zero_downtime: true
+
+    - name: "VERIFY 1: Container running with labels and network"
+      community.docker.docker_container_info:
+        name: lifecycle-test
+      register: v1
+
+    - name: "ASSERT 1"
+      ansible.builtin.assert:
+        that:
+          - v1.exists
+          - v1.container.State.Status == 'running'
+          - v1.container.Config.Labels['bay.managed'] == 'true'
+          - v1.container.Config.Labels['bay.stack'] == stack_name
+          - "'services' in v1.container.NetworkSettings.Networks"
+        fail_msg: "Test 1 failed"
+        success_msg: "PASS: First deploy — container running, labeled, on services network"
+
+    # ── Test 2: Zero-downtime canary swap ────────────────────────────────
+    - name: "TEST 2: Canary swap — add a label to trigger change"
+      ansible.builtin.include_role:
+        name: container_lifecycle
+      vars:
+        container_lifecycle_cleanup: false
+        container_specs:
+          - name: lifecycle-test
+            type: service
+            image: nginx:alpine
+            networks: [services]
+            labels:
+              traefik.enable: "false"
+              test.round: "2"
+            healthcheck:
+              test: ["CMD", "wget", "--spider", "-q", "http://localhost/"]
+              interval: "10s"
+              timeout: "5s"
+              retries: 3
+              start_period: "5s"
+            zero_downtime: true
+
+    - name: "VERIFY 2: Labels updated, canary cleaned up"
+      community.docker.docker_container_info:
+        name: lifecycle-test
+      register: v2
+
+    - name: "VERIFY 2b: No leftover canary"
+      community.docker.docker_container_info:
+        name: lifecycle-test-new
+      register: v2_canary
+
+    - name: "ASSERT 2"
+      ansible.builtin.assert:
+        that:
+          - v2.exists
+          - v2.container.State.Status == 'running'
+          - v2.container.Config.Labels['test.round'] == '2'
+          - not v2_canary.exists
+        fail_msg: "Test 2 failed"
+        success_msg: "PASS: Canary swap — labels updated, canary removed, old replaced"
+
+    # ── Test 3: Service without healthcheck ──────────────────────────────
+    - name: "TEST 3: Deploy service without healthcheck"
+      ansible.builtin.include_role:
+        name: container_lifecycle
+      vars:
+        container_lifecycle_cleanup: false
+        container_specs:
+          - name: lifecycle-test-nohc
+            type: service
+            image: nginx:alpine
+            networks: [services]
+            labels:
+              traefik.enable: "false"
+            zero_downtime: true
+
+    - name: "VERIFY 3"
+      community.docker.docker_container_info:
+        name: lifecycle-test-nohc
+      register: v3
+
+    - name: "ASSERT 3"
+      ansible.builtin.assert:
+        that:
+          - v3.exists
+          - v3.container.State.Status == 'running'
+        fail_msg: "Test 3 failed"
+        success_msg: "PASS: No-healthcheck service deployed and running"
+
+    # ── Test 4: Accessory with volume ────────────────────────────────────
+    - name: "TEST 4: Deploy accessory with named volume"
+      ansible.builtin.include_role:
+        name: container_lifecycle
+      vars:
+        container_lifecycle_cleanup: false
+        container_specs:
+          - name: lifecycle-test-vol
+            type: accessory
+            image: nginx:alpine
+            networks: [services]
+            volumes:
+              - "lifecycle_test_data:/usr/share/nginx/html"
+            labels:
+              traefik.enable: "false"
+
+    - name: "VERIFY 4: Accessory running"
+      community.docker.docker_container_info:
+        name: lifecycle-test-vol
+      register: v4
+
+    - name: "VERIFY 4b: Volume exists"
+      ansible.builtin.command:
+        cmd: docker volume inspect lifecycle_test_data
+      changed_when: false
+
+    - name: "ASSERT 4"
+      ansible.builtin.assert:
+        that:
+          - v4.exists
+          - v4.container.State.Status == 'running'
+        fail_msg: "Test 4 failed"
+        success_msg: "PASS: Accessory with volume deployed — volume preserved"
+
+    # ── Test 5: Cleanup removes orphans ──────────────────────────────────
+    - name: "TEST 5: Drop two containers from specs — verify orphan removal"
+      ansible.builtin.include_role:
+        name: container_lifecycle
+      vars:
+        container_specs:
+          - name: lifecycle-test
+            type: service
+            image: nginx:alpine
+            networks: [services]
+            labels:
+              traefik.enable: "false"
+              test.round: "2"
+            healthcheck:
+              test: ["CMD", "wget", "--spider", "-q", "http://localhost/"]
+              interval: "10s"
+              timeout: "5s"
+              retries: 3
+              start_period: "5s"
+            zero_downtime: true
+
+    - name: "VERIFY 5: Orphaned containers removed"
+      community.docker.docker_container_info:
+        name: "{{ item }}"
+      register: v5
+      loop:
+        - lifecycle-test-nohc
+        - lifecycle-test-vol
+
+    - name: "ASSERT 5"
+      ansible.builtin.assert:
+        that: not item.exists
+        fail_msg: "Test 5 failed: {{ item.item }} still exists"
+        success_msg: "PASS: {{ item.item }} removed as orphan"
+      loop: "{{ v5.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # ── Final Cleanup ────────────────────────────────────────────────────
+    - name: "CLEANUP: Remove remaining test container"
+      community.docker.docker_container:
+        name: lifecycle-test
+        state: absent
+
+    - name: "CLEANUP: Remove test volume"
+      community.docker.docker_volume:
+        name: lifecycle_test_data
+        state: absent
+
+    - name: "ALL TESTS PASSED"
+      ansible.builtin.debug:
+        msg: |
+          container_lifecycle role: 5/5 tests passed
+            1. First deploy with healthcheck
+            2. Zero-downtime canary swap
+            3. Service without healthcheck
+            4. Accessory with named volume
+            5. Orphan cleanup

@@ -1,0 +1,281 @@
+---
+# Bay alert registry — the single source of truth for the framework's alert
+# surface.
+#
+# Every alert Bay can emit has exactly one entry here, and CI enforces the
+# relationship in both directions: no call site may emit an ID this file does
+# not declare, and no entry here may exist without a call site. See
+# tests/test_alert_registry.py.
+#
+# Fields
+# ------
+#   level               One of the severity ladder in
+#                       docs/build-pipeline-observability-contract.md:
+#                       debug < info < warn < critical. Static — escalation is
+#                       modelled as a *separate* alert, not a mutating level.
+#   source              Where it fires from, as <role>/<file>. Documentation
+#                       only; the drift test derives real locations by scanning.
+#   summary             One line, operator-facing. Rendered into docs/alerting.md
+#                       — do not hand-copy this table anywhere else.
+#   enabled_by_default  Whether a recipient receives it without opting in.
+#                       Spelled out rather than `default:`, which was ambiguous
+#                       (default enabled? default recipient?).
+#   rate_limited        Metadata only. True where the *emitter* already
+#                       implements suppression; the alert channel does not add a
+#                       generic rate limiter (see M106 README non-goals).
+#
+# Naming: <domain>.<event>, lowercase, underscores within a segment. Domains in
+# use: backup, build, container, deploy, host, log, webhook, alerts.
+
+# ── backup ───────────────────────────────────────────────────────────────────
+backup.failed:
+  level: critical
+  source: backup/backup.sh.j2
+  summary: A backup run failed — dump, restic, or a pre-flight check.
+  enabled_by_default: true
+  rate_limited: false
+
+backup.warning:
+  level: warn
+  source: backup/backup.sh.j2
+  summary: A backup completed with a non-fatal problem.
+  enabled_by_default: true
+  rate_limited: false
+
+backup.prune_warning:
+  level: warn
+  source: backup/backup.sh.j2
+  summary: Retention prune failed; it will be retried on the next run.
+  enabled_by_default: true
+  rate_limited: false
+
+backup.integrity_check_failed:
+  level: critical
+  source: backup/maintenance.sh.j2
+  summary: A restic integrity check failed — the repository may be damaged.
+  enabled_by_default: true
+  rate_limited: false
+
+# ── build pipeline (rebuild.sh) ──────────────────────────────────────────────
+build.failed:
+  level: warn
+  source: git_deploy/rebuild.sh.j2
+  summary: A build, image pull, or webhook deploy failed; retries remain.
+  enabled_by_default: true
+  rate_limited: true   # _record_failure suppresses duplicate-SHA failures
+
+build.circuit_breaker_open:
+  level: critical
+  source: git_deploy/rebuild.sh.j2
+  summary: Consecutive failures tripped the circuit breaker; auto-builds are off.
+  enabled_by_default: true
+  rate_limited: true   # gated once per open event by alerts.opened_sent
+
+build.push_blocked:
+  level: warn
+  source: git_deploy/rebuild.sh.j2
+  summary: A push was rejected because the circuit breaker is open.
+  enabled_by_default: true
+  rate_limited: true   # alerts.last_blocked_alert_at, at most 1/hour
+
+build.health_check_failed:
+  level: critical
+  source: git_deploy/rebuild.sh.j2
+  summary: The new container failed its health check and no rollback was available.
+  enabled_by_default: true
+  rate_limited: false
+
+build.rollback_failed:
+  level: critical
+  source: git_deploy/rebuild.sh.j2
+  summary: Rollback failed — the previous image would not start or was unhealthy.
+  enabled_by_default: true
+  rate_limited: false
+
+build.rolled_back:
+  level: warn
+  source: git_deploy/rebuild.sh.j2
+  summary: Health check failed; the service was rolled back to the previous image.
+  enabled_by_default: true
+  rate_limited: false
+
+build.unknown_service:
+  level: warn
+  source: git_deploy/rebuild.sh.j2
+  summary: A build trigger fired for a service not declared in services.yml.
+  enabled_by_default: true
+  rate_limited: false
+
+build.lock_timeout:
+  level: warn
+  source: git_deploy/rebuild.sh.j2
+  summary: A concurrent build held the build lock past the timeout.
+  enabled_by_default: true
+  rate_limited: false
+
+build.remote_complete:
+  level: info
+  source: git_deploy/rebuild.sh.j2
+  summary: A remote build finished and deployment servers were notified to pull.
+  enabled_by_default: false
+  rate_limited: false
+
+build.fanout_failed:
+  level: warn
+  source: git_deploy/rebuild.sh.j2
+  summary: Notifying a peer to pull the new image failed.
+  enabled_by_default: true
+  rate_limited: false
+
+build.killed:
+  level: warn
+  source: git_deploy/build-alert.sh.j2
+  summary: A build was timed out or killed by systemd (timeout, OOM, signal).
+  enabled_by_default: true
+  rate_limited: false
+
+build.pipeline_stalled:
+  level: warn
+  source: git_deploy/bay-trigger-watchdog.sh.j2
+  summary: Build triggers are older than the stall threshold — the pipeline is stuck.
+  enabled_by_default: true
+  rate_limited: true   # keyed on the stale set + stall_watchdog_repeat_sec
+
+# ── deploy ───────────────────────────────────────────────────────────────────
+deploy.complete:
+  level: info
+  source: deploy_stack/main.yml
+  summary: A deploy finished successfully.
+  enabled_by_default: false
+  rate_limited: false
+
+deploy.failed:
+  level: critical
+  source: deploy_stack/main.yml
+  summary: A deploy failed.
+  enabled_by_default: true
+  rate_limited: false
+
+deploy.pull_complete:
+  level: info
+  source: git_deploy/rebuild.sh.j2
+  summary: A pull-only or remote-pull deploy finished successfully.
+  enabled_by_default: false
+  rate_limited: false
+
+deploy.webhook_complete:
+  level: info
+  source: git_deploy/rebuild.sh.j2
+  summary: A webhook-triggered build and deploy finished successfully.
+  enabled_by_default: false
+  rate_limited: false
+
+# ── containers (docker_monitor) ──────────────────────────────────────────────
+container.crash:
+  level: warn
+  source: docker_monitor/docker-monitor.py.j2
+  summary: A container exited with a non-zero status.
+  enabled_by_default: true
+  rate_limited: false
+
+container.recovered:
+  level: info
+  source: docker_monitor/docker-monitor.py.j2
+  summary: A previously crashed container started again.
+  enabled_by_default: false
+  rate_limited: false
+
+container.restart_loop:
+  level: critical
+  source: docker_monitor/docker-monitor.py.j2
+  summary: A container restarted repeatedly inside the detection window.
+  enabled_by_default: true
+  rate_limited: false
+
+container.health_check_failed:
+  level: warn
+  source: docker_monitor/docker-monitor.py.j2
+  summary: A container's Docker health check reported unhealthy.
+  enabled_by_default: true
+  rate_limited: true   # HEALTH_COOLDOWN_SECONDS per container
+
+# ── host (outbound_monitor — provision-only role) ────────────────────────────
+host.outbound_lost:
+  level: critical
+  source: outbound_monitor/bay-outbound-check.j2
+  summary: The host lost outbound internet while remaining reachable over Tailscale.
+  enabled_by_default: true
+  rate_limited: false
+
+host.outbound_restored:
+  level: info
+  source: outbound_monitor/bay-outbound-check.j2
+  summary: Outbound internet came back.
+  enabled_by_default: false
+  rate_limited: false
+
+host.disk_page:
+  level: critical
+  source: outbound_monitor/bay-disk-alert.sh.j2
+  summary: Disk usage crossed the page threshold.
+  enabled_by_default: true
+  rate_limited: false
+
+host.disk_warn:
+  level: warn
+  source: outbound_monitor/bay-disk-alert.sh.j2
+  summary: Disk usage crossed the warn threshold.
+  enabled_by_default: true
+  rate_limited: false
+
+host.disk_recovered:
+  level: info
+  source: outbound_monitor/bay-disk-alert.sh.j2
+  summary: Disk usage fell back below the warn threshold.
+  enabled_by_default: false
+  rate_limited: false
+
+# ── log archival ─────────────────────────────────────────────────────────────
+log.retention_prune:
+  level: info
+  source: log_archive/rotate-logs.sh.j2
+  summary: Log retention removed archived files (age or size threshold).
+  enabled_by_default: false
+  rate_limited: false
+
+# ── webhook receiver ─────────────────────────────────────────────────────────
+webhook.received:
+  level: info
+  source: git_deploy/webhook/app.py
+  summary: A push webhook arrived and a build was triggered.
+  enabled_by_default: false
+  rate_limited: false
+
+webhook.pull_signal_received:
+  level: info
+  source: git_deploy/webhook/app.py
+  summary: A peer signalled that a new image is ready to pull.
+  enabled_by_default: false
+  rate_limited: false
+
+webhook.image_pull_signal_received:
+  level: info
+  source: git_deploy/webhook/app.py
+  summary: A registry image-pull signal arrived and triggered pulls.
+  enabled_by_default: false
+  rate_limited: false
+
+webhook.fanout_failed:
+  level: warn
+  source: git_deploy/webhook/app.py
+  summary: Forwarding a webhook to a peer region failed.
+  enabled_by_default: true
+  rate_limited: false
+
+# ── alert channel itself ─────────────────────────────────────────────────────
+alerts.test:
+  level: info
+  source: alert_channel/bay alerts test
+  summary: A synthetic alert emitted by `bay alerts test` to prove delivery.
+  enabled_by_default: true
+  rate_limited: false

@@ -1,0 +1,46 @@
+---
+# tailnet-identity — ForwardAuth sidecar that resolves the client tailnet IP to
+# its Headscale device name and injects a trusted identity header onto
+# tailnet-proxy routes. See docs/tailnet-ingress.md and the M100 milestone.
+#
+# Runs ONLY on the Headscale control/ingress host (where the real client tailnet
+# IP is visible and the Headscale state lives). Gated OFF by default — enabling
+# it is meaningless without a Headscale ACL that makes infra the sole node able
+# to reach the upstream (otherwise the injected header is forgeable).
+
+# Master gate. Off by default → no container, no Traefik middleware, no behaviour
+# change. The role and compose snippet both no-op when false.
+tailnet_identity_enabled: false
+
+# Built on-host like the webhook receiver (bay-webhook): local image, never pulled.
+tailnet_identity_image: "argo-tailnet-identity:latest"  # legacy-argo: live image tag on hosts, migrate separately
+
+# Port the sidecar listens on inside the docker network (no host port published).
+tailnet_identity_port: 9100
+
+# Resolution source: 'api' (Headscale HTTP API — DEFAULT, recommended) or 'sqlite'
+# (read-only DB read).
+#
+#   api    — queries GET /api/v1/node with a Bearer key. The sidecar mounts NOTHING
+#            from Headscale's state, so a compromise of this header-parsing service
+#            cannot read the coordinator's private keys. Needs tailnet_identity_api_key
+#            (mint once: `headscale apikeys create`, store in vault).
+#   sqlite — reads the DB directly (no API key). !! SECURITY: this requires mounting
+#            Headscale's data dir read-only into the sidecar, which also exposes
+#            noise_private.key, derp_server_private.key and the full DB. Only use it
+#            when you accept that trade-off and the slightly-stale reads (see app.py).
+tailnet_identity_source: "api"
+tailnet_identity_api_url: "http://headscale:8080"
+# Required when tailnet_identity_source == 'api'. Provide via vault, never plain.
+tailnet_identity_api_key: ""
+
+# Behaviour for an unrecognised client IP: 'pass' → 200 + X-Tailnet-Device:
+# unknown (the app decides), or 'deny' → 403 at the edge (fail closed).
+tailnet_identity_unknown_action: "pass"
+
+# How often the sidecar refreshes its IP→device map (seconds).
+tailnet_identity_refresh_seconds: 30
+
+# Header names injected onto the upstream request (must match what the app trusts).
+tailnet_identity_device_header: "X-Tailnet-Device"
+tailnet_identity_device_id_header: "X-Tailnet-Device-Id"

@@ -1,0 +1,8 @@
+---
+watchtower_enabled: true
+watchtower_image: "nickfedor/watchtower:latest"
+watchtower_schedule: "0 0 4 * * *"
+watchtower_monitor_only: true
+watchtower_cleanup: true
+watchtower_telegram_bot_token: "{{ docker_monitor_telegram_bot_token | default('') }}"
+watchtower_telegram_chat_id: "{{ docker_monitor_telegram_chat_id | default('') }}"

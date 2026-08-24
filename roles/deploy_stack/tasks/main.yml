@@ -1,0 +1,371 @@
+---
+# Docker stack deployment
+# Manages env files, config files, and container lifecycle via container_lifecycle role
+# Runs as app user (become_user inherited from play)
+
+- name: Record deploy start time
+  ansible.builtin.set_fact:
+    docker_compose_deploy_start_time: "{{ ansible_facts['date_time']['iso8601'] }}"
+    docker_compose_deploy_start_epoch: "{{ ansible_facts['date_time']['epoch'] }}"
+
+# `playbook_dir` is a controller-side path. The default `slurp` runs on the
+# remote host, where that path doesn't exist — which logged a noisy `FAILED`
+# on every deploy (swallowed by ignore_errors). Delegate to localhost and
+# run_once so the read happens once on the controller, not per-host.
+# The key in version.yml is `bay_version`, not `version` — the previous
+# `.version` lookup would have returned "unknown" even if the slurp had
+# worked, breaking the version field in Telegram deploy alerts.
+- name: Read framework version
+  ansible.builtin.slurp:
+    src: "{{ playbook_dir }}/version.yml"
+  register: _bay_version_raw
+  delegate_to: localhost
+  run_once: true
+  become: false
+  ignore_errors: true
+
+- name: Parse framework version
+  ansible.builtin.set_fact:
+    _bay_version: "{{ (_bay_version_raw.content | default('') | b64decode | from_yaml).bay_version | default('unknown') }}"
+  run_once: true
+  when: _bay_version_raw is succeeded
+
+# ── Validation ──────────────────────────────────────────────────────────
+
+- name: Validate service definitions
+  ansible.builtin.include_tasks: validate.yml
+  tags: [deploy_stack]
+
+# ── Deploy Lock ─────────────────────────────────────────────────────────
+
+- name: Check for existing deploy lock
+  ansible.builtin.stat:
+    path: "{{ deploy_lock_path }}"
+  register: docker_compose_deploy_lock_stat
+
+- name: Fail if deploy lock exists and is recent
+  ansible.builtin.fail:
+    msg: "Deploy lock exists at {{ deploy_lock_path }}. Another deploy may be in progress."
+  when:
+    - docker_compose_deploy_lock_stat.stat.exists
+    - (ansible_facts['date_time']['epoch'] | int) - (docker_compose_deploy_lock_stat.stat.mtime | int) < deploy_lock_timeout
+
+- name: Acquire deploy lock
+  ansible.builtin.copy:
+    dest: "{{ deploy_lock_path }}"
+    content: |
+      {"user": "{{ lookup('env', 'USER') }}", "started_at": "{{ docker_compose_deploy_start_time }}"}
+    owner: "{{ app_user }}"
+    group: "{{ app_user_group }}"
+    mode: "0644"
+
+# ── Deploy (lock-protected) ──────────────────────────────────────────────
+
+- name: Deploy stack
+  block:
+
+    # ── Environment Files ──────────────────────────────────────────────
+
+    - name: Ensure env directory exists
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/env"
+        state: directory
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0750"
+
+    - name: Generate service env files
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ stack_dir }}/env/{{ item.key }}.env"
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0640"
+      loop: "{{ active_services | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      vars:
+        env_service_name: "{{ item.key }}"
+        # .get() required: env['clear'] falls back to dict.clear method on KeyError, defeating | default({})
+        env_clear: "{{ item.value.env.get('clear', {}) }}"
+        env_secrets: "{{ item.value.env.get('secret', []) }}"
+        env_database: "{{ item.value.database | default(false) }}"
+      when: item.value.env is defined or item.value.database is defined
+      register: _deploy_stack_service_env_result
+
+    - name: Generate accessory env files
+      ansible.builtin.template:
+        src: env.j2
+        dest: "{{ stack_dir }}/env/{{ item.key }}.env"
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0640"
+      loop: "{{ active_accessories | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      vars:
+        env_service_name: "{{ item.key }}"
+        # .get() required: env['clear'] falls back to dict.clear method on KeyError, defeating | default({})
+        env_clear: "{{ item.value.env.get('clear', {}) }}"
+        env_secrets: "{{ item.value.env.get('secret', []) }}"
+        env_database: false
+      when: item.value.env is defined
+      register: _deploy_stack_accessory_env_result
+
+    # ── Config Files ─────────────────────────────────────────────────
+
+    - name: Collect config files from all definitions
+      ansible.builtin.set_fact:
+        docker_compose_config_files: >-
+          {{
+            ((active_services | default({})) | dict2items | selectattr('value.config_files', 'defined')
+              | map(attribute='value.config_files') | flatten)
+            +
+            ((active_accessories | default({})) | dict2items | selectattr('value.config_files', 'defined')
+              | map(attribute='value.config_files') | flatten)
+          }}
+
+    - name: Ensure config directory exists
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/config"
+        state: directory
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0750"
+      when: docker_compose_config_files | length > 0
+
+    - name: Ensure config subdirectories exist
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/config/{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0750"
+      loop: "{{ docker_compose_config_files | map('dirname') | unique }}"
+      loop_control:
+        label: "config/{{ item }}"
+
+    - name: Deploy config files
+      ansible.builtin.copy:
+        src: "{{ playbook_dir | dirname }}/files/{{ item }}"
+        dest: "{{ stack_dir }}/config/{{ item }}"
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0640"
+      loop: "{{ docker_compose_config_files }}"
+      loop_control:
+        label: "config/{{ item }}"
+      register: docker_compose_config_result
+
+    # ── Compose File (documentation only) ──────────────────────────────
+
+    - name: Deploy docker-compose.yml
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ docker_compose_file }}"
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0640"
+
+    - name: Deploy docker-compose.infra.yml (boot safety)
+      ansible.builtin.template:
+        src: docker-compose.infra.yml.j2
+        dest: "{{ stack_dir }}/docker-compose.infra.yml"
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0640"
+
+    # ── Accessory Backup Teardown (region drop) ───────────────────────────
+    # When an accessory's `regions:` list no longer includes this host,
+    # `active_accessories` won't contain it but `accessories` still will.
+    # Collect dropped accessories that had `backup` defined and invoke
+    # teardown.yml to remove their timer units, scripts, and cache dirs.
+
+    - name: Collect dropped accessories with backup to teardown
+      ansible.builtin.set_fact:
+        _deploy_stack_teardown_accessories: >-
+          {{
+            (accessories | default({})) | dict2items
+            | rejectattr('key', 'in', (active_accessories | default({}) | list))
+            | selectattr('value.backup', 'defined')
+            | map(attribute='key')
+            | list
+          }}
+
+    - name: Operator notice — backup teardown for dropped accessories
+      ansible.builtin.debug:
+        msg: >-
+          Tearing down orphaned backup units/scripts on {{ inventory_hostname }}
+          for accessories no longer active in this region: {{ _deploy_stack_teardown_accessories | join(', ') }}
+      when: _deploy_stack_teardown_accessories | length > 0
+
+    - name: Teardown backup units and artefacts for dropped accessories
+      ansible.builtin.include_tasks: "{{ role_path }}/../backup/tasks/teardown.yml"
+      vars:
+        _teardown_accessories: "{{ _deploy_stack_teardown_accessories }}"
+      when: _deploy_stack_teardown_accessories | length > 0
+
+    # ── Wait for Active Backups ─────────────────────────────────────────
+
+    - name: Wait for active backups to complete before deploy
+      ansible.builtin.wait_for:
+        path: "{{ backup_lock_dir | default(stack_dir + '/backup/locks') }}/{{ item.key }}.lock"
+        state: absent
+        timeout: 300
+      loop: "{{ active_accessories | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: item.value.backup is defined
+      ignore_errors: true
+
+    # ── log_retention boundary (pre) ──────────────────────────────────
+    # Capture container IDs BEFORE container_lifecycle recreates them so
+    # the post task can write a "container recreated" sentinel into
+    # live.log for each container whose identity changed (M84 boundary
+    # marker).
+
+    - name: Capture pre-recreate IDs for log_retention containers
+      ansible.builtin.include_tasks: log_retention_boundary_pre.yml
+      tags: [deploy_stack]
+
+    # ── Deploy Containers ───────────────────────────────────────────────
+    # container_lifecycle auto-builds specs from active_services/accessories
+    # and infra vars, then deploys: infra → accessories → services → cleanup
+
+    - name: Deploy containers
+      ansible.builtin.include_role:
+        name: container_lifecycle
+      tags: [deploy_stack]
+
+    # ── log_retention boundary (post) ─────────────────────────────────
+    # Compare post-recreate IDs against pre. Write a sentinel line to
+    # live.log where the container was recreated so operators grepping
+    # through the archive see a visual boundary between container
+    # lifetimes.
+
+    - name: Write boundary sentinel for recreated log_retention containers
+      ansible.builtin.include_tasks: log_retention_boundary_post.yml
+      tags: [deploy_stack]
+
+
+    # ── Env File Change Recreate ──────────────────────────────────────
+    # Env-file changes are handled by the reconciler, not a standalone
+    # force-recreate loop. build_specs folds a sha256 of each rendered env
+    # file into the container's config-hash (M85-S1 / v0.96.1), so a changed
+    # env file changes the hash and the reconciler recreates that container in
+    # its single pass. The separate force-recreate block this replaced (gated
+    # on the old loop path) was retired in M85-S8.
+
+    # ── Database Provisioning ────────────────────────────────────────────
+
+    - name: Provision service databases
+      ansible.builtin.include_tasks: database_provision.yml
+      tags: [deploy_stack]
+
+    # ── Config Change Restart ─────────────────────────────────────────
+
+    - name: Build config file to container mapping  # noqa: no-handler
+      ansible.builtin.set_fact:
+        docker_compose_config_file_owners: >-
+          {{ docker_compose_config_file_owners | default({}) | combine({item.1: item.0.key}) }}
+      loop: >-
+        {{
+          (((active_services | default({})) | dict2items
+            | selectattr('value.config_files', 'defined'))
+            | subelements('value.config_files'))
+          +
+          (((active_accessories | default({})) | dict2items
+            | selectattr('value.config_files', 'defined'))
+            | subelements('value.config_files'))
+        }}
+      loop_control:
+        label: "{{ item.1 }} → {{ item.0.key }}"
+      when: docker_compose_config_result is changed
+
+    - name: Restart containers with changed config files  # noqa: no-handler
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: started
+        restart: true
+      loop: >-
+        {{ docker_compose_config_result.results | default([])
+           | selectattr('changed')
+           | map(attribute='item')
+           | map('extract', docker_compose_config_file_owners | default({}))
+           | unique
+           | list }}
+      loop_control:
+        label: "{{ item }}"
+      when:
+        - docker_compose_config_result is changed
+        - docker_compose_config_file_owners | default({}) | length > 0
+
+    # ── Audit Log ──────────────────────────────────────────────────────
+
+    - name: Record deploy end time
+      ansible.builtin.set_fact:
+        docker_compose_deploy_end_time: "{{ ansible_facts['date_time']['iso8601'] }}"
+        docker_compose_deploy_end_epoch: "{{ ansible_facts['date_time']['epoch'] }}"
+
+    - name: Append to deploy audit log
+      ansible.builtin.lineinfile:
+        path: "{{ deploy_audit_log_path }}"
+        line: "{{ docker_compose_deploy_end_time }} | {{ lookup('env', 'USER') }} | success"
+        create: true
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        mode: "0644"
+
+    # ── Deploy Notification ────────────────────────────────────────────
+
+    # Composed once, delivered to every configured sink. These control-node
+    # alerts are the most visible in the system and cannot go through the
+    # host-side shell snippet, so they adapt via the shared bay_alert filters.
+    - name: Compose deploy complete alert
+      ansible.builtin.set_fact:
+        _bay_alert_id: deploy.complete
+        _bay_deploy_alert: "{{ docker_monitor_alert_header }}\u2705 <b>Deploy complete</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host }}</code>\n\u25b8 Region:     <code>{{ group_names | reject('equalto', 'all') | first | default('default') }}</code>\n\u25b8 Stack:      <code>{{ stack_name }}</code>\n\u25b8 Services:   <code>{{ active_services | default({}) | length }}</code>\n\u25b8 Version:    <code>{{ _bay_version | default('unknown') }}</code>\n\u25b8 Duration:   <code>{{ ((docker_compose_deploy_end_epoch | int) - (docker_compose_deploy_start_epoch | int)) // 60 }}m {{ ((docker_compose_deploy_end_epoch | int) - (docker_compose_deploy_start_epoch | int)) % 60 }}s</code>\n\u25b8 Time:       {{ '%b %d, %H:%M UTC' | strftime(ansible_facts['date_time']['epoch'] | int) }}{{ docker_monitor_alert_footer }}"
+
+    - name: Deliver deploy alert to routed recipients
+      ansible.builtin.include_tasks: send_deploy_alert.yml
+
+  rescue:
+    - name: Remove any canary containers left by failed deploy
+      community.docker.docker_container:
+        name: "{{ item.name }}{{ container_lifecycle_canary_suffix | default('-new') }}"
+        state: absent
+      loop: "{{ container_specs | default([]) | selectattr('type', 'eq', 'service') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      ignore_errors: true
+
+    - name: Record deploy failure to audit log
+      ansible.builtin.lineinfile:
+        path: "{{ deploy_audit_log_path }}"
+        line: "{{ ansible_facts['date_time']['iso8601'] }} | {{ lookup('env', 'USER') }} | failed | {{ ansible_failed_task.name }}"
+        create: true
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        mode: "0644"
+      ignore_errors: true
+
+    - name: Compose deploy failed alert
+      ansible.builtin.set_fact:
+        _bay_alert_id: deploy.failed
+        _bay_deploy_alert: "{{ docker_monitor_alert_header }}\u274c <b>Deploy failed</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host }}</code>\n\u25b8 Region:     <code>{{ group_names | reject('equalto', 'all') | first | default('default') }}</code>\n\u25b8 Stack:      <code>{{ stack_name }}</code>\n\u25b8 Version:    <code>{{ _bay_version | default('unknown') }}</code>\n\u25b8 Failed at:  <code>{{ ansible_failed_task.name }}</code>\n\u25b8 Time:       {{ '%b %d, %H:%M UTC' | strftime(ansible_facts['date_time']['epoch'] | int) }}{{ docker_monitor_alert_footer }}"
+      ignore_errors: true
+
+    - name: Deliver deploy alert to routed recipients
+      ansible.builtin.include_tasks: send_deploy_alert.yml
+
+    - name: Re-raise deploy failure
+      ansible.builtin.fail:
+        msg: "{{ ansible_failed_result.msg | default('Deploy failed') }}"
+
+  always:
+    # ── Release Lock ───────────────────────────────────────────────────
+
+    - name: Release deploy lock
+      ansible.builtin.file:
+        path: "{{ deploy_lock_path }}"
+        state: absent

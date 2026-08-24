@@ -1,0 +1,28 @@
+# CrowdSec IP Whitelist
+# Managed by Ansible - do not edit manually
+
+name: ansible-whitelists
+description: "Whitelisted IPs from Ansible configuration"
+whitelist:
+  reason: "Trusted infrastructure - configured via Ansible"
+{% set single_ips = [] %}
+{% set cidr_ranges = [] %}
+{% for entry in ip_whitelist | default([]) | select('string') | reject('==', '') | list %}
+{%   if '/' in entry %}
+{%     set _ = cidr_ranges.append(entry) %}
+{%   else %}
+{%     set _ = single_ips.append(entry) %}
+{%   endif %}
+{% endfor %}
+{% if single_ips | length > 0 %}
+  ip:
+{% for ip in single_ips %}
+    - "{{ ip }}"
+{% endfor %}
+{% endif %}
+{% if cidr_ranges | length > 0 %}
+  cidr:
+{% for cidr in cidr_ranges %}
+    - "{{ cidr }}"
+{% endfor %}
+{% endif %}

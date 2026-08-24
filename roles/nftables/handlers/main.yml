@@ -1,0 +1,20 @@
+---
+- name: Reload nftables
+  ansible.builtin.systemd:
+    name: nftables
+    state: reloaded
+  become: true
+  become_user: root
+  notify: Restart Docker after nftables reload
+
+- name: Restart Docker after nftables reload
+  ansible.builtin.shell: |
+    systemctl restart docker
+    sleep 3
+    docker start $(docker ps -a --filter "status=exited" --format '{% raw %}{{.Names}}{% endraw %}') 2>/dev/null || true
+  args:
+    executable: /bin/bash
+  changed_when: true
+  become: true
+  become_user: root
+  when: _nftables_docker_unit.stat.exists | default(false)

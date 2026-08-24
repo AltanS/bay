@@ -1,0 +1,477 @@
+---
+# =============================================================================
+# CrowdSec Role for Trellis
+# =============================================================================
+
+# Master switch - set to false to skip all CrowdSec tasks
+crowdsec_enabled: true
+
+# =============================================================================
+# Legacy Migration (fail2ban + ferm)
+# =============================================================================
+
+# Stop and disable fail2ban/ferm when CrowdSec is enabled
+crowdsec_disable_legacy: true
+
+# Flush iptables rules from ferm (use with caution - only after confirming CrowdSec works)
+crowdsec_flush_legacy_rules: false
+
+# =============================================================================
+# Package Installation
+# =============================================================================
+
+# No configuration needed - CrowdSec package is installed automatically
+
+# =============================================================================
+# CrowdSec Hub - Collections, Parsers, Scenarios
+# =============================================================================
+
+# Collections to install (includes parsers + scenarios)
+# For Trellis WordPress, recommended collections are set here
+crowdsec_collections:
+  - crowdsecurity/linux
+  - crowdsecurity/nginx
+  - crowdsecurity/sshd
+  - crowdsecurity/base-http-scenarios
+  - crowdsecurity/http-cve
+  - crowdsecurity/wordpress
+  - crowdsecurity/whitelist-good-actors
+
+# Additional parsers (beyond what collections provide)
+crowdsec_parsers: []
+
+# Additional scenarios (beyond what collections provide)
+crowdsec_scenarios: []
+
+# Scenarios to remove (useful for disabling false-positive-prone scenarios from collections)
+# Use full scenario names as shown by `cscli scenarios list`
+crowdsec_scenarios_remove: []
+# Example - disable http-probing entirely:
+#   - crowdsecurity/http-probing
+
+# HTTP Probing scenario customization
+# The default http-probing scenario triggers on 404, 403, and 400 responses.
+# For WordPress/REST APIs, 404s are often legitimate ("resource not found").
+# Set to true to deploy a modified version that only triggers on 403/400.
+crowdsec_http_probing_exclude_404: false
+
+# =============================================================================
+# Hub Data Refresh (GeoLite2 mmdb)
+# =============================================================================
+# The vendor's daily crowdsec-hubupdate.timer runs `cscli hub upgrade` WITHOUT
+# --force, which only re-downloads an item's `data:` files when the item itself
+# version-bumps. crowdsecurity/geoip-enrich rarely bumps, so the GeoLite2 mmdbs
+# (GeoLite2-ASN.mmdb, GeoLite2-City.mmdb) pin to provision-day snapshots and go
+# stale (~4 months observed) — ASN-keyed scenarios (evt.Enriched.ASNumber) then
+# silently rot and fail open.
+#
+# cscli 1.7 has NO command that re-fetches a present-but-stale data file
+# (verified empirically on 1.7.7: `parsers upgrade --force` prints "Nothing to
+# install or remove." and never re-downloads — even with the file deleted —
+# because the plan engine keys on item version/taint, not data-file content).
+# So this role installs a weekly systemd timer that downloads each configured
+# parser's declared `data:` source_urls directly — a conditional GET (curl -z)
+# with an atomic tmp+mv replace — and reloads crowdsec only if a file's content
+# actually changed and `crowdsec -t -error` passes.
+# See docs/crowdsec.md ("Hub data refresh (GeoLite2)").
+
+# Master switch for the hub data refresh timer. Refreshes hub data files
+# (GeoLite2 mmdb) that the vendor hubupdate timer never re-downloads;
+# geoip-enrich is present transitively via the crowdsecurity/linux collection.
+crowdsec_data_refresh_enabled: true
+
+# systemd OnCalendar expression for the refresh timer. Weekly — GeoLite2
+# publishes Tue/Fri, so Saturday reliably picks up Friday's drop.
+# RandomizedDelaySec (see the timer unit) adds up to 1h of jitter on top.
+crowdsec_data_refresh_calendar: "Sat *-*-* 05:00:00"
+
+# Parsers whose declared `data:` files get refreshed. Surgical on purpose: the
+# script only fetches the data files these parsers declare — nothing hub-wide —
+# so tainted hub items carrying local overrides are never disturbed.
+crowdsec_data_refresh_parsers:
+  - crowdsecurity/geoip-enrich
+
+# =============================================================================
+# Ban Durations (Profiles)
+# =============================================================================
+# CrowdSec uses "profiles" to determine what action to take when a scenario
+# triggers. This role deploys a custom profiles.yaml with sensible defaults.
+#
+# Ban duration format: "4h" (hours), "30m" (minutes), "7d" (days)
+
+# Default ban duration for CrowdSec Hub scenarios (ssh-bf, http-probing, etc.)
+crowdsec_ban_duration_default: "24h"
+
+# =============================================================================
+# Built-in Scenarios
+# =============================================================================
+# These scenarios are included with this role and enabled by default.
+# Each scenario has tunable parameters explained below.
+#
+# Path prefixes to exclude from crawl detection (aggressive-crawl, sustained-crawl).
+# WordPress frontend JS fires multiple REST API requests per page view,
+# which inflates request counts and causes false positives on real users.
+# API abuse (injection, XSS, SQLi) is still caught by dedicated attack scenarios.
+crowdsec_crawl_exclude_paths:
+  - "/wp-json/"
+
+# User agent substrings to exclude from crawl detection.
+# Legitimate crawlers that should not trigger crawl scenarios.
+# Googlebot/Bingbot are already excluded by crowdsecurity/whitelist-good-actors.
+crowdsec_crawl_exclude_user_agents:
+  - "Ahrefs"
+#
+# SCENARIO PARAMETERS:
+# --------------------
+# capacity    - Number of events allowed before triggering (bucket size)
+#               Lower = more sensitive, Higher = more tolerant
+#
+# leakspeed   - How fast the bucket drains (one event leaks per interval)
+#               "1m" = 1 event drains per minute, "30s" = 1 per 30 seconds
+#               Faster leak = more tolerant of slow attacks
+#
+# blackhole   - Cooldown after triggering before scenario can fire again
+#               Prevents alert spam for persistent attackers
+#
+# ban_duration - How long the IP is banned when this scenario triggers
+#
+# TYPE: "leaky" vs "trigger"
+# --------------------------
+# leaky   - Bucket-based rate limiting (uses capacity/leakspeed/blackhole)
+# trigger - Immediate action on first match (no rate limiting)
+
+# -----------------------------------------------------------------------------
+# Actuator Probe Detection
+# -----------------------------------------------------------------------------
+# Detects probing for Spring Boot actuator endpoints (/actuator, /heapdump)
+# which expose sensitive application data. Common in automated scanners.
+crowdsec_scenario_actuator_probe: true
+crowdsec_scenario_actuator_probe_capacity: 3      # Trigger after 3 requests
+crowdsec_scenario_actuator_probe_leakspeed: "1m"  # Drain 1 request per minute
+crowdsec_scenario_actuator_probe_blackhole: "5m"  # 5 min cooldown between alerts
+crowdsec_scenario_actuator_probe_ban: "24h"       # Ban for 24 hours
+
+# -----------------------------------------------------------------------------
+# Debug Endpoint Fuzzing
+# -----------------------------------------------------------------------------
+# Detects probing for debug endpoints and error parameters that could
+# leak stack traces, configuration, or other sensitive information.
+# Paths: /debug, ?error=, ?stacktrace=, ?exception=
+crowdsec_scenario_debug_fuzzing: true
+crowdsec_scenario_debug_fuzzing_capacity: 5       # Trigger after 5 requests
+crowdsec_scenario_debug_fuzzing_leakspeed: "30s"  # Drain 1 request per 30 seconds
+crowdsec_scenario_debug_fuzzing_blackhole: "10m"  # 10 min cooldown between alerts
+crowdsec_scenario_debug_fuzzing_ban: "12h"        # Ban for 12 hours
+
+# -----------------------------------------------------------------------------
+# Custom Bad User Agent Detection
+# -----------------------------------------------------------------------------
+# Supplements the Hub's http-bad-user-agent scenario (500+ patterns) with
+# immediate blocking for the most egregious scanner user agents.
+#
+# Hub scenario triggers after 2 requests; this triggers immediately.
+# Detected agents: ffuf, sqlmap, nikto, nuclei, gobuster, dirbuster, wpscan,
+#                  Team Anon Force, Mozlila, Moz111a, depconf_deep_scanner,
+#                  getodin.com, cypex.ai/scanning, onlyscans.com
+#
+# TYPE: trigger (immediate ban on first match - no capacity/leakspeed)
+crowdsec_scenario_custom_bad_user_agent: true
+crowdsec_scenario_custom_bad_user_agent_ban: "168h"  # Ban for 7 days (serious intent)
+
+# -----------------------------------------------------------------------------
+# SSRF Callback Detection
+# -----------------------------------------------------------------------------
+# Detects Server-Side Request Forgery (SSRF) attempts using callback domains
+# to exfiltrate data or confirm vulnerabilities. These domains are used by
+# security testing tools (Burp, nuclei, etc.) for out-of-band detection.
+#
+# Detected domains: burpcollaborator.net, oastify.com, interact.sh,
+#                   canarytokens.com, requestbin.net, webhook.site, evil.com, *.oast.*
+#
+# TYPE: trigger (immediate ban on first match - no capacity/leakspeed)
+crowdsec_scenario_ssrf_callback: true
+crowdsec_scenario_ssrf_callback_ban: "168h"       # Ban for 7 days (active exploitation)
+
+# -----------------------------------------------------------------------------
+# Encoded Attack Payload Detection
+# -----------------------------------------------------------------------------
+# Detects double-encoded and HTML-entity-encoded attack payloads in URLs.
+# These encoding techniques (e.g. %253C = double-encoded <) are used to
+# evade WAF/IDS pattern matching. Legitimate traffic never double-encodes
+# angle brackets, quotes, or slashes. Catches evasion that bypasses the
+# Hub's http-xss-probbing scenario.
+#
+# TYPE: trigger (immediate ban on first match - no capacity/leakspeed)
+crowdsec_scenario_encoded_attack_payload: true
+crowdsec_scenario_encoded_attack_payload_ban: "168h"  # Ban for 7 days (evasion = serious intent)
+
+# -----------------------------------------------------------------------------
+# Extended XSS Detection
+# -----------------------------------------------------------------------------
+# Supplements the Hub's crowdsecurity/http-xss-probbing with XSS patterns
+# it does not cover: event handler attributes (onerror=, onload=, onfocus=,
+# onmouseover=, onclick=, oninput=, onchange=) and DOM property access
+# (document.cookie, document.domain, document.location, window.location).
+# The Hub handles tag injection (%3Cscript, %3Csvg, etc.) — this covers
+# the execution vectors that follow.
+crowdsec_scenario_xss_extended: true
+crowdsec_scenario_xss_extended_capacity: 5       # Bucket size; triggers on overflow (6th matching event)
+crowdsec_scenario_xss_extended_leakspeed: "30s"  # Drain 1 request per 30 seconds
+crowdsec_scenario_xss_extended_blackhole: "5m"   # 5 min cooldown between alerts
+crowdsec_scenario_xss_extended_ban: "4h"         # Ban for 4 hours
+
+# -----------------------------------------------------------------------------
+# Cache-Buster Probe Detection
+# -----------------------------------------------------------------------------
+# Detects bot networks using cache-busting query parameters to probe WordPress
+# sites. Matches requests with exactly one query parameter where the key is
+# 2-8 alphanumeric chars and the value is 4+ digits (e.g. ?cb=12345, ?ddd=67890).
+# This pattern is used by rotating bot networks on Hetzner/Contabo/DigitalOcean.
+# The regex anchors (^...$) ensure the entire query string is one parameter,
+# excluding multi-param requests. static_ressource filter excludes ?ver= on assets.
+crowdsec_scenario_cache_buster_probe: true
+crowdsec_scenario_cache_buster_probe_capacity: 8       # Trigger after 8 requests
+crowdsec_scenario_cache_buster_probe_leakspeed: "2m"   # Drain 1 request per 2 minutes
+crowdsec_scenario_cache_buster_probe_blackhole: "5m"   # 5 min cooldown between alerts
+crowdsec_scenario_cache_buster_probe_ban: "168h"       # Ban for 7 days
+
+# -----------------------------------------------------------------------------
+# Open Redirect Probe Detection
+# -----------------------------------------------------------------------------
+# Detects redirect parameter fuzzing — bots trying hundreds of redirect-like
+# parameter names (redirect=, goto=, next=, returnTo=, etc.) with external URL
+# targets. Requires BOTH a redirect parameter name AND an external URL value.
+# Uses distinct counting on http_args to count unique query strings per IP,
+# so only scanners trying many different param/URL combos trigger the ban.
+# WordPress internal redirects (?redirect_to=/my-account/) do NOT match
+# because they lack http:// or https:// in the value.
+crowdsec_scenario_open_redirect_probe: true
+crowdsec_scenario_open_redirect_probe_capacity: 5       # Trigger after 5 unique query strings
+crowdsec_scenario_open_redirect_probe_leakspeed: "30s"  # Drain 1 per 30 seconds
+crowdsec_scenario_open_redirect_probe_blackhole: "5m"   # 5 min cooldown between alerts
+crowdsec_scenario_open_redirect_probe_ban: "168h"       # Ban for 7 days
+
+# -----------------------------------------------------------------------------
+# Parameter Stuffing Detection
+# -----------------------------------------------------------------------------
+# Detects requests with 20+ query parameters, which is a strong indicator of
+# parameter fuzzing (testing many redirect/injection params at once). No
+# legitimate WordPress/WooCommerce request sends 20+ params in the query string.
+# WordPress bulk admin operations use POST body, not query strings.
+#
+# TYPE: trigger (immediate ban on first match - no capacity/leakspeed)
+crowdsec_scenario_param_stuffing: true
+crowdsec_scenario_param_stuffing_ban: "168h"            # Ban for 7 days
+
+# -----------------------------------------------------------------------------
+# Aggressive Crawl Detection (WordPress-compatible)
+# -----------------------------------------------------------------------------
+# Supplements the Hub's http-crawl-non_statics scenario which breaks on
+# WordPress pretty permalinks. The Hub uses distinct: "evt.Parsed.file_name"
+# but WordPress URLs end with / (e.g. /bonus/, /tipps/match-prognose/),
+# making file_name always empty and collapsing all requests into 1 bucket entry.
+#
+# This scenario uses distinct on the full URL path instead, and a slower
+# leak rate to catch both fast scrapers (~9 req/sec, triggers in ~5s) and
+# slow persistent scrapers (~0.5 req/sec, triggers in ~2min).
+#
+# DISABLED BY DEFAULT — modern JS apps (React, Next.js) load 40+ asset
+# chunks per page view, easily triggering false positive bans on legitimate
+# users. Enable only if you've tuned capacity and exclude paths for your site.
+crowdsec_scenario_aggressive_crawl: false
+crowdsec_scenario_aggressive_crawl_capacity: 40         # Trigger after 40 unique paths
+crowdsec_scenario_aggressive_crawl_leakspeed: "5s"      # Drain 1 request per 5 seconds (0.2/sec)
+crowdsec_scenario_aggressive_crawl_blackhole: "5m"      # 5 min cooldown between alerts
+crowdsec_scenario_aggressive_crawl_ban: "168h"          # Ban for 7 days (persistent scraping)
+
+# -----------------------------------------------------------------------------
+# Sustained Crawl Detection
+# -----------------------------------------------------------------------------
+# Complements aggressive-crawl by catching slow-but-persistent scrapers that
+# evade unique-path-based detection. Uses raw request count (no distinct
+# filter) with higher capacity and slower drain. Targets coordinated scraper
+# clusters using multiple IPs at 25-40 non-static requests/min each.
+#
+# DISABLED BY DEFAULT — same false positive risk as aggressive-crawl.
+# Enable with tuned capacity if your site has moderate request volume.
+crowdsec_scenario_sustained_crawl: false
+crowdsec_scenario_sustained_crawl_capacity: 120          # Trigger after 120 requests
+crowdsec_scenario_sustained_crawl_leakspeed: "10s"       # Drain 1 request per 10 seconds (0.1/sec)
+crowdsec_scenario_sustained_crawl_blackhole: "5m"        # 5 min cooldown between alerts
+crowdsec_scenario_sustained_crawl_ban: "168h"            # Ban for 7 days (persistent scraping)
+
+# =============================================================================
+# Console Enrollment (optional - for CrowdSec Console dashboard)
+# =============================================================================
+
+crowdsec_console_token: ""
+
+# =============================================================================
+# Log Acquisition
+# =============================================================================
+
+# Trellis-aware defaults: logs are at /srv/www/{site}/logs/
+# Override in group_vars if using non-standard paths
+#
+# Each item is rendered into /etc/crowdsec/acquis.yaml. Two source kinds:
+#
+#   File (default) — tail one or more files:
+#     - filenames:
+#         - /var/log/auth.log
+#       labels:
+#         type: syslog
+#
+#   Docker — read a container's stdout/stderr directly, surviving redeploys
+#   (the json-file path under /var/lib/docker/containers/<id>/ changes every
+#   recreate, so files don't). Requires the native CrowdSec agent to reach the
+#   Docker socket (it runs as root, so it already can; if you lock the socket
+#   down, point a read-only socket-proxy at it via `docker_host`). Use this to
+#   acquire an app's own verdict log (e.g. a bot-verify SPOOFED_GOOGLEBOT
+#   marker) without bind-mounting a logfile — see bay#23.
+#     - source: docker
+#       container_name:            # exact names; or container_name_regexp: ['^app-']
+#         - storefront
+#         - blog
+#       # docker_host: tcp://127.0.0.1:2375   # optional, defaults to the unix socket
+#       labels:
+#         type: bot_verify
+crowdsec_acquisition:
+  - filenames:
+      - /srv/www/*/logs/access.log
+    labels:
+      type: nginx
+  - filenames:
+      - /srv/www/*/logs/error.log
+    labels:
+      type: nginx
+  - filenames:
+      - /var/log/nginx/access.log
+      - /var/log/nginx/error.log
+    labels:
+      type: nginx
+  - filenames:
+      - /var/log/auth.log
+    labels:
+      type: syslog
+
+# =============================================================================
+# Firewall Bouncer
+# =============================================================================
+
+crowdsec_firewall_bouncer_enabled: true
+
+# =============================================================================
+# IP Whitelists
+# =============================================================================
+
+# IPs that should never be blocked by CrowdSec
+# Override in group_vars to add monitoring services, office IPs, etc.
+ip_whitelist:
+  - 127.0.0.0/8
+
+# =============================================================================
+# Blocked IPs Import
+# =============================================================================
+
+# IPs/CIDRs to permanently block - imported as CrowdSec decisions
+# Override in group_vars to block known bad actors
+ip_blocklist: []
+
+# Duration for imported blocked IPs (default: 10 years)
+crowdsec_ip_blocklist_duration: "87600h"
+
+# Deploy nftables interval set for ip_blocklist CIDR enforcement
+# Required because CrowdSec's firewall bouncer cannot handle CIDR ranges
+# in nftables (known bug: sets lack the 'interval' flag)
+crowdsec_nftables_blocklist: true
+
+# =============================================================================
+# Custom Scenarios
+# =============================================================================
+
+# Define custom scenarios (ported from fail2ban or custom rules).
+#
+# `filter:` is rendered as a YAML block scalar, so multi-line filters using
+# the `|` literal block style work naturally — see the second example below.
+#
+# expr-lang gotcha: `\` is a string-escape character even inside single-quoted
+# string literals, so regex escapes like `\.` produce `invalid char escape`
+# errors at scenario load time. Prefer startsWith / endsWith / contains over
+# `matches` whenever possible — they don't require regex escaping.
+#
+# Example (single-line filter):
+#   - name: wordpress-admin-exploit
+#     description: "Detect WordPress admin exploitation attempts"
+#     type: leaky
+#     filter: "evt.Meta.http_path contains '/wp-login.php' and evt.Meta.http_args contains 'lostpassword'"
+#     groupby: evt.Meta.source_ip
+#     capacity: 1
+#     leakspeed: 24h
+#     blackhole: 24h
+#     labels:
+#       service: wordpress
+#       type: exploit
+#       remediation: true
+#
+# Example (multi-line filter):
+#   - name: wp-decoy-probe
+#     description: "Detect probing of common WP-decoy paths"
+#     type: leaky
+#     filter: |
+#       evt.Meta.http_path == '/admin/config.php' or
+#       evt.Meta.http_path == '/wp-login.php' or
+#       endsWith(evt.Meta.http_path, '.env')
+#     groupby: evt.Meta.source_ip
+#     capacity: 3
+#     leakspeed: 1h
+#     blackhole: 5m
+#     labels:
+#       service: http
+#       type: scan
+#       remediation: true
+crowdsec_custom_scenarios: []
+
+# =============================================================================
+# Custom Parsers
+# =============================================================================
+
+# Ship a local CrowdSec parser purely via group_vars — mirrors
+# crowdsec_custom_scenarios. Each item renders to
+# /etc/crowdsec/parsers/<stage>/custom-<name>.yaml and the role validates it is
+# valid YAML before reload (one bad parser file breaks loading for ALL parsers).
+#
+# The primary use case (bay#23): ban off an app's authoritative verdict
+# instead of re-deriving it from raw UA strings. The consuming app already logs
+# a zero-false-positive marker for every spoofer (e.g.
+# `[bot-verify] SPOOFED_GOOGLEBOT ... ip=<ip>`); a parser turns that line into a
+# parsed event with evt.Meta.source_ip, and a `type: trigger` custom scenario
+# (see crowdsec_custom_scenarios) bans on the single event. No UA token list to
+# maintain, no rDNS-whitelist double-negative.
+#
+# Fields:
+#   name   — basename of the rendered file (custom-<name>.yaml); also the
+#            parser's `name:` as custom/<name>. Required.
+#   stage  — s00-raw | s01-parse | s02-enrich. Defaults to s01-parse.
+#   body   — raw CrowdSec parser YAML (everything except `name:`). The role
+#            injects `name: custom/<name>` for you; do NOT repeat it in body.
+#
+# Validate locally before deploy:
+#   cscli explain --log '<sample app log line>' --type <acq label type>
+#   # evt.Meta.source_ip should be populated; a trigger scenario then overflows.
+#
+# Example (bot-verify spoof marker → source_ip):
+#   - name: bot-verify-spoof
+#     stage: s01-parse
+#     body: |
+#       filter: "evt.Line.Raw contains 'SPOOFED_GOOGLEBOT'"
+#       onsuccess: next_stage
+#       nodes:
+#         - grok:
+#             pattern: 'ip=%{IP:spoof_ip}'
+#             apply_on: message
+#           statics:
+#             - meta: source_ip
+#               expression: evt.Parsed.spoof_ip
+#             - meta: log_type
+#               value: bot_verify_spoof
+crowdsec_custom_parsers: []

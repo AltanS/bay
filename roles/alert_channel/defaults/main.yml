@@ -1,0 +1,142 @@
+---
+# Alert channel — where framework alerts go.
+#
+# Telegram remains the built-in sink and is configured through the
+# docker_monitor_telegram_* variables. This role adds a SECOND, generic
+# webhook sink that fires alongside it, so a consumer can point alerts at
+# Campfire/Basecamp, Slack, or anything that accepts an HTTP POST without
+# patching role templates inside .bay/ (patches `bin/bay update` destroys).
+#
+# Both sinks are best-effort: a dead sink can never fail a deploy, backup or
+# build.
+#
+# The URL usually embeds a bot key, so it belongs in the vault. Per the
+# secrets casing convention it must be LOWERCASE in the `secrets:` dict —
+# it is consumed as an Ansible role var, and an UPPERCASE name silently
+# resolves undefined.
+#
+#   # group_vars/production/secrets.yml (vaulted)
+#   secrets:
+#     alert_webhook_url: "https://chat.example.com/integrations/BOTKEY/rooms/3/messages"
+#
+#   # group_vars/production/main.yml
+#   alert_webhook_url: "{{ secrets.alert_webhook_url }}"
+#   alert_webhook_format: campfire
+#
+# Empty URL = feature off, and off is the default. See docs/alerting.md.
+alert_webhook_url: ""
+
+# How to render the message for the sink. Bay composes alerts in Telegram
+# HTML (a closed vocabulary of <b>, <code>, <pre> — see docs/alerting.md);
+# the adapter translates that to whatever the sink wants.
+#
+#   campfire  POST text/html          (Campfire renders our tag subset as-is)
+#   slack     POST application/json   ({"text": "...mrkdwn..."})
+#   raw       POST text/plain         (tags stripped, entities decoded)
+alert_webhook_format: campfire
+
+# Hard cap on the webhook payload, in characters. Both Campfire and Slack
+# reject oversized messages, and a silently dropped alert is worse than a
+# clipped one. Applied only to the webhook sink — Telegram delivery is left
+# exactly as it was.
+alert_webhook_max_chars: 3500
+
+# Seconds to wait on the webhook sink before giving up. Bounded so a hung
+# endpoint cannot stall a build or a backup.
+alert_webhook_timeout: 10
+
+# ── Host identity ────────────────────────────────────────────────────────
+#
+# Every alert names the host it came from. Without this, that name is
+# whatever the emitter happened to reach for, and the three emitters Bay
+# shipped disagreed: most printed `inventory_hostname` (a bare IP for any
+# consumer whose inventory lists addresses), log_archive shelled out to
+# `hostname -f`, and outbound_monitor printed `region`. An operator paged at
+# 03:00 got "203.0.113.42" and had to grep the inventory to learn which
+# machine that was.
+#
+# Set this per host to the name YOU use for the machine — the tailnet node
+# name, or the address it answers on:
+#
+#   # host_vars/203.0.113.42.yml   (or group_vars/infra/main.yml)
+#   bay_host_label: infra.bay.example.com
+#
+# Leave it empty and Bay falls back to the machine's own hostname, then to
+# the inventory address. So an unlabelled host is never anonymous — it just
+# gets a less pretty name. Alerts print the label with the inventory address
+# beside it, because the responder needs the name to know WHICH box and the
+# address to ssh into it:
+#
+#   Host: infra.bay.example.com (203.0.113.42)
+#
+# Resolution happens in _notify.sh.j2 so it is identical for every emitter,
+# shell and Python alike. tests/test_alert_channel.py asserts no emitter
+# reintroduces its own idea of the host name.
+bay_host_label: ""
+
+# What alerts print for "which host is this". Do NOT override this — set
+# bay_host_label instead. This is the Ansible-var twin of _host_label.j2, and
+# exists only because the two control-node alerts (deploy.complete /
+# deploy.failed) are composed in a task var, where {% include %} is not
+# available. tests/test_alert_channel.py asserts the two agree.
+bay_alert_host: "{% set _n = (bay_host_label | default('', true)) or (ansible_hostname | default('', true)) or inventory_hostname %}{{ _n }}{% if _n != inventory_hostname %} ({{ inventory_hostname }}){% endif %}"
+
+# ── Recipients (M106-S3) ─────────────────────────────────────────────────
+#
+# An arbitrary-length list of alert recipients. Each is an adapter plus its
+# config, with its own severity floor. The legacy variables above still work
+# and desugar into implicit recipients, so adopting this list is additive —
+# a consumer who never sets it renders byte-identical output.
+#
+#   alert_recipients:
+#     - name: oncall
+#       adapter: webhook          # webhook | telegram
+#       min_level: critical       # debug < info < warn < critical
+#       config:
+#         url: "{{ secrets.pagerduty_url }}"
+#         format: raw             # campfire | slack | raw
+#
+#     - name: custom
+#       adapter: webhook
+#       min_level: warn
+#       config:
+#         url_env: BAY_HOOK_URL  # supplied at runtime (systemd unit env)
+#         content_type: application/json
+#         transform: json         # html | mrkdwn | mrkdwn_json | json | text
+#         headers:
+#           X-Api-Key: "{{ secrets.custom_hook_key }}"
+#
+# Adding a recipient type that speaks HTTP needs NO framework code — method,
+# headers, content type, and transform are all declarative. Consumer-supplied
+# adapter *code* is deliberately out of scope: it would have to ship both a
+# bash and a Python half and pass the byte-parity test, which is exactly where
+# that guarantee dies.
+#
+# Routing is resolved at RENDER time. Jinja compares each alert's registry
+# level against this recipient's min_level and bakes a flat ID list into a
+# bash `case`, so the host never parses a list or compares levels.
+alert_recipients: []
+
+# Global mute list — alert IDs no recipient receives. Per-recipient
+# include/exclude globs are reserved and validated-but-rejected for now; use
+# min_level plus this list. See alerts/registry.yml for every valid ID.
+alerts_disabled: []
+
+# Global opt-in list — alert IDs every recipient receives regardless of the
+# registry's enabled_by_default and regardless of the recipient's min_level.
+#
+# This is the counterpart to alerts_disabled, and it exists because the
+# registry ships the whole info tier as enabled_by_default: false (success
+# chatter — see docs/alerting.md, "Default-off alerts"). Without a force-on
+# list, default-off would be a one-way door: nothing a consumer could set
+# would bring `deploy.complete` back.
+#
+# Overriding min_level too is deliberate. Naming an ID here is unambiguous
+# intent, and an opt-in that silently did nothing on a warn recipient would be
+# the more surprising behaviour.
+#
+#   alerts_enabled:
+#     - deploy.complete
+#
+# Precedence: alerts_disabled > alerts_enabled > enabled_by_default+min_level.
+alerts_enabled: []

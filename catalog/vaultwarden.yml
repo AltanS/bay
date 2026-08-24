@@ -1,0 +1,25 @@
+---
+meta:
+  id: vaultwarden
+  name: Vaultwarden password manager
+  category: service
+  domain_prefix: vault
+  dependencies: []
+  post_add_instructions:
+    - "Add ADMIN_TOKEN to vault: bin/bay vault edit <environment>"
+
+defaults:
+  access: vpn
+  regions: []
+
+spec:
+  image: vaultwarden/server:latest
+  ports:
+    internal: 80
+  volumes:
+    - vw_data:/data
+  env:
+    clear:
+      SIGNUPS_ALLOWED: "false"
+    secret:
+      - ADMIN_TOKEN

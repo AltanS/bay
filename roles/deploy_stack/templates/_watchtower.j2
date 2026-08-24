@@ -1,0 +1,23 @@
+{% if watchtower_enabled | default(false) %}
+  # ── Watchtower Container Auto-Update ────────────────────────────────────
+  watchtower:
+    image: {{ watchtower_image }}
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - WATCHTOWER_SCHEDULE={{ watchtower_schedule }}
+      - WATCHTOWER_CLEANUP={{ watchtower_cleanup | string | lower }}
+      - WATCHTOWER_MONITOR_ONLY={{ watchtower_monitor_only | string | lower }}
+      - WATCHTOWER_LABEL_ENABLE=true
+{% if watchtower_telegram_bot_token | default('') | length > 0 and watchtower_telegram_chat_id | default('') | length > 0 %}
+      - WATCHTOWER_NOTIFICATION_URL=telegram://{{ watchtower_telegram_bot_token }}@telegram?chats={{ watchtower_telegram_chat_id }}
+{% endif %}
+    networks:
+      - {{ traefik_docker_network }}
+{{ macros.logging_block({}) }}
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+
+{% endif %}

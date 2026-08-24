@@ -1,0 +1,25 @@
+---
+- name: reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become_user: root
+
+# Fires when image-map.json content changes (see tasks/render_image_map.yml).
+# The webhook receiver loads /config/image-map.json once at process start
+# (files/webhook/app.py:_load_image_map called from main()), so a fresh render
+# on disk has no effect until the container restarts. Without this handler,
+# new services added to services.yml would not be expanded into per-service
+# pull triggers by the receiver — see M90 issue #13.
+#
+# Idempotence: Ansible's template task only reports `changed` when content
+# differs, so this handler only runs when the image-map actually changed.
+# Safe in check mode (community.docker.docker_container respects --check).
+#
+# Container name `bay-webhook` is the framework-fixed identity used by
+# roles/deploy_stack/templates/_webhook_receiver.j2:17 and
+# roles/container_lifecycle/tasks/build_specs.yml:288 — not consumer-overridable.
+- name: Restart bay-webhook
+  community.docker.docker_container:
+    name: bay-webhook
+    state: started
+    restart: true

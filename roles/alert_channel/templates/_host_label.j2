@@ -1,0 +1,22 @@
+{#
+  The one definition of "what host is this?" for every Bay alert.
+
+  Emitted as a bare display string with no shell or Python syntax, so the
+  same file serves a bash assignment, a Python constant and a compose env
+  entry. Symlinked into every role that names a host in an alert, because
+  Ansible only searches the current role's templates/ — see _notify.sh.j2.
+
+  Order: the operator's explicit label, the machine's own hostname, the
+  inventory address. The last step is what makes this safe to adopt — an
+  unlabelled host degrades to the name it already had, never to empty.
+
+  The address rides along with the label because a responder needs both: the
+  label to know WHICH box, the address to ssh into it. They collapse to one
+  field when the label already IS the address, so a consumer that sets
+  nothing sees no change in its alerts.
+
+  Written with no trailing newline on purpose. It is interpolated inline.
+#}
+{%- set _bay_host_name = (bay_host_label | default("", true)) or (ansible_hostname | default("", true)) or (inventory_hostname | default("unknown")) -%}
+{%- set _bay_host_addr = inventory_hostname | default("unknown") -%}
+{{- _bay_host_name -}}{%- if _bay_host_name != _bay_host_addr %} ({{ _bay_host_addr }}){% endif -%}

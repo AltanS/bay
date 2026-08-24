@@ -1,0 +1,66 @@
+---
+# Cronjobs role defaults
+
+# Docker system prune — removes unused images, containers, networks, and volumes
+docker_prune_enabled: true
+docker_prune_schedule: "0 3 * * 0"              # Weekly Sunday 03:00
+
+# Docker builder prune — cleans build cache (docker system prune does NOT touch this)
+docker_prune_builder_enabled: true
+docker_prune_builder_schedule: "55 2 * * 0"      # 5 min before system prune
+docker_prune_builder_keep_storage: "2G"           # Retain recent build cache
+
+# Name of the buildx builder git_deploy builds with. Mirrors the default in
+# roles/git_deploy/defaults/main.yml — override in group_vars to change both.
+bay_buildx_builder: "argo-builder"  # legacy-argo: live buildx builder name on hosts, migrate separately
+
+# Builders the prune sweeps, in order. `default` catches cache from plain
+# `docker build`; the bay builder uses the docker-container driver, whose
+# cache lives in its own volume (buildx_buildkit_<name>0_state) and is
+# invisible to BOTH `docker builder prune` and `docker system prune -af
+# --volumes` — the volume is in use by the running buildkit container.
+# Until v0.111.2 only the default builder was pruned, so the cache the
+# framework actually creates grew unbounded: a deployment host reached
+# 41 GB of stale cache while every prune logged "Total reclaimed space: 0B"
+# (GH#34). Names that do not resolve to an existing builder are skipped.
+docker_prune_builders:
+  - default
+  - "{{ bay_buildx_builder }}"
+
+# Users whose buildx registry the prune should also look in. buildx builder
+# registrations are PER-USER: git_deploy creates the bay builder as
+# `app_user`, so it lives in ~<app_user>/.docker/buildx and is invisible to
+# root — who runs the cron. Without this the prune finds no such builder and
+# skips it, which is the same silent no-op as the original bug. The script
+# tries the current user first, then each of these in order.
+docker_prune_builder_users:
+  - "{{ app_user | default('') }}"
+
+# Build-server override: when inventory_hostname == build_server and this
+# flag is true, the daily schedules below replace the weekly defaults. Build
+# servers accumulate ~2-3 GB/day of image layers from remote-strategy pushes
+# (M81-S1 cleans up per-push; this is the safety net). Non-build hosts have
+# far lower churn and keep the weekly schedule.
+cronjobs_build_server_daily: true
+docker_prune_build_server_schedule: "0 3 * * *"              # Daily 03:00
+
+# The BUILDER prune runs four times a day, not once, and that gap is the
+# difference between a bounded disk and a nightly sawtooth.
+#
+# `--reserved-space` binds only at prune time; between runs the buildkit cache
+# grows unbounded. Measured on a production infra host 2026-08-19: pruned to ~1.8 GB at
+# 02:55, back to 11 GB by 21:00 the same day — one prune reclaimed 9.29 GB and
+# took the disk from 76% to 52%. So the host crossed the 80% warn line every
+# afternoon, paged, and was quietly fixed by the next night's prune. The alert
+# was real and the cleanup worked; only the interval was wrong.
+#
+# The cache lives in the builder's own Docker volume
+# (buildx_buildkit_<builder>0_state), which `docker system df` does not report
+# and `docker system prune -af --volumes` cannot touch while the buildkit
+# container holds it open — so nothing else in this file bounds it.
+#
+# Four times a day keeps the peak near reserve + a quarter-day of churn, and
+# leaves the 2 GB reserve (docker_prune_builder_keep_storage) doing its job of
+# keeping the hottest layers warm. A continuous cap belongs in buildkitd's own
+# GC policy; that needs recreating the builder, so this is the safe lever.
+docker_prune_builder_build_server_schedule: "55 */6 * * *"   # Every 6h

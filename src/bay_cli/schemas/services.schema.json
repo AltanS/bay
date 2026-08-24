@@ -1,0 +1,546 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/services.schema.json",
+  "title": "Bay services.yml",
+  "description": "Schema for the Bay framework services.yml configuration file.",
+  "type": "object",
+  "properties": {
+    "services": {
+      "type": "object",
+      "description": "Service definitions — containers with Traefik routing and SSL.",
+      "additionalProperties": {
+        "$ref": "#/$defs/service"
+      }
+    },
+    "accessories": {
+      "type": "object",
+      "description": "Accessory definitions — infrastructure containers (databases, agents).",
+      "additionalProperties": {
+        "$ref": "#/$defs/accessory"
+      }
+    },
+    "webhook": {
+      "$ref": "#/$defs/webhook_block",
+      "description": "Deployment webhook configuration."
+    }
+  },
+  "patternProperties": {
+    "^_": {
+      "description": "Reserved scratch keys (e.g. _anchors) for YAML anchor declarations. Ignored by the framework."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "service": {
+      "type": "object",
+      "required": ["access", "domains", "ports"],
+      "properties": {
+        "access": {
+          "type": "string",
+          "enum": ["public", "vpn"],
+          "description": "Access mode: public (everyone) or vpn (IPAllowList)."
+        },
+        "image": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Docker image reference."
+        },
+        "build": {
+          "$ref": "#/$defs/build_block",
+          "description": "Build-from-source configuration."
+        },
+        "domains": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "description": "Domain names for Traefik routing."
+        },
+        "ports": {
+          "$ref": "#/$defs/ports_block"
+        },
+        "port": {
+          "description": "Host port binding (e.g., '127.0.0.1:8090:8090').",
+          "type": "string"
+        },
+        "env": {
+          "$ref": "#/$defs/env_block"
+        },
+        "volumes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Docker volume mounts."
+        },
+        "regions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Region restriction. Empty or absent means all regions."
+        },
+        "update": {
+          "description": "Auto-update mode.",
+          "oneOf": [
+            { "type": "string", "enum": ["auto", "monitor"] },
+            { "type": "boolean" }
+          ]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Service/accessory names this service depends on."
+        },
+        "healthcheck": {
+          "$ref": "#/$defs/healthcheck_block"
+        },
+        "healthcheck_path": {
+          "type": "string",
+          "pattern": "^/.+",
+          "description": "Path probed by `bin/bay healthcheck`. Use a route that exercises the dynamic backend (e.g. `/healthcheck`) when nginx and the app share a container — probing `/` would return nginx's static response even if the app process is dead."
+        },
+        "middleware": {
+          "type": "object",
+          "description": "Traefik middleware configuration."
+        },
+        "config_files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Config files to copy into the stack directory."
+        },
+        "public_routes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Routes exempt from VPN restriction (for vpn-access services)."
+        },
+        "vpn_routes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Routes protected by VPN on an otherwise public service."
+        },
+        "network_mode": {
+          "type": "string",
+          "description": "Docker network mode (e.g., 'host')."
+        },
+        "links": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/link_block"
+          },
+          "description": "Cross-region service links."
+        },
+        "database": {
+          "$ref": "#/$defs/database_block"
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Additional Docker labels."
+        },
+        "command": {
+          "description": "Container command override.",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "entrypoint": {
+          "description": "Container entrypoint override.",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "zero_downtime": {
+          "type": "boolean",
+          "description": "Enable canary zero-downtime deploy. Default false (opt-in)."
+        },
+        "mem_limit": {
+          "type": "string",
+          "description": "Container runtime memory limit (e.g., '512m', '1g')."
+        },
+        "log_rotation": {
+          "$ref": "#/$defs/log_rotation"
+        },
+        "log_retention": {
+          "$ref": "#/$defs/log_retention"
+        },
+        "replicas": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Number of container replicas."
+        },
+        "health_check_timeout": {
+          "type": "integer",
+          "description": "How long this service may take to become healthy after a restart, in seconds. Two consumers: (1) rebuild.sh's post-restart health poll, which decides when to roll back — must be >= healthcheck.start_period, and has no effect if no healthcheck block is configured; (2) the post-deploy `bay healthcheck` URL probe's readiness window, where it can only widen the 90s framework default (a smaller value is ignored so the probe never gets stricter than baseline). Overrides git_deploy_health_check_timeout for this service. Default: 90 (group_vars) or framework default.",
+          "minimum": 10
+        }
+      },
+      "anyOf": [
+        { "required": ["image"] },
+        { "required": ["build"] }
+      ],
+      "additionalProperties": false
+    },
+    "accessory": {
+      "type": "object",
+      "required": ["image"],
+      "properties": {
+        "image": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Docker image reference."
+        },
+        "port": {
+          "description": "Host port binding. Prefer declaring the IP via `expose:` (loopback | tailnet | host) so the bind IP lives alongside the accessory. When both are set, `expose:` wins and any IP prefix in `port:` is replaced.",
+          "type": "string"
+        },
+        "expose": {
+          "description": "Which host interface the accessory's port binds to. `loopback` (default) = 127.0.0.1; `gateway` = the active access gateway's overlay IP (`gateway_bind_ip`; deploy fails if the backend provides none). `tailnet` is a permanently-supported synonym for `gateway`, kept so existing services.yml files never need editing; `host` = 0.0.0.0 (explicit external exposure — unusual, expect reviewer friction).",
+          "type": "string",
+          "enum": ["loopback", "gateway", "tailnet", "host"]
+        },
+        "env": {
+          "$ref": "#/$defs/env_block"
+        },
+        "volumes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Docker volume mounts."
+        },
+        "regions": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Region restriction."
+        },
+        "update": {
+          "description": "Auto-update mode.",
+          "oneOf": [
+            { "type": "string", "enum": ["auto", "monitor"] },
+            { "type": "boolean" }
+          ]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Dependencies."
+        },
+        "backup": {
+          "$ref": "#/$defs/backup_block"
+        },
+        "healthcheck": {
+          "$ref": "#/$defs/healthcheck_block"
+        },
+        "network_mode": {
+          "type": "string",
+          "description": "Docker network mode."
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Additional Docker labels."
+        },
+        "command": {
+          "description": "Container command override.",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "entrypoint": {
+          "description": "Container entrypoint override.",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "config_files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Config files to copy."
+        },
+        "database": {
+          "$ref": "#/$defs/database_block"
+        },
+        "mem_limit": {
+          "type": "string",
+          "description": "Container runtime memory limit (e.g., '512m', '1g')."
+        },
+        "log_rotation": {
+          "$ref": "#/$defs/log_rotation"
+        },
+        "log_retention": {
+          "$ref": "#/$defs/log_retention"
+        },
+        "health_check_timeout": {
+          "type": "integer",
+          "description": "Rebuild.sh post-restart health poll timeout in seconds. Must be >= healthcheck.start_period. Has no effect if no healthcheck block is configured. Overrides git_deploy_health_check_timeout for this service. Default: 90 (group_vars) or framework default.",
+          "minimum": 10
+        }
+      },
+      "additionalProperties": false
+    },
+    "build_block": {
+      "type": "object",
+      "required": ["repo"],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Git repository URL."
+        },
+        "strategy": {
+          "type": "string",
+          "enum": ["local", "remote", "push", "registry"],
+          "description": "Build strategy: local (build on server), remote (build on build server, push to registry, server pulls), or registry (pull pre-built image from external CI). 'push' is a deprecated alias for 'remote'. Defaults to git_deploy_build_strategy."
+        },
+        "branch": {
+          "type": "string",
+          "description": "Git branch (defaults to main)."
+        },
+        "dockerfile": {
+          "type": "string",
+          "description": "Dockerfile path relative to repo root."
+        },
+        "context": {
+          "type": "string",
+          "description": "Build context path relative to repo root."
+        },
+        "secrets": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Build secrets — name to vault key mapping."
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Build arguments."
+        },
+        "token": {
+          "type": "string",
+          "description": "Vault key for git access token (private repos)."
+        },
+        "paths": {
+          "$ref": "#/$defs/build_paths_block",
+          "description": "Path filtering for webhook-triggered rebuilds."
+        }
+      },
+      "additionalProperties": false
+    },
+    "build_paths_block": {
+      "type": "object",
+      "properties": {
+        "exclude": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "description": "Gitignore-style glob patterns. Skip rebuild if ALL changed files match."
+        },
+        "include": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "description": "Reserved for future use. Not yet supported."
+        }
+      },
+      "additionalProperties": false
+    },
+    "ports_block": {
+      "type": "object",
+      "required": ["internal"],
+      "properties": {
+        "internal": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Container-internal port."
+        },
+        "expose": {
+          "description": "Which host interface the service's internal port binds to. Optional — by default Traefik-fronted services have no host binding (reachable only inside the docker network). `loopback` = 127.0.0.1; `gateway` = the active access gateway's overlay IP (`gateway_bind_ip`; deploy fails if the backend provides none). `tailnet` is a permanently-supported synonym for `gateway`, kept so existing services.yml files never need editing; `host` = 0.0.0.0 (explicit external exposure — bypasses Traefik, expect reviewer friction). Required when another service in another region declares `links:` to this service.",
+          "type": "string",
+          "enum": ["loopback", "gateway", "tailnet", "host"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "env_block": {
+      "type": "object",
+      "properties": {
+        "clear": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Plain-text environment variables."
+        },
+        "secret": {
+          "description": "Secret environment variables — list of key names or key-to-vault mapping.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "healthcheck_block": {
+      "type": "object",
+      "properties": {
+        "test": {
+          "description": "Healthcheck command.",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "interval": { "type": "string" },
+        "timeout": { "type": "string" },
+        "retries": { "type": "integer", "minimum": 0 },
+        "start_period": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "backup_block": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["pg_dump", "mysql", "redis", "file"],
+          "description": "Backup method."
+        },
+        "schedule": {
+          "type": "string",
+          "description": "Cron schedule for backups."
+        },
+        "retain": {
+          "description": "Retention policy — integer (days) or object (daily/weekly/monthly).",
+          "oneOf": [
+            { "type": "integer", "minimum": 1 },
+            {
+              "type": "object",
+              "properties": {
+                "daily": { "type": "integer" },
+                "weekly": { "type": "integer" },
+                "monthly": { "type": "integer" }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "source_path": {
+          "type": "string",
+          "description": "In-container path the `file` method backs up (docker cp source; also the restore target). Defaults to /data."
+        },
+        "paths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Reserved for future use — not currently read by any backup method. The `file` method takes its in-container path from `source_path`, a separate key."
+        }
+      },
+      "additionalProperties": false
+    },
+    "webhook_block": {
+      "type": "object",
+      "required": ["domain", "secret"],
+      "properties": {
+        "domain": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Webhook domain."
+        },
+        "secret": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Webhook secret (vault reference)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "link_block": {
+      "type": "object",
+      "required": ["region"],
+      "properties": {
+        "region": {
+          "type": "string",
+          "description": "Region of the linked service."
+        }
+      },
+      "additionalProperties": false
+    },
+    "database_block": {
+      "type": "object",
+      "required": ["accessory"],
+      "properties": {
+        "accessory": {
+          "type": "string",
+          "description": "Name of the database accessory to bind to."
+        },
+        "name": {
+          "type": "string",
+          "description": "Database name (defaults to service name)."
+        },
+        "user": {
+          "type": "string",
+          "description": "Database user (defaults to service name)."
+        }
+      },
+      "additionalProperties": false
+    },
+    "log_rotation": {
+      "description": "Per-container docker log retention. Either `false` (opt out, inherit daemon log-opts) or a partial override of log_rotation_defaults.",
+      "oneOf": [
+        { "type": "boolean", "const": false },
+        {
+          "type": "object",
+          "properties": {
+            "driver": {
+              "type": "string",
+              "enum": ["json-file", "local", "none"],
+              "description": "Docker log driver."
+            },
+            "max_size": {
+              "type": "string",
+              "pattern": "^[0-9]+[kKmMgG]?$",
+              "description": "Max size per log file (e.g. '50m', '2g')."
+            },
+            "max_file": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "Number of rotated log files to retain."
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "log_retention": {
+      "description": "Opt-in host-side log archival with time-based retention. Archives land under /opt/<stack>/logs/services/<svc>/ and survive container recreation. Orthogonal to `log_rotation`; both can coexist on one container. Requires a compatible docker log driver (json-file or local).",
+      "type": "object",
+      "properties": {
+        "days": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Archive retention window in days. Daily rotation writes YYYY-MM-DD.log.gz; files older than this are alerted and pruned at 00:00 UTC."
+        },
+        "max_total_size": {
+          "type": "string",
+          "pattern": "^[0-9]+[kKmMgG]?$",
+          "description": "Hard ceiling on the archive directory size (e.g. '500m', '2g'). Sum across host validated at deploy time against log_retention_budget_fraction * log_retention_disk_bytes."
+        },
+        "compress": {
+          "type": "boolean",
+          "description": "Gzip rotated archives. Default true."
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["normal", "sensitive"],
+          "description": "'normal' (default): 0640, group-readable by the app-owner's log group. 'sensitive': 0600 root:root — the app-owner's log group cannot read. Use 'sensitive' for services that log detailed PII."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

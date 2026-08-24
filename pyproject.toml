@@ -1,0 +1,95 @@
+[project]
+name = "bay"
+# Kept in lockstep with version.yml by scripts/release.sh — see
+# tests/test_pyproject_metadata.py, which fails the build if they drift.
+version = "0.1.0"
+description = "Ansible framework for provisioning hardened Docker servers with VPN-aware reverse proxy and declarative service deployment"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["ansible", "docker", "traefik", "headscale", "tailscale", "deployment", "self-hosted"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Installation/Setup",
+    "Topic :: System :: Systems Administration",
+    "Typing :: Typed",
+]
+dependencies = [
+    "typer>=0.9",
+    "rich>=13",
+    "jinja2>=3",
+    "jsonschema>=4.20",
+    "questionary>=2",
+    "ansible-core>=2.17",
+    "ruamel-yaml>=0.18",
+    "docker>=7",
+    "requests>=2.31",
+    "mitogen>=0.3.47",
+]
+
+[project.urls]
+Homepage = "https://github.com/AltanS/bay"
+Documentation = "https://github.com/AltanS/bay/blob/main/docs/README.md"
+Source = "https://github.com/AltanS/bay"
+Issues = "https://github.com/AltanS/bay/issues"
+
+[build-system]
+# >=77 for PEP 639 license expressions (`license = "MIT"`).
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+bay = "bay_cli.cli:_main"
+argo = "bay_cli.cli:_main"  # legacy-argo: remove in 1.1
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"bay_cli.wizard" = ["templates/*.j2"]
+"bay_cli.schemas" = ["*.json"]
+"bay_reconcile" = ["py.typed"]
+
+[dependency-groups]
+dev = [
+    "ansible-lint>=26.1.1",
+    "mypy>=2.1.0",
+    "pytest>=8",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.15.16",
+]
+
+[tool.uv]
+# Supply-chain protection: a 7-day release cooldown, so a poisoned package
+# release has a week to be caught by the ecosystem before the resolver will
+# accept it. The lockfile records this span (exclude-newer-span = "P7D" in
+# uv.lock), so the setting must live here in project config — any environment
+# lacking it (CI foremost) force-re-resolves and `uv sync --locked` fails.
+exclude-newer = "7 days"
+
+[tool.mypy]
+# Strict typing is enforced for the new server-side reconciler only; the
+# existing bay_cli package predates this work and is not yet --strict clean.
+python_version = "3.12"
+strict = true
+files = ["src/bay_reconcile"]
+
+[[tool.mypy.overrides]]
+# The docker SDK ships no type stubs; it is only touched by sdk_client.py.
+module = ["docker", "docker.*"]
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ANN"]
+ignore = ["ANN401"]  # Any is intentional at the docker-attrs parse boundary
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN"]

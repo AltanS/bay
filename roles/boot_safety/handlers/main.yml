@@ -1,0 +1,6 @@
+---
+- name: Reload bay-infra-boot
+  ansible.builtin.systemd:
+    name: "{{ boot_safety_service_name }}"
+    daemon_reload: true
+  become: true

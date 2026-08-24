@@ -1,0 +1,70 @@
+---
+# Debug agent role: creates a limited-permission user for AI agents
+# to SSH into servers for read-only debugging.
+
+- name: Skip debug agent (disabled)
+  ansible.builtin.debug:
+    msg: "Debug agent is disabled (debug_agent_enabled: false)"
+  when: not debug_agent_enabled
+
+- name: Configure debug agent
+  when: debug_agent_enabled
+  block:
+    - name: Resolve SSH keys from all sources
+      ansible.builtin.set_fact:
+        _debug_agent_resolved_keys: >-
+          {{
+            debug_agent_keys +
+            (debug_agent_github_users | map('regex_replace', '^(.*)$', 'https://github.com/\1.keys') | list)
+          }}
+
+    - name: Fail if enabled but no SSH keys are configured
+      ansible.builtin.fail:
+        msg: >-
+          Debug agent is enabled but no SSH keys are configured.
+          Set debug_agent_keys and/or debug_agent_github_users in group_vars.
+      when: _debug_agent_resolved_keys | length == 0
+
+    - name: Create debug agent user
+      ansible.builtin.user:
+        name: "{{ debug_agent_user }}"
+        groups: "{{ debug_agent_groups | join(',') }}"
+        append: true
+        state: present
+        shell: /bin/bash
+        create_home: true
+
+    - name: Set authorized SSH keys for debug agent
+      ansible.posix.authorized_key:
+        user: "{{ debug_agent_user }}"
+        key: "{{ item }}"
+        exclusive: "{{ ansible_loop.first }}"
+      loop: "{{ _debug_agent_resolved_keys }}"
+      loop_control:
+        extended: true
+        label: "key {{ ansible_loop.index }}"
+
+    - name: Install sudoers rules for read-only commands
+      ansible.builtin.template:
+        src: sudoers.j2
+        dest: "/etc/sudoers.d/{{ debug_agent_user }}"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
+      when: debug_agent_sudoers
+
+    - name: Remove sudoers rules when disabled
+      ansible.builtin.file:
+        path: "/etc/sudoers.d/{{ debug_agent_user }}"
+        state: absent
+      when: not debug_agent_sudoers
+
+    - name: Create tmp scratch directory
+      ansible.builtin.file:
+        path: "/home/{{ debug_agent_user }}/tmp"
+        state: directory
+        owner: "{{ debug_agent_user }}"
+        group: "{{ debug_agent_user }}"
+        mode: "0755"
+      when: debug_agent_create_tmp

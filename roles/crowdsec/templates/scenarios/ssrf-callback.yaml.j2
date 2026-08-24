@@ -1,0 +1,42 @@
+# CrowdSec Scenario: SSRF Callback Detection
+# Managed by Ansible - do not edit manually
+#
+# Detects Server-Side Request Forgery (SSRF) attempts that use callback
+# domains to exfiltrate data or confirm vulnerability. These domains are
+# used by security testing tools to receive out-of-band callbacks.
+
+type: trigger
+name: custom/ssrf-callback
+description: "Detect SSRF attempts with callback domains"
+filter: |
+  evt.Meta.http_args contains '.oast.fun' or
+  evt.Meta.http_args contains '.oast.live' or
+  evt.Meta.http_args contains '.oast.site' or
+  evt.Meta.http_args contains '.oast.online' or
+  evt.Meta.http_args contains '.oast.me' or
+  evt.Meta.http_args contains 'oast.me' or
+  evt.Meta.http_args contains 'burpcollaborator.net' or
+  evt.Meta.http_args contains 'oastify.com' or
+  evt.Meta.http_args contains 'interact.sh' or
+  evt.Meta.http_args contains 'canarytokens.com' or
+  evt.Meta.http_args contains 'requestbin.net' or
+  evt.Meta.http_args contains 'webhook.site' or
+  evt.Meta.http_args contains 'evil.com' or
+  evt.Meta.http_path contains '.oast.fun' or
+  evt.Meta.http_path contains '.oast.live' or
+  evt.Meta.http_path contains '.oast.site' or
+  evt.Meta.http_path contains '.oast.online' or
+  evt.Meta.http_path contains '.oast.me' or
+  evt.Meta.http_path contains 'oast.me' or
+  evt.Meta.http_path contains 'burpcollaborator.net' or
+  evt.Meta.http_path contains 'oastify.com' or
+  evt.Meta.http_path contains 'interact.sh' or
+  evt.Meta.http_path contains 'canarytokens.com' or
+  evt.Meta.http_path contains 'requestbin.net' or
+  evt.Meta.http_path contains 'webhook.site' or
+  evt.Meta.http_path contains 'evil.com'
+groupby: evt.Meta.source_ip
+labels:
+  service: http
+  type: exploit
+  remediation: true

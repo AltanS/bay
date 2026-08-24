@@ -1,0 +1,10 @@
+---
+# nftables role defaults
+
+nftables_config_path: /etc/nftables.conf
+
+# IPs that bypass CrowdSec bouncer enforcement entirely.
+# These are accepted at priority -20 (before CrowdSec's -10) so CAPI
+# community blocklist decisions cannot lock out admin access.
+# Set in consumer group_vars — e.g., your company VPN exit IP.
+crowdsec_trusted_ips: []

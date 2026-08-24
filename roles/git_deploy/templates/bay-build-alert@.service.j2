@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# Fires via OnFailure= when bay-build@<svc> is killed by systemd
+# (timeout, OOM, signal). Does NOT fire on normal exit-code failures —
+# rebuild.sh handles its own Telegram notifications for those.
+[Unit]
+Description=Build failure alert - %i
+
+[Service]
+Type=oneshot
+User={{ app_user }}
+ExecStart={{ stack_dir }}/bin/build-alert.sh %i

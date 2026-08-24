@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# scrub-logs.sh — GDPR erasure for archived logs (M84-S6, ADR-002).
+#
+# Called on-host by `bin/bay logs --scrub <svc> --pattern <regex> --yes`.
+# Removes lines matching <pattern> from:
+#   - live.log (pauses archiver timer during the edit)
+#   - every <date>.log.gz in the service directory (decompress → filter →
+#     recompress → update sha256 sidecar)
+#
+# Every affected file gets a .prune-log entry with reason=scrub so the
+# GDPR erasure leaves an audit trail alongside age/size prunes.
+#
+# Usage:
+#   scrub-logs.sh <service> <stack-dir> <pattern> <operator>
+#
+# trap EXIT restarts the archiver timer whether or not the scrub
+# completed cleanly — a failure mid-scrub must never leave the
+# archiver permanently stopped.
+
+set -euo pipefail
+
+SVC="${1:?service name required}"
+STACK_DIR="${2:?stack dir required}"
+PATTERN="${3:?pattern required}"
+OPERATOR="${4:-unknown}"
+
+LOG_DIR="${STACK_DIR}/logs/services/${SVC}"
+LIVE="${LOG_DIR}/live.log"
+PRUNE_LOG="${LOG_DIR}/.prune-log"
+RETENTION_FILE="${LOG_DIR}/.retention"
+LOCK="${LOG_DIR}/.archive.lock"
+ARCHIVER_TIMER="bay-logarchive@${SVC}.timer"
+
+[[ -d "$LOG_DIR" ]] || { echo "scrub-logs[$SVC]: missing dir $LOG_DIR" >&2; exit 2; }
+
+# ── retention config (mode + chattr) ────────────────────────────────
+mode="normal"
+# shellcheck disable=SC1090
+[[ -s "$RETENTION_FILE" ]] && source "$RETENTION_FILE"
+
+case "$mode" in
+  normal)
+    FILE_OWNER="{{ app_user }}"
+    FILE_GROUP="{{ log_archive_group }}"
+    FILE_MODE="0640"
+    ;;
+  sensitive)
+    FILE_OWNER="root"
+    FILE_GROUP="root"
+    FILE_MODE="0600"
+    ;;
+  *)
+    echo "scrub-logs[$SVC]: unknown mode '$mode' in .retention" >&2
+    exit 2
+    ;;
+esac
+
+CHATTR_ENABLED="${BAY_LOG_CHATTR:-false}"
+
+short_ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+sha256_of() { sha256sum "$1" | awk '{print $1}'; }
+
+maybe_chattr_unlock() {
+  [[ "$CHATTR_ENABLED" != "true" ]] && return 0
+  chattr -a "$1" 2>/dev/null || true
+}
+
+maybe_chattr_a() {
+  [[ "$CHATTR_ENABLED" != "true" ]] && return 0
+  chattr +a "$1" 2>/dev/null || true
+}
+
+# ── cleanup + trap ───────────────────────────────────────────────────
+# Restart the archiver timer unconditionally so a scrub that errors
+# out mid-flow doesn't leave archival silently disabled.
+
+ARCHIVER_STOPPED=0
+cleanup() {
+  local rc=$?
+  if (( ARCHIVER_STOPPED )); then
+    systemctl start "$ARCHIVER_TIMER" 2>/dev/null || true
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+
+# Wait up to 30s on the archiver's lock so no tick is mid-append when
+# we rewrite live.log. Stop the timer too so the next tick doesn't
+# race us.
+systemctl stop "$ARCHIVER_TIMER" 2>/dev/null || true
+ARCHIVER_STOPPED=1
+
+exec 8>"$LOCK"
+if ! flock -w 30 8; then
+  echo "scrub-logs[$SVC]: archiver still running after 30s — aborting" >&2
+  exit 1
+fi
+
+# ── file list ────────────────────────────────────────────────────────
+# live.log first, then every <date>.log.gz in the dir. .sha256 sidecars
+# are handled alongside their .gz — not scrubbed independently.
+
+targets=()
+[[ -f "$LIVE" ]] && targets+=("$LIVE")
+while IFS= read -r f; do
+  [[ -z "$f" ]] && continue
+  targets+=("$f")
+done < <(find "$LOG_DIR" -maxdepth 1 -type f -name '*.log.gz' 2>/dev/null | sort)
+
+total_removed=0
+any_changed=0
+
+audit_append() {
+  # <ISO8601_UTC> <svc>/<basename> <new_bytes> sha256:<hex>
+  #   reason=scrub pattern="<pat>" lines_removed=<n> operator=<op>
+  local path="$1" removed="$2"
+  local bytes hex ts
+  bytes="$(stat -c '%s' "$path" 2>/dev/null || echo 0)"
+  hex="$(sha256_of "$path" 2>/dev/null || echo '')"
+  ts="$(short_ts)"
+  maybe_chattr_unlock "$PRUNE_LOG"
+  printf '%s %s/%s %s sha256:%s reason=scrub pattern=%q lines_removed=%s operator=%s\n' \
+    "$ts" "$SVC" "$(basename "$path")" "$bytes" "$hex" "$PATTERN" "$removed" "$OPERATOR" \
+    >>"$PRUNE_LOG"
+  maybe_chattr_a "$PRUNE_LOG"
+}
+
+# ── scrub live.log ──────────────────────────────────────────────────
+if [[ -f "$LIVE" ]]; then
+  before="$(wc -l <"$LIVE" || echo 0)"
+  tmp="${LIVE}.scrub.$$"
+  # grep -v with -E, fixed pattern. If no lines match, grep exits 1 —
+  # normalize to "copy unchanged".
+  if grep -vE -- "$PATTERN" "$LIVE" >"$tmp" 2>/dev/null; then
+    :
+  else
+    # rc=1 means no lines matched the pattern (grep -v kept everything).
+    # rc≥2 is a real error.
+    rc=$?
+    if (( rc >= 2 )); then
+      rm -f "$tmp"
+      echo "scrub-logs[$SVC]: grep failed on live.log (rc=$rc)" >&2
+      exit "$rc"
+    fi
+  fi
+  after="$(wc -l <"$tmp" || echo 0)"
+  removed=$((before - after))
+  if (( removed > 0 )); then
+    chown "${FILE_OWNER}:${FILE_GROUP}" "$tmp" 2>/dev/null || true
+    chmod "$FILE_MODE" "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$LIVE"
+    audit_append "$LIVE" "$removed"
+    total_removed=$((total_removed + removed))
+    any_changed=1
+    echo "scrub-logs[$SVC]: live.log — removed $removed line(s)" >&2
+  else
+    rm -f "$tmp"
+  fi
+fi
+
+# ── scrub each .log.gz ──────────────────────────────────────────────
+for gz in "${targets[@]}"; do
+  [[ "$gz" == "$LIVE" ]] && continue
+
+  before="$(zcat "$gz" 2>/dev/null | wc -l || echo 0)"
+  work="${gz}.scrub.$$"
+  # Stream: decompress → filter → recompress to temp.
+  if zcat "$gz" | grep -vE -- "$PATTERN" | gzip -9 >"$work"; then
+    :
+  fi
+  after="$(zcat "$work" 2>/dev/null | wc -l || echo 0)"
+  removed=$((before - after))
+  if (( removed > 0 )); then
+    maybe_chattr_unlock "$gz"
+    chown "${FILE_OWNER}:${FILE_GROUP}" "$work" 2>/dev/null || true
+    chmod "$FILE_MODE" "$work" 2>/dev/null || true
+    mv -f "$work" "$gz"
+    maybe_chattr_a "$gz"
+
+    # New sha256 sidecar.
+    sha_path="${gz}.sha256"
+    new_hex="$(sha256_of "$gz")"
+    maybe_chattr_unlock "$sha_path"
+    printf '%s  %s\n' "$new_hex" "$(basename "$gz")" >"$sha_path"
+    chown "${FILE_OWNER}:${FILE_GROUP}" "$sha_path" 2>/dev/null || true
+    chmod "$FILE_MODE" "$sha_path" 2>/dev/null || true
+    maybe_chattr_a "$sha_path"
+
+    audit_append "$gz" "$removed"
+    total_removed=$((total_removed + removed))
+    any_changed=1
+    echo "scrub-logs[$SVC]: $(basename "$gz") — removed $removed line(s)" >&2
+  else
+    rm -f "$work"
+  fi
+done
+
+flock -u 8
+exec 8>&-
+
+if (( any_changed )); then
+  echo "scrub-logs[$SVC]: total lines removed = $total_removed"
+else
+  echo "scrub-logs[$SVC]: no matches — nothing changed"
+fi
+
+exit 0

@@ -1,0 +1,10 @@
+---
+# Network configuration — per-host static IP (replaces DHCP).
+# These vars are per-host. If this region group ever adds a second host,
+# migrate to host_vars/<hostname>/network.yml.
+
+netplan_enabled: true             # Set false (or omit) to skip static IP configuration
+netplan_address: "203.0.113.10"   # Must match ansible_host / the actual public IP
+netplan_mac: "92:00:00:00:00:00"  # From: ip link show eth0
+netplan_gateway: "172.31.1.1"     # Hetzner default gateway
+netplan_prefix_length: 32         # /32 for Hetzner dedicated; override if different

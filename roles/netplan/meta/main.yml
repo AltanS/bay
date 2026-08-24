@@ -1,0 +1,9 @@
+---
+galaxy_info:
+  role_name: netplan
+  description: Configure static IP via netplan, disabling DHCP to prevent systemd-networkd failure modes
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - focal

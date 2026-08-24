@@ -1,0 +1,1166 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Rebuild and deploy a single service triggered by webhook/systemd
+set -euo pipefail
+{#-
+    publish_flags(cfg) — emit `docker run` -p flags for a service's host-port
+    binding. Mirrors deploy_stack/templates/_macros.j2:container_base exactly so
+    the pull-signal recreate (GH bay#21) and the local-build webhook recreate
+    publish the same bindings the full `deploy_stack` compose path does.
+    Without this, a `docker run`-based recreate drops `ports.expose:`/`port:`
+    host bindings (PortBindings: {}), breaking tailnet/loopback/host exposure —
+    e.g. cross-region service links over the headscale mesh.
+
+    `expose:` is authoritative for the bind IP (string `port:` form defaults to
+    loopback). Defined once and called from BOTH docker run blocks below so the
+    two recreate paths can't drift.
+-#}
+{% macro publish_flags(cfg) %}
+{% if cfg.port is defined %}
+{% set _port_pair = cfg.port | regex_replace('^\\d+\\.\\d+\\.\\d+\\.\\d+:', '') %}
+{% set _expose = cfg.expose | default('loopback') %}
+{% if _expose == 'loopback' %}
+      -p "127.0.0.1:{{ _port_pair }}" \
+{% elif _expose == 'tailnet' %}
+      -p "{{ gateway_bind_ip }}:{{ _port_pair }}" \
+{% elif _expose == 'host' %}
+      -p "0.0.0.0:{{ _port_pair }}" \
+{% endif %}
+{% elif cfg.ports is defined and cfg.ports.expose is defined %}
+{% set _internal = cfg.ports.internal %}
+{% if cfg.ports.expose == 'loopback' %}
+      -p "127.0.0.1:{{ _internal }}:{{ _internal }}" \
+{% elif cfg.ports.expose == 'tailnet' %}
+      -p "{{ gateway_bind_ip }}:{{ _internal }}:{{ _internal }}" \
+{% elif cfg.ports.expose == 'host' %}
+      -p "0.0.0.0:{{ _internal }}:{{ _internal }}" \
+{% endif %}
+{% endif %}
+{% endmacro %}
+
+SERVICE="$1"
+STACK_DIR="{{ stack_dir }}"
+BUILD_DIR="{{ git_deploy_build_dir }}"
+IMAGE_PREFIX="{{ git_deploy_image_prefix }}"
+REMOTE_BUILD_DIR="{{ git_deploy_remote_build_dir }}"
+
+STATE_DIR="${STACK_DIR}/state"
+STATE_FILE="${STATE_DIR}/${SERVICE}.json"
+CB_MAX_FAILURES={{ git_deploy_cb_max_failures }}
+HEALTH_CHECK_TIMEOUT={{ git_deploy_health_check_timeout }}
+
+BAY_ALERT_HEADER={{ docker_monitor_alert_header | to_json }}
+
+# Delivery failures append here (observability contract, Phase 1).
+BAY_ALERT_FAILURE_LOG="${STATE_DIR}/telegram-failures.log"
+BAY_ALERT_FAILURE_CONTEXT="service=${SERVICE} host=${HOSTNAME}"
+
+# Commit SHA — set later per strategy, used for notification dedup
+SHA=""
+
+{% include '_notify.sh.j2' %}
+HOSTNAME="${BAY_HOST}"
+
+# Build-pipeline notifier. Appends the correlation ID that ties an alert back
+# to one specific build, then fans the message out to every configured sink
+# via bay_notify. Kept local because the correlation ID is build-specific;
+# everything else about delivery lives in the shared snippet above.
+notify_build() {
+  local alert_id="$1"
+  local message="$2"
+  [[ -n "${CORR_ID:-}" && "${CORR_ID}" != "unknown" ]] && message+="$(printf '\n\n\xf0\x9f\x94\x97 Correlation ID: %s' "${CORR_ID}")"
+  bay_notify "${alert_id}" "${message}"  # bay-alert-id: forwarder
+}
+
+format_timestamp() {
+  date -u +"%b %d, %H:%M UTC"
+}
+
+format_duration() {
+  local secs=$(( EPOCHSECONDS - BUILD_START ))
+  if [[ $secs -ge 60 ]]; then
+    printf '%dm %ds' $((secs / 60)) $((secs % 60))
+  else
+    printf '%ds' "$secs"
+  fi
+}
+
+_log() {
+  echo "[rebuild] [${CORR_ID:-no-corr}] $*"
+}
+
+# ── Circuit breaker state file helpers (schema v1) ──
+# Schema v1:
+#   {
+#     "version": 1,
+#     "consecutive_failures": 0,
+#     "opened_at": null,
+#     "last_failure": null | {sha, stage, reason, at},
+#     "alerts": {"opened_sent": false, "last_blocked_alert_at": null}
+#   }
+# All fields are always present; unknown values are null.
+
+_clean_state_json() {
+  printf '{"version":1,"consecutive_failures":0,"opened_at":null,"last_failure":null,"alerts":{"opened_sent":false,"last_blocked_alert_at":null}}'
+}
+
+# Read the current CB state and emit v1 JSON on stdout. If the file is
+# missing or malformed, emits a clean-state v1 document. Old-shape files
+# ({"failures":N,"last_failure":"<iso>","last_notified_sha":"<sha>"}) are
+# migrated on read: `failures` -> `consecutive_failures`, the old ISO
+# string in `last_failure` -> `last_failure.at`, `last_notified_sha` ->
+# `last_failure.sha`. `opened_at` remains null (migration doesn't infer
+# trip state), and `alerts.*` default to their clean values.
+_read_state() {
+  if [[ ! -f "${STATE_FILE}" ]]; then
+    _clean_state_json
+    return 0
+  fi
+  # Validate JSON; fall back to clean state if malformed.
+  if ! jq empty "${STATE_FILE}" 2>/dev/null; then
+    _clean_state_json
+    return 0
+  fi
+  # If the file already has "version", trust it (but fill in any missing
+  # fields defensively so callers always see the full shape).
+  if jq -e 'has("version")' "${STATE_FILE}" >/dev/null 2>&1; then
+    jq -c '
+      {
+        version: 1,
+        consecutive_failures: (.consecutive_failures // 0),
+        opened_at: (.opened_at // null),
+        last_failure: (.last_failure // null),
+        alerts: {
+          opened_sent: (.alerts.opened_sent // false),
+          last_blocked_alert_at: (.alerts.last_blocked_alert_at // null)
+        }
+      }
+    ' "${STATE_FILE}"
+    return 0
+  fi
+  # Legacy shape — migrate in-place on read.
+  jq -c '
+    {
+      version: 1,
+      consecutive_failures: ((.failures // 0) | tonumber? // 0),
+      opened_at: null,
+      last_failure: (
+        if (.last_notified_sha // "") != "" or (.last_failure // "") != "" then
+          {
+            sha: (.last_notified_sha // ""),
+            stage: "",
+            reason: "",
+            at: (.last_failure // "")
+          }
+        else
+          null
+        end
+      ),
+      alerts: {opened_sent: false, last_blocked_alert_at: null}
+    }
+  ' "${STATE_FILE}"
+}
+
+# Write a JSON state document to ${STATE_FILE} atomically. Reads JSON
+# from stdin. Uses the same temp-file + mv pattern as the previous
+# _record_failure implementation so readers never see a partial file.
+_write_state() {
+  mkdir -p "${STATE_DIR}" || true
+  local tmpfile="${STATE_FILE}.tmp"
+  cat > "${tmpfile}"
+  chmod 0644 "${tmpfile}"
+  mv -f "${tmpfile}" "${STATE_FILE}"
+}
+
+# Record a build failure and decide whether to notify.
+# Sends at most 2 notifications per incident: one on first failure,
+# one when the circuit breaker trips. Subsequent failures for the
+# same commit SHA are silently counted.
+#   $1 — commit SHA (empty = always notify, no dedup)
+#   $2 — context label / stage (e.g. "Build", "Remote build", "Image pull")
+#   $3 — optional detail / reason (e.g. build output tail, shown in <pre> block)
+_record_failure() {
+  local sha="${1:-}"
+  local context="${2:-Deploy}"
+  local detail="${3:-}"
+
+  local state notified_sha current new_count now opened_sent
+  state=$(_read_state)
+  current=$(printf '%s' "${state}" | jq -r '.consecutive_failures // 0')
+  current=${current:-0}
+  notified_sha=$(printf '%s' "${state}" | jq -r '.last_failure.sha // ""')
+  opened_sent=$(printf '%s' "${state}" | jq -r '.alerts.opened_sent // false')
+  new_count=$((current + 1))
+  now=$(date -Iseconds)
+
+  # Effective SHA stored in last_failure.sha: if the caller passed one,
+  # use it; otherwise carry the previous notified SHA forward.
+  local effective_sha="${sha:-${notified_sha}}"
+
+  # Compute opened_at: set on the transition to/at threshold; preserve
+  # whatever was there on subsequent failures (in case the breaker is
+  # already open and more failures pile on).
+  local new_state
+  if [[ "${new_count}" -ge "${CB_MAX_FAILURES}" ]]; then
+    new_state=$(printf '%s' "${state}" | jq -c \
+      --argjson count "${new_count}" \
+      --arg sha "${effective_sha}" \
+      --arg stage "${context}" \
+      --arg reason "${detail}" \
+      --arg at "${now}" \
+      '
+        .version = 1
+        | .consecutive_failures = $count
+        | .opened_at = (.opened_at // $at)
+        | .last_failure = {sha: $sha, stage: $stage, reason: $reason, at: $at}
+        | .alerts = (.alerts // {opened_sent: false, last_blocked_alert_at: null})
+      ')
+  else
+    new_state=$(printf '%s' "${state}" | jq -c \
+      --argjson count "${new_count}" \
+      --arg sha "${effective_sha}" \
+      --arg stage "${context}" \
+      --arg reason "${detail}" \
+      --arg at "${now}" \
+      '
+        .version = 1
+        | .consecutive_failures = $count
+        | .opened_at = null
+        | .last_failure = {sha: $sha, stage: $stage, reason: $reason, at: $at}
+        | .alerts = (.alerts // {opened_sent: false, last_blocked_alert_at: null})
+      ')
+  fi
+  printf '%s' "${new_state}" | _write_state
+
+  rm -f "${STACK_DIR}/triggers/${SERVICE}.trigger"
+
+  # Circuit breaker OPEN — notify exactly once per open event.
+  # `alerts.opened_sent` is the once-only guard (M75-S7 Phase 3): the very
+  # first failure that brings consecutive_failures to threshold fires the
+  # alert and flips the bit; any subsequent failures while the breaker
+  # remains open re-enter this branch but the Telegram is suppressed so
+  # operators don't get spammed. The `_reset_cb` / success path clears the
+  # bit back to false so the next open event will alert again.
+  if [[ "${new_count}" -ge "${CB_MAX_FAILURES}" ]]; then
+    if [[ "${opened_sent}" != "true" ]]; then
+      notify_build build.circuit_breaker_open "$(printf '\U0001f6d1 <b>Circuit breaker OPEN</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Failures:   %d consecutive\n\u25b8 Time:       %s\n\nAuto-builds disabled.\nRun: <code>bay build reset %s</code>' \
+        "${HOSTNAME}" "${SERVICE}" "${new_count}" "$(format_timestamp)" "${SERVICE}")"
+      # Mark opened_sent so future trips during the same open event don't
+      # re-spam. Re-read state to capture any concurrent updates from the
+      # write above, then atomically merge in the alert flag.
+      _read_state | jq -c '.alerts.opened_sent = true' | _write_state
+    else
+      _log "Circuit breaker re-trip for ${SERVICE} — open-alert already sent, suppressing"
+    fi
+    return
+  fi
+
+  # Same commit already notified — suppress duplicate
+  if [[ -n "${sha}" && "${sha}" == "${notified_sha}" ]]; then
+    _log "Failure #${new_count} for ${SERVICE} — notification suppressed (same commit ${sha})"
+    return
+  fi
+
+  # First failure for this commit — send notification
+  local msg
+  msg="$(printf '\U0001f6a8 <b>%s failed</b> (%d/%d)\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>' \
+    "${context}" "${new_count}" "${CB_MAX_FAILURES}" "${HOSTNAME}" "${SERVICE}")"
+  [[ -n "${sha}" ]] && msg+="$(printf '\n\u25b8 Commit:     <code>%s</code>' "${sha}")"
+  msg+="$(printf '\n\u25b8 Time:       %s' "$(format_timestamp)")"
+  # `detail` is a raw tail of build output — arbitrary text that routinely
+  # contains < and &. Unescaped it produces malformed HTML, which Telegram
+  # rejects with a 400, so the whole failure alert is lost exactly when it
+  # matters most. Escape before embedding.
+  [[ -n "${detail}" ]] && msg+="$(printf '\n\n<pre>%s</pre>' "$(bay_html_escape "${detail}")")"
+  notify_build build.failed "${msg}"
+}
+
+# Clear the circuit breaker state to a clean schema-v1 document. We
+# write a file (rather than rm -f) so `bay build status` can always
+# read a queryable "closed" state. The CLI's `bay build reset` still
+# rm -f's the file — that's equivalent because `_read_state` on a
+# missing file emits the same clean-state defaults.
+_reset_cb() {
+  _clean_state_json | _write_state
+}
+
+# Poll container health after restart. Returns 0 if healthy, 1 if failed.
+# For containers with HEALTHCHECK: waits for healthy/unhealthy status.
+# For containers without: polls State.Running repeatedly to catch crash loops.
+# Consecutive-unhealthy guard: requires 2 consecutive unhealthy reads before
+# returning 1. A single unhealthy read during Docker's StartPeriod window
+# may be a transient inspect race (Docker 29.x quirk) — one extra read with
+# a 2s gap is enough to distinguish a real failure from a race condition.
+_wait_healthy() {
+  local name="$1" timeout="${2:-${HEALTH_CHECK_TIMEOUT}}"
+  local deadline running health checks=0 unhealthy_count=0
+  deadline=$(( $(date +%s) + timeout ))
+
+  # Initial settle time
+  sleep 2
+
+  while [[ $(date +%s) -lt $deadline ]]; do
+    running=$(docker inspect --format '{% raw %}{{.State.Running}}{% endraw %}' "$name" 2>/dev/null || echo "false")
+    if [[ "$running" != "true" ]]; then
+      _log "Container ${name} is not running (exited or crashed)"
+      return 1
+    fi
+
+    health=$(docker inspect --format '{% raw %}{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}{% endraw %}' "$name" 2>/dev/null || echo "unknown")
+
+    case "$health" in
+      healthy)
+        unhealthy_count=0
+        _log "Container ${name} is healthy"
+        return 0
+        ;;
+      unhealthy)
+        unhealthy_count=$(( unhealthy_count + 1 ))
+        if [[ $unhealthy_count -ge 2 ]]; then
+          _log "Container ${name} is unhealthy (${unhealthy_count} consecutive reads)"
+          return 1
+        fi
+        _log "Container ${name}: transient unhealthy read (${unhealthy_count}/2) — continuing"
+        sleep 2
+        ;;
+      none)
+        unhealthy_count=0
+        # No healthcheck defined — require multiple consecutive running checks
+        # to catch crash loops (container restarts between checks)
+        checks=$((checks + 1))
+        if [[ $checks -ge 3 ]]; then
+          _log "Container ${name} is running (no healthcheck, ${checks} consecutive checks passed)"
+          return 0
+        fi
+        sleep 2
+        ;;
+      starting|*)
+        unhealthy_count=0
+        sleep 2
+        ;;
+    esac
+  done
+
+  # Timeout — check final state
+  running=$(docker inspect --format '{% raw %}{{.State.Running}}{% endraw %}' "$name" 2>/dev/null || echo "false")
+  if [[ "$running" == "true" ]]; then
+    health=$(docker inspect --format '{% raw %}{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}{% endraw %}' "$name" 2>/dev/null || echo "unknown")
+    if [[ "$health" == "starting" || "$health" == "none" ]]; then
+      _log "Container ${name} still starting after ${timeout}s — treating as healthy"
+      return 0
+    fi
+  fi
+
+  _log "Health check timed out for ${name} after ${timeout}s"
+  return 1
+}
+
+# Roll back to previous image after a failed health check.
+# Stops the failed container, retags :previous, restarts, and verifies.
+# Always exits the script (never returns to caller).
+#   $1 — container/service name
+#   $2 — previous image tag (e.g., IMAGE_NAME:previous or IMAGE_REPO:previous)
+#   $3 — current image tag (e.g., IMAGE_NAME:latest or IMAGE_REF)
+_handle_rollback() {
+  local svc="$1" prev_tag="$2" current_tag="$3"
+
+  # Disable ERR trap — we're handling the failure ourselves
+  trap - ERR
+
+  _log "Health check failed for ${svc} — attempting rollback"
+  docker stop "${svc}" 2>/dev/null || true
+  docker rm "${svc}" 2>/dev/null || true
+
+  # Check if previous image exists locally
+  if ! docker image inspect "${prev_tag}" &>/dev/null; then
+    _record_failure "${SHA}" "Health check" "No previous image available for rollback"
+    notify_build build.health_check_failed "$(printf '\U0001f6a8 <b>Health check FAILED</b> — no rollback available\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Time:       %s\n\nManual intervention required.\nInvestigate: <code>docker logs %s --tail 50</code>' \
+      "${HOSTNAME}" "${svc}" "$(format_timestamp)" "${svc}")"
+    exit 1
+  fi
+
+  # Capture :latest digest before retag so we can restore it if rollback also fails.
+  # TODO(M77): remove this retag + restore pattern once _run_container accepts an explicit image-ref arg.
+  local latest_digest
+  latest_digest=$(docker inspect --format '{% raw %}{{.Id}}{% endraw %}' "${current_tag}" 2>/dev/null || echo "")
+
+  # Retag previous image as current
+  docker tag "${prev_tag}" "${current_tag}"
+
+  # Restart with previous image (uses _run_container defined in per-service block)
+  if ! _run_container; then
+    _record_failure "${SHA}" "Rollback" "Failed to start container with previous image"
+    notify_build build.rollback_failed "$(printf '\U0001f6d1 <b>ROLLBACK FAILED</b> — container would not start\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Time:       %s\n\nManual intervention required.\nInvestigate: <code>docker logs %s --tail 50</code>' \
+      "${HOSTNAME}" "${svc}" "$(format_timestamp)" "${svc}")"
+    # Restore :latest to pre-rollback digest so tags don't converge on broken image
+    if [[ -n "${latest_digest}" ]]; then
+      docker tag "${latest_digest}" "${current_tag}" 2>/dev/null || true
+    fi
+    exit 1
+  fi
+
+  # Verify rollback health
+  if ! _wait_healthy "${svc}" "${HEALTH_CHECK_TIMEOUT}"; then
+    docker stop "${svc}" 2>/dev/null || true
+    docker rm "${svc}" 2>/dev/null || true
+    _record_failure "${SHA}" "Rollback" "Previous image also failed health check"
+    notify_build build.rollback_failed "$(printf '\U0001f6d1 <b>ROLLBACK FAILED</b> — previous image also unhealthy\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Time:       %s\n\nBoth new and previous images failed.\nInvestigate: <code>docker logs %s --tail 50</code>' \
+      "${HOSTNAME}" "${svc}" "$(format_timestamp)" "${svc}")"
+    # Restore :latest to pre-rollback digest so tags don't converge on broken image
+    if [[ -n "${latest_digest}" ]]; then
+      _log "Rollback health check failed — restored :latest to pre-rollback digest ${latest_digest}"
+      docker tag "${latest_digest}" "${current_tag}" 2>/dev/null || true
+    fi
+    exit 1
+  fi
+
+  # Rollback succeeded — service is running on previous image.
+  # _record_failure has just run, so consecutive_failures is up to date.
+  # Append a CB-state preview to the operator-facing Telegram so they can
+  # see how close the breaker is to tripping (M75-S7 Phase 3, contract
+  # exit-path map row 4).
+  _record_failure "${SHA}" "Health check" "Rolled back to previous image"
+  _rb_count=$(_read_state | jq -r '.consecutive_failures // 0')
+  _rb_count=${_rb_count:-0}
+  _rb_cb_line=""
+  if [[ "${_rb_count}" -lt "${CB_MAX_FAILURES}" ]]; then
+    _rb_cb_line="$(printf '\n\n\u26a0\ufe0f Circuit breaker at %d/%d — next failure will block pushes.\nReset: <code>bay build reset %s</code>' \
+      "${_rb_count}" "${CB_MAX_FAILURES}" "${svc}")"
+  fi
+  notify_build build.rolled_back "$(printf '\u23ea <b>Rolled back to previous</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Reason:     health check failed after %ds\n\u25b8 Time:       %s\n\nService is running on previous image.\nInvestigate: <code>docker logs %s --tail 50</code>%s' \
+    "${HOSTNAME}" "${svc}" "${HEALTH_CHECK_TIMEOUT}" "$(format_timestamp)" "${svc}" "${_rb_cb_line}")"
+  exit 1
+}
+
+_deploy_failed() {
+  _record_failure "${SHA}" "Webhook deploy"
+}
+trap '_deploy_failed' ERR
+
+BUILD_START="${EPOCHSECONDS}"
+
+# ── Read correlation ID and detect pull signal from trigger file ──
+# Trigger file format (v2): line 1 = corr_id (UUID4), line 2 = signal ("pull" or empty)
+# Legacy format (v1): single line "pull" or empty — CORR_ID set to "unknown"
+# Manual trigger (no trigger file): CORR_ID set to "manual-<epoch>"
+TRIGGER_FILE="${STACK_DIR}/triggers/${SERVICE}.trigger"
+CORR_ID="unknown"
+PULL_SIGNAL=0
+if [[ -f "${TRIGGER_FILE}" ]]; then
+  CORR_ID=$(sed -n '1p' "${TRIGGER_FILE}" 2>/dev/null || echo "unknown")
+  [[ -z "${CORR_ID}" ]] && CORR_ID="unknown"
+  PULL_SIGNAL_RAW=$(sed -n '2p' "${TRIGGER_FILE}" 2>/dev/null || echo "")
+  # Legacy 1-line format: line 1 was "pull" — detect and handle
+  if [[ "${CORR_ID}" == "pull" && -z "${PULL_SIGNAL_RAW}" ]]; then
+    CORR_ID="unknown"
+    PULL_SIGNAL_RAW="pull"
+  fi
+  if [[ "${PULL_SIGNAL_RAW}" == "pull" ]]; then
+    PULL_SIGNAL=1
+    echo "[rebuild] [${CORR_ID}] Pull signal detected for ${SERVICE}"
+  fi
+else
+  # No trigger file — manually invoked rebuild
+  CORR_ID="manual-${EPOCHSECONDS}"
+fi
+
+_log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
+
+# ── Per-service build config (rendered at deploy time) ──
+# git_deploy_rebuild_services includes local builds, remote builds,
+# and pull-only services (non-builder image consumers).
+{% set _build_services = [] %}
+{% set _pull_only_services = [] %}
+{% for svc_name in git_deploy_rebuild_services %}
+{% if services[svc_name].build is defined %}
+{% set _ = _build_services.append(svc_name) %}
+{% else %}
+{% set _ = _pull_only_services.append(svc_name) %}
+{% endif %}
+{% endfor %}
+{% set _dedup = services | bay_build_dedup_map(_build_services) %}
+{% set _is_first = namespace(val=true) %}
+{% for svc_name in _build_services %}
+{% set svc = services[svc_name] %}
+{% set build = svc.build %}
+{% set branch = build.branch | default('main') %}
+{% set dockerfile = build.dockerfile | default('Dockerfile') %}
+{% set context = build.context | default('.') %}
+{% set image_name = git_deploy_image_prefix ~ '-' ~ svc_name %}
+{% set raw_strategy = build.strategy | default(git_deploy_build_strategy | default('local')) %}
+{% set strategy = 'remote' if raw_strategy == 'push' else raw_strategy %}
+{% set slug = build.repo | bay_repo_slug(branch) %}
+{% set has_token = build.token is defined %}
+{% if has_token %}
+{% set repo_url = build.repo %}
+{% if repo_url.startswith('git@') %}
+{% set parts = repo_url.split(':') %}
+{% set host = parts[0] | replace('git@', '') %}
+{% set path = parts[1] %}
+{% set clone_url = 'https://x-access-token:' ~ build.token ~ '@' ~ host ~ '/' ~ path %}
+{% elif '://' in repo_url %}
+{% set proto_rest = repo_url.split('://') %}
+{% set clone_url = 'https://x-access-token:' ~ build.token ~ '@' ~ proto_rest[1] %}
+{% else %}
+{% set clone_url = repo_url %}
+{% endif %}
+{% else %}
+{% set clone_url = build.repo %}
+{% endif %}
+{% if not _is_first.val %}el{% endif %}if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
+{% if strategy == 'remote' %}
+  REPO_DIR="${REMOTE_BUILD_DIR}/{{ svc_name }}/repo"
+{% else %}
+  REPO_DIR="${BUILD_DIR}/shared/{{ slug }}/repo"
+{% endif %}
+  BRANCH="{{ branch }}"
+  DOCKERFILE="{{ dockerfile }}"
+  CONTEXT="{{ context }}"
+  IMAGE_NAME="{{ image_name }}"
+{% if strategy == 'remote' and svc.image is defined %}
+  IMAGE_REF="{{ svc.image }}"
+  IMAGE_REPO="{{ svc.image | regex_replace(':.*$', '') }}"
+{% else %}
+  IMAGE_REF=""
+  IMAGE_REPO=""
+{% endif %}
+{% if not _dedup[svc_name].primary %}
+  PRIMARY_IMAGE="{{ git_deploy_image_prefix }}-{{ _dedup[svc_name].primary_svc }}"
+{% else %}
+  PRIMARY_IMAGE=""
+{% endif %}
+  BUILD_STRATEGY="{{ strategy }}"
+{% if strategy == 'remote' %}
+  CLONE_URL="{{ clone_url }}"
+  CLONE_CMD="git clone --branch {{ branch }} --single-branch {{ clone_url }} ${REPO_DIR}"
+  FETCH_CMD="git -c url.{{ clone_url }}.insteadOf={{ build.repo }} fetch origin {{ branch }}"
+{% set _token_key = namespace(val='unknown') %}
+{% if has_token and secrets is defined %}{% for _k, _v in secrets.items() %}{% if _v == build.token %}{% set _token_key.val = _k %}{% endif %}{% endfor %}{% endif %}
+  CLONE_TOKEN_KEY="{{ _token_key.val }}"
+  CLONE_REPO="{{ build.repo }}"
+{% elif has_token %}
+  CLONE_URL="{{ clone_url }}"
+  PULL_CMD="git -c url.${CLONE_URL}.insteadOf={{ build.repo }} pull origin ${BRANCH}"
+{% set _token_key = namespace(val='unknown') %}
+{% if secrets is defined %}{% for _k, _v in secrets.items() %}{% if _v == build.token %}{% set _token_key.val = _k %}{% endif %}{% endfor %}{% endif %}
+  CLONE_TOKEN_KEY="{{ _token_key.val }}"
+  CLONE_REPO="{{ build.repo }}"
+{% else %}
+  DEPLOY_KEY="${BUILD_DIR}/{{ svc_name }}/.deploy_key"
+  PULL_CMD="GIT_SSH_COMMAND='ssh -i ${DEPLOY_KEY} -o StrictHostKeyChecking=accept-new' git pull origin ${BRANCH}"
+{% endif %}
+{% if build.args is defined %}
+  BUILD_ARGS=(
+{% for key, value in build.args.items() %}
+    --build-arg {{ key }}={{ value }}
+{% endfor %}
+  )
+{% else %}
+  BUILD_ARGS=()
+{% endif %}
+{% if build.secrets is defined %}
+  declare -A BUILD_SECRETS=(
+{% for key, value in build.secrets.items() %}
+    ["{{ key }}"]="{{ value }}"
+{% endfor %}
+  )
+{% else %}
+  declare -A BUILD_SECRETS=()
+{% endif %}
+  HEALTH_CHECK_TIMEOUT={{ svc.health_check_timeout | default(git_deploy_health_check_timeout) }}
+{% set _is_first.val = false %}
+{% endfor %}
+{% for svc_name in _pull_only_services %}
+{% set svc = services[svc_name] %}
+{% if not _is_first.val %}el{% endif %}if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
+  # Pull-only service (no build: block, shares a remote-built image)
+  IMAGE_REF="{{ svc.image }}"
+  IMAGE_REPO="{{ svc.image | regex_replace(':.*$', '') }}"
+  IMAGE_NAME=""
+  BUILD_STRATEGY="pull_only"
+  PRIMARY_IMAGE=""
+  BUILD_ARGS=()
+  declare -A BUILD_SECRETS=()
+  HEALTH_CHECK_TIMEOUT={{ svc.health_check_timeout | default(git_deploy_health_check_timeout) }}
+{% set _is_first.val = false %}
+{% endfor %}
+else
+  _log "Unknown service: ${SERVICE}"
+  notify_build build.unknown_service "$(printf '\u26a0\ufe0f <b>Unknown service in build trigger</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Time:       %s\n\nA build trigger fired for a service not declared in services.yml. This usually means a stale systemd unit, a stale trigger file, or a misconfigured webhook.\nInvestigate: <code>ls %s/triggers/</code> and <code>systemctl list-units bay-build@*.path</code>' \
+    "${HOSTNAME}" "${SERVICE}" "$(format_timestamp)" "${STACK_DIR}")"
+  exit 1
+fi
+
+# ── Circuit breaker ──
+# When the breaker is OPEN, blocking the push silently was the 2026-04-16
+# incident path: pushes returned exit 0 with only a journald log line, so
+# operators chasing webhook traces saw nothing. Phase 3 (M75-S7) now emits
+# a rate-limited Telegram alert here — at most once per
+# CB_BLOCKED_ALERT_INTERVAL_SEC — using `alerts.last_blocked_alert_at` as
+# the last-sent epoch timestamp.
+CB_BLOCKED_ALERT_INTERVAL_SEC=3600
+
+_cb_state=$(_read_state)
+_cb_count=$(printf '%s' "${_cb_state}" | jq -r '.consecutive_failures // 0')
+_cb_count=${_cb_count:-0}
+
+if [[ "${_cb_count}" -ge "${CB_MAX_FAILURES}" ]]; then
+  _log "Circuit breaker OPEN for ${SERVICE} (${_cb_count} consecutive failures)"
+  _log "Run 'bay build reset ${SERVICE}' after fixing the issue, then push again."
+
+  # Read alert metadata from state. `last_blocked_alert_at` may be null
+  # (never alerted) or an epoch-seconds integer.
+  _cb_last_alert=$(printf '%s' "${_cb_state}" | jq -r '.alerts.last_blocked_alert_at // 0')
+  _cb_last_alert=${_cb_last_alert:-0}
+  # jq emits "null" as the string "null" without `// 0` — guard anyway in
+  # case state is partial.
+  if [[ "${_cb_last_alert}" == "null" || -z "${_cb_last_alert}" ]]; then
+    _cb_last_alert=0
+  fi
+  _cb_now=$(date +%s)
+  _cb_age=$(( _cb_now - _cb_last_alert ))
+
+  if [[ "${_cb_age}" -ge "${CB_BLOCKED_ALERT_INTERVAL_SEC}" ]]; then
+    _cb_reason=$(printf '%s' "${_cb_state}" | jq -r '.last_failure.reason // "(unknown)"')
+    _cb_opened_at=$(printf '%s' "${_cb_state}" | jq -r '.opened_at // "(unknown)"')
+    # Truncate reason to 200 chars for Telegram; full text stays in state.
+    {% raw %}if [[ "${#_cb_reason}" -gt 200 ]]; then
+      _cb_reason="${_cb_reason:0:200}…"
+    fi
+{% endraw %}
+    notify_build build.push_blocked "$(printf '\u26a0\ufe0f <b>Push blocked — circuit breaker OPEN</b>\n\n\u25b8 Host:          <code>%s</code>\n\u25b8 Service:       <code>%s</code>\n\u25b8 Failures:      %d consecutive\n\u25b8 Opened at:     <code>%s</code>\n\u25b8 Last reason:   <pre>%s</pre>\n\u25b8 Time:          %s\n\nAuto-builds remain disabled. Re-alerts at most once per hour.\nRun: <code>bay build reset %s</code>' \
+      "${HOSTNAME}" "${SERVICE}" "${_cb_count}" "${_cb_opened_at}" "$(bay_html_escape "${_cb_reason}")" "$(format_timestamp)" "${SERVICE}")"
+    # Stamp last_blocked_alert_at so the next blocked push within the
+    # window is silenced. Re-read state to avoid clobbering concurrent
+    # writes from a second invocation racing on the same trigger.
+    _read_state | jq -c --argjson at "${_cb_now}" '.alerts.last_blocked_alert_at = $at' | _write_state
+  else
+    _log "Suppressed CB blocked-push alert for ${SERVICE} (last sent ${_cb_age}s ago, interval ${CB_BLOCKED_ALERT_INTERVAL_SEC}s)"
+  fi
+  exit 0
+fi
+
+# ── Cross-service build serialization (issue #9) ──
+# Multiple bay-build@*.path units can fire in the same instant — most
+# commonly from a monorepo push that matches several services' path globs.
+# Without serialization, two rebuild.sh runs hit the shared
+# buildx_buildkit_argo-builder0 container concurrently and OOM-kill it.  # legacy-argo: live buildx builder name on hosts, migrate separately
+# fd-based flock here means the kernel releases the lock on process exit
+# (no stale-lockfile cleanup needed). A 1-hour timeout bounds deadlocks if
+# any single build legitimately hangs that long.
+#
+# Note: the per-repo flock further down (${REPO_DIR}/.git/rebuild.lock)
+# remains as a defensive inner layer — it's now redundant under this lock
+# but cheap, and survives if anyone ever loosens or scopes the global lock.
+{% set _build_lock_path = git_deploy_build_lock_path | default(stack_dir ~ '/build.lock') %}
+{% set _build_lock_timeout = git_deploy_build_lock_timeout | default(3600) %}
+if ! { exec 9>"{{ _build_lock_path }}"; } 2>/dev/null; then  # brace group scopes 2>/dev/null to the open; bare `exec >f 2>/dev/null` silences the shell's stderr permanently
+  _log "Cannot open build lock {{ _build_lock_path }} — aborting (check directory ownership)"
+  trap - ERR
+  exit 1
+fi
+_lock_wait_start=${EPOCHSECONDS}
+_log "Waiting for build lock ({{ _build_lock_path }})"
+if ! flock -x -w {{ _build_lock_timeout }} 9; then
+  _log "Lock wait timed out after {{ _build_lock_timeout }}s — aborting"
+  notify_build build.lock_timeout "$(printf '⏱️ <b>Build lock timeout</b>\n\n▸ Host:       <code>%s</code>\n▸ Service:    <code>%s</code>\n▸ Waited:     %ds\n▸ Time:       %s\n\nA concurrent build held the lock longer than the timeout. Investigate hung builds: <code>journalctl -u bay-build@* --since '\''2 hours ago'\''</code>' \
+    "${HOSTNAME}" "${SERVICE}" "{{ _build_lock_timeout }}" "$(format_timestamp)")"
+  trap - ERR
+  exit 1
+fi
+_lock_waited=$(( EPOCHSECONDS - _lock_wait_start ))
+_log "Lock acquired (waited ${_lock_waited}s)"
+
+# ── Pull signal: pull image from registry and restart container ──
+# Triggered by the build server after a successful remote build+push.
+# Skips the build entirely — just pull the new image and restart.
+if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
+  _log "Pulling ${IMAGE_REF} from registry"
+  if ! docker pull "${IMAGE_REF}"; then
+    _record_failure "" "Image pull"
+    trap - ERR
+    exit 1
+  fi
+
+  # Tag running container's image as :previous for rollback
+  _PREV_DIGEST=$(docker inspect --format '{% raw %}{{.Image}}{% endraw %}' "${SERVICE}" 2>/dev/null || true)
+  if [[ -n "${_PREV_DIGEST}" ]]; then
+    docker tag "${_PREV_DIGEST}" "${IMAGE_REPO}:previous" 2>/dev/null || true
+    _log "Tagged running image as ${IMAGE_REPO}:previous for rollback"
+  fi
+
+  # Restart container with the new image
+  docker stop "${SERVICE}" 2>/dev/null || true
+  docker rm "${SERVICE}"   2>/dev/null || true
+
+{% set _pull_ns = namespace(first=true) %}
+{% for svc_name in git_deploy_rebuild_services %}
+{% set svc = services[svc_name] %}
+{% set _has_build = svc.build is defined %}
+{% set _is_remote = false %}
+{% if _has_build %}
+{% set _raw = svc.build.strategy | default(git_deploy_build_strategy | default('local')) %}
+{% set _is_remote = (_raw == 'remote' or _raw == 'push') %}
+{% endif %}
+{% set _is_pull_eligible = (_is_remote and svc.image is defined) or (not _has_build and svc.image is defined) %}
+{% if _is_pull_eligible %}
+{% set _tc = {
+  'traefik_docker_network': traefik_docker_network | default('services'),
+  'traefik_security_headers_enabled': traefik_security_headers_enabled | default(true),
+  'traefik_compress_enabled': traefik_compress_enabled | default(true),
+  'traefik_error_pages_enabled': traefik_error_pages_enabled | default(false),
+  'traefik_rate_limit_average': traefik_rate_limit_average | default(100),
+  'traefik_rate_limit_burst': traefik_rate_limit_burst | default(50),
+  'traefik_rate_limit_period': traefik_rate_limit_period | default('1s'),
+  'traefik_in_flight_req_amount': traefik_in_flight_req_amount | default(100),
+  'traefik_circuit_breaker_expression': traefik_circuit_breaker_expression | default('NetworkErrorRatio() > 0.5'),
+  'traefik_retry_attempts': traefik_retry_attempts | default(4),
+  'stack_name': stack_name | default('bay'),
+} %}
+{% if not _pull_ns.first %}el{% endif %}if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
+  _run_container() {
+    docker run -d \
+      --name "{{ svc_name }}" \
+      --hostname "{{ svc_name }}" \
+      --restart unless-stopped \
+{% if svc.network_mode is defined %}
+      --network "{{ svc.network_mode }}" \
+{% else %}
+      --network "{{ traefik_docker_network | default('services') }}" \
+{% endif %}
+{% if svc.env is defined or svc.database is defined %}
+      --env-file "${STACK_DIR}/env/{{ svc_name }}.env" \
+{% endif %}
+{{ publish_flags(svc) -}}
+{% for vol in svc.volumes | default([]) | bay_prefix_volumes(stack_name | default('bay')) %}
+      -v "{{ vol }}" \
+{% endfor %}
+{% if svc.mem_limit is defined %}
+      --memory "{{ svc.mem_limit }}" \
+{% endif %}
+{% for k, v in (svc | bay_traefik_labels(svc_name, _tc)).items() %}
+      -l '{{ k }}={{ v }}' \
+{% endfor %}
+      -l 'bay.managed=true' \
+      -l 'bay.stack={{ stack_name }}' \
+{% set _wt_labels = (svc['update'] | default('monitor')) | bay_watchtower_labels(watchtower_enabled | default(false)) %}
+{% for k, v in _wt_labels.items() %}
+      -l '{{ k }}={{ v }}' \
+{% endfor %}
+      "${IMAGE_REF}"{{ ' ' ~ svc.command if svc.command is defined else '' }}
+  }
+{% set _pull_ns.first = false %}
+{% endif %}
+{% endfor %}
+{% if not _pull_ns.first %}
+  fi
+{% endif %}
+
+  _run_container
+
+  if ! _wait_healthy "${SERVICE}" "${HEALTH_CHECK_TIMEOUT}"; then
+    _handle_rollback "${SERVICE}" "${IMAGE_REPO}:previous" "${IMAGE_REF}"
+  fi
+
+  _reset_cb
+
+  _log "Pull deploy complete for ${SERVICE} at $(date -Iseconds)"
+  notify_build deploy.pull_complete "$(printf '\u2705 <b>Pull deploy complete</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Image:      <code>%s</code>\n\u25b8 Duration:   %s\n\u25b8 Time:       %s' \
+    "${HOSTNAME}" "${SERVICE}" "${IMAGE_REF}" "$(format_duration)" "$(format_timestamp)")"
+  exit 0
+fi
+
+# ── Pull-only guard ──
+# Pull-only services (no build: block) can only be triggered by pull signals.
+# If we reach here without a pull signal, something is wrong — skip gracefully.
+if [[ "${BUILD_STRATEGY}" == "pull_only" ]]; then
+  _log "Service ${SERVICE} is pull-only but no pull signal detected — skipping"
+  exit 0
+fi
+
+# ── Strategy routing ──
+if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
+  # ── Remote strategy: fetch, build, push to registry ──
+  # No container restart — deployment servers pull via S2 fan-out.
+
+  # Ensure clone directory exists
+  mkdir -p "$(dirname "${REPO_DIR}")"
+
+  # Clone if repo doesn't exist yet
+  if [[ ! -d "${REPO_DIR}/.git" ]]; then
+    _log "Cloning repository for ${SERVICE}"
+    _CLONE_STDERR=$(eval "${CLONE_CMD}" 2>&1)
+    _CLONE_EXIT=$?
+    if [[ ${_CLONE_EXIT} -ne 0 ]]; then
+      if grep -q "403" <<<"${_CLONE_STDERR}"; then
+        _log "clone failed (HTTP 403)"
+        _log "  repo: ${CLONE_REPO}"
+        _log "  token: ${CLONE_TOKEN_KEY}"
+        _log "hint: verify the PAT has Contents:Read (fine-grained) or repo (classic) scope."
+      else
+        echo "${_CLONE_STDERR}" >&2
+      fi
+      exit ${_CLONE_EXIT}
+    fi
+  fi
+
+  # Acquire repo lock
+  exec 200>"${REPO_DIR}/.git/rebuild.lock"
+  flock -x 200
+  _log "Acquired repo lock for ${SERVICE}"
+
+  # Fetch + reset (force-push safe)
+  cd "${REPO_DIR}"
+  _FETCH_STDERR=$(eval "${FETCH_CMD}" 2>&1)
+  _FETCH_EXIT=$?
+  if [[ ${_FETCH_EXIT} -ne 0 ]]; then
+    if grep -q "403" <<<"${_FETCH_STDERR}"; then
+      _log "clone failed (HTTP 403)"
+      _log "  repo: ${CLONE_REPO}"
+      _log "  token: ${CLONE_TOKEN_KEY}"
+      _log "hint: verify the PAT has Contents:Read (fine-grained) or repo (classic) scope."
+    else
+      echo "${_FETCH_STDERR}" >&2
+    fi
+    exit ${_FETCH_EXIT}
+  fi
+  git reset --hard FETCH_HEAD
+
+  # Get commit SHA (12-char for registry tags, matching remote_build.yml)
+  SHA=$(git rev-parse --short=12 HEAD)
+
+  # Check if image already exists in registry for this SHA
+  if docker manifest inspect "${IMAGE_REPO}:${SHA}" &>/dev/null && docker manifest inspect "${IMAGE_REF}" &>/dev/null; then
+    _log "Image ${IMAGE_REPO}:${SHA} and ${IMAGE_REF} already in registry, skipping build"
+  else
+    # Write build secrets to temp files
+    SECRETS_DIR="${REMOTE_BUILD_DIR}/.secrets"
+    mkdir -p "${SECRETS_DIR}"
+    chmod 700 "${SECRETS_DIR}"
+    SECRET_FLAGS=""
+    for key in "${!BUILD_SECRETS[@]}"; do
+      TMPFILE="${SECRETS_DIR}/${SERVICE}-${key}"
+      printf '%s' "${BUILD_SECRETS[$key]}" > "${TMPFILE}"
+      chmod 600 "${TMPFILE}"
+      SECRET_FLAGS="${SECRET_FLAGS} --secret id=${key},src=${TMPFILE}"
+    done
+
+    # Build
+    _log "Building ${IMAGE_REPO}:${SHA} (CONTEXT=${CONTEXT} REPO_DIR=${REPO_DIR} PWD=$(pwd))"
+    ls -la "${CONTEXT}" 2>&1 | head -5 || _log "WARNING: build context '${CONTEXT}' not found"
+    BUILD_OUTPUT=$(mktemp)
+    if ! docker buildx build \
+      --builder {{ bay_buildx_builder }} \
+      --provenance=false \
+      --load \
+      -t "${IMAGE_REPO}:${SHA}" \
+      -t "${IMAGE_REF}" \
+      -f "${DOCKERFILE}" \
+      "${BUILD_ARGS[@]}" \
+      ${SECRET_FLAGS} \
+      "${CONTEXT}" 2>&1 | tee "${BUILD_OUTPUT}"; then
+      TAIL_OUTPUT=$(tail -c 500 "${BUILD_OUTPUT}")
+      _record_failure "${SHA}" "Remote build" "${TAIL_OUTPUT}"
+      rm -f "${BUILD_OUTPUT}"
+      # Clean up secret temp files
+      for key in "${!BUILD_SECRETS[@]}"; do
+        rm -f "${SECRETS_DIR}/${SERVICE}-${key}"
+      done
+      trap - ERR
+      exit 1
+    fi
+    rm -f "${BUILD_OUTPUT}"
+
+    # Push to registry (SHA tag + :latest)
+    _log "Pushing ${IMAGE_REPO}:${SHA} to registry"
+    docker push "${IMAGE_REPO}:${SHA}"
+    _log "Pushing ${IMAGE_REF} to registry"
+    docker push "${IMAGE_REF}"
+
+    # M81-S1 — trim old local content-hash tags after a successful push so
+    # the build server doesn't accumulate ~1 GB per push indefinitely. The
+    # Ansible-side cleanup in remote_build.yml only fires on `bay deploy`
+    # — webhook auto-builds (this path) never hit it, which is how the
+    # 2026-04-17 76%-disk incident happened. Keeps `latest` + newest N
+    # content-hash tags (default {{ git_deploy_build_keep_tags | default(3) }}),
+    # skips anything a running container references.
+    KEEP_TAGS="{{ git_deploy_build_keep_tags | default(3) }}"
+    if [[ "${KEEP_TAGS}" -gt 0 ]]; then
+      _log "Pruning old local content-hash tags for ${IMAGE_REPO} (keep=${KEEP_TAGS})"
+      RUNNING_REFS=$(docker ps --format '{{ '{{' }}.Image{{ '}}' }}' 2>/dev/null || true)
+      # Build a newline-delimited list of repo-scoped tags currently used by
+      # running containers, stripped of the repo: prefix so it matches the
+      # tag column emitted below.
+      RUNNING_TAGS=$(printf '%s\n' "${RUNNING_REFS}" \
+        | grep -E "^${IMAGE_REPO}:" 2>/dev/null \
+        | sed "s|^${IMAGE_REPO}:||" \
+        || true)
+      # List non-latest, non-dangling tags newest-first. --format emits
+      # `<tag>|<createdat>`; sort -t'|' -k2 -r orders by CreatedAt desc.
+      CANDIDATES=$(docker images "${IMAGE_REPO}" \
+        --format '{{ '{{' }}.Tag{{ '}}' }}|{{ '{{' }}.CreatedAt{{ '}}' }}' 2>/dev/null \
+        | grep -v '^latest|' \
+        | grep -v '^<none>|' \
+        | sort -t'|' -k2 -r \
+        | cut -d'|' -f1)
+      # Filter out tags used by running containers (defensive; docker rmi
+      # itself also refuses such images).
+      if [[ -n "${RUNNING_TAGS}" ]]; then
+        CANDIDATES=$(printf '%s\n' "${CANDIDATES}" \
+          | grep -vxF -f <(printf '%s\n' "${RUNNING_TAGS}") \
+          || true)
+      fi
+      TO_REMOVE=$(printf '%s\n' "${CANDIDATES}" | tail -n +$((KEEP_TAGS + 1)))
+      if [[ -n "${TO_REMOVE}" ]]; then
+        while IFS= read -r tag; do
+          [[ -z "${tag}" ]] && continue
+          if docker rmi "${IMAGE_REPO}:${tag}" >/dev/null 2>&1; then
+            _log "  pruned ${IMAGE_REPO}:${tag}"
+          fi
+        done <<< "${TO_REMOVE}"
+      fi
+    fi
+
+    # Clean up secret temp files
+    for key in "${!BUILD_SECRETS[@]}"; do
+      rm -f "${SECRETS_DIR}/${SERVICE}-${key}"
+    done
+  fi
+
+  # Release repo lock
+  exec 200>&-
+
+  _reset_cb
+
+  _log "Completed remote build for ${SERVICE} at $(date -Iseconds)"
+  notify_build build.remote_complete "$(printf '\u2705 <b>Remote build complete</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Commit:     <code>%s</code>\n\u25b8 Image:      <code>%s</code>\n\u25b8 Duration:   %s\n\u25b8 Time:       %s\n\nNotifying deployment servers to pull.' \
+    "${HOSTNAME}" "${SERVICE}" "${SHA}" "${IMAGE_REF}" "$(format_duration)" "$(format_timestamp)")"
+
+  # ── Fan-out image-level pull signals to deployment servers ──
+  # After a successful build+push, POST to each region's /webhook/pull-image
+  # with the image ref in the body. Each region pulls the image once and
+  # restarts all local containers using it.
+  # Uses associative arrays for image->region mapping, computed from all
+  # services sharing each built image across all regions.
+{% set _image_region_map = services | bay_image_region_map(git_deploy_rebuild_services) %}
+{% set _peer_urls = git_deploy_peer_webhook_urls | default({}) %}
+{% if _image_region_map and _peer_urls %}
+  # Image-to-region mapping (computed at deploy time)
+  declare -A IMAGE_REGIONS=(
+{% for image_ref, regions in _image_region_map.items() %}
+    ["{{ image_ref }}"]="{{ regions | join(' ') }}"
+{% endfor %}
+  )
+
+  # Peer webhook URLs
+  declare -A PEER_URLS=(
+{% for region_name, region_url in _peer_urls.items() %}
+    ["{{ region_name }}"]="{{ region_url | regex_replace('/$', '') }}"
+{% endfor %}
+  )
+
+  if [[ -n "${IMAGE_REF}" && -n "${IMAGE_REGIONS[${IMAGE_REF}]+_}" ]]; then
+    for region in ${IMAGE_REGIONS[${IMAGE_REF}]}; do
+      if [[ -n "${PEER_URLS[${region}]+_}" ]]; then
+        PULL_URL="${PEER_URLS[${region}]}/webhook/pull-image"
+        PULL_BODY='{"image":"'"${IMAGE_REF}"'"}'
+        _log "Sending image-level pull signal to ${region} for ${IMAGE_REF}"
+        HMAC_SIG=$(printf '%s' "${PULL_BODY}" | openssl dgst -sha256 -hmac '{{ webhook.secret }}' -binary | xxd -p -c 256)
+        if curl -sf -X POST \
+          --connect-timeout 10 \
+          --max-time 30 \
+          -H "Content-Type: application/json" \
+          -H "X-Hub-Signature-256: sha256=${HMAC_SIG}" \
+          -H "X-Bay-Pull-Signal: 1" \
+          -d "${PULL_BODY}" \
+          "${PULL_URL}"; then
+          _log "Pull signal sent to ${region} for ${IMAGE_REF} successfully"
+        else
+          _log "WARNING: Pull signal to ${region} for ${IMAGE_REF} failed"
+          notify_build build.fanout_failed "$(printf '\u26a0\ufe0f <b>Pull fan-out failed</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Image:      <code>%s</code>\n\u25b8 Peer:       <code>%s</code>\n\u25b8 URL:        <code>%s</code>\n\u25b8 Time:       %s' \
+            "${HOSTNAME}" "${SERVICE}" "${IMAGE_REF}" "${region}" "${PULL_URL}" "$(format_timestamp)")"
+        fi
+      fi
+    done
+  fi
+{% endif %}
+
+  # Exit here — no container restart for remote strategy on build server.
+  exit 0
+fi
+
+# ── Local strategy: build and restart on this server ──
+
+# ── Acquire repo lock (serializes pull + build for shared repos) ──
+# Uses fd-based flock so variables set inside are available afterward.
+# When two services share a repo and both webhooks fire, the second
+# waits here until the first finishes building — then S2 dedup kicks
+# in and retags from the primary instead of rebuilding.
+exec 200>"${REPO_DIR}/.git/rebuild.lock"
+flock -x 200
+_log "Acquired repo lock for ${SERVICE}"
+
+# ── Pull latest code ──
+cd "${REPO_DIR}"
+eval "${PULL_CMD}"
+
+# ── Get new commit SHA ──
+SHA=$(git rev-parse --short HEAD)
+
+# ── Check if image already exists for this SHA ──
+if docker image inspect "${IMAGE_NAME}:${SHA}" &>/dev/null; then
+  _log "Image ${IMAGE_NAME}:${SHA} already exists, skipping build"
+elif [[ -n "${PRIMARY_IMAGE}" ]] && docker image inspect "${PRIMARY_IMAGE}:${SHA}" &>/dev/null; then
+  _log "Re-tagging from primary ${PRIMARY_IMAGE}:${SHA} (build dedup)"
+  docker tag "${PRIMARY_IMAGE}:${SHA}" "${IMAGE_NAME}:${SHA}"
+  docker tag "${IMAGE_NAME}:${SHA}" "${IMAGE_NAME}:latest"
+else
+  # Write build secrets to temp files
+  SECRET_FLAGS=""
+  for key in "${!BUILD_SECRETS[@]}"; do
+    TMPFILE="/tmp/build-secret-${SERVICE}-${key}"
+    printf '%s' "${BUILD_SECRETS[$key]}" > "${TMPFILE}"
+    chmod 600 "${TMPFILE}"
+    SECRET_FLAGS="${SECRET_FLAGS} --secret id=${key},src=${TMPFILE}"
+  done
+
+  # Re-tag current :latest as :previous (ignore if no :latest)
+  docker tag "${IMAGE_NAME}:latest" "${IMAGE_NAME}:previous" 2>/dev/null || true
+
+  # Build
+  _log "Building ${IMAGE_NAME}:${SHA} (CONTEXT=${CONTEXT} REPO_DIR=${REPO_DIR} PWD=$(pwd))"
+  ls -la "${CONTEXT}" 2>&1 | head -5 || _log "WARNING: build context '${CONTEXT}' not found"
+  BUILD_OUTPUT=$(mktemp)
+  if ! docker buildx build \
+    --builder {{ bay_buildx_builder }} \
+    --load \
+    -t "${IMAGE_NAME}:${SHA}" \
+    -f "${DOCKERFILE}" \
+    "${BUILD_ARGS[@]}" \
+    ${SECRET_FLAGS} \
+    "${CONTEXT}" 2>&1 | tee "${BUILD_OUTPUT}"; then
+    TAIL_OUTPUT=$(tail -c 500 "${BUILD_OUTPUT}")
+    _record_failure "${SHA}" "Build" "${TAIL_OUTPUT}"
+    rm -f "${BUILD_OUTPUT}"
+    # Clean up secret temp files on failure
+    for key in "${!BUILD_SECRETS[@]}"; do
+      rm -f "/tmp/build-secret-${SERVICE}-${key}"
+    done
+    # Disable ERR trap to avoid duplicate notification
+    trap - ERR
+    exit 1
+  fi
+  rm -f "${BUILD_OUTPUT}"
+
+  # Tag as :latest
+  docker tag "${IMAGE_NAME}:${SHA}" "${IMAGE_NAME}:latest"
+
+  # Clean up secret temp files
+  for key in "${!BUILD_SECRETS[@]}"; do
+    rm -f "/tmp/build-secret-${SERVICE}-${key}"
+  done
+fi
+
+# ── Release repo lock before restart ──
+exec 200>&-
+
+# ── Restart with new image ──
+# Stop and remove old container, then recreate directly.
+# Brief downtime is acceptable for developer-triggered rebuilds.
+# The next Ansible deploy will manage the container via container_lifecycle.
+docker stop "${SERVICE}" 2>/dev/null || true
+docker rm "${SERVICE}"   2>/dev/null || true
+
+{% for svc_name in git_deploy_services %}
+{% set svc = services[svc_name] %}
+{% set _tc = {
+  'traefik_docker_network': traefik_docker_network | default('services'),
+  'traefik_security_headers_enabled': traefik_security_headers_enabled | default(true),
+  'traefik_compress_enabled': traefik_compress_enabled | default(true),
+  'traefik_error_pages_enabled': traefik_error_pages_enabled | default(false),
+  'traefik_rate_limit_average': traefik_rate_limit_average | default(100),
+  'traefik_rate_limit_burst': traefik_rate_limit_burst | default(50),
+  'traefik_rate_limit_period': traefik_rate_limit_period | default('1s'),
+  'traefik_in_flight_req_amount': traefik_in_flight_req_amount | default(100),
+  'traefik_circuit_breaker_expression': traefik_circuit_breaker_expression | default('NetworkErrorRatio() > 0.5'),
+  'traefik_retry_attempts': traefik_retry_attempts | default(4),
+  'stack_name': stack_name | default('bay'),
+} %}
+{% if not loop.first %}el{% endif %}if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
+  _run_container() {
+    docker run -d \
+      --name "{{ svc_name }}" \
+      --hostname "{{ svc_name }}" \
+      --restart unless-stopped \
+{% if svc.network_mode is defined %}
+      --network "{{ svc.network_mode }}" \
+{% else %}
+      --network "{{ traefik_docker_network | default('services') }}" \
+{% endif %}
+{% if svc.env is defined or svc.database is defined %}
+      --env-file "${STACK_DIR}/env/{{ svc_name }}.env" \
+{% endif %}
+{{ publish_flags(svc) -}}
+{% for vol in svc.volumes | default([]) | bay_prefix_volumes(stack_name | default('bay')) %}
+      -v "{{ vol }}" \
+{% endfor %}
+{% if svc.mem_limit is defined %}
+      --memory "{{ svc.mem_limit }}" \
+{% endif %}
+{% for k, v in (svc | bay_traefik_labels(svc_name, _tc)).items() %}
+      -l '{{ k }}={{ v }}' \
+{% endfor %}
+      -l 'bay.managed=true' \
+      -l 'bay.stack={{ stack_name }}' \
+{% set _wt_labels = (svc['update'] | default('monitor')) | bay_watchtower_labels(watchtower_enabled | default(false)) %}
+{% for k, v in _wt_labels.items() %}
+      -l '{{ k }}={{ v }}' \
+{% endfor %}
+      "${IMAGE_NAME}:latest"{{ ' ' ~ svc.command if svc.command is defined else '' }}
+  }
+{% endfor %}
+{% if git_deploy_services | length > 0 %}
+fi
+{% endif %}
+
+_run_container
+
+if ! _wait_healthy "${SERVICE}" "${HEALTH_CHECK_TIMEOUT}"; then
+  _handle_rollback "${SERVICE}" "${IMAGE_NAME}:previous" "${IMAGE_NAME}:latest"
+fi
+
+_reset_cb
+
+# ── Fan-out: trigger alias rebuilds for dedup groups ──
+# When a primary service builds, its aliases just retag from the primary
+# image. Write CORR_ID into each alias trigger so log correlation survives
+# the fan-out (readers set CORR_ID=[unknown] from an empty trigger file).
+#
+# Alias trigger format: line 1 = CORR_ID only. We intentionally OMIT
+# line 2 (the pull signal) — the primary trigger drives the image build
+# on this host, and aliases piggyback on the same local image via the
+# dedup retag at the top of the script. Emitting "pull" here would route
+# aliases through the registry-pull path, which is wrong (nothing has
+# been pushed to the registry for local-strategy builds).
+#
+# Write atomically: temp file + mv -f so the path-unit watcher that fires
+# bay-build@<alias>.service never observes a partial/empty trigger.
+{% for svc_name in git_deploy_services %}
+{% if _dedup[svc_name].primary and _dedup[svc_name].group_size > 1 %}
+if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
+{% for other_svc in git_deploy_services %}
+{% if not _dedup[other_svc].primary and _dedup[other_svc].primary_svc == svc_name %}
+  _log "Fan-out: triggering alias {{ other_svc }}"
+  _alias_trigger="${STACK_DIR}/triggers/{{ other_svc }}.trigger"
+  _alias_tmp="${_alias_trigger}.tmp.$$"
+  printf '%s\n' "${CORR_ID}" > "${_alias_tmp}" && mv -f "${_alias_tmp}" "${_alias_trigger}"
+{% endif %}
+{% endfor %}
+fi
+{% endif %}
+{% endfor %}
+
+_log "Completed rebuild for ${SERVICE} at $(date -Iseconds)"
+notify_build deploy.webhook_complete "$(printf '\u2705 <b>Webhook deploy complete</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Commit:     <code>%s</code>\n\u25b8 Image:      <code>%s:latest</code>\n\u25b8 Duration:   %s\n\u25b8 Time:       %s' \
+  "${HOSTNAME}" "${SERVICE}" "${SHA}" "${IMAGE_NAME}" "$(format_duration)" "$(format_timestamp)")"
+exit 0

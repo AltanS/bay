@@ -1,0 +1,19 @@
+# CrowdSec Scenario: Debug Endpoint Fuzzing Detection
+# Managed by Ansible - do not edit manually
+
+type: leaky
+name: custom/debug-fuzzing
+description: "Detect debug/error endpoint probing"
+filter: |
+  evt.Meta.http_path contains '/debug' or
+  evt.Meta.http_args contains 'error=' or
+  evt.Meta.http_args contains 'stacktrace=' or
+  evt.Meta.http_args contains 'exception='
+groupby: evt.Meta.source_ip
+capacity: {{ crowdsec_scenario_debug_fuzzing_capacity }}
+leakspeed: {{ crowdsec_scenario_debug_fuzzing_leakspeed }}
+blackhole: {{ crowdsec_scenario_debug_fuzzing_blackhole }}
+labels:
+  service: http
+  type: scan
+  remediation: true

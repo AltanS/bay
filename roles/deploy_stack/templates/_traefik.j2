@@ -1,0 +1,83 @@
+  # ── Traefik Reverse Proxy ──────────────────────────────────────────────
+  traefik:
+    image: {{ traefik_image }}
+    container_name: {{ traefik_container_name }}
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - {{ traefik_config_path }}:/etc/traefik/traefik.yml:ro
+      - {{ traefik_acme_path }}:/etc/traefik/acme.json
+      - {{ traefik_access_log_path | dirname }}:/var/log/traefik
+{% if traefik_dns_challenge_enabled | default(false) %}
+      - {{ traefik_acme_dns_path }}:/etc/traefik/acme-dns.json
+      - {{ stack_dir }}/dynamic:/etc/traefik/dynamic:ro
+{% endif %}
+{{ macros.logging_block({'log_rotation': traefik_log_rotation | default(log_rotation_defaults)}) }}
+{% if traefik_dns_challenge_enabled | default(false) %}
+    env_file:
+      - {{ stack_dir }}/env/traefik.env
+{% endif %}
+    labels:
+      - "traefik.enable=true"
+      # Dummy port to prevent "port is missing" error (host network has no port mapping)
+      - "traefik.http.services.traefik-noop.loadbalancer.server.port=0"
+      # Exclude traefik from watchtower updates (image pinned by framework)
+      - "com.centurylinklabs.watchtower.enable=false"
+      # ── Global Middlewares ──
+      # VPN-only IP allowlist
+      - "traefik.http.middlewares.vpn-only.ipallowlist.sourcerange={{ vpn_allowed_ips | join(',') }}"
+{% if traefik_security_headers_enabled %}
+      # Security headers
+      - "traefik.http.middlewares.secure-headers.headers.stsSeconds={{ traefik_security_headers.sts_seconds }}"
+      - "traefik.http.middlewares.secure-headers.headers.stsIncludeSubdomains={{ traefik_security_headers.sts_include_subdomains | string | lower }}"
+      - "traefik.http.middlewares.secure-headers.headers.stsPreload={{ traefik_security_headers.sts_preload | string | lower }}"
+      - "traefik.http.middlewares.secure-headers.headers.contentTypeNosniff={{ traefik_security_headers.content_type_nosniff | string | lower }}"
+      - "traefik.http.middlewares.secure-headers.headers.frameDeny={{ traefik_security_headers.frame_deny | string | lower }}"
+      - "traefik.http.middlewares.secure-headers.headers.referrerPolicy={{ traefik_security_headers.referrer_policy }}"
+      - "traefik.http.middlewares.secure-headers.headers.permissionsPolicy={{ traefik_security_headers.permissions_policy }}"
+      - "traefik.http.middlewares.secure-headers.headers.browserXssFilter={{ traefik_security_headers.browser_xss_filter | string | lower }}"
+{% for header_name, header_value in traefik_security_headers.custom_response_headers.items() %}
+      - "traefik.http.middlewares.secure-headers.headers.customResponseHeaders.{{ header_name }}={{ header_value }}"
+{% endfor %}
+{% endif %}
+{% if traefik_compress_enabled %}
+      # Compression
+      - "traefik.http.middlewares.compress.compress=true"
+{% endif %}
+{% if traefik_error_pages_enabled %}
+      # Error pages
+      - "traefik.http.middlewares.errors.errors.service=error-pages@docker"
+      - "traefik.http.middlewares.errors.errors.status={{ traefik_error_pages_status }}"
+      - "traefik.http.middlewares.errors.errors.query={{ traefik_error_pages_query }}"
+{% endif %}
+      # ── Middleware Chains ──
+{% set public_chain_members = [] %}
+{% if traefik_security_headers_enabled %}{% set _ = public_chain_members.append('secure-headers') %}{% endif %}
+{% if traefik_compress_enabled %}{% set _ = public_chain_members.append('compress') %}{% endif %}
+{% if traefik_error_pages_enabled %}{% set _ = public_chain_members.append('errors') %}{% endif %}
+      - "traefik.http.middlewares.public-chain.chain.middlewares={{ public_chain_members | join(',') }}"
+{% set vpn_chain_members = [] %}
+{% if traefik_security_headers_enabled %}{% set _ = vpn_chain_members.append('secure-headers') %}{% endif %}
+{% if traefik_compress_enabled %}{% set _ = vpn_chain_members.append('compress') %}{% endif %}
+{% set _ = vpn_chain_members.append('vpn-only') %}
+{% if traefik_error_pages_enabled %}{% set _ = vpn_chain_members.append('errors') %}{% endif %}
+      - "traefik.http.middlewares.vpn-chain.chain.middlewares={{ vpn_chain_members | join(',') }}"
+
+{% if traefik_error_pages_enabled %}
+  # ── Error Pages ────────────────────────────────────────────────────────
+  error-pages:
+    image: {{ traefik_error_pages_image }}
+    container_name: error-pages
+    restart: unless-stopped
+    networks:
+      - {{ traefik_docker_network }}
+    environment:
+      - TEMPLATE_NAME={{ traefik_error_pages_template }}
+{{ macros.logging_block({}) }}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.services.error-pages.loadbalancer.server.port={{ traefik_error_pages_port }}"
+      - "com.centurylinklabs.watchtower.enable=false"
+
+{% endif %}

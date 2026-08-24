@@ -1,0 +1,36 @@
+{% if tailnet_identity_enabled | default(false) | bool and headscale_server | default(false) | bool %}
+  # ── tailnet-identity (ForwardAuth: client tailnet IP → device header) ──
+  # Published on loopback (127.0.0.1) ONLY so the host-networked Traefik can reach
+  # the ForwardAuth endpoint — NOT exposed to the tailnet/public. Joins the bridge
+  # network to reach headscale:8080 (api source). Resolves the real client tailnet
+  # IP (visible at infra before the identity-collapsing upstream hop) to its
+  # Headscale device name. See roles/tailnet_identity and docs/tailnet-ingress.md.
+  tailnet-identity:
+    image: {{ tailnet_identity_image }}
+    pull_policy: never
+    container_name: tailnet-identity
+    restart: unless-stopped
+    networks:
+      - {{ traefik_docker_network }}
+    ports:
+      - "127.0.0.1:{{ tailnet_identity_port | default(9100) }}:{{ tailnet_identity_port | default(9100) }}"
+    env_file:
+      - {{ stack_dir }}/tailnet-identity/tailnet-identity.env
+{% if tailnet_identity_source | default('api') == 'sqlite' %}
+    volumes:
+      # sqlite source ONLY. SECURITY: this read-only mount also exposes Headscale's
+      # private keys (noise/derp) and full DB to this header-parsing service. The
+      # default 'api' source mounts nothing — prefer it. See roles/tailnet_identity.
+      - /opt/headscale/data:/data:ro
+{% endif %}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:%s/healthz' % os.environ.get('LISTEN_PORT','9100'))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+{{ macros.logging_block({}) }}
+    labels:
+      - "traefik.enable=false"
+      - "com.centurylinklabs.watchtower.enable=false"
+
+{% endif %}

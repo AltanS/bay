@@ -1,0 +1,24 @@
+{% set config = {} %}
+{% for item in services | default({}) | dict2items | selectattr('value.build', 'defined') %}
+{% set svc_name = item.key %}
+{% set svc = item.value %}
+{% set build = svc.build %}
+{% set entry = {"branch": build.branch | default("main")} %}
+{% if build.paths is defined %}
+{% set paths = {} %}
+{% if build.paths.include is defined %}
+{% set _ = paths.update({"include": build.paths.include}) %}
+{% endif %}
+{% if build.paths.exclude is defined %}
+{% set _ = paths.update({"exclude": build.paths.exclude}) %}
+{% endif %}
+{% if paths %}
+{% set _ = entry.update({"paths": paths}) %}
+{% endif %}
+{% endif %}
+{% set _ = entry.update({"regions": svc.regions | default([])}) %}
+{% set _ = entry.update({"peer_urls": git_deploy_peer_webhook_urls | default({})}) %}
+{% set _ = entry.update({"strategy": build.strategy | default(git_deploy_build_strategy | default('local'))}) %}
+{% set _ = config.update({svc_name: entry}) %}
+{% endfor %}
+{{ config | to_nice_json }}

@@ -1,0 +1,26 @@
+{% if access_gateway | default('wireguard') == 'headscale' and headscale_server | default(true) | bool %}
+  # ── Headscale Coordination Server ─────────────────────────────────────
+  headscale:
+    image: headscale/headscale:{{ headscale_version }}
+    container_name: headscale
+    restart: unless-stopped
+    command: serve
+    volumes:
+      - /opt/headscale/config:/etc/headscale
+      - /opt/headscale/data:/var/lib/headscale
+    ports:
+      - "3478:3478/udp"
+    networks:
+      - {{ traefik_docker_network }}
+{{ macros.logging_block({}) }}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network={{ traefik_docker_network }}"
+      - "traefik.http.routers.headscale.rule=Host(`{{ headscale_domain }}`)"
+      - "traefik.http.routers.headscale.entrypoints=websecure"
+      - "traefik.http.routers.headscale.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.headscale.middlewares=public-chain"
+      - "traefik.http.services.headscale.loadbalancer.server.port=8080"
+      - "com.centurylinklabs.watchtower.enable=false"
+
+{% endif %}

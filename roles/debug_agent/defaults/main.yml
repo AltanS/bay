@@ -1,0 +1,54 @@
+---
+# Debug agent — opt-in read-only SSH access for AI agents (Claude Code)
+# Set debug_agent_enabled: true and provide SSH keys to activate.
+debug_agent_enabled: false
+
+# Username for the debug agent account
+debug_agent_user: debugbot
+
+# Supplementary groups (the user gets its own primary group automatically)
+debug_agent_groups:
+  - ssh-access
+  - adm
+  - docker
+
+# Direct SSH public keys
+debug_agent_keys: []
+
+# GitHub usernames — each is resolved to https://github.com/<user>.keys
+debug_agent_github_users: []
+
+# Create a ~/tmp scratch directory for the debug user
+debug_agent_create_tmp: true
+
+# Passwordless sudo for read-only commands (set to false to disable)
+debug_agent_sudoers: true
+debug_agent_sudoers_commands:
+  - /usr/bin/tail
+  - /usr/bin/head
+  - /usr/bin/cat
+  - /usr/bin/grep
+  - /usr/bin/wc
+  - /usr/bin/ls
+  - /usr/bin/journalctl
+  - /usr/bin/systemctl status
+  - /usr/bin/systemctl status *
+  - /usr/bin/cscli decisions list
+  - /usr/bin/cscli decisions list *
+  - /usr/bin/cscli alerts list
+  - /usr/bin/cscli alerts list *
+  - /usr/bin/cscli alerts inspect *
+  - /usr/bin/cscli metrics
+  - /usr/bin/cscli bouncers list
+  - /usr/bin/cscli machines list
+  - /usr/bin/cscli hub list
+  - /usr/bin/docker compose logs *
+  - /usr/bin/docker compose ps
+  - /usr/bin/docker compose ps *
+  - /usr/bin/docker compose top *
+  - /usr/bin/docker logs *
+  - /usr/bin/docker ps *
+  - /usr/bin/docker top *
+  - /usr/bin/docker inspect *
+  - /usr/bin/docker stats --no-stream
+  - /usr/sbin/nft list ruleset

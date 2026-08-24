@@ -1,0 +1,21 @@
+# {{ ansible_managed }}
+[Unit]
+# Recreate deleted infrastructure containers (Traefik, Watchtower) on boot.
+# Handles the Hetzner KVM + netplan hard reboot path where container objects
+# can be completely absent. Does NOT conflict with Docker's restart policy
+# (which handles stopped containers) — see bay-infra-ensure.sh for logic.
+Description=Recreate deleted Bay infrastructure containers
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+OOMScoreAdjust=-900
+ExecStartPre=-/usr/bin/docker network create {{ traefik_docker_network | default('services') }}
+ExecStart=/usr/local/bin/bay-infra-ensure.sh
+RemainAfterExit=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

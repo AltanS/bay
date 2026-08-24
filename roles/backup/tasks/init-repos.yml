@@ -1,0 +1,29 @@
+---
+# Initialize restic repositories for each backup-enabled accessory
+# Requires root privileges to run restic
+
+- name: Check if restic repository exists for {{ item.name }}
+  ansible.builtin.command:
+    cmd: "{{ backup_restic_bin }} cat config"
+  environment:
+    RESTIC_REPOSITORY: "{{ item.repo }}"
+    RESTIC_PASSWORD: "{{ backup_restic_password }}"
+    AWS_ACCESS_KEY_ID: "{{ backup_s3_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ backup_s3_secret_access_key }}"
+  register: _restic_repo_check
+  failed_when: false
+  changed_when: false
+  become: true
+  become_user: root
+
+- name: Initialize restic repository for {{ item.name }}
+  ansible.builtin.command:
+    cmd: "{{ backup_restic_bin }} init"
+  environment:
+    RESTIC_REPOSITORY: "{{ item.repo }}"
+    RESTIC_PASSWORD: "{{ backup_restic_password }}"
+    AWS_ACCESS_KEY_ID: "{{ backup_s3_access_key_id }}"
+    AWS_SECRET_ACCESS_KEY: "{{ backup_s3_secret_access_key }}"
+  when: _restic_repo_check.rc != 0
+  become: true
+  become_user: root

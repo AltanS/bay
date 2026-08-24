@@ -1,0 +1,14 @@
+---
+galaxy_info:
+  role_name: rename_migration
+  author: bay
+  description: >-
+    Remove the systemd units, scripts, state directories and container left
+    behind on hosts provisioned before the M108 rename. Every old-name literal
+    in this role is tagged `legacy-argo:`; deleting the role removes the last
+    host-facing reference to the pre-1.0 name, once every host has converged.
+    Still deployed as of v1.4.1; removal is deferred to a future major
+    release, not v1.1.
+  license: MIT
+  min_ansible_version: "2.14"
+dependencies: []

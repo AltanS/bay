@@ -1,0 +1,323 @@
+---
+# Bay - Service Deployment
+# Repeatable deployment: build/pull images, deploy compose stack with Traefik routing
+#
+# Three-phase deploy:
+#   Play 1 — Root bootstrap: create /opt/bay (needs root), set ownership, ACME cert
+#   Play 2 — App deploy: everything else runs as the app user
+#   Play 3 — System services: monitoring, cron jobs (needs root for systemd/logrotate)
+#
+# Usage:
+#   ansible-playbook deploy.yml -e target_host=production
+
+- name: Bootstrap stack directory
+  hosts: "{{ target_host }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - version.yml
+
+  roles:
+    # Runs before anything else touches the host: a pre-1.0 host still has
+    # pre-1.0 units running and an old webhook container holding the webhook
+    # port, both of which collide with what the roles below install. Tagged
+    # `always` so even a targeted `--tags deploy_stack` run cannot bring the
+    # new artifacts up alongside the old ones. No-op on a clean host.
+    - role: rename_migration
+      tags: [always, rename_migration]
+      when: rename_migration_enabled | default(true) | bool
+
+  tasks:
+    - name: Ensure stack directory exists
+      ansible.builtin.file:
+        path: "{{ stack_dir }}"
+        state: directory
+        mode: "0755"
+        owner: "{{ app_user }}"
+        group: docker
+
+    - name: Ensure config directory exists
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/config"
+        state: directory
+        mode: "0755"
+        owner: "{{ app_user }}"
+        group: docker
+
+    - name: Create ACME cert storage file
+      ansible.builtin.file:
+        path: "{{ traefik_acme_path | default(stack_dir + '/acme.json') }}"
+        state: touch
+        owner: root
+        group: root
+        mode: "0600"
+        modification_time: preserve
+        access_time: preserve
+
+# ── Bootstrap stack directory on the remote build server ──────────────────
+# When `build_server` is defined and is a different host than `target_host`,
+# the build_server is not in the deploy play's host list and never gets its
+# /opt/<stack> directory created. The git_deploy role's "Set up build server
+# for remote builds" block then fails when it tries to mkdir
+# /opt/<stack>/push-builds as app_user (no permission to create /opt/<stack>
+# itself). This play runs as root, delegates to the build_server, and is a
+# no-op when build_server is undefined or equals the target host (the main
+# bootstrap play already covers that case).
+- name: Bootstrap stack directory on build server
+  hosts: "{{ target_host }}"
+  become: true
+  gather_facts: false
+  run_once: true
+  vars_files:
+    - version.yml
+  tags: [always]
+
+  tasks:
+    - name: Ensure stack directory exists on build server
+      ansible.builtin.file:
+        path: "{{ stack_dir }}"
+        state: directory
+        mode: "0755"
+        owner: "{{ app_user }}"
+        group: docker
+      delegate_to: "{{ build_server | default(inventory_hostname) }}"
+      when: build_server is defined
+
+- name: Deploy services
+  hosts: "{{ target_host }}"
+  become: true
+  become_user: "{{ app_user }}"
+  gather_subset:
+    - "!all"
+  vars_files:
+    - version.yml
+
+  pre_tasks:
+    - name: Check framework version compatibility
+      ansible.builtin.assert:
+        that:
+          - bay_version is version(bay_minimum_version, '>=')
+        fail_msg: >-
+          Framework version {{ bay_version }} is older than the minimum
+          required version {{ bay_minimum_version }}.
+          Run 'make bay:install' to update the framework.
+        success_msg: "Framework version {{ bay_version }} meets minimum requirement (>= {{ bay_minimum_version }})"
+      when: bay_minimum_version is defined
+      tags: [always]
+
+    - name: Initialize active services
+      ansible.builtin.set_fact:
+        active_services: {}
+        active_accessories: {}
+      tags: [always]
+
+    - name: Compute active services for this host
+      ansible.builtin.set_fact:
+        active_services: "{{ active_services | combine({item.key: item.value}) }}"
+      loop: "{{ (services | default({})) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: >-
+        item.value.regions is not defined
+        or item.value.regions | length == 0
+        or (item.value.regions | intersect(group_names) | length > 0)
+      tags: [always]
+
+    - name: Compute active accessories for this host
+      ansible.builtin.set_fact:
+        active_accessories: "{{ active_accessories | combine({item.key: item.value}) }}"
+      loop: "{{ (accessories | default({})) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: >-
+        item.value.regions is not defined
+        or item.value.regions | length == 0
+        or (item.value.regions | intersect(group_names) | length > 0)
+      tags: [always]
+
+    - name: Build cross-region link entries for validation
+      ansible.builtin.set_fact:
+        _link_entries: "{{ _link_entries | default([]) + _entries }}"
+      loop: "{{ (services | default({})) | dict2items | selectattr('value.links', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.key }}"
+      vars:
+        _entries: >-
+          {{
+            item.value.links | dict2items
+            | map('combine', {'_source': item.key})
+            | list
+          }}
+      tags: [always]
+
+    - name: Validate cross-region link targets exist
+      ansible.builtin.fail:
+        msg: >-
+          Service '{{ item._source }}' links to '{{ item.key }}'
+          (region: {{ item.value.region | default('MISSING') }})
+          but '{{ item.key }}' is not found in services or accessories.
+      loop: "{{ _link_entries | default([]) }}"
+      loop_control:
+        label: "{{ item._source }} -> {{ item.key }}"
+      when: item.key not in ((services | default({})) | combine(accessories | default({})))
+      tags: [always]
+
+    # ── Cross-region link resolution ────────────────────────────────────
+
+    - name: Compute link targets for this region
+      ansible.builtin.set_fact:
+        link_targets: >-
+          {{
+            _link_entries | default([])
+            | selectattr('value.region', 'defined')
+            | selectattr('value.region', 'in', group_names)
+            | map(attribute='key')
+            | list
+            | unique
+          }}
+      tags: [always]
+
+    - name: Build link port map
+      # M87: resolve from the unfiltered services/accessories dict so cross-
+      # region link targets (which are absent from the local active_* sets)
+      # still resolve to their declared ports.internal. Pre-M87, _all was
+      # active_services|combine(active_accessories), which silently fell
+      # through to 0 for cross-region targets — see GH bay#7.
+      ansible.builtin.set_fact:
+        _link_port_map: "{{ _link_port_map | default({}) | combine({item.key: _port | trim}) }}"
+      loop: "{{ _link_entries | default([]) }}"
+      loop_control:
+        label: "{{ item.key }}"
+      vars:
+        _all: "{{ (services | default({})) | combine(accessories | default({})) }}"
+        _cfg: "{{ _all[item.key] | default({}) }}"
+        _port: >-
+          {% if _cfg.ports is defined and _cfg.ports.internal is defined %}{{ _cfg.ports.internal }}{% elif _cfg.port is defined %}{{ _cfg.port.split(':')[-2] }}{% else %}0{% endif %}
+      when: item.key in ((services | default({})) | combine(accessories | default({})))
+      tags: [always]
+
+    - name: Initialize link environment variables
+      ansible.builtin.set_fact:
+        _link_env: {}
+      tags: [always]
+
+    - name: Resolve link environment variables for services
+      ansible.builtin.set_fact:
+        _link_env: >-
+          {{
+            _link_env | combine({
+              item._source: (_link_env[item._source] | default({})) | combine(_vars)
+            })
+          }}
+      loop: "{{ _link_entries | default([]) }}"
+      loop_control:
+        label: "{{ item._source }} -> {{ item.key }}"
+      vars:
+        _prefix: "LINKS_{{ item.key | upper | replace('-', '_') }}"
+        _port: "{{ (_link_port_map | default({}))[item.key] | default('0') }}"
+        _vars: "{{ {_prefix ~ '_PORT': _port} }}"
+      tags: [always]
+
+    - name: Resolve link tailnet IPs from hostvars
+      ansible.builtin.set_fact:
+        _link_env: >-
+          {{
+            _link_env | combine({
+              item._source: (_link_env[item._source] | default({})) | combine(_ip_vars)
+            })
+          }}
+      loop: "{{ _link_entries | default([]) }}"
+      loop_control:
+        label: "{{ item._source }} -> {{ item.key }}"
+      vars:
+        _prefix: "LINKS_{{ item.key | upper | replace('-', '_') }}"
+        _region: "{{ item.value.region }}"
+        _region_host: "{{ groups[_region] | default([]) | first | default('') }}"
+        _remote_vars: "{{ hostvars[_region_host] | default({}) }}"
+        _remote_facts: "{{ _remote_vars.ansible_facts | default({}) }}"
+        _tailnet_ip: >-
+          {{ (_remote_vars | bay_gateway_bind_ip)
+             | default(
+               (_remote_facts.tailscale0 | default({})).ipv4.address
+               | default(
+                 _remote_facts.all_ipv4_addresses | default([])
+                 | select('match', '^100\\.')
+                 | first
+                 | default('')
+               , true)
+             , true)
+          }}
+        _port: "{{ (_link_port_map | default({}))[item.key] | default('0') }}"
+        _ip_vars: "{{ {_prefix ~ '_HOST': _tailnet_ip | trim, _prefix ~ '_URL': 'http://' ~ (_tailnet_ip | trim) ~ ':' ~ _port} }}"
+      when:
+        - _link_entries | default([]) | length > 0
+        - groups[item.value.region] | default([]) | length > 0
+      tags: [always]
+
+    - name: Fail if tailnet IP could not be resolved for any link
+      ansible.builtin.fail:
+        msg: >-
+          Cannot resolve tailnet IP for link target '{{ item.key }}'
+          in region '{{ item.value.region }}'.
+          Is the Headscale node registered? Check with 'tailscale status'.
+      loop: "{{ _link_entries | default([]) }}"
+      loop_control:
+        label: "{{ item._source }} -> {{ item.key }}"
+      vars:
+        _prefix: "LINKS_{{ item.key | upper | replace('-', '_') }}"
+        _host_var: "{{ _prefix }}_HOST"
+        _resolved_ip: "{{ (_link_env[item._source] | default({}))[_host_var] | default('') | trim }}"
+      when:
+        - _link_entries | default([]) | length > 0
+        - _resolved_ip == ''
+      tags: [always]
+
+  roles:
+    # ── App roles (always run) ──────────────────────────────────────
+    - { role: build_image, tags: [build] }
+    - { role: git_deploy, tags: [build, git_deploy] }
+    # ── Infrastructure roles (skipped without --rig) ────────────────
+    - { role: nftables, tags: [security, nftables], when: _rig_mode | default(true) | bool }
+    - { role: access_gateway, tags: [access_gateway, deploy_stack], when: _rig_mode | default(true) | bool }
+    - { role: traefik, tags: [traefik, deploy_stack], when: _rig_mode | default(true) | bool }
+    - { role: zot, tags: [zot, deploy_stack], when: (_rig_mode | default(true) | bool) and (zot_enabled | default(false) | bool) and (zot_server | default(false) | bool) }
+    - { role: tailnet_identity, tags: [tailnet_identity, deploy_stack], when: (_rig_mode | default(true) | bool) and (tailnet_identity_enabled | default(false) | bool) and (headscale_server | default(false) | bool) }
+    - { role: watchtower, tags: [watchtower, deploy_stack], when: _rig_mode | default(true) | bool }
+    # ── App roles (always run) ──────────────────────────────────────
+    # log_archive creates the per-service archive tree + installs
+    # systemd timers BEFORE deploy_stack, so the boundary sentinel
+    # task inside deploy_stack has live.log to append to on an already-
+    # provisioned host. No-op when no container has log_retention.
+    - { role: alert_policy, tags: [alert_policy, alerts] }
+    - { role: log_archive, tags: [deploy_stack, log_archive], become_user: root }
+    - { role: deploy_stack, tags: [deploy_stack] }
+    - { role: tailscale_register, tags: [tailscale_register], when: (_rig_mode | default(true) | bool) and (gateway_requires_node_registration | default(false) | bool) }
+    - { role: backup, tags: [backup], when: _rig_mode | default(true) | bool }
+
+  post_tasks:
+    - name: Write rig state file
+      ansible.builtin.copy:
+        dest: "{{ stack_dir }}/.rig-state"
+        content: >-
+          {{ {"rigged_at": ansible_facts['date_time']['iso8601'],
+              "bay_version": bay_version,
+              "consumer_ref": lookup('pipe', 'git -C ' + (playbook_dir | dirname) + ' rev-parse --short HEAD')}
+             | to_nice_json }}
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        mode: "0644"
+      when: (_rig_mode | default(true) | bool) and (_rig_write | default(true) | bool)
+      tags: [always]
+
+- name: Deploy system services
+  hosts: "{{ target_host }}"
+  gather_facts: false
+  become: true
+  vars_files:
+    - version.yml
+
+  roles:
+    - { role: crowdsec_allowlist, tags: [security, crowdsec, allowlist], when: _rig_mode | default(true) | bool }
+    - { role: docker_monitor, tags: [monitoring], when: _rig_mode | default(true) | bool }
+    - { role: cronjobs, tags: [cronjobs], when: _rig_mode | default(true) | bool }
+    - { role: boot_safety, tags: [boot_safety], when: _rig_mode | default(true) | bool }

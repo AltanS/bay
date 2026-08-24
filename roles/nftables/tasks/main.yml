@@ -1,0 +1,54 @@
+---
+# nftables firewall configuration
+# Manages firewall rules, integrates with CrowdSec bouncer
+
+- name: Install nftables
+  ansible.builtin.apt:
+    name: nftables
+    state: "{{ apt_package_state }}"
+  become: true
+  become_user: root
+
+- name: Remove ufw (avoid conflicts)
+  ansible.builtin.apt:
+    name: ufw
+    state: absent
+    purge: true
+  become: true
+  become_user: root
+
+- name: Ensure nftables.d directory exists
+  ansible.builtin.file:
+    path: /etc/nftables.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  become_user: root
+
+- name: Deploy nftables configuration
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: "{{ nftables_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload nftables
+  become: true
+  become_user: root
+
+- name: Enable and start nftables
+  ansible.builtin.systemd:
+    name: nftables
+    enabled: true
+    state: started
+  become: true
+  become_user: root
+
+- name: Check if Docker service exists
+  ansible.builtin.stat:
+    path: /usr/lib/systemd/system/docker.service
+  register: _nftables_docker_unit
+  become: true
+  become_user: root

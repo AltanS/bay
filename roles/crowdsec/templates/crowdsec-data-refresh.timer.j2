@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly Bay CrowdSec GeoLite2 hub data refresh
+
+[Timer]
+OnCalendar={{ crowdsec_data_refresh_calendar }}
+RandomizedDelaySec=3600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,41 @@
+---
+# Core project configuration
+# Values here apply to all environments
+
+# Default SSH user for provisioned servers (override with -u root for first run)
+ansible_user: bay-admin
+
+admin_user: bay-admin
+app_user: bay
+app_user_group: bay
+
+apt_cache_valid_time: 3600
+apt_package_state: present
+
+docker_users:
+  - "{{ '{{ admin_user }}' }}"
+  - "{{ '{{ app_user }}' }}"
+
+# Docker daemon configuration (written to /etc/docker/daemon.json by geerlingguy.docker)
+docker_daemon_options:
+  log-driver: json-file
+  log-opts:
+    max-size: "50m"
+    max-file: "3"
+
+# Ensure Compose V2 plugin is installed
+docker_install_compose_plugin: true
+docker_compose_package: docker-compose-plugin
+docker_compose_package_state: present
+
+# Project identity
+stack_name: {{ project_name }}
+stack_dir: "/opt/{{ '{{ stack_name }}' }}"
+docker_compose_file: "{{ '{{ stack_dir }}' }}/docker-compose.yml"
+
+# Docker registry (override per-environment if needed)
+docker_registry_org: ""
+
+# Minimum framework version required by this consumer (optional)
+# Deploys will fail fast if .bay/ has an older version than this
+# bay_minimum_version: "0.1.0"

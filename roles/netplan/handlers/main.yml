@@ -1,0 +1,5 @@
+---
+- name: Apply network configuration
+  ansible.builtin.command: netplan apply
+  changed_when: true
+  listen: Apply network configuration

@@ -1,0 +1,106 @@
+---
+# M85 (S6/S7/S8) — server-side reconciler. The sole container-deploy path.
+#
+# Runs inside the container_lifecycle role (so its role-local filters are
+# loaded) AFTER build_specs has produced container_specs. Renders a desired-
+# state bundle from container_specs + the env files deploy_stack rendered,
+# ships the self-contained bay_reconcile package, and runs it in ONE
+# server-side pass — replacing the per-container Ansible deploy round-trips.
+#
+# Safety: orphan removal follows the long-standing container_lifecycle_cleanup
+# knob (default true — parity with the retired cleanup.yml), overridable via
+# bay_reconciler_remove_orphans; --plan-only mode (bay_reconciler_plan_only)
+# reports the plan without mutating anything. A bundle that does not enumerate
+# every managed container must never remove one — see planner.plan(). The
+# bundle holds resolved env (secrets) at mode 0600 on
+# the host — same posture as the env files — and is removed after the run.
+
+- name: Slurp rendered env files for the bundle
+  ansible.builtin.slurp:
+    src: "{{ item.env_file }}"
+  loop: "{{ container_specs | selectattr('env_file', 'defined') | list }}"
+  loop_control:
+    loop_var: item
+    label: "{{ item.name }}"
+  register: _reconcile_env_slurps
+  no_log: true
+
+- name: Build reconcile bundle entries
+  ansible.builtin.set_fact:
+    _reconcile_entries: "{{ (_reconcile_entries | default([])) + [_entry] }}"
+  loop: "{{ container_specs }}"
+  loop_control:
+    loop_var: _spec
+    label: "{{ _spec.name }}"
+  vars:
+    _slurp_match: >-
+      {{ (_reconcile_env_slurps.results | default([]))
+         | selectattr('item.name', 'equalto', _spec.name) | list }}
+    _env_b64: "{{ (_slurp_match[0].content) if (_slurp_match | length > 0) else '' }}"
+    _env_file_dict: "{{ (_env_b64 | b64decode | parse_env_file) if _env_b64 else {} }}"
+    _env_digest: "{{ (_env_b64 | b64decode | hash('sha256')) if _env_b64 else '' }}"
+    _entry: >-
+      {{ {
+        'name': _spec.name,
+        'image': _spec.image,
+        'type': _spec.type,
+        'config_hash': (_spec | bay_spec_hash(env_digest=_env_digest)),
+        'env': (_env_file_dict | combine(_spec.env | default({}))),
+        'volumes': _spec.volumes | default([]),
+        'networks': _spec.networks | default([]),
+        'network_mode': _spec.network_mode | default(None),
+        'ports': _spec.ports | default([]),
+        'command': _spec.command | default(None),
+        'restart_policy': _spec.restart_policy | default('unless-stopped'),
+        'mem_limit': _spec.mem_limit | default(None),
+        'labels': _spec.labels | default({}),
+        'healthcheck': _spec.healthcheck | default(None),
+        'log_driver': _spec.log_driver | default(None),
+        'log_options': _spec.log_options | default(None),
+        'zero_downtime': _spec.zero_downtime | default(false),
+        'build': _spec.build | default(false)
+      } }}
+  no_log: true
+
+- name: Write reconcile bundle (resolved env — mode 0600, removed after run)
+  ansible.builtin.copy:
+    dest: "{{ stack_dir }}/.reconcile-bundle.json"
+    content: >-
+      {{ {
+        'stack': stack_name | default('bay'),
+        'managed_label': container_lifecycle_managed_label | default('bay.managed'),
+        'remove_orphans': bay_reconciler_remove_orphans | default(container_lifecycle_cleanup | default(true)) | bool,
+        'containers': _reconcile_entries | default([])
+      } | to_nice_json }}
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0600"
+  no_log: true
+
+- name: Ship the bay_reconcile package
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/src/bay_reconcile"
+    dest: "{{ stack_dir }}/.reconcile/"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0644"
+
+- name: Run server-side reconciler
+  ansible.builtin.command:
+    cmd: >-
+      python3 -m bay_reconcile {{ stack_dir }}/.reconcile-bundle.json
+      {{ '--plan-only' if (bay_reconciler_plan_only | default(false) | bool) else '' }}
+  environment:
+    PYTHONPATH: "{{ stack_dir }}/.reconcile"
+  register: _reconcile_result
+  changed_when: "(_reconcile_result.stdout | from_json).changed | default(false)"
+  failed_when: _reconcile_result.rc != 0
+
+- name: Reconciler report
+  ansible.builtin.debug:
+    msg: "{{ _reconcile_result.stdout | from_json }}"
+
+- name: Remove reconcile bundle (contains resolved env)
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/.reconcile-bundle.json"
+    state: absent

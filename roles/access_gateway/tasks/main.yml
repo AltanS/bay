@@ -1,0 +1,77 @@
+---
+# Access Gateway — VPN backend orchestration
+# Selects between wireguard (default) and headscale backends.
+# Sets vpn_allowed_ips fact before traefik/container_lifecycle consume it.
+
+# ── Headscale Backend ────────────────────────────────────────────────────
+
+# M85-S10: append the tailnet CIDR to the operator's allowlist — do NOT replace.
+# Replacing dropped the static vpn_allowed_ips entries (localhost, company VPN
+# IPs), and because this role runs on rig-included deploys but is skipped on
+# rig-skip / `--tags deploy_stack` runs, traefik's vpn-only IPAllowList
+# sourcerange flip-flopped (tailnet-only ↔ tailnet+static) → spurious traefik
+# recreations + an allowlist that didn't match group_vars. union() dedups, so
+# a consumer that already lists the tailnet CIDR (the common case) is unchanged.
+- name: Ensure headscale tailnet CIDR is allowlisted (append, not replace)
+  ansible.builtin.set_fact:
+    vpn_allowed_ips: >-
+      {{ (vpn_allowed_ips | default([]))
+         + (headscale_tailnet_cidr | reject('in', vpn_allowed_ips | default([])) | list) }}
+  when: access_gateway == 'headscale'
+  tags: [access_gateway]
+
+- name: Include headscale role
+  ansible.builtin.include_role:
+    name: headscale
+  when: access_gateway == 'headscale' and headscale_server | default(true) | bool
+  tags: [access_gateway, headscale]
+
+- name: Include tailscale_node role (install only)
+  ansible.builtin.include_role:
+    name: tailscale_node
+  when: access_gateway == 'headscale'
+  tags: [access_gateway]
+
+# NOTE: tailscale_register runs AFTER container_lifecycle (see deploy.yml)
+# because it needs the headscale container to be running.
+
+# ── WireGuard Backend ────────────────────────────────────────────────────
+
+- name: Pass through vpn_allowed_ips from group_vars
+  ansible.builtin.set_fact:
+    vpn_allowed_ips: "{{ vpn_allowed_ips }}"
+  when: access_gateway == 'wireguard'
+  tags: [access_gateway]
+
+# ── None Backend (M107) ──────────────────────────────────────────────────
+#
+# For an operator who wants a plain public deploy and runs no overlay network
+# at all. `gateway_enabled` is false and `gateway_bind_ip` is empty, so
+# traefik renders no tailnet entrypoint, zot writes no self-pin, and
+# crowdsec_allowlist has no overlay IP to exempt.
+#
+# `access: vpn` cannot mean anything here. An empty IPAllowList is
+# technically fail-closed, but silently serving nobody is a confusing way to
+# discover you have no VPN — so this fails loudly at deploy time instead.
+
+- name: Fail when access_gateway is none but services request access vpn
+  ansible.builtin.fail:
+    msg: >-
+      Service '{{ item.key }}' sets access: vpn, but access_gateway is 'none'
+      so there is no VPN to allow traffic from. Either choose an access
+      gateway backend (wireguard or headscale) in
+      group_vars/all/access_gateway.yml, or change this service to
+      access: public.
+  loop: "{{ (active_services | default({})) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - access_gateway == 'none'
+    - (item.value.access | default('public')) == 'vpn'
+  tags: [access_gateway]
+
+- name: Default vpn_allowed_ips to empty when no access gateway is configured
+  ansible.builtin.set_fact:
+    vpn_allowed_ips: "{{ vpn_allowed_ips | default([]) }}"
+  when: access_gateway == 'none'
+  tags: [access_gateway]

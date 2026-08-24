@@ -1,0 +1,17 @@
+---
+# VPN access control
+# IPs listed here can access services with access: vpn
+#
+# Used in two places:
+#   1. Traefik IPAllowList middleware (M6) - restricts HTTP routing
+#   2. CrowdSec whitelist (M3) - prevents blocking trusted IPs
+#
+# Accepts individual IPs and CIDR ranges.
+
+vpn_allowed_ips:
+  # Localhost (health checks from host)
+  - 127.0.0.1
+  - ::1
+  # Add your VPN exit IPs / trusted IPs below
+  # - 203.0.113.0/24
+  # - 198.51.100.50

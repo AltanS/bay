@@ -1,0 +1,46 @@
+---
+# Tailscale node — install only
+# Installs the Tailscale daemon and enables IP forwarding.
+# Registration with Headscale happens in tailscale_register (post-compose).
+
+# -- IP Forwarding --------------------------------------------------------------
+
+- name: Enable IP forwarding
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: "1"
+    sysctl_set: true
+    reload: true
+  become: true
+  become_user: root
+  loop:
+    - net.ipv4.ip_forward
+    - net.ipv6.conf.all.forwarding
+  tags: [tailscale_node]
+
+# -- Package Installation -------------------------------------------------------
+
+- name: Add Tailscale apt signing key
+  ansible.builtin.get_url:
+    url: "https://pkgs.tailscale.com/stable/ubuntu/{{ ansible_facts['distribution_release'] }}.noarmor.gpg"
+    dest: /usr/share/keyrings/tailscale-archive-keyring.gpg
+    mode: "0644"
+  become: true
+  become_user: root
+  tags: [tailscale_node]
+
+- name: Add Tailscale apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/ubuntu {{ ansible_facts['distribution_release'] }} main"
+  become: true
+  become_user: root
+  tags: [tailscale_node]
+
+- name: Install tailscale
+  ansible.builtin.apt:
+    name: tailscale
+    state: present
+    update_cache: true
+  become: true
+  become_user: root
+  tags: [tailscale_node]

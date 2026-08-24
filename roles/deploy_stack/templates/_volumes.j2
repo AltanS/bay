@@ -1,0 +1,31 @@
+{% set all_named_volumes = [] %}
+{% for name, acc in active_accessories.items() %}
+{% if acc.volumes is defined %}
+{% for vol in acc.volumes %}
+{% if ':' in vol and not vol.startswith('/') and not vol.startswith('.') %}
+{% set vol_name = vol.split(':')[0] %}
+{% if vol_name not in all_named_volumes %}
+{% set _ = all_named_volumes.append(vol_name) %}
+{% endif %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% for name, svc in active_services.items() %}
+{% if svc.volumes is defined %}
+{% for vol in svc.volumes %}
+{% if ':' in vol and not vol.startswith('/') and not vol.startswith('.') and not vol.startswith('{') %}
+{% set vol_name = vol.split(':')[0] %}
+{% if vol_name not in all_named_volumes %}
+{% set _ = all_named_volumes.append(vol_name) %}
+{% endif %}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% if all_named_volumes | length > 0 %}
+volumes:
+{% for vol in all_named_volumes %}
+  {{ vol }}:
+{% endfor %}
+{% endif %}

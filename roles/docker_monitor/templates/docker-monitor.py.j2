@@ -1,0 +1,344 @@
+#!/usr/bin/env python3
+# {{ ansible_managed }}
+# Docker container monitor
+# Watches Docker events and sends Telegram alerts for:
+#   - Container crashes (non-zero exit code)
+#   - Container recovery (start after crash)
+#   - Restart loops (too many starts within a time window)
+#   - Health check failures
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from collections import defaultdict
+from datetime import datetime
+
+TELEGRAM_BOT_TOKEN = "{{ docker_monitor_telegram_bot_token }}"
+TELEGRAM_CHAT_ID = "{{ docker_monitor_telegram_chat_id }}"
+HOSTNAME = "{% include '_host_label.j2' %}"
+
+ALERT_CONTAINER_CRASH = {{ docker_monitor_alert_container_crash | bool | string }}
+ALERT_RESTART_LOOP = {{ docker_monitor_alert_restart_loop | bool | string }}
+ALERT_HEALTHCHECK_FAILURE = {{ docker_monitor_alert_healthcheck_failure | bool | string }}
+
+RESTART_LOOP_THRESHOLD = {{ docker_monitor_restart_loop_threshold }}
+RESTART_LOOP_WINDOW = {{ docker_monitor_restart_loop_window }}
+
+IGNORE_CONTAINERS = {{ docker_monitor_ignore_containers | to_json }}
+
+STATE_FILE = "{{ stack_dir | default('/opt/bay') }}/.container-crashes.json"
+MSG_HEADER = {{ docker_monitor_alert_header | to_json }}
+MSG_FOOTER = {{ docker_monitor_alert_footer | to_json }}
+
+ALERT_WEBHOOK_URL = {{ alert_webhook_url | default('') | to_json }}
+ALERT_WEBHOOK_FORMAT = {{ alert_webhook_format | default('campfire') | to_json }}
+ALERT_WEBHOOK_TIMEOUT = {{ alert_webhook_timeout | default(10) }}
+ALERT_WEBHOOK_MAX_CHARS = {{ alert_webhook_max_chars | default(3500) }}
+
+# The generic webhook sink, shared verbatim with the webhook receiver and the
+# control-node deploy alerts. See roles/alert_channel/files/bay_alert.py.
+{% include 'bay_alert.py' %}
+
+# In-memory state
+restart_timestamps = defaultdict(list)  # container_name -> [timestamps]
+health_cooldowns = {}  # container_name -> last_alert_timestamp
+crash_state = {}  # container_name -> {"exit_code": int, "crashed_at": str, "crash_count": int}
+HEALTH_COOLDOWN_SECONDS = 300
+
+
+def send_alert(alert_id, message):
+    """Fan one alert out to every configured sink.
+
+    `alert_id` is the alert's registry ID from alerts/registry.yml. It must be
+    passed as a literal string at every call site — tests/test_alert_registry.py
+    enforces that, because the registry drift check scans for literals and a
+    variable would make it under-report silently. Accepted and unused here;
+    M106-S3 routes on it.
+
+    Both sends are best-effort: a monitor that dies on a failed alert stops
+    monitoring.
+    """
+    del alert_id
+    body = MSG_HEADER + message + MSG_FOOTER
+
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": body,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=10)
+        except Exception as e:
+            print(f"Failed to send Telegram alert: {e}", file=sys.stderr)
+
+    bay_send_webhook(
+        body,
+        ALERT_WEBHOOK_URL,
+        ALERT_WEBHOOK_FORMAT,
+        timeout=ALERT_WEBHOOK_TIMEOUT,
+        max_chars=ALERT_WEBHOOK_MAX_CHARS,
+        on_error=lambda reason: print(
+            f"Failed to send webhook alert: {reason}", file=sys.stderr
+        ),
+    )
+
+
+def is_ignored(container_name):
+    """Check if a container should be ignored (suffix match)."""
+    for pattern in IGNORE_CONTAINERS:
+        if container_name.endswith(pattern):
+            return True
+    return False
+
+
+def load_crash_state():
+    """Load crash state from disk. Returns empty dict on missing/corrupt file."""
+    try:
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def save_crash_state():
+    """Write crash state atomically (tmp + rename) to avoid corruption."""
+    state_dir = os.path.dirname(STATE_FILE)
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=state_dir, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(crash_state, f, indent=2)
+            os.replace(tmp_path, STATE_FILE)
+        except BaseException:
+            os.unlink(tmp_path)
+            raise
+    except OSError as e:
+        print(f"Failed to write state file: {e}", file=sys.stderr)
+
+
+def format_timestamp():
+    """Format current time as human-readable UTC string."""
+    return datetime.utcnow().strftime("%b %d, %H:%M UTC")
+
+
+def format_duration(seconds):
+    """Format seconds into a human-readable duration string."""
+    seconds = int(seconds)
+    if seconds < 0:
+        seconds = 0
+
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if seconds or not parts:
+        parts.append(f"{seconds}s")
+
+    return " ".join(parts)
+
+
+def handle_die(event):
+    """Handle container die event (crash detection + state tracking)."""
+    attrs = event.get("Actor", {}).get("Attributes", {})
+    container_name = attrs.get("name", "unknown")
+    exit_code = attrs.get("exitCode", "?")
+
+    if is_ignored(container_name):
+        return
+
+    # Exit 0 = clean shutdown, 143 = SIGTERM (128+15), 137 = SIGKILL (128+9)
+    # Both 143 and 137 are normal during docker stop (SIGTERM then SIGKILL after timeout)
+    if str(exit_code) in ("0", "137", "143"):
+        return
+
+    # Track crash in state file
+    now_iso = datetime.now().isoformat()
+    prev = crash_state.get(container_name)
+    crash_count = (prev["crash_count"] + 1) if prev else 1
+    crash_state[container_name] = {
+        "exit_code": int(exit_code) if str(exit_code).isdigit() else exit_code,
+        "crashed_at": now_iso,
+        "crash_count": crash_count,
+    }
+    save_crash_state()
+
+    if not ALERT_CONTAINER_CRASH:
+        return
+
+    print(
+        f"[{datetime.now().isoformat()}] Container died: {container_name} (exit {exit_code})",
+        flush=True,
+    )
+    send_alert(
+        "container.crash",
+        f"\U0001f6a8 <b>Container crash</b>\n\n"
+        f"\u25b8 Host:       <code>{HOSTNAME}</code>\n"
+        f"\u25b8 Container:  <code>{container_name}</code>\n"
+        f"\u25b8 Exit code:  <code>{exit_code}</code>\n"
+        f"\u25b8 Time:       {format_timestamp()}"
+    )
+
+
+def handle_start(event):
+    """Handle container start event (recovery detection + restart loop detection)."""
+    attrs = event.get("Actor", {}).get("Attributes", {})
+    container_name = attrs.get("name", "unknown")
+
+    if is_ignored(container_name):
+        return
+
+    # --- Recovery detection ---
+    if container_name in crash_state:
+        crash_info = crash_state.pop(container_name)
+        save_crash_state()
+
+        try:
+            crashed_at = datetime.fromisoformat(crash_info["crashed_at"])
+            duration_secs = (datetime.now() - crashed_at).total_seconds()
+            duration_str = format_duration(duration_secs)
+        except (KeyError, ValueError):
+            duration_str = "unknown"
+
+        now_iso = datetime.now().isoformat()
+        print(
+            f"[{now_iso}] Container recovered: {container_name} (was crashed for {duration_str})",
+            flush=True,
+        )
+        send_alert(
+            "container.recovered",
+            f"\u2705 <b>Container recovered</b>\n\n"
+            f"\u25b8 Host:       <code>{HOSTNAME}</code>\n"
+            f"\u25b8 Container:  <code>{container_name}</code>\n"
+            f"\u25b8 Downtime:   <code>{duration_str}</code>\n"
+            f"\u25b8 Time:       {format_timestamp()}"
+        )
+
+    # --- Restart loop detection ---
+    if not ALERT_RESTART_LOOP:
+        return
+
+    now = time.monotonic()
+    timestamps = restart_timestamps[container_name]
+    timestamps.append(now)
+
+    # Prune timestamps outside the window
+    cutoff = now - RESTART_LOOP_WINDOW
+    restart_timestamps[container_name] = [t for t in timestamps if t > cutoff]
+
+    if len(restart_timestamps[container_name]) >= RESTART_LOOP_THRESHOLD:
+        count = len(restart_timestamps[container_name])
+        print(
+            f"[{datetime.now().isoformat()}] Restart loop: {container_name} ({count} starts in {RESTART_LOOP_WINDOW}s)",
+            flush=True,
+        )
+        send_alert(
+            "container.restart_loop",
+            f"\U0001f504 <b>Restart loop detected</b>\n\n"
+            f"\u25b8 Host:       <code>{HOSTNAME}</code>\n"
+            f"\u25b8 Container:  <code>{container_name}</code>\n"
+            f"\u25b8 Restarts:   <code>{count}</code> in {RESTART_LOOP_WINDOW}s\n"
+            f"\u25b8 Time:       {format_timestamp()}"
+        )
+        # Reset to avoid repeated alerts for the same loop
+        restart_timestamps[container_name] = []
+
+
+def handle_health_status(event):
+    """Handle health_status event (health check failure alerts)."""
+    if not ALERT_HEALTHCHECK_FAILURE:
+        return
+
+    attrs = event.get("Actor", {}).get("Attributes", {})
+    container_name = attrs.get("name", "unknown")
+    health_status = event.get("Action", "")
+
+    if is_ignored(container_name):
+        return
+
+    # Only alert on unhealthy status
+    if "unhealthy" not in health_status:
+        return
+
+    # Cooldown: suppress repeated alerts for the same container
+    now = time.monotonic()
+    last_alert = health_cooldowns.get(container_name, 0)
+    if now - last_alert < HEALTH_COOLDOWN_SECONDS:
+        return
+
+    health_cooldowns[container_name] = now
+
+    print(
+        f"[{datetime.now().isoformat()}] Health check failed: {container_name}",
+        flush=True,
+    )
+    send_alert(
+        "container.health_check_failed",
+        f"\U0001f3e5 <b>Health check failed</b>\n\n"
+        f"\u25b8 Host:       <code>{HOSTNAME}</code>\n"
+        f"\u25b8 Container:  <code>{container_name}</code>\n"
+        f"\u25b8 Time:       {format_timestamp()}"
+    )
+
+
+def main():
+    """Watch Docker events and dispatch to handlers."""
+    global crash_state
+    crash_state = load_crash_state()
+    if crash_state:
+        print(
+            f"[{datetime.now().isoformat()}] Loaded {len(crash_state)} crashed container(s) from state file",
+            flush=True,
+        )
+
+    proc = subprocess.Popen(
+        [
+            "docker", "events",
+            "--format", "{{ '{{json .}}' }}",
+            "--filter", "event=die",
+            "--filter", "event=start",
+            "--filter", "event=health_status",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+
+    print(f"[{datetime.now().isoformat()}] Docker monitor started", flush=True)
+
+    for line in proc.stdout:
+        try:
+            event = json.loads(line.strip())
+        except json.JSONDecodeError:
+            continue
+
+        action = event.get("Action", "")
+
+        if action == "die":
+            handle_die(event)
+        elif action == "start":
+            handle_start(event)
+        elif action.startswith("health_status"):
+            handle_health_status(event)
+
+
+if __name__ == "__main__":
+    main()

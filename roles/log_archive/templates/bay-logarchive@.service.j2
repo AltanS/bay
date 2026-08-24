@@ -1,0 +1,28 @@
+[Unit]
+Description=Bay per-service log archiver ({{ '%i' }})
+Documentation=https://github.com/AltanS/bay/blob/main/docs/adr/002-log-archival.md
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+UMask=0027
+ExecStart={{ log_archive_bin_dir }}/archive-logs.sh {{ '%i' }} {{ stack_dir }}
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=30
+
+# Mildly harden — archiver only needs to read docker logs and write
+# under {{ stack_dir }}/logs/. No network egress, no tmpfs outside
+# /run, read-only /usr and /etc.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ stack_dir }}/logs
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

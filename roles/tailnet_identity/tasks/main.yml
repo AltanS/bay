@@ -1,0 +1,51 @@
+---
+# tailnet-identity ForwardAuth sidecar — build the local image and render its
+# config. The container itself is declared in deploy_stack/_tailnet_identity.j2
+# and brought up by the deploy_stack compose run. This role only runs on the
+# control/ingress host (gated in deploy.yml: tailnet_identity_enabled +
+# headscale_server).
+
+- name: Create tailnet-identity stack directory
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/tailnet-identity/build"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0755"
+  tags: [tailnet_identity]
+
+- name: Sync tailnet-identity build context
+  ansible.builtin.copy:
+    src: tailnet-identity/
+    dest: "{{ stack_dir }}/tailnet-identity/build/"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0644"
+  register: _tailnet_identity_files
+  tags: [tailnet_identity]
+
+- name: Build tailnet-identity image
+  ansible.builtin.command:
+    cmd: "docker build -t {{ tailnet_identity_image }} {{ stack_dir }}/tailnet-identity/build/"
+  when: _tailnet_identity_files.changed
+  changed_when: true
+  tags: [tailnet_identity]
+
+- name: Render tailnet-identity env file
+  ansible.builtin.template:
+    src: tailnet-identity.env.j2
+    dest: "{{ stack_dir }}/tailnet-identity/tailnet-identity.env"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0600"
+  tags: [tailnet_identity]
+
+- name: Assert API key present when source is the Headscale API
+  ansible.builtin.assert:
+    that:
+      - tailnet_identity_api_key | length > 0
+    fail_msg: >-
+      tailnet_identity_source is 'api' but tailnet_identity_api_key is empty.
+      Provide the Headscale API key via vault, or use the default 'sqlite' source.
+  when: tailnet_identity_source == 'api'
+  tags: [tailnet_identity]

@@ -1,0 +1,70 @@
+---
+# Common system baseline
+# Installs essential packages, configures timezone, locale
+
+- name: Install essential packages
+  ansible.builtin.apt:
+    name: "{{ common_packages }}"
+    state: "{{ apt_package_state }}"
+  become: true
+
+- name: Set timezone
+  community.general.timezone:
+    name: "{{ common_timezone }}"
+  become: true
+
+- name: Ensure locale is generated
+  community.general.locale_gen:
+    name: "{{ common_locale }}"
+    state: present
+  become: true
+
+- name: Set default locale
+  ansible.builtin.copy:
+    dest: /etc/default/locale
+    content: |
+      LANG={{ common_locale }}
+      LC_ALL={{ common_locale }}
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Ensure unattended-upgrades is installed
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: "{{ apt_package_state }}"
+  become: true
+
+- name: Enable automatic security updates
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Ensure journald drop-in directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/journald.conf.d
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Cap systemd-journald disk use
+  ansible.builtin.copy:
+    dest: /etc/systemd/journald.conf.d/99-bay-max-use.conf
+    content: |
+      # Managed by Ansible (bay common role). See journald_max_use default.
+      [Journal]
+      SystemMaxUse={{ journald_max_use }}
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  notify: restart journald

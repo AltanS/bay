@@ -1,0 +1,33 @@
+---
+# Render the alert override file. Included by BOTH provision.yml and deploy.yml
+# so a mute cannot be stranded in the playbook an operator did not run — the
+# GH#33 failure mode.
+#
+# become_user: root is explicit on every task. deploy.yml's play runs with
+# `become: true` + `become_user: "{{ app_user }}"`, and a task-level
+# `become: true` does NOT reset the user — it stays app_user, which cannot
+# write /etc. Setting it here rather than at the role invocation keeps the role
+# correct from any playbook, present or future.
+
+- name: Ensure bay config directory exists
+  ansible.builtin.file:
+    path: "{{ alert_policy_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  become_user: root
+
+- name: Render alert policy overrides
+  # Ansible's template module writes to a temp file and renames it into place,
+  # so a reader never observes a partial file. Readers still tolerate one:
+  # a truncated file parses to no mutes, which fails open.
+  ansible.builtin.template:
+    src: alert-overrides.j2
+    dest: "{{ alert_policy_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  become_user: root

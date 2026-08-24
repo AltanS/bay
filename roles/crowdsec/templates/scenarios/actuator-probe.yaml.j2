@@ -1,0 +1,15 @@
+# CrowdSec Scenario: Spring Boot Actuator Probe Detection
+# Managed by Ansible - do not edit manually
+
+type: leaky
+name: custom/actuator-probe
+description: "Detect Spring Boot actuator endpoint probing"
+filter: "evt.Meta.http_path contains '/actuator' or evt.Meta.http_path contains '/heapdump'"
+groupby: evt.Meta.source_ip
+capacity: {{ crowdsec_scenario_actuator_probe_capacity }}
+leakspeed: {{ crowdsec_scenario_actuator_probe_leakspeed }}
+blackhole: {{ crowdsec_scenario_actuator_probe_blackhole }}
+labels:
+  service: http
+  type: scan
+  remediation: true

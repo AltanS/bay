@@ -1,0 +1,56 @@
+# CrowdSec Scenario: Open Redirect Probe Detection
+# Managed by Ansible - do not edit manually
+#
+# Detects redirect parameter fuzzing — bots trying hundreds of redirect-like
+# parameter names with external URL targets. Requires BOTH conditions:
+#   1. A redirect-like parameter name (redirect=, goto=, next=, etc.)
+#   2. An external URL value (http://, https://, or URL-encoded equivalents)
+#
+# WordPress internal redirects (?redirect_to=/my-account/) do NOT match
+# because they lack an external URL scheme in the value.
+#
+# Uses distinct counting on http_args so only unique query string combinations
+# fill the bucket. Normal users reuse the same redirect param; scanners try
+# dozens of different param names with external URLs.
+
+type: leaky
+name: custom/open-redirect-probe
+description: "Detect redirect parameter fuzzing with external URL targets"
+filter: |
+  evt.Meta.service == 'http' and
+  evt.Parsed.static_ressource == 'false' and (
+    evt.Meta.http_args contains 'redirect=' or
+    evt.Meta.http_args contains 'redirect_to=' or
+    evt.Meta.http_args contains 'redirect_uri=' or
+    evt.Meta.http_args contains 'redirect_url=' or
+    evt.Meta.http_args contains 'redir=' or
+    evt.Meta.http_args contains 'goto=' or
+    evt.Meta.http_args contains 'next=' or
+    evt.Meta.http_args contains 'returnTo=' or
+    evt.Meta.http_args contains 'return_to=' or
+    evt.Meta.http_args contains 'return_url=' or
+    evt.Meta.http_args contains 'continue=' or
+    evt.Meta.http_args contains 'dest=' or
+    evt.Meta.http_args contains 'destination=' or
+    evt.Meta.http_args contains 'checkout_url=' or
+    evt.Meta.http_args contains 'login_url=' or
+    evt.Meta.http_args contains 'logout_url='
+  ) and (
+    evt.Meta.http_args contains 'http%3A' or
+    evt.Meta.http_args contains 'http%3a' or
+    evt.Meta.http_args contains 'https%3A' or
+    evt.Meta.http_args contains 'https%3a' or
+    evt.Meta.http_args contains 'http://' or
+    evt.Meta.http_args contains 'https://' or
+    evt.Meta.http_args contains '%2F%2F' or
+    evt.Meta.http_args contains '%2f%2f'
+  )
+groupby: evt.Meta.source_ip
+distinct: "evt.Meta.http_args"
+capacity: {{ crowdsec_scenario_open_redirect_probe_capacity }}
+leakspeed: {{ crowdsec_scenario_open_redirect_probe_leakspeed }}
+blackhole: {{ crowdsec_scenario_open_redirect_probe_blackhole }}
+labels:
+  service: http
+  type: scan
+  remediation: true

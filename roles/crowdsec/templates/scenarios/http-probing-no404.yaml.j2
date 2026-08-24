@@ -1,0 +1,26 @@
+# Modified HTTP Probing Scenario (excludes 404)
+# Managed by Ansible - do not edit manually
+#
+# This is a local override of crowdsecurity/http-probing that excludes 404 responses.
+# Useful for WordPress/REST APIs where 404 means "resource not found" (normal behavior).
+# Original: https://github.com/crowdsecurity/hub/blob/master/scenarios/crowdsecurity/http-probing.yaml
+
+type: leaky
+name: crowdsecurity/http-probing
+description: "Detect site scanning/probing from a single ip (404 excluded for REST API compatibility)"
+filter: "evt.Meta.service == 'http' && evt.Meta.http_status in ['403', '400'] && evt.Parsed.static_ressource == 'false'"
+groupby: "evt.Meta.source_ip + '/' + evt.Parsed.target_fqdn"
+distinct: "evt.Meta.http_path"
+capacity: 10
+reprocess: true
+leakspeed: "10s"
+blackhole: 5m
+labels:
+  remediation: true
+  classification:
+    - attack.T1595
+  behavior: "http:scan"
+  label: "HTTP Probing"
+  spoofable: 0
+  service: http
+  confidence: 1

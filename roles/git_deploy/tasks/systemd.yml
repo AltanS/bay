@@ -1,0 +1,116 @@
+---
+# Deploy systemd path and service units for build triggers
+
+- name: Ensure build state directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/state"
+    state: directory
+    owner: "{{ app_user }}"
+    mode: "0755"
+
+- name: Deploy rebuild script
+  ansible.builtin.template:
+    src: rebuild.sh.j2
+    dest: "{{ stack_dir }}/bin/rebuild.sh"
+    owner: "{{ app_user }}"
+    mode: "0700"
+
+- name: Ensure systemd unit directory exists
+  ansible.builtin.file:
+    path: /etc/systemd/system
+    state: directory
+    mode: "0755"
+  become_user: root
+
+- name: Deploy systemd path units
+  ansible.builtin.template:
+    src: bay-build@.path.j2
+    dest: "/etc/systemd/system/bay-build@.path"
+    mode: "0644"
+  become_user: root
+  notify: reload systemd
+
+- name: Deploy systemd service units
+  ansible.builtin.template:
+    src: bay-build@.service.j2
+    dest: "/etc/systemd/system/bay-build@.service"
+    mode: "0644"
+  become_user: root
+  notify: reload systemd
+
+- name: Deploy systemd alert units
+  ansible.builtin.template:
+    src: bay-build-alert@.service.j2
+    dest: "/etc/systemd/system/bay-build-alert@.service"
+    mode: "0644"
+  become_user: root
+  notify: reload systemd
+
+- name: Deploy build alert script
+  ansible.builtin.template:
+    src: build-alert.sh.j2
+    dest: "{{ stack_dir }}/bin/build-alert.sh"
+    owner: "{{ app_user }}"
+    mode: "0700"
+
+- name: Enable and start path units for build services
+  ansible.builtin.systemd:
+    name: "bay-build@{{ item }}.path"
+    state: started
+    enabled: true
+    daemon_reload: true
+  become_user: root
+  loop: "{{ git_deploy_rebuild_services }}"
+  loop_control:
+    label: "{{ item }}"
+
+# ── Trigger stall watchdog (M78-S7) ───────────────────────────────────────
+# Scans ${stack_dir}/triggers/ every 5 minutes for *.trigger files older
+# than git_deploy_stall_watchdog_threshold. If any are found, emits a
+# single Telegram alert so operators are notified when the path unit or
+# the build service itself has silently wedged.
+
+- name: Deploy trigger stall watchdog script
+  ansible.builtin.template:
+    src: bay-trigger-watchdog.sh.j2
+    dest: "{{ stack_dir }}/bin/bay-trigger-watchdog.sh"
+    owner: "{{ app_user }}"
+    mode: "0750"
+  when: git_deploy_stall_watchdog_enabled | default(true) | bool
+
+- name: Deploy trigger stall watchdog service unit
+  ansible.builtin.template:
+    src: bay-trigger-watchdog.service.j2
+    dest: /etc/systemd/system/bay-trigger-watchdog.service
+    mode: "0644"
+  become_user: root
+  notify: reload systemd
+  when: git_deploy_stall_watchdog_enabled | default(true) | bool
+
+- name: Deploy trigger stall watchdog timer unit
+  ansible.builtin.template:
+    src: bay-trigger-watchdog.timer.j2
+    dest: /etc/systemd/system/bay-trigger-watchdog.timer
+    mode: "0644"
+  become_user: root
+  notify: reload systemd
+  when: git_deploy_stall_watchdog_enabled | default(true) | bool
+
+- name: Enable and start trigger stall watchdog timer
+  ansible.builtin.systemd:
+    name: bay-trigger-watchdog.timer
+    state: started
+    enabled: true
+    daemon_reload: true
+  become_user: root
+  when: git_deploy_stall_watchdog_enabled | default(true) | bool
+
+- name: Stop and disable trigger stall watchdog timer when disabled
+  ansible.builtin.systemd:
+    name: bay-trigger-watchdog.timer
+    state: stopped
+    enabled: false
+    daemon_reload: true
+  become_user: root
+  when: not (git_deploy_stall_watchdog_enabled | default(true) | bool)
+  failed_when: false

@@ -1,0 +1,129 @@
+---
+# Outbound connectivity monitor
+# Deploys a systemd timer that probes external endpoints and sends Telegram
+# alerts on connectivity loss and recovery.
+
+# ── State directory ──────────────────────────────────────────────────────────
+
+- name: Create outbound check state directory
+  ansible.builtin.file:
+    path: "{{ outbound_check_state_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Initialize state file to up (first-run default)
+  ansible.builtin.copy:
+    content: "up\n"
+    dest: "{{ outbound_check_state_dir }}/state"
+    owner: root
+    group: root
+    mode: "0644"
+    force: false
+  become: true
+
+# ── Probe script ─────────────────────────────────────────────────────────────
+
+- name: Deploy outbound check probe script
+  ansible.builtin.template:
+    src: bay-outbound-check.j2
+    dest: /usr/local/bin/bay-outbound-check
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+# ── systemd units ────────────────────────────────────────────────────────────
+
+- name: Deploy outbound check systemd service unit
+  ansible.builtin.template:
+    src: bay-outbound-check.service.j2
+    dest: /etc/systemd/system/bay-outbound-check.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Deploy outbound check systemd timer unit
+  ansible.builtin.template:
+    src: bay-outbound-check.timer.j2
+    dest: /etc/systemd/system/bay-outbound-check.timer
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+# ── Enable path ──────────────────────────────────────────────────────────────
+
+- name: Enable and start outbound check timer
+  ansible.builtin.systemd:
+    name: bay-outbound-check.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+  when: outbound_check_enabled
+
+# ── Disable path ─────────────────────────────────────────────────────────────
+
+- name: Stop, disable and mask outbound check timer
+  ansible.builtin.systemd:
+    name: bay-outbound-check.timer
+    enabled: false
+    state: stopped
+    masked: true
+    daemon_reload: true
+  become: true
+  when: not outbound_check_enabled
+
+# ── Disk pressure alerts (M81-S5) ────────────────────────────────────────────
+# Reuses outbound_check_state_dir for the dedup state file — one directory
+# for all bay probe state keeps inventory clean.
+
+- name: Deploy disk alert probe script
+  ansible.builtin.template:
+    src: bay-disk-alert.sh.j2
+    dest: /usr/local/bin/bay-disk-alert
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Deploy disk alert systemd service unit
+  ansible.builtin.template:
+    src: bay-disk-alert.service.j2
+    dest: /etc/systemd/system/bay-disk-alert.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Deploy disk alert systemd timer unit
+  ansible.builtin.template:
+    src: bay-disk-alert.timer.j2
+    dest: /etc/systemd/system/bay-disk-alert.timer
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Enable and start disk alert timer
+  ansible.builtin.systemd:
+    name: bay-disk-alert.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  become: true
+  when: disk_alert_enabled | bool
+
+- name: Stop, disable and mask disk alert timer
+  ansible.builtin.systemd:
+    name: bay-disk-alert.timer
+    enabled: false
+    state: stopped
+    masked: true
+    daemon_reload: true
+  become: true
+  when: not (disk_alert_enabled | bool)

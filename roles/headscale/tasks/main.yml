@@ -1,0 +1,170 @@
+---
+# Headscale coordination server
+# Deploys config and data directories for the self-hosted Tailscale control plane.
+# The container itself is managed by the container_lifecycle role.
+
+# -- Validation ---------------------------------------------------------------
+
+- name: Validate headscale_domain is set
+  ansible.builtin.assert:
+    that:
+      - headscale_domain | length > 0
+    fail_msg: >-
+      headscale_domain must be set to the public FQDN of the Headscale server
+      (e.g. headscale.example.com). Set it in group_vars.
+  tags: [headscale]
+
+# -- Directory Setup ----------------------------------------------------------
+
+- name: Create headscale config directory
+  ansible.builtin.file:
+    path: /opt/headscale/config
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0755"
+  become: true
+  become_user: root
+  tags: [headscale]
+
+- name: Create headscale data directory
+  ansible.builtin.file:
+    path: /opt/headscale/data
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0755"
+  become: true
+  become_user: root
+  tags: [headscale]
+
+# -- Configuration ------------------------------------------------------------
+
+- name: Template headscale config
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /opt/headscale/config/config.yaml
+    owner: "{{ app_user }}"
+    mode: "0644"
+  notify: Restart headscale
+  tags: [headscale]
+
+- name: Template split-DNS extra records
+  ansible.builtin.template:
+    src: extra-records.json.j2
+    dest: /opt/headscale/config/extra-records.json
+    owner: "{{ app_user }}"
+    mode: "0644"
+  notify: Restart headscale
+  tags: [headscale]
+
+# -- ACL Policy (file mode, opt-in) -------------------------------------------
+# Rendered only when headscale_acl_policy is defined. WARNING: defining a policy
+# flips the tailnet from default-allow to default-deny — every required flow must
+# be enumerated in the var or it will be blocked. See defaults/main.yml.
+#
+# Staged and validated BEFORE the live policy is replaced. An invalid policy makes
+# headscale crash-loop on start, and because the running tailnet coasts on its
+# cached policy until the container actually dies, the breakage surfaces long after
+# the deploy that caused it. So: render to a staging path, run `headscale policy
+# check` against it, and only install once it passes. A bad policy fails the play
+# with headscale's own parser error and leaves the live policy untouched.
+#
+# Validation runs via `docker exec` into the RUNNING container. As of headscale
+# 0.29 `policy check` is a thin gRPC frontend to a live server: from a throwaway
+# container it aborts on a confirmation prompt unless given
+# --bypass-grpc-and-access-database-directly, which opens the DB directly and is
+# explicitly unsafe while headscale is running. On 0.28 the same exec is a local
+# parse, so this form is correct on both. It is SKIPPED (loudly) when the
+# container isn't running — being unable to check must never masquerade as a
+# failed check, or a valid policy would be rejected on a first-ever deploy.
+#
+# CAVEAT: on a headscale_version bump the OLD binary validates, because this role
+# runs before deploy_stack recreates the container. Version-gated policy semantics
+# (e.g. 0.29 resolving `*` to the CGNAT/ULA ranges instead of all IPs) must be
+# pre-checked out of band against the target image before bumping.
+
+- name: Stage headscale ACL policy for validation
+  ansible.builtin.template:
+    src: policy.hujson.j2
+    dest: /opt/headscale/config/.policy.hujson.staged
+    owner: "{{ app_user }}"
+    mode: "0644"
+  when: headscale_acl_policy is defined
+  changed_when: false
+  tags: [headscale]
+
+- name: Check headscale container is running for policy validation
+  ansible.builtin.command:
+    cmd: docker ps --filter name=^headscale$ --filter status=running --quiet
+  register: headscale_container_check
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: root
+  when: headscale_acl_policy is defined
+  tags: [headscale]
+
+- name: Warn that headscale ACL policy cannot be validated
+  ansible.builtin.debug:
+    msg: >-
+      SKIPPING ACL validation — the headscale container is not running, so
+      `headscale policy check` cannot run. The policy will be installed
+      UNVALIDATED; if it is malformed headscale will crash-loop on start.
+  when:
+    - headscale_acl_policy is defined
+    - (headscale_container_check.stdout | default('') | trim) == ''
+  tags: [headscale]
+
+- name: Validate staged headscale ACL policy
+  ansible.builtin.command:
+    cmd: >-
+      docker exec headscale
+      headscale policy check --file /etc/headscale/.policy.hujson.staged
+  register: headscale_policy_check
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: root
+  when:
+    - headscale_acl_policy is defined
+    - (headscale_container_check.stdout | default('') | trim) != ''
+  tags: [headscale]
+
+- name: Assert headscale ACL policy is valid
+  ansible.builtin.assert:
+    that:
+      - headscale_policy_check.rc == 0
+    fail_msg: >-
+      headscale_acl_policy is INVALID — refusing to install it. The live policy on
+      the host is untouched and the tailnet is unaffected. Fix headscale_acl_policy
+      in group_vars and re-run; the rejected policy is kept at
+      /opt/headscale/config/.policy.hujson.staged for inspection. headscale said:
+      {{ (headscale_policy_check.stderr | default('') ~ ' ' ~ headscale_policy_check.stdout | default('')) | trim }}
+    success_msg: headscale ACL policy is valid.
+  when:
+    - headscale_acl_policy is defined
+    # `is not skipped` rather than re-testing the container probe: a command task
+    # skipped by check mode still registers rc 0, which would assert on a check
+    # that never ran.
+    - headscale_policy_check is not skipped
+  tags: [headscale]
+
+- name: Install validated headscale ACL policy
+  ansible.builtin.copy:
+    src: /opt/headscale/config/.policy.hujson.staged
+    dest: /opt/headscale/config/policy.hujson
+    remote_src: true
+    owner: "{{ app_user }}"
+    mode: "0644"
+  when: headscale_acl_policy is defined
+  notify: Restart headscale
+  tags: [headscale]
+
+- name: Remove staged headscale ACL policy
+  ansible.builtin.file:
+    path: /opt/headscale/config/.policy.hujson.staged
+    state: absent
+  when: headscale_acl_policy is defined
+  changed_when: false
+  tags: [headscale]

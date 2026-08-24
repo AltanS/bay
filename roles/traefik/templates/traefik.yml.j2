@@ -1,0 +1,98 @@
+# {{ ansible_managed }}
+# Traefik static configuration
+
+entryPoints:
+{% if traefik_split_entrypoints | default(false) %}
+  # Fail-closed split: public services bind the public IP only; the tailnet
+  # IP gets its own entrypoint so tailnet-only routes never share a public
+  # socket. The `websecure` name is preserved (public-IP-bound) so existing
+  # public routers (zot, webhook, headscale, …) are unchanged.
+  web:
+    address: "{{ traefik_public_bind_ip }}:80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: "{{ traefik_public_bind_ip }}:443"
+{%   if gateway_bind_ip | default('', true) | trim | length > 0 %}
+  websecure_tailnet:
+    address: "{{ gateway_bind_ip }}:443"
+{%   endif %}
+{% else %}
+  web:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+  websecure:
+    address: ":443"
+{% endif %}
+{% if traefik_metrics_enabled %}
+  metrics:
+    address: ":{{ traefik_metrics_port }}"
+{% endif %}
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: {{ traefik_docker_network }}
+{% if traefik_dns_challenge_enabled | default(false) %}
+  # File provider for tailnet-proxy routes to remote upstreams (Docker
+  # labels can only target local containers).
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+{% endif %}
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: "{{ letsencrypt_email }}"
+      storage: /etc/traefik/acme.json
+      httpChallenge:
+        entryPoint: web
+{% if traefik_dns_challenge_enabled | default(false) %}
+  # DNS-01 resolver for tailnet wildcard certs — no public reachability
+  # required. Token supplied via CF_DNS_API_TOKEN in the traefik env file.
+  {{ traefik_dns_resolver_name }}:
+    acme:
+      email: "{{ traefik_acme_dns_email | default(letsencrypt_email) }}"
+      storage: /etc/traefik/acme-dns.json
+      dnsChallenge:
+        provider: {{ traefik_dns_provider }}
+        resolvers:
+          - "1.1.1.1:53"
+          - "8.8.8.8:53"
+{% endif %}
+
+accessLog:
+  filePath: /var/log/traefik/access.log
+  bufferingSize: 100
+{% if traefik_access_log_fields_headers %}
+  fields:
+    headers:
+      names:
+{% for name, mode in traefik_access_log_fields_headers.items() %}
+        {{ name }}: {{ mode }}
+{% endfor %}
+{% endif %}
+
+{% if traefik_metrics_enabled %}
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: true
+    addServicesLabels: true
+    addRoutersLabels: true
+{% endif %}
+
+log:
+  level: {{ traefik_log_level | default('ERROR') }}
+
+api:
+  dashboard: false

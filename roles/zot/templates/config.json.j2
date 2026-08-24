@@ -1,0 +1,69 @@
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "{{ zot_storage_root }}",
+    "gc": {{ zot_gc_enabled | to_json }},
+    "gcDelay": "{{ zot_gc_delay }}",
+    "gcInterval": "{{ zot_gc_interval }}",
+    "dedupe": true,
+    "retention": {
+      "dryRun": false,
+      "delay": "{{ zot_untagged_retention_delay }}",
+      "policies": [
+        {
+          "repositories": ["**"],
+          "deleteReferrers": true,
+          "deleteUntagged": true,
+          "keepTags": [
+            {
+              "mostRecentlyPushedCount": {{ zot_retention_keep_count }},
+              "mostRecentlyPulledCount": {{ zot_retention_keep_count }},
+              "pulledWithin": "{{ zot_retention_keep_within }}",
+              "pushedWithin": "{{ zot_retention_keep_within }}"
+            }
+          ]
+        }
+      ]
+    }{% if zot_storage_driver == 's3' %},
+    "storageDriver": {
+      "name": "s3",
+      "bucket": "{{ zot_s3_bucket }}",
+      "region": "{{ zot_s3_region }}",
+      "rootdirectory": "{{ zot_s3_rootdirectory }}",
+      "secure": {{ zot_s3_secure | to_json }},
+      "forcepathstyle": {{ zot_s3_force_path_style | to_json }}
+    },
+    "remoteCache": {{ zot_remote_cache | to_json }}{% if zot_remote_cache %},
+    "cacheDriver": {
+      "name": "{{ zot_cache_driver }}",
+      "rootDir": "{{ zot_cache_dir }}"
+    }{% endif %}{% endif %}
+
+  },
+  "http": {
+    "address": "0.0.0.0",
+    "port": "{{ zot_port }}",
+    "realm": "{{ zot_domain }}",
+{# docker2s2 compat is required for `docker push` to work. Zot is OCI-only by
+   default and rejects Docker v2s2 manifests with HTTP 415 without this flag. #}
+    "compat": ["docker2s2"],
+    "auth": {
+      "htpasswd": {
+        "path": "/etc/zot/htpasswd"
+      },
+      "failDelay": 5
+    }
+  },
+  "log": {
+    "level": "info"
+  },
+  "extensions": {
+    "search": {
+      "enable": true
+    },
+    "scrub": {
+      "enable": true,
+      "interval": "24h"
+    }
+  }
+}

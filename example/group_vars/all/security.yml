@@ -1,0 +1,87 @@
+---
+# Security configuration
+# Firewall (nftables) and CrowdSec settings
+
+# nftables - allowed ports
+firewall_allowed_tcp_ports:
+  - 22   # SSH
+  - 80   # HTTP
+  - 443  # HTTPS
+
+firewall_allowed_udp_ports: []
+
+# SSH hardening (drives geerlingguy.security role)
+security_ssh_port: 22
+security_ssh_permit_root_login: "no"
+security_ssh_permit_empty_password: "no"
+security_ssh_password_authentication: "no"
+security_ssh_challenge_response_auth: "no"
+security_ssh_gss_api_authentication: "no"
+security_ssh_x11_forwarding: "no"
+security_ssh_usedns: "no"
+
+security_ssh_allowed_groups:
+  - ssh-access
+
+# Disable fail2ban (CrowdSec replaces it)
+security_fail2ban_enabled: false
+
+# Disable geerlingguy.security auto-updates (handled by common role)
+security_autoupdate_enabled: false
+
+# IPs that bypass CrowdSec bouncer enforcement entirely.
+# These are accepted at nftables priority -20, before CrowdSec's -10,
+# so community blocklist (CAPI) decisions cannot lock out admin access.
+# Use your company VPN exit IP, CI runner IP, or other trusted sources.
+crowdsec_trusted_ips: []
+# - 203.0.113.50/32    # Company VPN
+# - 198.51.100.0/24    # Office subnet
+
+# =============================================================================
+# CrowdSec configuration (crowdsec role overrides)
+# =============================================================================
+
+# Collections: swap nginx for traefik, drop wordpress (add back if deploying WP)
+crowdsec_collections:
+  - crowdsecurity/linux
+  - crowdsecurity/traefik
+  - crowdsecurity/sshd
+  - crowdsecurity/base-http-scenarios
+  - crowdsecurity/http-cve
+  - crowdsecurity/whitelist-good-actors
+
+# Log acquisition: Traefik access log (single file, all services)
+crowdsec_acquisition:
+  - filenames:
+      - "{{ stack_dir }}/logs/traefik/access.log"
+    labels:
+      type: traefik
+  - filenames:
+      - /var/log/auth.log
+    labels:
+      type: syslog
+
+# Map VPN IPs to trellis-crowdsec's whitelist variable
+ip_whitelist: "{{ vpn_allowed_ips + ['127.0.0.0/8'] }}"
+
+# Crawl exclusion paths (no /wp-json/ needed for non-WordPress)
+crowdsec_crawl_exclude_paths: []
+
+# CrowdSec console enrollment (optional)
+crowdsec_console_token: ""
+
+# IP blocklist (manual bans, imported as CrowdSec decisions)
+ip_blocklist: []
+
+# =============================================================================
+# Debug agent — opt-in read-only SSH access for AI agents (Claude Code)
+# =============================================================================
+
+# Enable the debug agent (default: false — set to true to activate)
+debug_agent_enabled: false
+
+# GitHub usernames — SSH keys fetched from https://github.com/<user>.keys
+debug_agent_github_users: []
+
+# Direct SSH public keys (alternative to GitHub users)
+debug_agent_keys: []

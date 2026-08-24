@@ -1,0 +1,10 @@
+[Unit]
+Description=Bay CrowdSec GeoLite2 hub data refresh
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/crowdsec-data-refresh.sh
+TimeoutStartSec=15min
+User=root

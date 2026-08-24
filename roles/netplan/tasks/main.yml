@@ -1,0 +1,47 @@
+---
+- name: Assert required vars are defined
+  ansible.builtin.assert:
+    that:
+      - netplan_address is defined
+      - netplan_mac is defined
+      - netplan_gateway is defined
+    fail_msg: >-
+      netplan_address, netplan_mac, and netplan_gateway must be defined.
+      Set them in group_vars or host_vars for host {{ inventory_hostname }}.
+
+- name: Assert static IP matches ansible_host
+  ansible.builtin.assert:
+    that:
+      - netplan_address == ansible_host
+    fail_msg: >-
+      Safety check failed: netplan_address ({{ netplan_address }}) does not match
+      ansible_host ({{ ansible_host }}). Verify group_vars for {{ inventory_hostname }}.
+
+- name: Write static netplan configuration
+  ansible.builtin.template:
+    src: 51-static.yaml.j2
+    dest: /etc/netplan/51-static.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Apply network configuration
+
+- name: Disable cloud-init network management
+  ansible.builtin.copy:
+    dest: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    content: |
+      network: {config: disabled}
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Remove legacy Docker-unmanaged networkd drop-in
+  ansible.builtin.file:
+    path: /etc/systemd/network/99-docker-unmanaged.network
+    state: absent
+  register: _docker_unmanaged_removed
+
+- name: Reload systemd-networkd to flush stale drop-in from memory
+  ansible.builtin.command: networkctl reload
+  changed_when: true
+  when: _docker_unmanaged_removed.changed

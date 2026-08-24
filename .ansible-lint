@@ -1,0 +1,103 @@
+---
+# ansible-lint configuration for Bay
+# https://ansible.readthedocs.io/projects/lint/configuring/
+
+profile: production
+
+project_dir: .
+
+# Offline mode - don't download collections/roles during linting
+offline: true
+
+exclude_paths:
+  - .venv/
+  - .git/
+  - .ansible/
+  - .claude/
+  - vendor/
+  # Example CONSUMER wrappers — each is a one-line `import_playbook:
+  # .bay/<x>.yml`, which only resolves inside a real consumer where .bay/ is
+  # the framework clone. Unlintable from here by construction. The framework's
+  # own provision/deploy/restore.yml are linted directly (see kinds: below).
+  - example/deploy.yml
+  - example/provision.yml
+  - example/restore.yml
+  - example/webhook.yml
+
+# File type mappings
+kinds:
+  - playbook: "provision.yml"
+  - playbook: "deploy.yml"
+  - playbook: "restore.yml"
+  - tasks: "roles/*/tasks/*.yml"
+  - handlers: "roles/*/handlers/*.yml"
+  - vars: "roles/*/vars/*.yml"
+  - vars: "example/group_vars/**/*.yml"
+  - meta: "roles/*/meta/*.yml"
+  - yaml: "roles/*/defaults/*.yml"
+  - jinja2: "roles/*/templates/**/*.j2"
+
+skip_list:
+  # command-instead-of-module: docker compose, aws s3, and cscli have no
+  # Ansible module equivalents. All command/shell usage is intentional.
+  - command-instead-of-module
+
+  # command-instead-of-shell: backup/restore scripts pipe through shell
+  # intentionally (gunzip | psql, etc.)
+  - command-instead-of-shell
+
+  # no-changed-when: deploy tasks (container lifecycle, lock acquire) use
+  # changed_when: true explicitly where side effects are guaranteed.
+  - no-changed-when
+
+  # name[template]: container_lifecycle tasks use {{ _spec.name }} prefix
+  # so Ansible output shows which container each task operates on.
+  - name[template]
+
+  # var-naming[no-role-prefix]: internal variables use _ prefix convention
+  # for scoping. Role-prefixing (container_lifecycle_*) adds verbosity
+  # without improving clarity.
+  - var-naming[no-role-prefix]
+
+  # ignore-errors: used intentionally where failure is non-fatal
+  # (port checks, optional features, health probes).
+  - ignore-errors
+
+  # no-handler: some tasks restart services inline when handler
+  # indirection would obscure the control flow.
+  - no-handler
+
+  # partial-become[task]: task-level become is intentional when a play
+  # runs as app_user but specific tasks need root (systemd, apt).
+  - partial-become[task]
+
+  # schema: custom task keys (loop_var, label in loop_control) and
+  # meta fields trigger false positives with strict schema validation.
+  - schema[tasks]
+  - schema[playbook]
+  - schema[meta]
+
+  # yaml: line-length and empty-lines are cosmetic; long lines are
+  # often Jinja expressions that can't be meaningfully broken up.
+  - yaml[line-length]
+  - yaml[empty-lines]
+
+# Mock external roles so linting doesn't fail on missing vendor/ deps
+mock_roles:
+  - geerlingguy.git
+  - geerlingguy.security
+  - geerlingguy.pip
+  - geerlingguy.docker
+  - darkwizard242.lazydocker
+
+# Required extra-vars for playbooks that template them into `hosts:`/`name:`.
+# Keep in sync with the syntax-check invocation in tests/test_framework.sh —
+# without accessory/backup_file, restore.yml fails ansible-lint's own
+# syntax-check with "'accessory' is undefined".
+extra_vars:
+  target_host: all
+  accessory: postgres
+  backup_file: /dev/null
+
+warn_list:
+  - experimental
