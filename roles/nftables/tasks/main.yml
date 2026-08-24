@@ -1,6 +1,31 @@
 ---
 # nftables firewall configuration
 # Manages firewall rules, integrates with CrowdSec bouncer
+#
+# WHY THE RELOAD IS NOT NOTIFIED BY THE TEMPLATE TASK
+# ---------------------------------------------------
+# Reloading nftables forces a Docker daemon restart (the handler chain below):
+# Docker installs its own chains at daemon start and an nftables reload wipes
+# them, so every container on the host bounces. That is an outage, and it must
+# only ever be paid for a real change to the RULESET.
+#
+# `ansible.builtin.template` reports "changed" for ANY byte difference — so a
+# comment-only edit to nftables.conf.j2 (or a re-rendered `ansible_managed`
+# header) notified the handler and restarted Docker on every host. That is how
+# a documentation change took down containers on four production hosts.
+#
+# The fix: hash the live file with comments and trailing whitespace stripped
+# BEFORE the template writes, hash it again AFTER, and notify the handler from
+# a separate flag task only when the two differ. The real file is always
+# written, so comments still land on the host; only the reload is gated.
+#
+# Check mode: the template writes nothing, so before == after, the flag task's
+# `when` is false and nothing is reloaded or restarted — while the template
+# task still reports its diff. The two hash probes are read-only and carry
+# `check_mode: false` so they produce a real answer in a dry run.
+#
+# First install: no live file, so the "before" hash is the hash of empty input
+# and differs from "after" — treated as changed, as it must be.
 
 - name: Install nftables
   ansible.builtin.apt:
@@ -27,6 +52,24 @@
   become: true
   become_user: root
 
+- name: Read live nftables ruleset fingerprint
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      sed -e 's/#.*$//' -e 's/[[:space:]]*$//' {{ nftables_config_path }} 2>/dev/null
+      | grep -v '^[[:space:]]*$'
+      | sha256sum
+      | cut -d' ' -f1
+    executable: /bin/bash
+  register: _nftables_semantic_before
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+
+# NOTE: no `notify:` here. See the header — a comment-only diff must not
+# restart Docker. The reload is notified by the flag task below.
 - name: Deploy nftables configuration
   ansible.builtin.template:
     src: nftables.conf.j2
@@ -34,9 +77,33 @@
     owner: root
     group: root
     mode: "0644"
-  notify: Reload nftables
   become: true
   become_user: root
+
+- name: Re-read nftables ruleset fingerprint
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      sed -e 's/#.*$//' -e 's/[[:space:]]*$//' {{ nftables_config_path }} 2>/dev/null
+      | grep -v '^[[:space:]]*$'
+      | sha256sum
+      | cut -d' ' -f1
+    executable: /bin/bash
+  register: _nftables_semantic_after
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+
+- name: Reload nftables only when the ruleset changed semantically
+  ansible.builtin.debug:
+    msg: >-
+      nftables ruleset changed (comments ignored) — reloading nftables, which
+      restarts the Docker daemon and bounces every container on this host.
+  changed_when: true
+  notify: Reload nftables
+  when: _nftables_semantic_before.stdout != _nftables_semantic_after.stdout
 
 - name: Enable and start nftables
   ansible.builtin.systemd:
