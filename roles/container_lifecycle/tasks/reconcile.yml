@@ -96,9 +96,14 @@
   changed_when: "(_reconcile_result.stdout | from_json).changed | default(false)"
   failed_when: _reconcile_result.rc != 0
 
+# In --check mode the command task above is skipped, so `stdout` is empty and
+# `from_json` raises (exit 2, the whole play dies). Guard on `is not skipped`,
+# NOT on `rc is defined` — a check-mode-skipped command still registers rc: 0,
+# so an `rc`-based guard passes and the crash happens anyway.
 - name: Reconciler report
   ansible.builtin.debug:
     msg: "{{ _reconcile_result.stdout | from_json }}"
+  when: _reconcile_result is not skipped
 
 - name: Remove reconcile bundle (contains resolved env)
   ansible.builtin.file:
