@@ -7,6 +7,50 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.2.1] — 2026-08-25
+
+### Fixed
+
+- **`--check` no longer kills the play in three more places.** Ansible does not
+  execute `command`/`shell` modules in check mode, but the registered result
+  still carries `rc: 0` and an **empty** `stdout`. Anything that then parses
+  that stdout dies with exit 2, taking the whole dry run with it. Same shape as
+  the reconciler fix in 0.2.0.
+  - `roles/tailscale_register` — "Set registration needed fact" piped
+    `tailscale status --json` through `from_json`. Now guarded with
+    `is not skipped`, and every consumer of the fact reads
+    `_needs_registration | default(false)`, so the role cannot register a node
+    in a dry run.
+  - `roles/headscale` — "Install validated headscale ACL policy" copied
+    `.policy.hujson.staged`, which does not exist in check mode, and aborted
+    with "Source does not exist". Now skipped in check mode; the staging task
+    still shows the rendered policy as a diff.
+  - `restore.yml` — "Parse snapshot details" piped `restic snapshots --json`
+    through `from_json`. Now guarded, and every task that dereferences `_snap`
+    is gated on it being defined.
+
+  None of these uses `rc is defined`: a command task skipped by check mode
+  registers `rc: 0`, so that guard passes and the crash happens anyway.
+- **A comment-only nftables change no longer restarts the Docker daemon.**
+  Reloading nftables wipes the chains Docker installs at daemon start, so the
+  reload handler has to restart Docker and every container on the host bounces.
+  `Deploy nftables configuration` is a `template`, which reports "changed" for
+  any byte difference — so an edit to a comment in `nftables.conf.j2` (or a
+  re-rendered `ansible_managed` header) triggered that outage on every host.
+  The live file is now fingerprinted with comments and trailing whitespace
+  stripped, before and after the write, and the reload is notified only when
+  the fingerprints differ. The file itself is still always written, so comments
+  land on the host; a real ruleset change reloads exactly as before, including
+  on first install.
+
+### Upgrade notes
+
+- The nftables fix is picked up by `bin/bay deploy --rig <env>` (the role runs
+  under `_rig_mode`) or by `bin/bay provision <env> --tags nftables`. A plain
+  non-rig `bin/bay deploy` does **not** run the role. Upgrading costs no
+  container bounce: if your ruleset is semantically unchanged, the new
+  fingerprint comparison matches and nothing is reloaded.
+
 ## [0.2.0] — 2026-08-24
 
 ### Added
