@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Keep SKILL.md's generated sections in sync with the CLI and the doc index.
+#
+# CI fails a commit whose SKILL.md is stale (tests/test_skill_doc.py), so this
+# hook exists to make that failure impossible to reach rather than to catch it
+# late. It only runs when something SKILL.md is compiled *from* is staged.
+#
+# Note: the regeneration reads the working tree, not the index — if you stage
+# a partial change to src/bay_cli/, the regenerated SKILL.md reflects the file
+# on disk. That is the same trade-off every formatting hook makes.
+#
+# Installed by `make hooks` (sets core.hooksPath=.githooks).
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+
+# Paths SKILL.md is compiled from. Adding a new source here is the whole
+# maintenance burden of this hook.
+if ! git diff --cached --name-only --diff-filter=ACMR | grep -qE \
+    '^(src/bay_cli/|docs/README\.md$|scripts/gen_skill\.py$|SKILL\.md$)'; then
+    exit 0
+fi
+
+if ! command -v uv >/dev/null 2>&1; then
+    echo "pre-commit: uv not found — skipping SKILL.md regeneration" >&2
+    echo "            CI will fail if SKILL.md is stale; run 'make docs-skill'" >&2
+    exit 0
+fi
+
+# Nothing to do in the common case, and --check never writes.
+if (cd "$root" && uv run --frozen python scripts/gen_skill.py --check >/dev/null 2>&1); then
+    exit 0
+fi
+
+if ! (cd "$root" && uv run --frozen python scripts/gen_skill.py >/dev/null); then
+    # A hard error here is a real problem (a doc missing from the index, a
+    # table row the parser can't read) — surface it instead of committing
+    # a SKILL.md that silently lost content.
+    echo "pre-commit: SKILL.md regeneration failed — commit blocked" >&2
+    echo "            run 'make docs-skill' to see the error" >&2
+    exit 1
+fi
+
+git add "$root/SKILL.md"
+echo "pre-commit: regenerated SKILL.md and staged it"

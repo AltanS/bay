@@ -1,0 +1,13 @@
+[Unit]
+Description=Bay per-service log archiver timer ({{ '%i' }})
+Documentation=https://github.com/AltanS/bay/blob/main/docs/adr/002-log-archival.md
+
+[Timer]
+OnBootSec=30s
+OnCalendar={{ log_archive_timer_oncalendar }}
+Persistent=true
+AccuracySec=5s
+Unit={{ log_archive_unit_name }}@{{ '%i' }}.service
+
+[Install]
+WantedBy=timers.target

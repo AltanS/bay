@@ -1,0 +1,6 @@
+{# Headscale ACL policy (HuJSON). Rendered from the headscale_acl_policy var.
+   Emitted as strict JSON (valid HuJSON, and parseable by standard JSON tools for
+   validation). Provenance: {{ ansible_managed }} — do not edit on the host; edit
+   headscale_acl_policy in group_vars. WARNING: a non-empty policy switches the
+   tailnet to default-deny — every required flow must be listed. -#}
+{{ headscale_acl_policy | to_nice_json }}

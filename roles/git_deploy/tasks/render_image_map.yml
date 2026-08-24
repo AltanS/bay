@@ -1,0 +1,168 @@
+---
+# Render image-map.json for the webhook receiver.
+#
+# This task file is tagged for both [build, git_deploy] and [deploy_stack] so
+# that standard service-config deploys (`bin/bay deploy --tags deploy_stack`)
+# re-render image-map.json whenever services.yml changes — without dragging in
+# the rest of the git_deploy role (systemd path units, rebuild.sh,
+# build_server bootstrap).
+#
+# Background: issue #13. The git_deploy role itself is tagged only
+# [build, git_deploy], so a deploy_stack-only run would otherwise leave the
+# webhook receiver with a stale image-map and silently drop new services from
+# the post-build pull-signal fan-out.
+#
+# Self-contained design: this file computes every fact it depends on with
+# `when: var is not defined` guards, so it works correctly both standalone
+# (--tags deploy_stack) and when invoked from the main git_deploy flow (where
+# main.yml has already populated the facts).
+
+# ── Prerequisite facts ──────────────────────────────────────────────────
+# These mirror the set_facts in tasks/main.yml. Guarded so a full
+# git_deploy run does not recompute them.
+
+- name: Render image-map — detect build server role
+  ansible.builtin.set_fact:
+    _is_build_server: "{{ (build_server | default('')) == inventory_hostname }}"
+  when: _is_build_server is not defined
+
+- name: Render image-map — resolve host-local build services
+  ansible.builtin.set_fact:
+    _all_build_services: >-
+      {{
+        (active_services | default({})) | dict2items
+        | selectattr('value.build', 'defined')
+        | map(attribute='key')
+        | list
+      }}
+  when: _all_build_services is not defined
+
+- name: Render image-map — resolve global build services
+  ansible.builtin.set_fact:
+    _all_build_services_global: >-
+      {{
+        (services | default({})) | dict2items
+        | selectattr('value.build', 'defined')
+        | map(attribute='key')
+        | list
+      }}
+  when: _all_build_services_global is not defined
+
+- name: Render image-map — resolve global remote build services
+  ansible.builtin.set_fact:
+    _global_remote_build_services: >-
+      {{
+        (
+          (services | default({})) | dict2items
+          | selectattr('value.build', 'defined')
+          | selectattr('value.build.strategy', 'defined')
+          | selectattr('value.build.strategy', 'in', ['remote', 'push'])
+          | map(attribute='key')
+          | list
+        )
+        +
+        (
+          (services | default({})) | dict2items
+          | selectattr('value.build', 'defined')
+          | rejectattr('value.build.strategy', 'defined')
+          | map(attribute='key')
+          | list
+          if (git_deploy_build_strategy | default('local')) in ['remote', 'push']
+          else []
+        )
+      }}
+  when: _global_remote_build_services is not defined
+
+- name: Render image-map — resolve per-service build strategies
+  ansible.builtin.include_tasks: resolve_strategy.yml
+  when:
+    - _all_build_services | length > 0
+    - _local_build_services is not defined or _remote_build_services is not defined
+
+- name: Render image-map — set git_deploy_services to local builds
+  ansible.builtin.set_fact:
+    git_deploy_services: "{{ _local_build_services | default([]) }}"
+  when: git_deploy_services is not defined
+
+- name: Render image-map — collect remote-built image refs (global)
+  ansible.builtin.set_fact:
+    _remote_built_image_refs: >-
+      {{
+        _global_remote_build_services | default([])
+        | map('extract', services)
+        | selectattr('image', 'defined')
+        | map(attribute='image')
+        | list
+        | unique
+      }}
+  when: _remote_built_image_refs is not defined
+
+- name: Render image-map — compute pull-only services
+  ansible.builtin.set_fact:
+    git_deploy_pull_only_services: >-
+      {{
+        (active_services | default({})) | dict2items
+        | rejectattr('value.build', 'defined')
+        | selectattr('value.image', 'defined')
+        | selectattr('value.image', 'in', _remote_built_image_refs | default([]))
+        | map(attribute='key')
+        | list
+      }}
+  when: git_deploy_pull_only_services is not defined
+
+- name: Render image-map — set git_deploy_rebuild_services (deployment server)
+  ansible.builtin.set_fact:
+    git_deploy_rebuild_services: >-
+      {{
+        (git_deploy_services | default([]))
+        + (_remote_build_services | default([]))
+        + (git_deploy_pull_only_services | default([]))
+      }}
+  when:
+    - git_deploy_rebuild_services is not defined
+    - not (_is_build_server | bool and (_global_remote_build_services | default([]) | length > 0))
+
+- name: Render image-map — set git_deploy_rebuild_services (build server)
+  ansible.builtin.set_fact:
+    git_deploy_rebuild_services: "{{ (git_deploy_services | default([])) + (_global_remote_build_services | default([])) }}"
+  when:
+    - git_deploy_rebuild_services is not defined
+    - _is_build_server | bool
+    - (_global_remote_build_services | default([]) | length > 0)
+
+# ── Render ──────────────────────────────────────────────────────────────
+# Only render when the host actually has something to fan out to and the
+# webhook is enabled. Skip silently otherwise so deploy_stack-only runs on
+# hosts without build services remain no-ops.
+
+- name: Render image-map.json
+  # Mirrors the original `Process build services` / "Deploy webhook
+  # infrastructure" block guards in main.yml so we only render on hosts
+  # that actually receive pull-signal fan-out. A bare deploy_stack run on
+  # a host with no build services and no remote consumers is a no-op.
+  when:
+    - webhook is defined
+    - git_deploy_rebuild_services | default([]) | length > 0
+    - (_all_build_services | default([]) | length > 0)
+      or (_is_build_server | bool and (_global_remote_build_services | default([]) | length > 0))
+  block:
+    - name: Ensure webhook config directory exists
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/webhook"
+        state: directory
+        mode: "0755"
+
+    - name: Render image-to-services map for pull signal handler
+      # Notify restarts bay-webhook so the receiver picks up the new map.
+      # The receiver loads /config/image-map.json once at process start
+      # (files/webhook/app.py:_load_image_map). Without this handler, a fresh
+      # render on disk stays invisible to the running receiver until the
+      # container is restarted out-of-band — see issue #13. Ansible's
+      # template task only reports `changed` on content diff, so the handler
+      # is content-idempotent: no-op when services.yml additions don't affect
+      # the image consumer map.
+      ansible.builtin.template:
+        src: image-map.json.j2
+        dest: "{{ stack_dir }}/webhook/image-map.json"
+        mode: "0644"
+      notify: Restart bay-webhook

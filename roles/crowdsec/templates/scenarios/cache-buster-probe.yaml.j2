@@ -1,0 +1,30 @@
+# CrowdSec Scenario: Cache-Buster Probe Detection
+# Managed by Ansible - do not edit manually
+#
+# Detects bot networks using cache-busting query parameters to probe WordPress
+# sites. Matches requests with exactly one query parameter where the key is
+# 2-8 alphanumeric chars (no underscores/hyphens) and the value is 4+ digits.
+#
+# Examples caught: ?cb=12345, ?ddd=67890, ?sdlro1=12345, ?eirx5t=12345
+#
+# Why this is specific:
+#   - ^...$ anchors = entire query string is ONE param (no & allowed)
+#   - [a-zA-Z0-9]{2,8} = excludes WordPress params with underscores (page_id, post_type)
+#   - [0-9]{4,} = excludes legitimate short-digit params (?cat=5, ?page=2, ?author=1)
+#   - static_ressource == 'false' = excludes ?ver=12345 on CSS/JS files
+
+type: leaky
+name: custom/cache-buster-probe
+description: "Detect cache-busting query parameter probing from bot networks"
+filter: |
+  evt.Meta.service == 'http' and
+  evt.Parsed.static_ressource == 'false' and
+  evt.Meta.http_args matches "^[a-zA-Z0-9]{2,8}=[0-9]{4,}$"
+groupby: evt.Meta.source_ip
+capacity: {{ crowdsec_scenario_cache_buster_probe_capacity }}
+leakspeed: {{ crowdsec_scenario_cache_buster_probe_leakspeed }}
+blackhole: {{ crowdsec_scenario_cache_buster_probe_blackhole }}
+labels:
+  service: http
+  type: scan
+  remediation: true

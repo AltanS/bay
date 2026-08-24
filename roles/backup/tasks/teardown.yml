@@ -1,0 +1,85 @@
+---
+# Teardown orphaned backup units and artefacts for accessories dropped from this host.
+#
+# Called from deploy_stack/tasks/main.yml when an accessory's `regions:` list no
+# longer includes the current host.  Receives `_teardown_accessories` — a list of
+# accessory name strings to clean up.
+#
+# All steps use `state: absent` / `failed_when: false` so the task is a no-op
+# when the unit or path was never installed.
+
+- name: Stop and disable backup timer for dropped accessory
+  ansible.builtin.systemd:
+    name: "bay-backup@{{ item }}.timer"
+    state: stopped
+    enabled: false
+  loop: "{{ _teardown_accessories }}"
+  loop_control:
+    label: "{{ item }}"
+  become: true
+  become_user: root
+  failed_when: false
+
+- name: Stop and disable maintenance timer for dropped accessory
+  ansible.builtin.systemd:
+    name: "bay-backup-maintenance@{{ item }}.timer"
+    state: stopped
+    enabled: false
+  loop: "{{ _teardown_accessories }}"
+  loop_control:
+    label: "{{ item }}"
+  become: true
+  become_user: root
+  failed_when: false
+
+- name: Remove backup timer unit file for dropped accessory
+  ansible.builtin.file:
+    path: "/etc/systemd/system/bay-backup@{{ item }}.timer"
+    state: absent
+  loop: "{{ _teardown_accessories }}"
+  loop_control:
+    label: "{{ item }}"
+  become: true
+  become_user: root
+
+- name: Remove maintenance timer unit file for dropped accessory
+  ansible.builtin.file:
+    path: "/etc/systemd/system/bay-backup-maintenance@{{ item }}.timer"
+    state: absent
+  loop: "{{ _teardown_accessories }}"
+  loop_control:
+    label: "{{ item }}"
+  become: true
+  become_user: root
+
+- name: Remove backup script for dropped accessory
+  ansible.builtin.file:
+    path: "{{ backup_scripts_dir }}/backup-{{ item }}.sh"
+    state: absent
+  loop: "{{ _teardown_accessories }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Remove maintenance script for dropped accessory
+  ansible.builtin.file:
+    path: "{{ backup_scripts_dir }}/maintenance-{{ item }}.sh"
+    state: absent
+  loop: "{{ _teardown_accessories }}"
+  loop_control:
+    label: "{{ item }}"
+
+- name: Remove restic cache dir for dropped accessory
+  ansible.builtin.file:
+    path: "~{{ app_user }}/.cache/restic/{{ item }}"
+    state: absent
+  loop: "{{ _teardown_accessories }}"
+  loop_control:
+    label: "{{ item }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: Reload systemd daemon after timer unit file removal
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+  become_user: root

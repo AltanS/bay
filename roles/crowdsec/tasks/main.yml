@@ -1,0 +1,847 @@
+---
+# CrowdSec IDS/IPS — detection engine, nftables firewall bouncer, custom scenarios
+# Migrated from vendor/trellis_crowdsec to native Bay role
+
+# =============================================================================
+# Legacy Cleanup: Disable fail2ban and ferm when migrating to CrowdSec
+# =============================================================================
+- name: Check if fail2ban is installed
+  ansible.builtin.stat:
+    path: /etc/fail2ban
+  register: fail2ban_installed
+
+- name: Stop and disable fail2ban service
+  ansible.builtin.service:
+    name: fail2ban
+    state: stopped
+    enabled: false
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_disable_legacy | default(true)
+    - fail2ban_installed.stat.exists
+  failed_when: false
+
+- name: Check if ferm is installed
+  ansible.builtin.stat:
+    path: /etc/ferm
+  register: ferm_installed
+
+- name: Stop and disable ferm service
+  ansible.builtin.service:
+    name: ferm
+    state: stopped
+    enabled: false
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_disable_legacy | default(true)
+    - ferm_installed.stat.exists
+  failed_when: false
+
+- name: Flush ferm iptables rules
+  ansible.builtin.command:
+    cmd: iptables -F
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_disable_legacy | default(true)
+    - crowdsec_flush_legacy_rules | default(false)
+    - ferm_installed.stat.exists
+  failed_when: false
+  changed_when: true
+
+# =============================================================================
+# Package Installation
+# =============================================================================
+- name: Install CrowdSec prerequisites
+  ansible.builtin.apt:
+    name:
+      - curl
+      - gnupg
+    state: present
+    update_cache: true
+  when: crowdsec_enabled | bool
+
+- name: Add CrowdSec GPG key
+  ansible.builtin.apt_key:
+    url: https://packagecloud.io/crowdsec/crowdsec/gpgkey
+    state: present
+  when: crowdsec_enabled | bool
+
+- name: Add CrowdSec repository
+  ansible.builtin.apt_repository:
+    repo: "deb https://packagecloud.io/crowdsec/crowdsec/{{ ansible_distribution | lower }}/ {{ ansible_distribution_release }} main"
+    state: present
+    filename: crowdsec
+  when: crowdsec_enabled | bool
+
+- name: Install CrowdSec
+  ansible.builtin.apt:
+    name: crowdsec
+    state: present
+    update_cache: true
+  when: crowdsec_enabled | bool
+  notify: Restart crowdsec
+
+# Remove legacy ExecStartPost BEFORE starting CrowdSec — the synchronous
+# bouncer restart blocks startup completion and causes systemd timeout.
+- name: Remove legacy ExecStartPost override (pre-start cleanup)
+  ansible.builtin.file:
+    path: /etc/systemd/system/crowdsec.service.d/restart-bouncer.conf
+    state: absent
+  register: _legacy_execstartpost
+  when: crowdsec_enabled | bool
+
+- name: Reload systemd after legacy cleanup
+  ansible.builtin.systemd:
+    daemon_reload: true
+  when:
+    - crowdsec_enabled | bool
+    - _legacy_execstartpost is changed
+
+- name: Ensure CrowdSec service is enabled and started
+  ansible.builtin.service:
+    name: crowdsec
+    enabled: true
+    state: started
+  when: crowdsec_enabled | bool
+
+- name: Enroll in CrowdSec Console
+  ansible.builtin.command:
+    cmd: cscli console enroll {{ crowdsec_console_token }}
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_console_token | length > 0
+  register: console_enroll
+  changed_when: "'already enrolled' not in console_enroll.stderr"
+  failed_when: false
+
+# =============================================================================
+# Local Scenarios (rendered BEFORE `cscli hub update`)
+# =============================================================================
+# `cscli hub update` performs a full sync of /etc/crowdsec, including parsing
+# every file in /etc/crowdsec/scenarios. An invalid YAML file there causes
+# hub update to fail, which then blocks subsequent runs from recovering.
+# Render local scenarios first so a bad file from a prior render is
+# overwritten, and validate the result before letting hub update touch them.
+- name: Ensure CrowdSec scenarios directory exists
+  ansible.builtin.file:
+    path: /etc/crowdsec/scenarios
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: crowdsec_enabled | bool
+
+- name: Remove disabled built-in scenarios
+  ansible.builtin.file:
+    path: "/etc/crowdsec/scenarios/{{ item.template }}.yaml"
+    state: absent
+  loop:
+    - { template: actuator-probe, enabled: "{{ crowdsec_scenario_actuator_probe }}" }
+    - { template: debug-fuzzing, enabled: "{{ crowdsec_scenario_debug_fuzzing }}" }
+    - { template: custom-bad-user-agent, enabled: "{{ crowdsec_scenario_custom_bad_user_agent }}" }
+    - { template: ssrf-callback, enabled: "{{ crowdsec_scenario_ssrf_callback }}" }
+    - { template: encoded-attack-payload, enabled: "{{ crowdsec_scenario_encoded_attack_payload }}" }
+    - { template: xss-extended, enabled: "{{ crowdsec_scenario_xss_extended }}" }
+    - { template: cache-buster-probe, enabled: "{{ crowdsec_scenario_cache_buster_probe }}" }
+    - { template: open-redirect-probe, enabled: "{{ crowdsec_scenario_open_redirect_probe }}" }
+    - { template: param-stuffing, enabled: "{{ crowdsec_scenario_param_stuffing }}" }
+    - { template: aggressive-crawl, enabled: "{{ crowdsec_scenario_aggressive_crawl }}" }
+    - { template: sustained-crawl, enabled: "{{ crowdsec_scenario_sustained_crawl }}" }
+    - { template: bad-user-agent, enabled: false }  # Legacy cleanup
+  loop_control:
+    label: "{{ item.template }}"
+  notify: Reload crowdsec
+  when:
+    - crowdsec_enabled | bool
+    - not (item.enabled | bool)
+
+# Our override shadows the hub's scenario at the SAME path, so "remove the
+# override" must not become "remove the hub's scenario". cscli installs hub
+# content as a SYMLINK (/etc/crowdsec/scenarios/x.yaml -> /etc/crowdsec/hub/...)
+# while everything Ansible renders here is a regular file — that is the
+# discriminator, and it is how crowdsec works, not a heuristic.
+#
+# Unconditional `state: absent` deleted the hub's symlink on every provision
+# where exclude_404 was false (the default, i.e. always). `cscli collections
+# install` further down then restored it, so the end state looked right while
+# both tasks reported `changed` forever and reloaded crowdsec each run. Between
+# those two tasks the http-probing scenario was genuinely gone.
+- name: Stat http-probing scenario path
+  ansible.builtin.stat:
+    path: /etc/crowdsec/scenarios/http-probing.yaml
+  register: _http_probing_path
+  when:
+    - crowdsec_enabled | bool
+    - not (crowdsec_http_probing_exclude_404 | bool)
+
+- name: Remove http-probing override when disabled
+  ansible.builtin.file:
+    path: /etc/crowdsec/scenarios/http-probing.yaml
+    state: absent
+  notify: Reload crowdsec
+  when:
+    - crowdsec_enabled | bool
+    - not (crowdsec_http_probing_exclude_404 | bool)
+    - _http_probing_path.stat.exists | default(false)
+    # A symlink is the hub's — leave it alone. Only a regular file is ours.
+    - not (_http_probing_path.stat.islnk | default(false))
+
+- name: Deploy http-probing override (exclude 404)
+  ansible.builtin.template:
+    src: scenarios/http-probing-no404.yaml.j2
+    dest: /etc/crowdsec/scenarios/http-probing.yaml
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload crowdsec
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_http_probing_exclude_404 | bool
+
+- name: Deploy built-in scenarios
+  ansible.builtin.template:
+    src: "scenarios/{{ item.template }}.yaml.j2"
+    dest: "/etc/crowdsec/scenarios/{{ item.template }}.yaml"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - { template: actuator-probe, enabled: "{{ crowdsec_scenario_actuator_probe }}" }
+    - { template: debug-fuzzing, enabled: "{{ crowdsec_scenario_debug_fuzzing }}" }
+    - { template: custom-bad-user-agent, enabled: "{{ crowdsec_scenario_custom_bad_user_agent }}" }
+    - { template: ssrf-callback, enabled: "{{ crowdsec_scenario_ssrf_callback }}" }
+    - { template: encoded-attack-payload, enabled: "{{ crowdsec_scenario_encoded_attack_payload }}" }
+    - { template: xss-extended, enabled: "{{ crowdsec_scenario_xss_extended }}" }
+    - { template: cache-buster-probe, enabled: "{{ crowdsec_scenario_cache_buster_probe }}" }
+    - { template: open-redirect-probe, enabled: "{{ crowdsec_scenario_open_redirect_probe }}" }
+    - { template: param-stuffing, enabled: "{{ crowdsec_scenario_param_stuffing }}" }
+    - { template: aggressive-crawl, enabled: "{{ crowdsec_scenario_aggressive_crawl }}" }
+    - { template: sustained-crawl, enabled: "{{ crowdsec_scenario_sustained_crawl }}" }
+  loop_control:
+    label: "{{ item.template }}"
+  notify: Reload crowdsec
+  when:
+    - crowdsec_enabled | bool
+    - item.enabled | bool
+
+- name: Deploy custom CrowdSec scenarios
+  ansible.builtin.template:
+    src: scenarios/custom-scenario.yaml.j2
+    dest: "/etc/crowdsec/scenarios/{{ item.name }}.yaml"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ crowdsec_custom_scenarios }}"
+  notify: Reload crowdsec
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_custom_scenarios | length > 0
+
+# Defense in depth — fail fast with the offending file path if any rendered
+# scenario is invalid YAML, instead of letting `cscli hub update` fail with
+# a cryptic error that requires SSH-level inspection to triage.
+- name: List rendered scenario files
+  ansible.builtin.find:
+    paths: /etc/crowdsec/scenarios
+    patterns: '*.yaml'
+  register: _rendered_scenarios
+  when: crowdsec_enabled | bool
+
+- name: Validate rendered scenario YAML
+  ansible.builtin.command:
+    cmd: python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" "{{ item.path }}"
+  register: _scenario_yaml_check
+  changed_when: false
+  failed_when: _scenario_yaml_check.rc != 0
+  loop: "{{ _rendered_scenarios.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when:
+    - crowdsec_enabled | bool
+    - _rendered_scenarios.files is defined
+
+# =============================================================================
+# Local Parsers (rendered BEFORE `cscli hub update`)
+# =============================================================================
+# Lets a consumer ship a local parser purely via group_vars — e.g. to turn an
+# app-emitted log line into a parsed event with evt.Meta.source_ip that a
+# `type: trigger` custom scenario can ban on (see bay#23). Rendered before
+# `cscli hub update` for the same reason as scenarios: an invalid YAML file
+# under /etc/crowdsec/parsers breaks parser loading for ALL parsers, so a bad
+# file from a prior render must be overwritten and validated first.
+- name: Ensure CrowdSec custom parser stage directories exist
+  ansible.builtin.file:
+    path: "/etc/crowdsec/parsers/{{ item.stage | default('s01-parse') }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop: "{{ crowdsec_custom_parsers }}"
+  loop_control:
+    label: "{{ item.stage | default('s01-parse') }}"
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_custom_parsers | length > 0
+
+- name: Deploy custom CrowdSec parsers
+  ansible.builtin.template:
+    src: parsers/custom-parser.yaml.j2
+    dest: "/etc/crowdsec/parsers/{{ item.stage | default('s01-parse') }}/custom-{{ item.name }}.yaml"
+    owner: root
+    group: root
+    mode: '0644'
+  loop: "{{ crowdsec_custom_parsers }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify: Reload crowdsec
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_custom_parsers | length > 0
+
+# Defense in depth — fail fast with the offending file path if any rendered
+# parser is invalid YAML, instead of letting `cscli hub update` (or the agent
+# reload) fail with a cryptic error that requires SSH-level inspection.
+- name: List rendered custom parser files
+  ansible.builtin.find:
+    paths: /etc/crowdsec/parsers
+    patterns: 'custom-*.yaml'
+    recurse: true
+  register: _rendered_parsers
+  when: crowdsec_enabled | bool
+
+- name: Validate rendered custom parser YAML
+  ansible.builtin.command:
+    cmd: python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" "{{ item.path }}"
+  register: _parser_yaml_check
+  changed_when: false
+  failed_when: _parser_yaml_check.rc != 0
+  loop: "{{ _rendered_parsers.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when:
+    - crowdsec_enabled | bool
+    - _rendered_parsers.files is defined
+
+# =============================================================================
+# Hub Collections and Scenarios
+# =============================================================================
+- name: Update CrowdSec hub
+  ansible.builtin.command:
+    cmd: cscli hub update
+  changed_when: false
+  when: crowdsec_enabled | bool
+
+- name: Install CrowdSec collections
+  ansible.builtin.command:
+    cmd: "cscli collections install {{ item }}"
+  loop: "{{ crowdsec_collections }}"
+  register: collection_install
+  # cscli >= 1.7 prints "Nothing to install or remove." to STDOUT on a no-op and
+  # keeps stderr for its own log lines (e.g. the "new release available"
+  # warning). The legacy 'overwrite'/'already' markers it used to emit are gone,
+  # so a stderr-only test could never match and this reported `changed` on every
+  # single provision. Both spellings are kept so older cscli stays correct.
+  changed_when: >-
+    'Nothing to install or remove' not in collection_install.stdout
+    and 'overwrite' not in collection_install.stderr
+    and 'already' not in collection_install.stderr
+  when: crowdsec_enabled | bool
+
+- name: Install additional scenarios
+  ansible.builtin.command:
+    cmd: "cscli scenarios install {{ item }}"
+  loop: "{{ crowdsec_scenarios }}"
+  register: scenario_install
+  # See "Install CrowdSec collections" above — same stale-marker fix.
+  changed_when: >-
+    'Nothing to install or remove' not in scenario_install.stdout
+    and 'overwrite' not in scenario_install.stderr
+    and 'already' not in scenario_install.stderr
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_scenarios | length > 0
+
+- name: Remove unwanted scenarios
+  ansible.builtin.command:
+    cmd: "cscli scenarios remove {{ item }} --force"
+  loop: "{{ crowdsec_scenarios_remove }}"
+  register: scenario_remove
+  changed_when: "'Removed' in scenario_remove.stdout or 'removed' in scenario_remove.stdout"
+  failed_when: false
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_scenarios_remove | length > 0
+  notify: Reload crowdsec
+
+- name: Install additional parsers
+  ansible.builtin.command:
+    cmd: "cscli parsers install {{ item }}"
+  loop: "{{ crowdsec_parsers }}"
+  register: parser_install
+  # See "Install CrowdSec collections" above — same stale-marker fix.
+  changed_when: >-
+    'Nothing to install or remove' not in parser_install.stdout
+    and 'overwrite' not in parser_install.stderr
+    and 'already' not in parser_install.stderr
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_parsers | length > 0
+  notify: Reload crowdsec
+
+# =============================================================================
+# Log Acquisition
+# =============================================================================
+- name: Remove default CrowdSec acquisition files
+  ansible.builtin.file:
+    path: /etc/crowdsec/acquis.d
+    state: absent
+  notify: Reload crowdsec
+  when: crowdsec_enabled | bool
+
+- name: Configure CrowdSec log acquisition
+  ansible.builtin.template:
+    src: acquis.yaml.j2
+    dest: /etc/crowdsec/acquis.yaml
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload crowdsec
+  when: crowdsec_enabled | bool
+
+# =============================================================================
+# Profiles (Ban Durations)
+# =============================================================================
+- name: Configure CrowdSec profiles (ban durations)
+  ansible.builtin.template:
+    src: profiles.yaml.j2
+    dest: /etc/crowdsec/profiles.yaml
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload crowdsec
+  when: crowdsec_enabled | bool
+
+# =============================================================================
+# Firewall Bouncer
+# =============================================================================
+- name: Install CrowdSec Firewall Bouncer
+  ansible.builtin.apt:
+    name: crowdsec-firewall-bouncer-nftables
+    state: present
+  register: _bouncer_pkg
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+
+# apt postinst auto-starts the bouncer before the API key is configured.
+# Stop it now to prevent a stale netlink handle from the double-start race
+# (ExecStartPost on crowdsec.service triggers another restart immediately).
+- name: Stop bouncer after fresh install (prevent race condition)
+  ansible.builtin.service:
+    name: crowdsec-firewall-bouncer
+    state: stopped
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+    - _bouncer_pkg is changed
+
+- name: Check if firewall bouncer is already registered
+  ansible.builtin.command:
+    cmd: cscli bouncers list -o raw
+  register: bouncer_list
+  changed_when: false
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+
+# Fallback path only. The Debian package's postinst self-registers as
+# `cs-firewall-bouncer-<epoch>` and writes its own key, so on every existing
+# production host this block never fires — it exists for a genuinely fresh
+# install where the list is empty.
+#
+# The `not in` test is a SUBSTRING match, and that is deliberate: it reads as
+# "is SOME firewall bouncer already registered", which is the actual intent,
+# and it matches inside the package's `cs-firewall-bouncer-<epoch>` name. Do
+# NOT tighten it to an exact `firewall-bouncer` match to look rigorous — the
+# name it wants does not exist on any host, so the next provision would mint a
+# second bouncer everywhere, rewrite the api_key, restart the bouncers, and
+# leave the package's registration orphaned with a stale last_pull.
+- name: Register firewall bouncer with LAPI
+  ansible.builtin.command:
+    cmd: cscli bouncers add firewall-bouncer -o raw
+  register: bouncer_key
+  changed_when: bouncer_key.rc == 0
+  failed_when: false
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+    - "'firewall-bouncer' not in bouncer_list.stdout"
+
+# Only writes a key we JUST minted. Two guards beyond the obvious rc check:
+#
+#   `is not skipped` — on ansible-core >= 2.19 a command task skipped BY CHECK
+#   MODE registers {skipped: true, rc: 0, stdout: ""}, i.e. a fake success rc.
+#   Under --check that cascades: the list task skips -> stdout "" -> Register's
+#   `when` passes -> Register also check-skips with rc 0 -> `rc == 0` here
+#   passes -> a predicted diff blanking api_key. Nothing is written in check
+#   mode, but the false diff reads exactly like an imminent IPS outage. A
+#   `when`-skipped task in a REAL run registers no rc at all, which is why this
+#   never fired for real.
+#
+#   `stdout | length > 0` — cheap insurance for the only genuine blank-key
+#   path left: cscli itself exiting 0 with empty output. Never observed; an
+#   empty api_key silently unauthenticates the bouncer, so it is worth the line.
+- name: Configure firewall bouncer API key
+  ansible.builtin.lineinfile:
+    path: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+    regexp: '^api_key:'
+    line: "api_key: {{ bouncer_key.stdout }}"
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+    - bouncer_key is defined
+    - bouncer_key is not skipped
+    - bouncer_key.rc is defined
+    - bouncer_key.rc == 0
+    - bouncer_key.stdout | length > 0
+  notify: Restart crowdsec-firewall-bouncer
+
+# Configure bouncer to exclude trusted admin IPs from CAPI enforcement.
+# Without this, CAPI community blocklist decisions can ban the admin IP
+# and lock out SSH. The nftables bypass chain approach does NOT work —
+# in nftables, accept in one chain doesn't prevent drop in the next chain.
+- name: Configure bouncer exclude_ips for trusted admin IPs
+  ansible.builtin.blockinfile:
+    path: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+    marker: "# {mark} ANSIBLE MANAGED - trusted IPs excluded from bouncer enforcement"
+    block: |
+      exclude_ips:
+      {% for ip in crowdsec_trusted_ips %}
+        - {{ ip }}
+      {% endfor %}
+    create: false
+  notify: Restart crowdsec-firewall-bouncer
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+    - crowdsec_trusted_ips | default([]) | length > 0
+
+- name: Remove bouncer exclude_ips when no trusted IPs configured
+  ansible.builtin.blockinfile:
+    path: /etc/crowdsec/bouncers/crowdsec-firewall-bouncer.yaml
+    marker: "# {mark} ANSIBLE MANAGED - trusted IPs excluded from bouncer enforcement"
+    state: absent
+  notify: Restart crowdsec-firewall-bouncer
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+    - crowdsec_trusted_ips | default([]) | length == 0
+
+# =============================================================================
+# Bouncer Auto-Restart on Agent Restart
+# =============================================================================
+# Use systemd PartOf= — when CrowdSec restarts, systemd automatically
+# restarts the bouncer too. After= ensures the bouncer starts after LAPI is ready.
+- name: Create bouncer service override directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/crowdsec-firewall-bouncer.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+
+- name: Bind bouncer lifecycle to CrowdSec agent
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/crowdsec-firewall-bouncer.service.d/crowdsec-dependency.conf
+    content: |
+      [Unit]
+      PartOf=crowdsec.service
+      After=crowdsec.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd daemon
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+
+# Flush handlers so exclude_ips and PartOf= changes take effect before start
+- name: Flush handlers before bouncer start
+  ansible.builtin.meta: flush_handlers
+
+# =============================================================================
+# Start bouncer (AFTER all config including exclude_ips is in place)
+# =============================================================================
+- name: Ensure firewall bouncer service is enabled and started
+  ansible.builtin.service:
+    name: crowdsec-firewall-bouncer
+    enabled: true
+    state: started
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+
+# =============================================================================
+# Bouncer Verification — ensure nftables tables actually exist
+# =============================================================================
+- name: Flush handlers before bouncer verification
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for bouncer to initialize nftables table with sets
+  ansible.builtin.shell:
+    # `grep` WITHOUT -q on purpose: -q exits on first match, nft takes SIGPIPE
+    # on the remaining ~2MB of blocklist sets, and pipefail turns the successful
+    # match into rc 141 — the poll would never pass. Plain grep reads all input.
+    cmd: set -o pipefail && nft list table ip crowdsec | grep "set" > /dev/null
+    executable: /bin/bash
+  register: _bouncer_nft_check
+  until: _bouncer_nft_check.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
+  failed_when: false
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+
+- name: Restart bouncer if nftables table is missing after polling
+  ansible.builtin.service:
+    name: crowdsec-firewall-bouncer
+    state: restarted
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+    - _bouncer_nft_check.rc is defined
+    - _bouncer_nft_check.rc != 0
+
+- name: Wait for bouncer nftables table after recovery restart
+  ansible.builtin.shell:
+    # `grep` WITHOUT -q on purpose: -q exits on first match, nft takes SIGPIPE
+    # on the remaining ~2MB of blocklist sets, and pipefail turns the successful
+    # match into rc 141 — the poll would never pass. Plain grep reads all input.
+    cmd: set -o pipefail && nft list table ip crowdsec | grep "set" > /dev/null
+    executable: /bin/bash
+  register: _bouncer_recovery_check
+  until: _bouncer_recovery_check.rc == 0
+  retries: 15
+  delay: 2
+  changed_when: false
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_firewall_bouncer_enabled | bool
+    - _bouncer_nft_check.rc is defined
+    - _bouncer_nft_check.rc != 0
+
+# =============================================================================
+# IP Whitelists
+# =============================================================================
+- name: Ensure CrowdSec parser directory exists
+  ansible.builtin.file:
+    path: /etc/crowdsec/parsers/s02-enrich
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - crowdsec_enabled | bool
+    - ip_whitelist | default([]) | length > 0
+
+- name: Configure CrowdSec IP whitelists
+  ansible.builtin.template:
+    src: whitelists.yaml.j2
+    dest: /etc/crowdsec/parsers/s02-enrich/ansible-whitelists.yaml
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload crowdsec
+  when:
+    - crowdsec_enabled | bool
+    - ip_whitelist | default([]) | length > 0
+
+# =============================================================================
+# Blocked IPs Import
+# =============================================================================
+- name: Import blocked single IPs as CrowdSec decisions
+  ansible.builtin.command:
+    cmd: >
+      cscli decisions add
+      --ip "{{ item }}"
+      --duration {{ crowdsec_ip_blocklist_duration }}
+      --reason "Imported from ip_blocklist"
+      --type ban
+  loop: "{{ ip_blocklist | default([]) | select('match', '^[0-9.]+$') | list }}"
+  register: decision_add_ip
+  changed_when: "'already exists' not in decision_add_ip.stderr | default('')"
+  failed_when:
+    - decision_add_ip.rc != 0
+    - "'already exists' not in decision_add_ip.stderr | default('')"
+  when:
+    - crowdsec_enabled | bool
+    - ip_blocklist | default([]) | length > 0
+
+- name: Import blocked CIDR ranges as CrowdSec decisions
+  ansible.builtin.command:
+    cmd: >
+      cscli decisions add
+      --range "{{ item }}"
+      --duration {{ crowdsec_ip_blocklist_duration }}
+      --reason "Imported from ip_blocklist"
+      --type ban
+  loop: "{{ ip_blocklist | default([]) | select('match', '.*/[0-9]+$') | list }}"
+  register: decision_add_range
+  changed_when: "'already exists' not in decision_add_range.stderr | default('')"
+  failed_when:
+    - decision_add_range.rc != 0
+    - "'already exists' not in decision_add_range.stderr | default('')"
+  when:
+    - crowdsec_enabled | bool
+    - ip_blocklist | default([]) | length > 0
+
+# =============================================================================
+# nftables Blocklist (CIDR Range Enforcement)
+# =============================================================================
+- name: Ensure nftables.d directory exists
+  ansible.builtin.file:
+    path: /etc/nftables.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_nftables_blocklist | bool
+    - ip_blocklist | default([]) | length > 0
+
+- name: Deploy nftables blocklist configuration
+  ansible.builtin.template:
+    src: nftables-blocklist.conf.j2
+    dest: /etc/nftables.d/trellis-blocklist.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Apply nftables blocklist
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_nftables_blocklist | bool
+    - ip_blocklist | default([]) | length > 0
+
+- name: Remove nftables blocklist when disabled
+  ansible.builtin.file:
+    path: /etc/nftables.d/trellis-blocklist.conf
+    state: absent
+  notify: Remove nftables blocklist table
+  when:
+    - crowdsec_enabled | bool
+    - not (crowdsec_nftables_blocklist | bool) or (ip_blocklist | default([]) | length == 0)
+
+- name: Ensure nftables.conf includes nftables.d directory
+  ansible.builtin.lineinfile:
+    path: /etc/nftables.conf
+    line: 'include "/etc/nftables.d/*.conf"'
+    create: false
+  failed_when: false
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_nftables_blocklist | bool
+    - ip_blocklist | default([]) | length > 0
+
+# =============================================================================
+# Hub Data Refresh (GeoLite2 mmdb)
+# =============================================================================
+# The vendor hubupdate timer never re-downloads geoip-enrich `data:` files
+# (GeoLite2 mmdbs) because it upgrades without --force, and cscli 1.7 has no way
+# to refresh a present-but-stale data file at all — so they pin to the
+# provision-day snapshot and rot. Install a weekly systemd timer that fetches the
+# parsers' declared data: URLs directly (conditional GET + atomic replace) and
+# reloads crowdsec only on a real content change, gated on `crowdsec -t -error`.
+# See docs/crowdsec.md ("Hub data refresh (GeoLite2)").
+- name: Ensure curl is present for CrowdSec data refresh
+  ansible.builtin.apt:
+    name: curl
+    state: present
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_data_refresh_enabled | bool
+
+- name: Deploy CrowdSec data refresh script
+  ansible.builtin.template:
+    src: crowdsec-data-refresh.sh.j2
+    dest: /usr/local/bin/crowdsec-data-refresh.sh
+    owner: root
+    group: root
+    mode: '0755'
+  register: _data_refresh_script
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_data_refresh_enabled | bool
+
+- name: Deploy CrowdSec data refresh systemd service unit
+  ansible.builtin.template:
+    src: crowdsec-data-refresh.service.j2
+    dest: /etc/systemd/system/crowdsec-data-refresh.service
+    owner: root
+    group: root
+    mode: '0644'
+  register: _data_refresh_service_unit
+  notify: Reload systemd daemon
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_data_refresh_enabled | bool
+
+- name: Deploy CrowdSec data refresh systemd timer unit
+  ansible.builtin.template:
+    src: crowdsec-data-refresh.timer.j2
+    dest: /etc/systemd/system/crowdsec-data-refresh.timer
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload systemd daemon
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_data_refresh_enabled | bool
+
+# Flush the daemon-reload so the freshly written units are known to systemd
+# before we enable/start the timer and seed the first run.
+- name: Flush handlers before CrowdSec data refresh timer start
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start CrowdSec data refresh timer
+  ansible.builtin.systemd:
+    name: crowdsec-data-refresh.timer
+    enabled: true
+    state: started
+    daemon_reload: true
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_data_refresh_enabled | bool
+
+# Seed run — force an initial refresh on first install or when the script is
+# updated, so a fresh host doesn't wait up to a week for the first mmdb pull.
+# Routine re-provisions (script + unit unchanged) skip this and don't re-download.
+# Uses `systemctl start` (not the systemd module) so it blocks until the oneshot
+# finishes and fails the play loudly if the refresh script errors.
+- name: Run initial CrowdSec data refresh
+  ansible.builtin.command:
+    cmd: systemctl start crowdsec-data-refresh.service
+  changed_when: true
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_data_refresh_enabled | bool
+    - _data_refresh_script is changed or _data_refresh_service_unit is changed
+
+# Disable path — stop, disable and mask the timer when the feature is turned
+# off. Masking is safe even if the units were never installed on this host.
+- name: Stop, disable and mask CrowdSec data refresh timer
+  ansible.builtin.systemd:
+    name: crowdsec-data-refresh.timer
+    enabled: false
+    state: stopped
+    masked: true
+    daemon_reload: true
+  when:
+    - crowdsec_enabled | bool
+    - not (crowdsec_data_refresh_enabled | bool)
+

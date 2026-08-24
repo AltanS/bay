@@ -1,0 +1,140 @@
+---
+# Central service definitions — the key file that drives everything.
+# Schema reference: docs/services.md
+
+# Multi-region tip: replace hardcoded domains with {{ domain_base }}
+# e.g., domain: "gatus.{{ domain_base }}"
+# Set domain_base per-region in group_vars/eu/main.yml etc.
+# See docs/multi-region.md for the full pattern.
+
+services:
+  gatus:
+    access: public
+    image: twinproduction/gatus:latest
+    domains:
+      - status.example.com
+    ports:
+      internal: 8080
+    healthcheck:
+      path: /health
+      interval: 30s
+    env:
+      clear:
+        GATUS_CONFIG: /config/config.yaml
+    config_files:
+      - gatus/config.yaml
+    volumes:
+      - "{{ stack_dir }}/config/gatus/config.yaml:/config/config.yaml:ro"
+    # Per-service docker log retention. Unspecified keys inherit
+    # log_rotation_defaults from group_vars. Set to `false` to opt out
+    # entirely and fall back to daemon-level log-opts.
+    # log_rotation:
+    #   max_size: "200m"
+    #   max_file: 10
+
+  internal-stats:
+    access: vpn
+    public_routes:                   # Paths open to everyone on a VPN service
+      - /webhooks/
+      - /api/health
+    image: myorg/internal-stats:latest
+    domains:
+      - stats.example.com
+    ports:
+      internal: 3000
+
+  status-page:
+    access: public
+    vpn_routes:                      # Paths restricted to VPN on a public service
+      - /admin
+      - /endpoints/secret
+    image: twinproduction/gatus:latest
+    domains:
+      - status.example.com
+    ports:
+      internal: 8080
+    replicas: 1
+    healthcheck:
+      path: /health
+      interval: 30s
+    env:
+      clear:
+        NODE_ENV: production
+        APP_PORT: "3000"
+      secret:
+        - DB_PASSWORD
+        - SESSION_SECRET
+    depends_on:
+      - postgres
+
+  myapp:
+    access: public
+    zero_downtime: true
+    build:
+      repo: git@github.com:myorg/myapp.git
+      branch: main
+      args:
+        NODE_ENV: production
+      paths:
+        exclude:
+          - "*.md"
+          - "docs/**"
+          - ".github/**"
+          - "LICENSE"
+    domains:
+      - app.example.com
+    ports:
+      internal: 3000
+    mem_limit: 512m
+    healthcheck:
+      path: /health
+    env:
+      clear:
+        DATABASE_URL: "postgresql://app:{{ secrets.DB_PASSWORD }}@localhost:5432/app"
+      secret:
+        - SESSION_SECRET
+    depends_on:
+      - postgres
+
+accessories:
+  postgres:
+    image: postgres:16
+    port: "5432:5432"
+    # expose: controls the host-interface bind. Defaults to 'loopback'.
+    #   loopback — 127.0.0.1 only (same-stack services reach via Docker DNS,
+    #              no host publish needed for in-stack consumers)
+    #   tailnet  — <headscale_server_tailnet_ip> (cross-region access over
+    #              the Headscale tailnet; deploy fails if that var is unset)
+    #   host     — 0.0.0.0 (intentional public bind, e.g. external BI tool)
+    expose: loopback
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    env:
+      clear:
+        POSTGRES_DB: app
+        POSTGRES_USER: app
+      secret:
+        - POSTGRES_PASSWORD
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "app"]
+      interval: 5s
+      retries: 5
+    backup:
+      method: pg_dump
+      schedule: "0 3 * * *"
+      retain: 7
+
+  redis:
+    image: redis:7-alpine
+    port: "6379:6379"
+    expose: loopback
+    volumes:
+      - redis_data:/data
+
+# ── Webhook Receiver (optional) ──────────────────────────────────────
+# Uncomment to enable automatic deployments from GitHub webhooks.
+# See docs/services.md for the full webhook schema and setup instructions.
+#
+# webhook:
+#   domain: deploy.example.com
+#   secret: "{{ secrets.WEBHOOK_SECRET }}"

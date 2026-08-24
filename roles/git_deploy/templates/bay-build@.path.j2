@@ -1,0 +1,9 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Watch for build trigger - %i
+
+[Path]
+PathExists={{ stack_dir }}/triggers/%i.trigger
+
+[Install]
+WantedBy=multi-user.target

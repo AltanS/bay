@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# crowdsec-data-refresh — GeoLite2 mmdb hub data refresh
+# Managed by Ansible (crowdsec role). Do not edit manually.
+#
+# Why this exists (and why it does NOT use cscli for the download):
+# The vendor's daily crowdsec-hubupdate.timer runs `cscli hub upgrade` and never
+# re-downloads an item's data: files unless the item itself version-bumps.
+# crowdsecurity/geoip-enrich rarely bumps, so the GeoLite2 mmdbs
+# (GeoLite2-ASN.mmdb, GeoLite2-City.mmdb) pin to the provision-day snapshot and
+# rot — ASN-keyed scenarios (evt.Enriched.ASNumber) then silently fail open.
+#
+# cscli offers NO path to refresh a present-but-stale data file on 1.7 (verified
+# empirically on 1.7.7): `parsers upgrade --force` prints "Nothing to install or
+# remove." and never re-fetches — even with the data file deleted — because the
+# 1.7 plan engine keys purely on item version/taint; data files are simply not
+# part of the plan for an already-installed item. Even `remove --purge --force`
+# + `install` only pulls MISSING files (purge leaves data files in place, install
+# skips present ones).
+#
+# So this script bypasses cscli for the transfer. For each configured parser it
+# reads the parser's declared data: source_urls — from the installed hub-item
+# yaml that `cscli parsers inspect -o json` points at via "local_path" — and
+# fetches each one directly: a conditional GET (If-Modified-Since via `curl -z`),
+# an atomic same-directory tmp+mv replace, and a crowdsec reload gated on a real
+# content change AND a passing `crowdsec -t -error` (the vendor unit's own config
+# test). Still surgical: only the parsers in PARSERS are touched, nothing
+# hub-wide.
+
+set -euo pipefail
+umask 077
+
+DATA_DIR="/var/lib/crowdsec/data"
+
+PARSERS=(
+{% for parser in crowdsec_data_refresh_parsers %}
+  "{{ parser }}"
+{% endfor %}
+)
+
+changed=0
+fail=0
+
+# Clean up the in-flight temp file if we're interrupted mid-download. Every
+# normal code path below already removes/consumes its own tmp; this is the
+# belt-and-suspenders for a signal mid-transfer. Single quotes defer the $tmp
+# expansion to trap time, when it names the file currently being written.
+tmp=""
+trap 'rm -f -- "$tmp" 2>/dev/null || true' EXIT
+
+for p in "${PARSERS[@]}"; do
+  # `cscli parsers inspect -o json` exposes "local_path" — the installed hub-item
+  # yaml that declares this parser's data: files. `|| true` keeps set -e/pipefail
+  # from aborting when the parser isn't installed (cscli then exits non-zero).
+  yaml_path="$(cscli --error parsers inspect "$p" -o json 2>/dev/null \
+    | sed -n 's/.*"local_path": *"\([^"]*\)".*/\1/p' || true)"
+  if [[ -z "$yaml_path" || ! -f "$yaml_path" ]]; then
+    echo "crowdsec-data-refresh: $p not installed, skipping"
+    continue
+  fi
+
+  # Pull the source_url / dest_file values from the data: block in document
+  # order and pair them positionally. grep exits 1 on no match, so `|| true`
+  # keeps set -e/pipefail from aborting when a parser declares no data: files.
+  urls="$(grep -E 'source_url:' "$yaml_path" | sed -E 's/.*source_url:[[:space:]]*//' || true)"
+  dests="$(grep -E 'dest_file:' "$yaml_path" | sed -E 's/.*dest_file:[[:space:]]*//' || true)"
+  if [[ -z "$urls" || -z "$dests" ]]; then
+    echo "crowdsec-data-refresh: $p has no data files, skipping"
+    continue
+  fi
+
+  # `< <(...)` keeps the loop in the current shell so changed/fail flags persist.
+  while IFS=$'\t' read -r url dest_file; do
+    [[ -n "$url" && -n "$dest_file" ]] || continue
+
+    dest="$DATA_DIR/$dest_file"
+    tmp="$DATA_DIR/.$dest_file.refresh.tmp"
+    rm -f -- "$tmp"
+
+    # Conditional GET: only transfer if upstream is newer than our copy
+    # (-z/--time-cond compares against dest's mtime; the server may answer 304
+    # with no body, leaving an empty tmp that the content check below rejects).
+    curl_args=(--fail --silent --show-error --location --output "$tmp")
+    if [[ -f "$dest" ]]; then
+      curl_args+=(--time-cond "$dest")
+    fi
+    if ! curl "${curl_args[@]}" "$url"; then
+      echo "crowdsec-data-refresh: ERROR failed to fetch $url" >&2
+      fail=1
+      rm -f -- "$tmp"
+      continue
+    fi
+
+    # Replace only on a real content change — covers a 304 (empty tmp) and a
+    # 200 that returns byte-identical data. mv within the same fs is atomic.
+    if [[ -s "$tmp" ]] && { [[ ! -f "$dest" ]] || ! cmp -s "$tmp" "$dest"; }; then
+      chmod 0600 "$tmp"
+      mv -f -- "$tmp" "$dest"
+      changed=1
+      echo "crowdsec-data-refresh: updated $dest_file"
+    else
+      rm -f -- "$tmp"
+      echo "crowdsec-data-refresh: $dest_file up to date"
+    fi
+  done < <(paste -d $'\t' <(printf '%s\n' "$urls") <(printf '%s\n' "$dests"))
+done
+
+# Reload only when data actually changed, and only if the config still tests
+# clean — a corrupt/truncated mmdb must never take crowdsec down on reload.
+if [[ "$changed" -eq 1 ]]; then
+  echo "crowdsec-data-refresh: data changed, validating config (crowdsec -t -error)"
+  if ! crowdsec -t -error; then
+    echo "crowdsec-data-refresh: ERROR crowdsec -t failed, NOT reloading" >&2
+    exit 1
+  fi
+  systemctl reload crowdsec
+  echo "crowdsec-data-refresh: reloaded crowdsec after data refresh"
+else
+  echo "crowdsec-data-refresh: all data files up to date, no reload"
+fi
+
+# Surface fetch failures AFTER the reload logic so files that did update still
+# get applied; a stale copy is kept for any file whose fetch failed.
+if [[ "$fail" -eq 1 ]]; then
+  echo "crowdsec-data-refresh: ERROR one or more data files failed to refresh" >&2
+  exit 1
+fi
+
+exit 0

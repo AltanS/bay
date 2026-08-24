@@ -1,0 +1,26 @@
+---
+# Access gateway configuration
+# Controls how VPN-protected services (access: vpn) are secured.
+#
+# Options:
+#   headscale  — self-hosted Tailscale coordination server, auto device enrollment
+#   wireguard  — manually managed WireGuard VPN with static peer IPs
+#   none       — no VPN protection, all services are public
+
+access_gateway: {{ access_gateway }}
+{% if access_gateway == "headscale" %}
+
+# Public domain where Headscale is reachable (for client enrollment)
+headscale_domain: {{ headscale_domain }}
+{% if multi_region and regions %}
+
+# Which region runs the Headscale coordination server.
+# All other regions run only the Tailscale daemon and register via API.
+headscale_control_region: {{ regions[0].name }}
+{% endif %}
+
+# Optional: OIDC self-service enrollment
+# headscale_oidc_issuer: https://auth.example.com
+# headscale_oidc_client_id: headscale
+# headscale_oidc_client_secret: "{{ '{{ vault_headscale_oidc_secret }}' }}"
+{% endif %}

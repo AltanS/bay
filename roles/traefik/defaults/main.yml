@@ -1,0 +1,80 @@
+---
+# Traefik role defaults
+
+traefik_image: traefik:v3.6
+traefik_container_name: traefik
+
+# Paths on the remote host
+traefik_config_path: "{{ stack_dir }}/traefik.yml"
+traefik_acme_path: "{{ stack_dir }}/acme.json"
+traefik_access_log_path: "{{ stack_dir }}/logs/traefik/access.log"
+
+# Docker network for app containers
+traefik_docker_network: services
+
+# Prometheus metrics
+traefik_metrics_enabled: true
+traefik_metrics_port: 8082
+
+# Request headers to include in the access log. Traefik drops all request
+# headers by default, so the access log shows "-" for every User-Agent. Set
+# e.g. { "User-Agent": "keep" } to enable UA-based CrowdSec scenarios. Empty {}
+# preserves the current (drop-all) behaviour and keeps access.log byte-identical.
+traefik_access_log_fields_headers: {}
+
+# ── Global Middleware Defaults ──────────────────────────────────────────
+
+# Security headers (applied to all services via chain)
+traefik_security_headers_enabled: true
+traefik_security_headers:
+  sts_seconds: 63072000
+  sts_include_subdomains: true
+  sts_preload: true
+  content_type_nosniff: true
+  frame_deny: true
+  referrer_policy: strict-origin-when-cross-origin
+  permissions_policy: "camera=(), microphone=(), geolocation=(), payment=()"
+  browser_xss_filter: true
+  custom_response_headers: {}
+
+# Gzip/Brotli compression
+traefik_compress_enabled: true
+
+# Custom error pages (requires error-pages container — disabled by default)
+traefik_error_pages_enabled: false
+traefik_error_pages_image: tarampampam/error-pages:3
+traefik_error_pages_template: ghost
+traefik_error_pages_port: 8080
+traefik_error_pages_status: "400-599"
+traefik_error_pages_query: "/{status}.html"
+
+# Per-service middleware defaults (used when service opts in without specifying values)
+traefik_rate_limit_average: 100
+traefik_rate_limit_burst: 50
+traefik_rate_limit_period: "1s"
+traefik_in_flight_req_amount: 100
+traefik_retry_attempts: 4
+traefik_circuit_breaker_expression: "NetworkErrorRatio() > 0.5"
+
+# ── Tailnet HTTPS ingress (self-hosted Headscale) ───────────────────────
+# Opt-in DNS-01 wildcard cert resolver + Traefik file provider, so the
+# control/ingress host can terminate TLS for tailnet services — including
+# services that live on OTHER tailnet nodes (see docs/tailnet-ingress.md).
+# All flags default OFF: a host that does not set them renders byte-identically.
+traefik_dns_challenge_enabled: false
+traefik_dns_provider: cloudflare
+traefik_dns_resolver_name: letsencrypt_dns
+traefik_acme_dns_path: "{{ stack_dir }}/acme-dns.json"
+traefik_acme_dns_email: "{{ letsencrypt_email | default('') }}"
+# Cloudflare API token (scoped Zone:DNS:Edit). Set to a vault reference in
+# the consumer's group_vars, e.g. "{{ secrets.CLOUDFLARE_DNS_API_TOKEN }}".
+traefik_cloudflare_dns_api_token: ""
+
+# ── Fail-closed split entrypoints (tailnet-only :443) ───────────────────
+# When true, web/websecure bind the host's PUBLIC IP (not all interfaces) and
+# a websecure_tailnet entrypoint is added on the tailnet IP, freeing the
+# tailnet IP for a dedicated, fail-closed listener. Existing public routers
+# keep using `websecure` (now public-IP-bound) unchanged; VPN routers add the
+# tailnet entrypoint via vpn_entrypoints. Requires netplan_address (public IP).
+traefik_split_entrypoints: false
+traefik_public_bind_ip: "{{ netplan_address | default('') }}"

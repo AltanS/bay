@@ -1,0 +1,79 @@
+---
+# Maintenance cron jobs
+
+# Resolve effective schedules. Build servers (inventory_hostname matches the
+# `build_server` group var) get daily prune instead of weekly when
+# cronjobs_build_server_daily is true.
+
+- name: Resolve effective prune schedules
+  ansible.builtin.set_fact:
+    _prune_is_build_server: >-
+      {{ cronjobs_build_server_daily | bool and (build_server | default('')) == inventory_hostname }}
+
+- name: Resolve docker prune schedules
+  ansible.builtin.set_fact:
+    _docker_prune_schedule: >-
+      {{ docker_prune_build_server_schedule if _prune_is_build_server else docker_prune_schedule }}
+    _docker_prune_builder_schedule: >-
+      {{ docker_prune_builder_build_server_schedule if _prune_is_build_server else docker_prune_builder_schedule }}
+
+# The prune is a rendered script rather than an inline cron command because it
+# has to sweep more than one builder and pick between --keep-storage and
+# --reserved-space at runtime. It also gives consumers something to run by hand
+# and a single place the builder list is expressed (docker_prune_builders).
+- name: Install Docker builder prune script
+  ansible.builtin.template:
+    src: bay-docker-builder-prune.sh.j2
+    dest: /usr/local/bin/bay-docker-builder-prune
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  when: docker_prune_enabled and docker_prune_builder_enabled
+
+- name: Schedule Docker builder cache prune
+  ansible.builtin.cron:
+    name: "docker-builder-prune"
+    minute: "{{ _docker_prune_builder_schedule.split()[0] }}"
+    hour: "{{ _docker_prune_builder_schedule.split()[1] }}"
+    day: "{{ _docker_prune_builder_schedule.split()[2] }}"
+    month: "{{ _docker_prune_builder_schedule.split()[3] }}"
+    weekday: "{{ _docker_prune_builder_schedule.split()[4] }}"
+    job: >-
+      /usr/local/bin/bay-docker-builder-prune
+      >> /var/log/docker-prune.log 2>&1
+    user: root
+    state: "{{ 'present' if (docker_prune_enabled and docker_prune_builder_enabled) else 'absent' }}"
+  become: true
+
+- name: Schedule Docker system prune
+  ansible.builtin.cron:
+    name: "docker-system-prune"
+    minute: "{{ _docker_prune_schedule.split()[0] }}"
+    hour: "{{ _docker_prune_schedule.split()[1] }}"
+    day: "{{ _docker_prune_schedule.split()[2] }}"
+    month: "{{ _docker_prune_schedule.split()[3] }}"
+    weekday: "{{ _docker_prune_schedule.split()[4] }}"
+    job: >-
+      docker system prune -af --volumes
+      >> /var/log/docker-prune.log 2>&1
+    user: root
+    state: "{{ 'present' if docker_prune_enabled else 'absent' }}"
+  become: true
+
+- name: Configure logrotate for Docker prune log
+  ansible.builtin.copy:
+    dest: /etc/logrotate.d/docker-prune
+    content: |
+      /var/log/docker-prune.log {
+          monthly
+          rotate 3
+          compress
+          missingok
+          notifempty
+      }
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: docker_prune_enabled

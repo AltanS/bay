@@ -1,0 +1,41 @@
+---
+# Capture container IDs BEFORE container_lifecycle recreates them.
+# The post task compares these against post-recreate IDs and writes a
+# "container recreated" sentinel to live.log when they differ so
+# operators have a grep-able boundary marker between container
+# lifetimes in the archive.
+#
+# Only runs when at least one service/accessory has log_retention.
+
+- name: Identify log_retention containers for boundary capture
+  ansible.builtin.set_fact:
+    _log_retention_boundary_containers: >-
+      {{ (active_services | combine(active_accessories))
+         | dict2items
+         | selectattr('value.log_retention', 'defined')
+         | selectattr('value.log_retention', 'mapping')
+         | map(attribute='key')
+         | list }}
+
+- name: Capture pre-recreate container IDs
+  ansible.builtin.command:
+    cmd: "docker inspect --format {% raw %}'{{.Id}}'{% endraw %} {{ item }}"
+  register: _log_retention_pre_ids_raw
+  changed_when: false
+  failed_when: false
+  loop: "{{ _log_retention_boundary_containers }}"
+  loop_control:
+    label: "{{ item }}"
+  when: _log_retention_boundary_containers | length > 0
+
+- name: Build pre-recreate ID map
+  ansible.builtin.set_fact:
+    _log_retention_pre_ids: >-
+      {{ dict(_log_retention_pre_ids_raw.results
+              | default([])
+              | map(attribute='item')
+              | zip(_log_retention_pre_ids_raw.results
+                    | default([])
+                    | map(attribute='stdout')
+                    | map('default', ''))) }}
+  when: _log_retention_boundary_containers | length > 0

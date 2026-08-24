@@ -1,0 +1,95 @@
+---
+access_gateway: wireguard
+
+# Which region runs the Headscale coordination server.
+# Set once in group_vars/all/access_gateway.yml for multi-region deployments.
+# Single-server setups leave this unset (headscale_server defaults to true).
+# headscale_control_region: eu
+
+# Derived: true when this host IS the control region (or single-server).
+# Do not set this directly — set headscale_control_region instead.
+headscale_server: >-
+  {{ headscale_control_region is not defined
+     or (region | default('')) == headscale_control_region }}
+
+# Headscale defaults (must live here so container_lifecycle specs can resolve them)
+headscale_tailnet_cidr:
+  - "100.64.0.0/10"
+headscale_domain: ""
+headscale_magic_dns_domain: "{{ stack_name }}.tailnet.internal"
+headscale_version: "0.29.2"
+# Headscale user that owns VPS server nodes — defaults to stack_name.
+# Each Bay project creates its own user, preventing collisions when
+# multiple projects share one Headscale server.
+headscale_server_user: "{{ stack_name }}"
+
+# Hostname for the VPS node in Headscale — deterministic and namespaced.
+# Single-server: "myapp", multi-region: "myapp-eu", "myapp-na".
+headscale_node_hostname: "{{ stack_name }}{{ ('-' ~ region) if region is defined and region | length > 0 else '' }}"
+
+# Tailnet IP of this server — used for split-DNS extra_records.
+# Default matches the first sequential allocation from headscale_tailnet_cidr.
+headscale_server_tailnet_ip: "100.64.0.1"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Access-gateway adapter contract
+#
+# These four vars are THE interface between the active gateway backend and
+# the rest of the framework. Neutral roles (traefik, zot, crowdsec_allowlist,
+# container_lifecycle, git_deploy, deploy_stack) read these and MUST NOT read
+# `headscale_server_tailnet_ip` or compare `access_gateway == 'headscale'`
+# directly. `tests/test_gateway_ratchet.py` enforces that mechanically.
+#
+# They are lazy-evaluated DEFAULTS, not `set_fact` facts, on purpose: a fact
+# only exists in another host's hostvars after the role ran on that host in
+# that play, which is fragile under --limit, --tags and rig-skip runs. That
+# exact bug already shipped once — the vpn_allowed_ips flip-flop documented
+# in tasks/main.yml.
+#
+# LIMIT, VERIFIED NOT ASSUMED: role defaults are absent from
+# `hostvars[<other_host>]` entirely, as are play `vars:`. Only inventory
+# vars, group_vars, host_vars, facts and set_facts land there. So these vars
+# serve every SAME-host read; the two cross-host readers
+# (roles/crowdsec_allowlist and deploy.yml's multi-region link resolution)
+# must go through the `bay_gateway_bind_ip` resolver instead.
+#
+# `gateway_bind_ip` aliases `headscale_server_tailnet_ip` for BOTH headscale
+# and wireguard. That is not a typo: a consumer running the wireguard
+# backend can already override that var, so it is doing double duty as a
+# generic "private bind IP" in the field today. Preserving that override
+# path is what makes this migration zero-config-change.
+# ─────────────────────────────────────────────────────────────────────────
+
+# Does any private overlay network exist on this host?
+gateway_enabled: >-
+  {{ (access_gateway | default('wireguard')) in ['headscale', 'wireguard'] }}
+
+# This host's overlay IP. The bind target for `expose: gateway`, the
+# fail-closed traefik entrypoint, zot's self-pin and the crowdsec self-ban
+# exemption. Empty means "this backend provides no bind IP".
+gateway_bind_ip: >-
+  {{ (headscale_server_tailnet_ip | default(''))
+     if (access_gateway | default('wireguard')) in ['headscale', 'wireguard']
+     else '' }}
+
+# Overlay CIDR(s) to feed into allowlists. WireGuard supplies its ranges
+# through `vpn_allowed_ips` directly, as it always has.
+gateway_cidrs: >-
+  {{ headscale_tailnet_cidr
+     if (access_gateway | default('wireguard')) == 'headscale'
+     else [] }}
+
+# Does this backend need each host registered with a control server after
+# its containers are up? Only a managed control plane does. deploy.yml reads
+# this instead of naming the backend, so the play stays neutral.
+gateway_requires_node_registration: >-
+  {{ (access_gateway | default('wireguard')) == 'headscale' }}
+
+# Can this backend inject a per-request device identity header? A backend
+# that cannot must degrade gracefully downstream — a consumer app must never
+# treat an absent X-Tailnet-Device header as trusted.
+gateway_identity_supported: >-
+  {{ (tailnet_identity_enabled | default(false) | bool)
+     if (access_gateway | default('wireguard')) == 'headscale'
+     else false }}

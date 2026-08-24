@@ -1,0 +1,103 @@
+---
+# Debug agent role: creates a narrow-permission user for AI agents
+# to SSH into servers for read-only debugging.
+#
+# The account is not a sandbox. It reads logs, container state and firewall
+# rules through wrapper scripts that validate their own arguments, because
+# sudoers can only match a command, never its argument.
+
+- name: Skip debug agent (disabled)
+  ansible.builtin.debug:
+    msg: "Debug agent is disabled (debug_agent_enabled: false)"
+  when: not debug_agent_enabled
+
+- name: Configure debug agent
+  when: debug_agent_enabled
+  block:
+    - name: Resolve SSH keys from all sources
+      ansible.builtin.set_fact:
+        _debug_agent_resolved_keys: >-
+          {{
+            debug_agent_keys +
+            (debug_agent_github_users | map('regex_replace', '^(.*)$', 'https://github.com/\1.keys') | list)
+          }}
+
+    - name: Fail if enabled but no SSH keys are configured
+      ansible.builtin.fail:
+        msg: >-
+          Debug agent is enabled but no SSH keys are configured.
+          Set debug_agent_keys and/or debug_agent_github_users in group_vars.
+      when: _debug_agent_resolved_keys | length == 0
+
+    - name: Resolve supplementary groups
+      ansible.builtin.set_fact:
+        _debug_agent_all_groups: >-
+          {{
+            (debug_agent_groups + (['docker'] if debug_agent_docker_access else []))
+            | unique
+          }}
+
+    - name: Warn that docker group access makes the debug agent root
+      ansible.builtin.debug:
+        msg: >-
+          debug_agent_docker_access is true, so {{ debug_agent_user }} joins the
+          docker group. That group is root-equivalent — a member can bind-mount /
+          into a container and read or write any file on this host.
+      when: debug_agent_docker_access
+
+    - name: Create debug agent user
+      ansible.builtin.user:
+        name: "{{ debug_agent_user }}"
+        groups: "{{ _debug_agent_all_groups | join(',') }}"
+        append: true
+        state: present
+        shell: /bin/bash
+        create_home: true
+
+    - name: Set authorized SSH keys for debug agent
+      ansible.posix.authorized_key:
+        user: "{{ debug_agent_user }}"
+        key: "{{ item }}"
+        exclusive: "{{ ansible_loop.first }}"
+      loop: "{{ _debug_agent_resolved_keys }}"
+      loop_control:
+        extended: true
+        label: "key {{ ansible_loop.index }}"
+
+    - name: Install argument-validating wrapper scripts
+      ansible.builtin.template:
+        src: "{{ item }}.j2"
+        dest: "/usr/local/bin/{{ item }}"
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - bay-readlog
+        - bay-journal
+        - bay-systemctl-ro
+        - bay-docker-ro
+
+    - name: Install sudoers rules for read-only commands
+      ansible.builtin.template:
+        src: sudoers.j2
+        dest: "/etc/sudoers.d/{{ debug_agent_user }}"
+        owner: root
+        group: root
+        mode: "0440"
+        validate: "visudo -cf %s"
+      when: debug_agent_sudoers
+
+    - name: Remove sudoers rules when disabled
+      ansible.builtin.file:
+        path: "/etc/sudoers.d/{{ debug_agent_user }}"
+        state: absent
+      when: not debug_agent_sudoers
+
+    - name: Create tmp scratch directory
+      ansible.builtin.file:
+        path: "/home/{{ debug_agent_user }}/tmp"
+        state: directory
+        owner: "{{ debug_agent_user }}"
+        group: "{{ debug_agent_user }}"
+        mode: "0755"
+      when: debug_agent_create_tmp

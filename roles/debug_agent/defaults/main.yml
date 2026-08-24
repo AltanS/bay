@@ -1,0 +1,74 @@
+---
+# Debug agent — opt-in SSH access for AI agents (Claude Code).
+# Set debug_agent_enabled: true and provide SSH keys to activate.
+#
+# This account is NOT root-equivalent by default, but it is also NOT a
+# sandbox. It reads logs, container state and firewall rules. Treat it as
+# an operator account with a narrow, read-only command surface.
+debug_agent_enabled: false
+
+# Username for the debug agent account
+debug_agent_user: debugbot
+
+# Supplementary groups (the user gets its own primary group automatically).
+# Do NOT add `docker` here — see debug_agent_docker_access below.
+debug_agent_groups:
+  - ssh-access
+  - adm
+
+# ############################################################################
+# DANGER: the `docker` group is ROOT. Any member can start a container that
+# bind-mounts / and read or write every file on the host, including
+# /etc/shadow and the vault password. There is no read-only docker group.
+#
+# Leave this false. The role installs /usr/local/bin/bay-docker-ro, a wrapper
+# that serves the read-only docker subcommands through sudo without handing
+# out the group. Set this to true ONLY if you accept that the debug agent
+# becomes root on this host.
+# ############################################################################
+debug_agent_docker_access: false
+
+# Direct SSH public keys
+debug_agent_keys: []
+
+# GitHub usernames — each is resolved to https://github.com/<user>.keys
+debug_agent_github_users: []
+
+# Create a ~/tmp scratch directory for the debug user
+debug_agent_create_tmp: true
+
+# Directories whose files bay-readlog will serve. A path is accepted only if
+# `realpath -e` resolves inside one of these, so a symlink that escapes is
+# refused. Entries may contain shell globs.
+debug_agent_readable_paths:
+  - /var/log
+  - "{{ stack_dir }}/logs"
+
+# Passwordless sudo for read-only commands (set to false to disable).
+#
+# Every entry below is either a bay-* wrapper that validates its own
+# arguments, or a subcommand with no file operand. Do NOT add bare
+# /usr/bin/cat, tail, head or grep — sudoers cannot restrict their argument,
+# so `sudo cat /etc/shadow` and `sudo grep . /root/.ssh/id_ed25519` both work.
+debug_agent_sudoers: true
+debug_agent_sudoers_commands:
+  # File inspection — path-validated wrapper (cat/head/tail/grep/wc/ls)
+  - /usr/local/bin/bay-readlog *
+  # Journal + unit state — pager forced off, verbs allowlisted
+  - /usr/local/bin/bay-journal
+  - /usr/local/bin/bay-journal *
+  - /usr/local/bin/bay-systemctl-ro *
+  # Docker read-only surface — no docker group required
+  - /usr/local/bin/bay-docker-ro *
+  # CrowdSec (read-only subcommands, no file operand)
+  - /usr/bin/cscli decisions list
+  - /usr/bin/cscli decisions list *
+  - /usr/bin/cscli alerts list
+  - /usr/bin/cscli alerts list *
+  - /usr/bin/cscli alerts inspect *
+  - /usr/bin/cscli metrics
+  - /usr/bin/cscli bouncers list
+  - /usr/bin/cscli machines list
+  - /usr/bin/cscli hub list
+  # Firewall
+  - /usr/sbin/nft list ruleset

@@ -1,0 +1,27 @@
+---
+meta:
+  id: gatus
+  name: Gatus status page
+  category: service
+  domain_prefix: status
+  dependencies: []
+  post_add_instructions: []
+
+defaults:
+  access: public
+  regions: []
+
+spec:
+  image: twinproduction/gatus:latest
+  ports:
+    internal: 8080
+  healthcheck:
+    path: /health
+    interval: 30s
+  env:
+    clear:
+      GATUS_CONFIG: /config/config.yaml
+  config_files:
+    - gatus/config.yaml
+  volumes:
+    - "{{ stack_dir }}/config/gatus/config.yaml:/config/config.yaml:ro"

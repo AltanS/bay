@@ -1,0 +1,33 @@
+#!/usr/sbin/nft -f
+# Managed by Ansible (trellis-crowdsec role) - do not edit manually
+#
+# Supplements CrowdSec's firewall bouncer with proper CIDR range support.
+# The bouncer creates nftables sets with `type ipv4_addr; flags timeout` which
+# cannot match CIDR ranges (known bug). This table uses `flags interval` to
+# enforce both single IPs and CIDR ranges from the ip_blocklist variable.
+#
+# Flush existing table on re-apply so nft doesn't fail with "File exists".
+# auto-merge merges overlapping CIDR ranges instead of rejecting them.
+
+table inet trellis_blocklist {}
+delete table inet trellis_blocklist
+
+table inet trellis_blocklist {
+  set blocked_v4 {
+    type ipv4_addr
+    flags interval
+    auto-merge
+{% if ip_blocklist | default([]) | length > 0 %}
+    elements = {
+{% for ip in ip_blocklist | default([]) %}
+      {{ ip }}{{ "," if not loop.last else "" }}
+{% endfor %}
+    }
+{% endif %}
+  }
+
+  chain input {
+    type filter hook input priority -1; policy accept;
+    ip saddr @blocked_v4 drop
+  }
+}

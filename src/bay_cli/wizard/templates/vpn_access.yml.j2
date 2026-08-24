@@ -1,0 +1,21 @@
+---
+vpn_allowed_ips:
+  # Localhost (health checks from the server itself)
+  - 127.0.0.1
+  - ::1
+{% if access_gateway == "headscale" %}
+  # Tailnet CIDR — all Headscale-enrolled devices are allowed
+  - 100.64.0.0/10
+{% elif access_gateway == "wireguard" %}
+{% if vpn_peer_ips %}
+  # WireGuard peer IPs
+{% for ip in vpn_peer_ips %}
+  - {{ ip }}
+{% endfor %}
+{% else %}
+  # Add WireGuard client IPs / CIDR ranges below
+  # - 10.0.0.0/24
+{% endif %}
+{% else %}
+  # No VPN gateway configured — add IPs here if you enable one later
+{% endif %}

@@ -1,0 +1,37 @@
+# Vault password file
+.vault_pass
+.vault_pass.*
+
+# Consumer group_vars symlink (created by bay:update)
+/group_vars
+
+# External Galaxy dependencies (install via requirements.yml)
+vendor/roles/*/
+vendor/collections/
+
+# Retry files
+*.retry
+
+# Dep-sync marker (written by bay install/update)
+.deps-synced
+
+# Rig-state cache (written by deploy auto-rig detection)
+.rig-state-cache
+
+# Implementation tracker — lives in the workspace repo, never in the framework
+.tracker/
+
+# Python / uv
+.venv/
+__pycache__/
+*.egg-info/
+.coverage
+.pytest_cache/
+
+# OS files
+.DS_Store
+
+# Type/lint caches
+.mypy_cache/
+.ruff_cache/
+.ansible/

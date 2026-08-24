@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Bay backup maintenance timer for {{ accessory_name }}
+
+[Timer]
+OnCalendar=Sun *-*-* 06:00:00
+Persistent=true
+RandomizedDelaySec=1800
+
+[Install]
+WantedBy=timers.target

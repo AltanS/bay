@@ -1,0 +1,113 @@
+# {{ ansible_managed }}
+server_url: "https://{{ headscale_domain }}"
+# Suppress the "an updated version has been found" notice — it pollutes the stdout
+# of `headscale` CLI calls run via `docker exec` (e.g. `bin/bay gateway apikey`).
+disable_check_updates: true
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 127.0.0.1:9090
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+prefixes:
+  v4: {{ headscale_tailnet_cidr | first }}
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+derp:
+  server:
+    enabled: true
+    region_id: 999
+    region_code: "local"
+    region_name: "Local DERP"
+    stun_listen_addr: 0.0.0.0:3478
+    private_key_path: /var/lib/headscale/derp_server_private.key
+  urls: []
+  paths: []
+{# Collect VPN service domains across ALL hosts (multi-region aware).
+   hostvars resolves {{ domain_base }} per-host, so each region's domains are correct.
+   Filter by service regions to avoid duplicate keys when a hardcoded domain
+   (e.g. blog.example.com) appears on multiple hosts. #}
+{% set vpn_records = [] %}
+{% set seen_domains = {} %}
+{% for host in groups.get('all', [inventory_hostname]) %}
+{%   set h = hostvars[host] %}
+{%   set host_region = h.get('region', '') %}
+{%   for svc_name, svc in (h['services'] | default({})).items() %}
+{%     set svc_regions = svc.regions | default([]) %}
+{%     if svc_regions | length == 0 or host_region in svc_regions %}
+{%       if svc.access | default('public') == 'vpn' or svc.vpn_routes | default([]) | length > 0 %}
+{%         for domain in svc.domains | default([]) %}
+{%           if domain not in seen_domains %}
+{%             set _ = vpn_records.append({'domain': domain, 'ip': h['headscale_server_tailnet_ip'] | default('100.64.0.1')}) %}
+{%             set _ = seen_domains.update({domain: true}) %}
+{%           endif %}
+{%         endfor %}
+{%       endif %}
+{%     endif %}
+{%   endfor %}
+{% endfor %}
+{# tailnet_proxies — remote tailnet services fronted by this control host's
+   ingress (docs/tailnet-ingress.md). Route their domains to MagicDNS so the
+   extra_records A entries (→ this host's tailnet IP) resolve. #}
+{% for proxy_name, proxy in (tailnet_proxies | default({})).items() %}
+{%   for domain in proxy.domains | default([]) %}
+{%     if domain not in seen_domains %}
+{%       set _ = vpn_records.append({'domain': domain, 'ip': headscale_server_tailnet_ip | default('100.64.0.1')}) %}
+{%       set _ = seen_domains.update({domain: true}) %}
+{%     endif %}
+{%   endfor %}
+{% endfor %}
+{# headscale_extra_dns_records — operator-defined manual A records (e.g. an
+   externally-managed tailnet node) that aren't derivable from services.yml
+   or tailnet_proxies. Appended before the vpn_records | length gate below, so
+   a deployment whose only split-DNS source is manual records still gets the
+   split block + extra_records_path. See docs/access-gateways.md#split-dns-for-vpn-services. #}
+{% for rec in headscale_extra_dns_records | default([]) %}
+{%   if rec.name not in seen_domains %}
+{%     set _ = vpn_records.append({'domain': rec.name, 'ip': rec.value}) %}
+{%     set _ = seen_domains.update({rec.name: true}) %}
+{%   endif %}
+{% endfor %}
+dns:
+  override_local_dns: {{ headscale_dns_override_local | default(false) | lower }}
+  magic_dns: true
+  base_domain: "{{ headscale_magic_dns_domain }}"
+  nameservers:
+{% if headscale_dns_global_nameservers | default([]) | length > 0 %}
+    global:
+{% for ns in headscale_dns_global_nameservers %}
+      - {{ ns }}
+{% endfor %}
+{% endif %}
+{% if vpn_records | length > 0 %}
+    # Route queries for VPN service domains to MagicDNS so extra_records resolve.
+    # Without this, Tailscale's split-DNS won't send these queries to MagicDNS.
+    split:
+{% for rec in vpn_records %}
+      {{ rec.domain }}:
+        - 100.100.100.100
+{% endfor %}
+  # VPN service domain → tailnet IP mappings loaded from JSON file.
+  # Using extra_records_path (file watcher) instead of inline extra_records
+  # for reliable hot-reload without restarting headscale.
+  extra_records_path: /etc/headscale/extra-records.json
+{% endif %}
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+log:
+  level: info
+{% if headscale_oidc_issuer | default('') | length > 0 %}
+oidc:
+  issuer: "{{ headscale_oidc_issuer }}"
+  client_id: "{{ headscale_oidc_client_id }}"
+  client_secret: "{{ headscale_oidc_client_secret }}"
+{% endif %}
+{% if headscale_acl_policy is defined %}
+# ACL policy (file mode). Rendered from headscale_acl_policy → policy.hujson.
+# WARNING: defining a policy flips the tailnet from default-allow to
+# default-deny — every required flow must be enumerated. See
+# roles/headscale/defaults/main.yml and docs/tailnet-ingress.md.
+policy:
+  mode: file
+  path: /etc/headscale/policy.hujson
+{% endif %}

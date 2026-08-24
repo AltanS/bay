@@ -1,0 +1,159 @@
+# CrowdSec Profiles Configuration
+# Managed by Ansible - do not edit manually
+#
+# Profiles determine what action to take when a scenario triggers.
+# They are evaluated in order; first match wins (on_success: break).
+
+{% if crowdsec_scenario_actuator_probe | bool %}
+# -----------------------------------------------------------------------------
+# Actuator Probe - Spring Boot endpoint scanning
+# -----------------------------------------------------------------------------
+name: actuator_probe
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/actuator-probe"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_actuator_probe_ban }}
+on_success: break
+---
+{% endif %}
+{% if crowdsec_scenario_debug_fuzzing | bool %}
+# -----------------------------------------------------------------------------
+# Debug Fuzzing - Debug/error endpoint probing
+# -----------------------------------------------------------------------------
+name: debug_fuzzing
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/debug-fuzzing"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_debug_fuzzing_ban }}
+on_success: break
+---
+{% endif %}
+{% if crowdsec_scenario_custom_bad_user_agent | bool %}
+# -----------------------------------------------------------------------------
+# Custom Bad User Agent - Known scanner tools (immediate, longer ban)
+# -----------------------------------------------------------------------------
+name: custom_bad_user_agent
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/custom-bad-user-agent"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_custom_bad_user_agent_ban }}
+on_success: break
+---
+{% endif %}
+{% if crowdsec_scenario_ssrf_callback | bool %}
+# -----------------------------------------------------------------------------
+# SSRF Callback - Exploitation attempt with callback domains
+# -----------------------------------------------------------------------------
+name: ssrf_callback
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/ssrf-callback"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_ssrf_callback_ban }}
+on_success: break
+---
+{% endif %}
+{% if crowdsec_scenario_encoded_attack_payload | bool %}
+# -----------------------------------------------------------------------------
+# Encoded Attack Payload - Double-encoded evasion techniques
+# -----------------------------------------------------------------------------
+name: encoded_attack_payload
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/encoded-attack-payload"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_encoded_attack_payload_ban }}
+on_success: break
+---
+{% endif %}
+{% if crowdsec_scenario_xss_extended | bool %}
+# -----------------------------------------------------------------------------
+# XSS Extended - Event handler and DOM access patterns (supplements Hub)
+# -----------------------------------------------------------------------------
+name: xss_extended
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/xss-extended"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_xss_extended_ban }}
+on_success: break
+---
+{% endif %}
+{% if crowdsec_scenario_cache_buster_probe | bool %}
+# -----------------------------------------------------------------------------
+# Cache-Buster Probe - Bot network cache-busting parameter detection
+# -----------------------------------------------------------------------------
+name: cache_buster_probe
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/cache-buster-probe"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_cache_buster_probe_ban }}
+on_success: break
+---
+{% endif %}
+{% if crowdsec_scenario_open_redirect_probe | bool %}
+# -----------------------------------------------------------------------------
+# Open Redirect Probe - Redirect parameter fuzzing with external URLs
+# -----------------------------------------------------------------------------
+name: open_redirect_probe
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/open-redirect-probe"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_open_redirect_probe_ban }}
+on_success: break
+---
+{% endif %}
+{% if crowdsec_scenario_param_stuffing | bool %}
+# -----------------------------------------------------------------------------
+# Parameter Stuffing - 20+ query parameter detection
+# -----------------------------------------------------------------------------
+name: param_stuffing
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/param-stuffing"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_param_stuffing_ban }}
+on_success: break
+---
+{% endif %}
+{% if crowdsec_scenario_aggressive_crawl | bool %}
+# -----------------------------------------------------------------------------
+# Aggressive Crawl - WordPress-compatible crawl detection
+# -----------------------------------------------------------------------------
+name: aggressive_crawl
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/aggressive-crawl"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_aggressive_crawl_ban }}
+on_success: break
+---
+{% endif %}
+{% if crowdsec_scenario_sustained_crawl | bool %}
+# -----------------------------------------------------------------------------
+# Sustained Crawl - Slow-but-persistent scraper detection
+# -----------------------------------------------------------------------------
+name: sustained_crawl
+filters:
+  - Alert.Remediation == true && Alert.GetScenario() == "custom/sustained-crawl"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_scenario_sustained_crawl_ban }}
+on_success: break
+---
+{% endif %}
+# -----------------------------------------------------------------------------
+# Default - All other scenarios (CrowdSec Hub scenarios)
+# -----------------------------------------------------------------------------
+name: default_ip_remediation
+filters:
+  - Alert.Remediation == true && Alert.GetScope() == "Ip"
+decisions:
+  - type: ban
+    duration: {{ crowdsec_ban_duration_default }}
+on_success: break

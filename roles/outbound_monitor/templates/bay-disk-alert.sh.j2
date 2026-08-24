@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# bay-disk-alert — Disk pressure probe
+# Managed by Ansible (outbound_monitor role). Do not edit manually.
+#
+# Fires on threshold crossings (ok → warn, warn → page, any → ok) so the
+# on-call isn't spammed every 15 minutes while the disk stays above the
+# warn line. Body includes `df -h /` and `docker system df` so the first
+# responder can distinguish Docker bloat from other disk consumers without
+# SSHing to the host.
+
+set -uo pipefail
+
+STATE_DIR="{{ outbound_check_state_dir }}"
+STATE_FILE="${STATE_DIR}/disk-alert.state"
+WARN_PCT="{{ disk_alert_warn_pct }}"
+PAGE_PCT="{{ disk_alert_page_pct }}"
+
+{% set docker_monitor_telegram_bot_token = docker_monitor_telegram_bot_token | default('') or telegram_bot_token | default('') %}
+{% set docker_monitor_telegram_chat_id = docker_monitor_telegram_chat_id | default('') or telegram_chat_id | default('') %}
+{% include '_notify.sh.j2' %}
+
+# Disk usage percent for the root filesystem, stripping the trailing '%'.
+current_pct=$(df --output=pcent / | tail -1 | tr -d ' %')
+
+mkdir -p "${STATE_DIR}"
+if [[ -f "${STATE_FILE}" ]]; then
+  previous_state=$(cat "${STATE_FILE}")
+else
+  previous_state="ok"
+fi
+
+# Determine the current level by thresholds.
+if [[ "${current_pct}" -ge "${PAGE_PCT}" ]]; then
+  current_state="page"
+elif [[ "${current_pct}" -ge "${WARN_PCT}" ]]; then
+  current_state="warn"
+else
+  current_state="ok"
+fi
+
+# No-op while state is unchanged — this is the dedup.
+if [[ "${current_state}" == "${previous_state}" ]]; then
+  exit 0
+fi
+
+df_output=$(df -h / | tail -n +1)
+docker_df_output="(docker not available)"
+if command -v docker >/dev/null 2>&1; then
+  docker_df_output=$(docker system df 2>/dev/null || echo "docker system df failed")
+fi
+
+case "${current_state}" in
+  page)
+    label="🚨 <b>[DISK PAGE]</b>"
+    ;;
+  warn)
+    label="⚠️ <b>[DISK WARN]</b>"
+    ;;
+  ok)
+    label="✅ <b>[DISK RECOVERED]</b>"
+    ;;
+esac
+
+message="${label}
+Host: <code>${BAY_HOST}</code>
+Usage: <code>${current_pct}%</code> (warn ${WARN_PCT}%, page ${PAGE_PCT}%)
+
+<pre>$(bay_html_escape "${df_output}")</pre>
+<pre>$(bay_html_escape "${docker_df_output}")</pre>"
+
+case "${current_state}" in
+  page) bay_notify host.disk_page "${message}" ;;
+  warn) bay_notify host.disk_warn "${message}" ;;
+  ok)   bay_notify host.disk_recovered "${message}" ;;
+esac
+echo "${current_state}" > "${STATE_FILE}"

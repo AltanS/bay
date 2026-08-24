@@ -1,0 +1,173 @@
+  # ── Service: {{ name }} ({{ svc.access }}) ──────────────────────────────
+  {{ name }}:
+{{ macros.container_base(name, svc) }}
+    networks:
+      - {{ traefik_docker_network }}
+{# command/entrypoint are emitted by container_base (see _macros.j2) — keeping #}
+{# a second `command:` here would duplicate the compose key.                   #}
+{% if svc.depends_on is defined %}
+    depends_on:
+{% for dep in svc.depends_on %}
+      {{ dep }}:
+        condition: service_started
+{% endfor %}
+{% endif %}
+{# ── Middleware Configuration ── #}
+{% set mw = svc.middleware | default({}) %}
+{% set svc_headers = mw.security_headers | default(true) %}
+{% set svc_compress = mw.compress | default(true) %}
+{% set needs_custom_chain = (not svc_headers) or (not svc_compress) %}
+{# Build per-service middleware names #}
+{% set per_svc_mw = [] %}
+{% if mw.rate_limit is defined %}{% set _ = per_svc_mw.append(name ~ '-ratelimit') %}{% endif %}
+{% if mw.in_flight_req is defined %}{% set _ = per_svc_mw.append(name ~ '-inflightreq') %}{% endif %}
+{% if mw.basic_auth is defined %}{% set _ = per_svc_mw.append(name ~ '-basicauth') %}{% endif %}
+{% if mw.circuit_breaker is defined %}{% set _ = per_svc_mw.append(name ~ '-circuitbreaker') %}{% endif %}
+{% if mw.retry is defined %}{% set _ = per_svc_mw.append(name ~ '-retry') %}{% endif %}
+{# Build middleware lists for public and VPN routers #}
+{% set public_mw = [] %}
+{% if needs_custom_chain %}
+{% set _ = public_mw.append(name ~ '-chain') %}
+{% else %}
+{% set _ = public_mw.append('public-chain') %}
+{% endif %}
+{% for m in per_svc_mw %}{% set _ = public_mw.append(m) %}{% endfor %}
+{% set vpn_mw = [] %}
+{% if needs_custom_chain %}
+{% set _ = vpn_mw.append(name ~ '-chain') %}
+{% set _ = vpn_mw.append('vpn-only') %}
+{% else %}
+{% set _ = vpn_mw.append('vpn-chain') %}
+{% endif %}
+{% for m in per_svc_mw %}{% set _ = vpn_mw.append(m) %}{% endfor %}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network={{ traefik_docker_network }}"
+{% if needs_custom_chain %}
+      # Custom middleware chain (service opts out of some globals)
+{% set custom_chain_members = [] %}
+{% if svc_headers and traefik_security_headers_enabled %}{% set _ = custom_chain_members.append('secure-headers') %}{% endif %}
+{% if svc_compress and traefik_compress_enabled %}{% set _ = custom_chain_members.append('compress') %}{% endif %}
+{% if traefik_error_pages_enabled %}{% set _ = custom_chain_members.append('errors') %}{% endif %}
+      - "traefik.http.middlewares.{{ name }}-chain.chain.middlewares={{ custom_chain_members | join(',') }}"
+{% endif %}
+{# Per-service middleware definitions #}
+{% if mw.rate_limit is defined %}
+{% set rl = mw.rate_limit %}
+      - "traefik.http.middlewares.{{ name }}-ratelimit.ratelimit.average={{ rl.average | default(traefik_rate_limit_average) }}"
+      - "traefik.http.middlewares.{{ name }}-ratelimit.ratelimit.burst={{ rl.burst | default(traefik_rate_limit_burst) }}"
+      - "traefik.http.middlewares.{{ name }}-ratelimit.ratelimit.period={{ rl.period | default(traefik_rate_limit_period) }}"
+      - "traefik.http.middlewares.{{ name }}-ratelimit.ratelimit.sourceCriterion.ipStrategy.depth=1"
+{% endif %}
+{% if mw.in_flight_req is defined %}
+{% set ifr = mw.in_flight_req %}
+      - "traefik.http.middlewares.{{ name }}-inflightreq.inflightreq.amount={{ ifr.amount | default(traefik_in_flight_req_amount) }}"
+      - "traefik.http.middlewares.{{ name }}-inflightreq.inflightreq.sourceCriterion.ipStrategy.depth=1"
+{% endif %}
+{% if mw.basic_auth is defined %}
+{% set ba = mw.basic_auth %}
+{% if ba.credentials is defined %}
+{% set _auth_entries = [] %}
+{% for cred in ba.credentials %}
+{% set _salt = (stack_name ~ name ~ cred.username) | hash('md5') | truncate(8, end='') %}
+{% set _ = _auth_entries.append(cred.username ~ ':' ~ lookup('pipe', 'openssl passwd -apr1 -salt ' ~ _salt ~ ' ' ~ cred.password | quote)) %}
+{% endfor %}
+      - "traefik.http.middlewares.{{ name }}-basicauth.basicauth.users={{ _auth_entries | map('replace', '$', '$$') | join(',') }}"
+{% elif ba.users is defined %}
+      - "traefik.http.middlewares.{{ name }}-basicauth.basicauth.users={{ ba.users | map('replace', '$', '$$') | join(',') }}"
+{% endif %}
+{% if ba.realm is defined %}
+      - "traefik.http.middlewares.{{ name }}-basicauth.basicauth.realm={{ ba.realm }}"
+{% endif %}
+      - "traefik.http.middlewares.{{ name }}-basicauth.basicauth.removeheader={{ ba.removeheader | default(true) | string | lower }}"
+{% endif %}
+{% if mw.circuit_breaker is defined %}
+{% set cb = mw.circuit_breaker %}
+      - "traefik.http.middlewares.{{ name }}-circuitbreaker.circuitbreaker.expression={{ cb.expression | default(traefik_circuit_breaker_expression) }}"
+{% endif %}
+{% if mw.retry is defined %}
+{% set rt = mw.retry %}
+      - "traefik.http.middlewares.{{ name }}-retry.retry.attempts={{ rt.attempts | default(traefik_retry_attempts) }}"
+{% endif %}
+{# Router labels #}
+{# Host() expression covers every entry in domains, not just the first (GH#31). #}
+{# _sec_host parenthesises the OR-group for the path-matched router because    #}
+{# `&&` binds tighter than `||`: Host(a) || Host(b) && Path(p) parses as       #}
+{# Host(a) || (Host(b) && Path(p)), so that router would match the whole of    #}
+{# domain a rather than just its paths — for a vpn service with public_routes  #}
+{# that serves the entire first domain publicly. Single domain stays unwrapped #}
+{# so output is byte-identical to pre-fix for the common case.                 #}
+{% set _domains = svc.domains | default([]) %}
+{% set _host_expr = _domains | map('regex_replace', '^(.+)$', 'Host(`\\1`)') | join(' || ') %}
+{% set _sec_host = ('(' ~ _host_expr ~ ')') if _domains | length > 1 else _host_expr %}
+{% if svc.access == 'public' %}
+{% if svc.vpn_routes is defined and svc.vpn_routes | length > 0 %}
+      # Public service with VPN-protected routes
+      - "traefik.http.services.{{ name }}.loadbalancer.server.port={{ svc.ports.internal }}"
+      # VPN routes — higher priority
+      - "traefik.http.routers.{{ name }}-vpn.rule={{ _sec_host }} && ({{ svc.vpn_routes | map('regex_replace', '^(.+)$', 'PathPrefix(`\\1`)') | join(' || ') }})"
+      - "traefik.http.routers.{{ name }}-vpn.service={{ name }}"
+      - "traefik.http.routers.{{ name }}-vpn.priority=20"
+      - "traefik.http.routers.{{ name }}-vpn.entrypoints={{ vpn_entrypoints | default('websecure') }}"
+      - "traefik.http.routers.{{ name }}-vpn.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{ name }}-vpn.middlewares={{ vpn_mw | join(',') }}"
+      # Public catch-all — lower priority
+      - "traefik.http.routers.{{ name }}.rule={{ _host_expr }}"
+      - "traefik.http.routers.{{ name }}.service={{ name }}"
+      - "traefik.http.routers.{{ name }}.priority=10"
+      - "traefik.http.routers.{{ name }}.entrypoints={{ public_entrypoints | default('websecure') }}"
+      - "traefik.http.routers.{{ name }}.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{ name }}.middlewares={{ public_mw | join(',') }}"
+{% else %}
+      # Public service: single router
+      - "traefik.http.routers.{{ name }}.rule={{ _host_expr }}"
+      - "traefik.http.routers.{{ name }}.entrypoints={{ public_entrypoints | default('websecure') }}"
+      - "traefik.http.routers.{{ name }}.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{ name }}.middlewares={{ public_mw | join(',') }}"
+      - "traefik.http.services.{{ name }}.loadbalancer.server.port={{ svc.ports.internal }}"
+{% endif %}
+{% elif svc.access == 'vpn' %}
+{% if svc.public_routes is defined and svc.public_routes | length > 0 %}
+      # VPN service with public route exceptions
+      - "traefik.http.services.{{ name }}.loadbalancer.server.port={{ svc.ports.internal }}"
+      # Public routes - higher priority
+      - "traefik.http.routers.{{ name }}-public.rule={{ _sec_host }} && ({{ svc.public_routes | map('regex_replace', '^(.+)$', 'PathPrefix(`\\1`)') | join(' || ') }})"
+      - "traefik.http.routers.{{ name }}-public.service={{ name }}"
+      - "traefik.http.routers.{{ name }}-public.priority=20"
+      - "traefik.http.routers.{{ name }}-public.entrypoints={{ public_entrypoints | default('websecure') }}"
+      - "traefik.http.routers.{{ name }}-public.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{ name }}-public.middlewares={{ public_mw | join(',') }}"
+      # VPN-only router (catch-all for this host)
+      - "traefik.http.routers.{{ name }}-vpn.rule={{ _host_expr }}"
+      - "traefik.http.routers.{{ name }}-vpn.service={{ name }}"
+      - "traefik.http.routers.{{ name }}-vpn.priority=10"
+      - "traefik.http.routers.{{ name }}-vpn.entrypoints={{ vpn_entrypoints | default('websecure') }}"
+      - "traefik.http.routers.{{ name }}-vpn.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{ name }}-vpn.middlewares={{ vpn_mw | join(',') }}"
+{% else %}
+      # VPN-only router (catch-all for this host)
+      - "traefik.http.routers.{{ name }}-vpn.rule={{ _host_expr }}"
+      - "traefik.http.routers.{{ name }}-vpn.priority=10"
+      - "traefik.http.routers.{{ name }}-vpn.entrypoints={{ vpn_entrypoints | default('websecure') }}"
+      - "traefik.http.routers.{{ name }}-vpn.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{ name }}-vpn.middlewares={{ vpn_mw | join(',') }}"
+      - "traefik.http.services.{{ name }}-vpn.loadbalancer.server.port={{ svc.ports.internal }}"
+{% endif %}
+{% endif %}
+{% if watchtower_enabled | default(false) %}
+{# Watchtower update labels: monitor (default), auto, or false #}
+{% set _update = svc['update'] | default('monitor') %}
+{% if _update == 'auto' %}
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=false"
+{% elif _update == false or _update == 'false' %}
+      - "com.centurylinklabs.watchtower.enable=false"
+{% else %}
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
+{% endif %}
+{% endif %}
+{% if svc.healthcheck is defined %}
+{{ macros.render_healthcheck(svc.healthcheck, svc.ports.internal) }}
+{% endif %}
+

@@ -1,0 +1,391 @@
+---
+# Git-based service deployment
+# Clones repos, builds Docker images, manages deploy keys
+#
+# Strategy routing:
+#   local     -> clone repo, build image on server, deploy webhook + systemd triggers
+#   remote    -> build on build server, push to registry, pull on deployment server
+#                webhook + systemd also deployed on build server for auto-builds
+#   registry  -> skip entirely (handled by build_image role pulling image:)
+
+# ── issue #13 — image-map.json re-render on deploy_stack ──────────────
+# image-map.json drives the webhook receiver's post-build pull-signal
+# fan-out. Without this include, the file is only refreshed under
+# --tags build|git_deploy, so a routine `bin/bay deploy --tags
+# deploy_stack` after a services.yml change leaves the receiver loading a
+# stale recipient list and silently drops new services from fan-out.
+#
+# Tagging this include with [deploy_stack] in addition to the role's
+# default [build, git_deploy] tags makes it run under all three contexts.
+# The included file is self-contained (computes its own prerequisites
+# with `when: var is not defined` guards) so it works standalone when no
+# other git_deploy task has run.
+- name: Re-render image-map.json (runs under deploy_stack too)
+  ansible.builtin.include_tasks:
+    file: render_image_map.yml
+    apply:
+      tags: [deploy_stack, build, git_deploy]
+  tags: [deploy_stack, build, git_deploy]
+
+- name: Resolve all build services
+  ansible.builtin.set_fact:
+    _all_build_services: >-
+      {{
+        active_services | dict2items
+        | selectattr('value.build', 'defined')
+        | map(attribute='key')
+        | list
+      }}
+
+- name: Resolve all build services globally (for build server webhook)
+  ansible.builtin.set_fact:
+    _all_build_services_global: >-
+      {{
+        (services | default({})) | dict2items
+        | selectattr('value.build', 'defined')
+        | map(attribute='key')
+        | list
+      }}
+
+- name: Resolve global remote build services
+  ansible.builtin.set_fact:
+    _global_remote_build_services: >-
+      {{
+        (
+          (services | default({})) | dict2items
+          | selectattr('value.build', 'defined')
+          | selectattr('value.build.strategy', 'defined')
+          | selectattr('value.build.strategy', 'in', ['remote', 'push'])
+          | map(attribute='key')
+          | list
+        )
+        +
+        (
+          (services | default({})) | dict2items
+          | selectattr('value.build', 'defined')
+          | rejectattr('value.build.strategy', 'defined')
+          | map(attribute='key')
+          | list
+          if (git_deploy_build_strategy | default('local')) in ['remote', 'push']
+          else []
+        )
+      }}
+
+- name: Check if this host is the build server
+  ansible.builtin.set_fact:
+    _is_build_server: "{{ (build_server | default('')) == inventory_hostname }}"
+
+- name: Skip git_deploy when no build services and not build server
+  ansible.builtin.debug:
+    msg: "No services with build: blocks and not build server — skipping git_deploy"
+  when:
+    - _all_build_services | length == 0
+    - not (_is_build_server | bool and _global_remote_build_services | length > 0)
+
+- name: Process build services
+  when: _all_build_services | length > 0 or (_is_build_server | bool and _global_remote_build_services | length > 0)
+  block:
+    - name: Resolve build strategies
+      ansible.builtin.include_tasks: resolve_strategy.yml
+      when: _all_build_services | length > 0
+
+    # git_deploy_services = services that actually build locally.
+    # Registry and remote strategy services are excluded — they pull via build_image role
+    # or are built on the build server and pushed to a registry.
+    - name: Set git_deploy_services to local builds
+      ansible.builtin.set_fact:
+        git_deploy_services: "{{ _local_build_services | default([]) }}"
+
+    - name: Skip clone/build when all build services use registry/remote strategy
+      ansible.builtin.debug:
+        msg: "All build services use registry/remote strategy — skipping local clone/build"
+      when:
+        - _all_build_services | length > 0
+        - git_deploy_services | length == 0
+
+    # ── Remote strategy: build on build server, push to registry ──
+    - name: Validate build_server is set for remote strategy
+      ansible.builtin.fail:
+        msg: >-
+          Services {{ _remote_build_services | join(', ') }} use strategy 'remote'
+          but 'build_server' variable is not defined. Set build_server in group_vars
+          to the inventory hostname of your build server (or 'localhost' for local builds).
+      when:
+        - (_remote_build_services | default([]) | length > 0)
+        - build_server is not defined
+
+    # Runs when the host owns at least one remote-strategy service OR when
+    # it is the designated build_server for any global remote services
+    # (dedicated build hosts that don't run any app services themselves,
+    # like demo infra).
+    - name: Set up build server for remote builds
+      when: >-
+        (_remote_build_services | default([]) | length > 0)
+        or (_is_build_server | bool and _global_remote_build_services | length > 0)
+      delegate_to: "{{ build_server | default(inventory_hostname) }}"
+      become: true
+      become_user: "{{ app_user }}"
+      block:
+        - name: Ensure remote build directory exists
+          ansible.builtin.file:
+            path: "{{ git_deploy_remote_build_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Ensure remote secrets directory exists
+          ansible.builtin.file:
+            path: "{{ git_deploy_remote_build_dir }}/.secrets"
+            state: directory
+            mode: "0700"
+
+        - name: Check if the bay buildx instance exists
+          ansible.builtin.command:
+            cmd: docker buildx inspect {{ bay_buildx_builder }}
+          register: _buildx_inspect
+          failed_when: false
+          changed_when: false
+
+        - name: Create the bay buildx instance
+          ansible.builtin.command:
+            cmd: docker buildx create --name {{ bay_buildx_builder }} --driver docker-container --bootstrap
+          when: _buildx_inspect.rc != 0
+
+        # On remote-only hosts (no local-strategy services) setup_builder.yml is
+        # never included, so without this call the buildkit container runs
+        # without a memory cap. That left demo infra exposed during the
+        # Live verification (2026-04-17): MemoryMax=2G was set on the
+        # systemd unit, but the buildkit sidecar it invokes had `memory.max=max`
+        # and exhausted RAM. Applied on every deploy so a bump to
+        # git_deploy_buildkit_memory_max actually reaches the daemon.
+        - name: Apply memory limit to the bay buildx container
+          ansible.builtin.command:
+            cmd: >-
+              docker update
+              --memory {{ git_deploy_buildkit_memory_max }}
+              --memory-swap {{ git_deploy_buildkit_memory_max }}
+              buildx_buildkit_{{ bay_buildx_builder }}0
+          when: git_deploy_buildkit_memory_max | default('') | length > 0
+          register: _remote_buildx_mem_update
+          changed_when: _remote_buildx_mem_update.rc == 0
+          failed_when:
+            - _remote_buildx_mem_update.rc != 0
+            - '"No such container" not in _remote_buildx_mem_update.stderr'
+
+    - name: Log in to Docker registries on build server
+      community.docker.docker_login:
+        registry_url: "https://{{ item.domain }}"
+        username: "{{ item.username }}"
+        password: "{{ item.password }}"
+      loop: "{{ docker_registries | default([]) }}"
+      loop_control:
+        label: "{{ item.domain }}"
+      delegate_to: "{{ build_server | default(inventory_hostname) }}"
+      become: true
+      become_user: "{{ app_user }}"
+      run_once: true
+      when:
+        - _remote_build_services | default([]) | length > 0
+        - (item.username | default('')) | length > 0
+      no_log: true
+
+    - name: Build and push images (remote strategy)
+      ansible.builtin.include_tasks: remote_build.yml
+      loop: "{{ _remote_build_services | default([]) }}"
+      loop_control:
+        loop_var: _svc_name
+        label: "{{ _svc_name }}"
+      run_once: true
+
+    - name: Collect unique remote-built image refs
+      ansible.builtin.set_fact:
+        _remote_built_images: >-
+          {{
+            _remote_build_services
+            | map('extract', services)
+            | selectattr('image', 'defined')
+            | map(attribute='image')
+            | list
+            | unique
+          }}
+      when: _remote_build_services | default([]) | length > 0
+
+    - name: Pull freshly-pushed images on deployment server
+      ansible.builtin.command:
+        cmd: "docker pull {{ item }}"
+      loop: "{{ _remote_built_images | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when: _remote_build_services | default([]) | length > 0
+      changed_when: true
+      retries: 3
+      delay: 10
+      register: _remote_pull_result
+      until: _remote_pull_result.rc == 0
+
+    # ── Local strategy: clone and build on deployment server ──
+    - name: Clone and build services
+      when: git_deploy_services | length > 0
+      block:
+        - name: Ensure build directory exists
+          ansible.builtin.file:
+            path: "{{ git_deploy_build_dir }}"
+            state: directory
+            mode: "0755"
+
+        - name: Ensure bin directory exists
+          ansible.builtin.file:
+            path: "{{ stack_dir }}/bin"
+            state: directory
+            mode: "0755"
+
+        - name: Provision buildx builder
+          ansible.builtin.include_tasks: setup_builder.yml
+
+        - name: Generate deploy keys (SSH services only)
+          ansible.builtin.include_tasks: deploy_keys.yml
+          loop: "{{ git_deploy_services }}"
+          loop_control:
+            loop_var: _svc_name
+            label: "{{ _svc_name }}"
+          when: services[_svc_name].build.token is not defined
+
+        - name: Compute repo groups for clone deduplication
+          ansible.builtin.set_fact:
+            _repo_groups: "{{ services | bay_repo_groups(git_deploy_services) }}"
+            _build_dedup_map: "{{ services | bay_build_dedup_map(git_deploy_services) }}"
+
+        - name: Clone shared repos
+          ansible.builtin.include_tasks: clone_repos.yml
+          loop: "{{ _repo_groups }}"
+          loop_control:
+            loop_var: _repo_group
+            label: "{{ _repo_group.slug }} ({{ _repo_group.services | join(', ') }})"
+
+        - name: Build service images
+          ansible.builtin.include_tasks: build.yml
+          loop: "{{ git_deploy_services }}"
+          loop_control:
+            loop_var: _svc_name
+            label: "{{ _svc_name }}"
+
+    # ── Compute pull-only services ──
+    # Services that share a remote-built image but have no build: block.
+    # They need webhook + systemd + docker run config but NOT build config.
+    # Example: storefront-es shares the storefront image built by storefront-de.
+    - name: Collect remote-built image refs (global, not host-local)
+      ansible.builtin.set_fact:
+        _remote_built_image_refs: >-
+          {{
+            _global_remote_build_services | default([])
+            | map('extract', services)
+            | selectattr('image', 'defined')
+            | map(attribute='image')
+            | list
+            | unique
+          }}
+
+    - name: Compute pull-only services (non-builder image consumers)
+      ansible.builtin.set_fact:
+        git_deploy_pull_only_services: >-
+          {{
+            (active_services | default({})) | dict2items
+            | rejectattr('value.build', 'defined')
+            | selectattr('value.image', 'defined')
+            | selectattr('value.image', 'in', _remote_built_image_refs | default([]))
+            | map(attribute='key')
+            | list
+          }}
+
+    - name: Log pull-only services
+      ansible.builtin.debug:
+        msg: "Pull-only services (non-builder image consumers): {{ git_deploy_pull_only_services | join(', ') | default('none') }}"
+      when: git_deploy_pull_only_services | default([]) | length > 0
+
+    # ── Set git_deploy_rebuild_services and deploy webhook infrastructure ──
+    # Rebuild services = local builds + remote build services + pull-only services.
+    # On the build server, this is overridden to include all global remote services.
+    # On deployment servers, remote services receive pull signals from the build
+    # server and execute a pull-only path (docker pull + restart, no build).
+
+    # Deployment server (not the build server): local + region-local remote + pull-only
+    - name: Set git_deploy_rebuild_services (deployment server)
+      ansible.builtin.set_fact:
+        git_deploy_rebuild_services: >-
+          {{
+            (git_deploy_services | default([]))
+            + (_remote_build_services | default([]))
+            + (git_deploy_pull_only_services | default([]))
+          }}
+      when: not (_is_build_server | bool and _global_remote_build_services | length > 0)
+
+    - name: Deploy webhook infrastructure on deployment server
+      when:
+        - git_deploy_rebuild_services | default([]) | length > 0
+        - webhook is defined
+        - not (_is_build_server | bool and _global_remote_build_services | length > 0)
+      block:
+        - name: Ensure bin directory exists
+          ansible.builtin.file:
+            path: "{{ stack_dir }}/bin"
+            state: directory
+            mode: "0755"
+
+        - name: Deploy webhook receiver
+          ansible.builtin.include_tasks: webhook.yml
+
+        - name: Deploy systemd build triggers
+          ansible.builtin.include_tasks: systemd.yml
+
+        - name: Migrate legacy CB state files to schema v1
+          ansible.builtin.include_tasks: cb_state_migration.yml
+
+        # ── Deploy timestamp sentinel ─────────────────────────────────────
+        # Written after all git_deploy config files (rebuild.sh,
+        # webhook-config.json, image-map.json) have been rendered.
+        # `bay validate --check-config-age` reads this file and warns when
+        # rebuild.sh or webhook configs are older than the sentinel, indicating
+        # a partial deploy (e.g., `--tags deploy_stack` without `git_deploy`)
+        # left the webhook infrastructure stale.
+        - name: Write git_deploy config sentinel timestamp
+          ansible.builtin.copy:
+            content: "{{ ansible_date_time.iso8601 }}\n"
+            dest: "{{ stack_dir }}/state/git-deploy-config.timestamp"
+            owner: "{{ app_user }}"
+            mode: "0644"
+
+    # ── Build server webhook: deploy webhook + systemd for remote builds ──
+    # When this host IS the build server and has remote-strategy services,
+    # deploy the webhook receiver and systemd triggers so GitHub pushes
+    # trigger builds automatically.
+    - name: Deploy webhook infrastructure on build server
+      when:
+        - _is_build_server | bool
+        - _global_remote_build_services | length > 0
+        - webhook is defined
+      block:
+        - name: Set git_deploy_rebuild_services for build server
+          ansible.builtin.set_fact:
+            git_deploy_rebuild_services: "{{ (git_deploy_services | default([])) + _global_remote_build_services }}"
+
+        - name: Ensure bin directory exists (build server)
+          ansible.builtin.file:
+            path: "{{ stack_dir }}/bin"
+            state: directory
+            mode: "0755"
+
+        - name: Deploy webhook receiver (build server)
+          ansible.builtin.include_tasks: webhook.yml
+
+        - name: Deploy systemd build triggers (build server)
+          ansible.builtin.include_tasks: systemd.yml
+
+        - name: Migrate legacy CB state files to schema v1 (build server)
+          ansible.builtin.include_tasks: cb_state_migration.yml
+
+        # ── Deploy timestamp sentinel ─────────────────────────────────────
+        - name: Write git_deploy config sentinel timestamp (build server)
+          ansible.builtin.copy:
+            content: "{{ ansible_date_time.iso8601 }}\n"
+            dest: "{{ stack_dir }}/state/git-deploy-config.timestamp"
+            owner: "{{ app_user }}"
+            mode: "0644"

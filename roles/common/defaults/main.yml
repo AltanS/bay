@@ -1,0 +1,26 @@
+---
+# Common role defaults
+
+common_timezone: UTC
+
+common_packages:
+  - curl
+  - wget
+  - vim
+  - htop
+  - unzip
+  - jq
+  - apt-transport-https
+  - ca-certificates
+  - gnupg
+  - lsb-release
+  - software-properties-common
+
+common_locale: en_US.UTF-8
+
+# Cap systemd-journald disk use. The distro default lets journald claim up
+# to 10% of the filesystem (≈3.8 GB on a 38 GB disk) — material on small
+# hosts already under pressure from build caches and container images.
+# 500M is enough to keep ~2 weeks of typical server logs while capping the
+# worst case. Override per-host in group_vars if a host needs more.
+journald_max_use: "500M"

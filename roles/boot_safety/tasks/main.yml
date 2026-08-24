@@ -1,0 +1,32 @@
+---
+# Boot safety — systemd oneshot to recreate missing infra containers on boot
+# Ensures traefik/watchtower/headscale come back after OOM + hard reboot
+
+- name: Deploy bay-infra-ensure script
+  ansible.builtin.template:
+    src: bay-infra-ensure.sh.j2
+    dest: /usr/local/bin/bay-infra-ensure.sh
+    owner: root
+    group: root
+    mode: "0755"
+  when: boot_safety_enabled
+  become: true
+
+- name: Deploy bay-infra-boot systemd service
+  ansible.builtin.template:
+    src: bay-infra-boot.service.j2
+    dest: /etc/systemd/system/{{ boot_safety_service_name }}.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Reload bay-infra-boot
+  when: boot_safety_enabled
+  become: true
+
+- name: Enable bay-infra-boot service
+  ansible.builtin.systemd:
+    name: "{{ boot_safety_service_name }}"
+    enabled: true
+    daemon_reload: true
+  when: boot_safety_enabled
+  become: true

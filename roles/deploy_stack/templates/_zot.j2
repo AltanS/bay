@@ -1,0 +1,33 @@
+{% if zot_enabled | default(false) | bool %}
+  # ── Zot Container Registry ─────────────────────────────────────────
+  zot:
+    image: {{ zot_image }}
+    container_name: zot
+    restart: unless-stopped
+    volumes:
+      - {{ zot_config_dir }}:/etc/zot:ro
+      - {{ zot_data_dir }}:/var/lib/registry
+    networks:
+      - {{ traefik_docker_network }}
+{% if (zot_storage_driver | default('filesystem')) == 's3' %}
+    env_file:
+      - {{ stack_dir }}/env/zot.env
+{% endif %}
+{{ macros.logging_block({}) }}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network={{ traefik_docker_network }}"
+      - "traefik.http.routers.zot.rule=Host(`{{ zot_domain }}`)"
+{# Split entrypoints: bind BOTH public + tailnet listeners so infra-host
+   pushes (which resolve zot_domain to the tailnet IP → websecure_tailnet)
+   reach zot, not just deployment nodes on the public IP. See GitHub #27.
+   Override the whole set via group_vars `zot_entrypoints` (mirrors the
+   vpn_entrypoints idiom). Mirror of container_lifecycle build_specs.yml. #}
+{% set _zot_ep_default = 'websecure,websecure_tailnet' if traefik_split_entrypoints | default(false) | bool else 'websecure' %}
+      - "traefik.http.routers.zot.entrypoints={{ zot_entrypoints | default(_zot_ep_default) }}"
+      - "traefik.http.routers.zot.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.zot.middlewares=public-chain"
+      - "traefik.http.services.zot.loadbalancer.server.port={{ zot_port }}"
+      - "com.centurylinklabs.watchtower.enable=false"
+
+{% endif %}

@@ -1,0 +1,118 @@
+---
+# Bay - Server Provisioning
+# One-time server hardening: users, SSH, firewall, CrowdSec, Docker runtime
+#
+# Works automatically on fresh servers (falls back to root) and reprovisioning:
+#   ansible-playbook provision.yml -e target_host=production
+
+- name: Detect SSH user
+  hosts: "{{ target_host }}"
+  gather_facts: false
+  tags: [always]
+
+  tasks:
+    - name: Test SSH connection as configured user
+      ansible.builtin.ping:
+      register: _ssh_test
+      ignore_errors: true
+      ignore_unreachable: true
+
+    - name: Fall back to root for first-time provisioning
+      ansible.builtin.set_fact:
+        ansible_user: root
+      when: _ssh_test is unreachable
+
+    - name: Show detected SSH user
+      ansible.builtin.debug:
+        msg: "Connecting as {{ ansible_user }}"
+
+- name: Provision and harden server
+  hosts: "{{ target_host }}"
+  become: true
+  vars_files:
+    - version.yml
+
+  vars:
+    pip_install_packages:
+      - name: docker
+
+  pre_tasks:
+    - name: Check framework version compatibility
+      ansible.builtin.assert:
+        that:
+          - bay_version is version(bay_minimum_version, '>=')
+        fail_msg: >-
+          Framework version {{ bay_version }} is older than the minimum
+          required version {{ bay_minimum_version }}.
+          Run 'make bay:install' to update the framework.
+        success_msg: "Framework version {{ bay_version }} meets minimum requirement (>= {{ bay_minimum_version }})"
+      when: bay_minimum_version is defined
+      tags: [always]
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: "{{ apt_cache_valid_time }}"
+
+    - name: Install AWS CLI for S3 backups
+      when: (secrets.backup_s3_bucket | default(S3_BUCKET | default(''))) | length > 0
+      tags: [backup]
+      block:
+        - name: Check if AWS CLI is installed
+          ansible.builtin.stat:
+            path: /usr/local/bin/aws
+          register: _aws_cli
+
+        - name: Install AWS CLI v2
+          when: not _aws_cli.stat.exists
+          block:
+            - name: Install unzip for AWS CLI installer
+              ansible.builtin.apt:
+                name: unzip
+                state: present
+
+            - name: Download and extract AWS CLI v2
+              ansible.builtin.unarchive:
+                src: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+                dest: /tmp
+                remote_src: true
+
+            - name: Run AWS CLI v2 installer
+              ansible.builtin.command:
+                cmd: /tmp/aws/install
+                creates: /usr/local/bin/aws
+
+            - name: Clean up AWS CLI installer
+              ansible.builtin.file:
+                path: /tmp/aws
+                state: absent
+
+  roles:
+    # Phase 0: pre-1.0 cleanup. Several owners of the pre-1.0 units
+    # (outbound_monitor, common) live in provision only, so a deploy run can
+    # never reach them. No-op on a clean host.
+    - { role: rename_migration, tags: [always, rename_migration], when: rename_migration_enabled | default(true) | bool }
+
+    # Phase 1: System baseline
+    - { role: netplan, tags: [netplan], when: netplan_enabled | default(false) }
+    - { role: alert_policy, tags: [alert_policy, alerts] }
+    - { role: outbound_monitor, tags: [outbound_monitor] }
+    - { role: common, tags: [common] }
+    - { role: geerlingguy.git, tags: [common] }
+    - { role: darkwizard242.lazydocker, tags: [common] }
+    - { role: swap, tags: [swap] }
+
+    # Phase 2: Users and access (before SSH hardening)
+    - { role: users, tags: [users] }
+    - { role: debug_agent, tags: [users, agent-debug], when: debug_agent_enabled | default(false) }
+
+    # Phase 3: SSH and security hardening
+    - { role: geerlingguy.security, tags: [security] }
+    - { role: sshd_hardening, tags: [security] }
+    - { role: nftables, tags: [security, nftables] }
+    - { role: crowdsec, tags: [security, crowdsec] }
+    - { role: crowdsec_allowlist, tags: [security, crowdsec, allowlist] }
+
+    # Phase 4: Docker runtime
+    - { role: geerlingguy.pip, tags: [docker] }
+    - { role: geerlingguy.docker, tags: [docker] }

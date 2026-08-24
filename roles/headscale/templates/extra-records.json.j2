@@ -1,0 +1,43 @@
+[
+{% set vpn_records = [] %}
+{% set seen_domains = {} %}
+{% for host in groups.get('all', [inventory_hostname]) %}
+{%   set h = hostvars[host] %}
+{%   set host_region = h.get('region', '') %}
+{%   for svc_name, svc in (h['services'] | default({})).items() %}
+{%     set svc_regions = svc.regions | default([]) %}
+{%     if svc_regions | length == 0 or host_region in svc_regions %}
+{%       if svc.access | default('public') == 'vpn' or svc.vpn_routes | default([]) | length > 0 %}
+{%         for domain in svc.domains | default([]) %}
+{%           if domain not in seen_domains %}
+{%             set _ = vpn_records.append({'name': domain, 'type': 'A', 'value': h['headscale_server_tailnet_ip'] | default('100.64.0.1')}) %}
+{%             set _ = seen_domains.update({domain: true}) %}
+{%           endif %}
+{%         endfor %}
+{%       endif %}
+{%     endif %}
+{%   endfor %}
+{% endfor %}
+{# tailnet_proxies — A records (domain → this control host's tailnet IP) for
+   remote tailnet services fronted by the ingress (docs/tailnet-ingress.md). #}
+{% for proxy_name, proxy in (tailnet_proxies | default({})).items() %}
+{%   for domain in proxy.domains | default([]) %}
+{%     if domain not in seen_domains %}
+{%       set _ = vpn_records.append({'name': domain, 'type': 'A', 'value': headscale_server_tailnet_ip | default('100.64.0.1')}) %}
+{%       set _ = seen_domains.update({domain: true}) %}
+{%     endif %}
+{%   endfor %}
+{% endfor %}
+{# headscale_extra_dns_records — operator-defined manual A records (e.g. an
+   externally-managed tailnet node) that aren't derivable from services.yml
+   or tailnet_proxies. See docs/access-gateways.md#split-dns-for-vpn-services. #}
+{% for rec in headscale_extra_dns_records | default([]) %}
+{%   if rec.name not in seen_domains %}
+{%     set _ = vpn_records.append({'name': rec.name, 'type': rec.type | default('A'), 'value': rec.value}) %}
+{%     set _ = seen_domains.update({rec.name: true}) %}
+{%   endif %}
+{% endfor %}
+{% for rec in vpn_records %}
+  {"name": "{{ rec.name }}", "type": "{{ rec.type }}", "value": "{{ rec.value }}"}{{ "," if not loop.last else "" }}
+{% endfor %}
+]

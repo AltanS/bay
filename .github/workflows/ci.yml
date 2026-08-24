@@ -1,0 +1,89 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Keep uv's cache inside the workspace so actions/cache picks it up.
+  UV_CACHE_DIR: /tmp/.uv-cache
+
+jobs:
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      # Galaxy roles/collections are gitignored — the framework test suite
+      # needs them present to resolve role paths.
+      - name: Install Galaxy dependencies
+        run: make install
+
+      - name: Python tests
+        run: make test-python
+
+      - name: Framework tests
+        run: make test-framework
+
+      - name: Bootstrap tests
+        run: make test-bootstrap
+
+  lint:
+    name: Lint & typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync dependencies
+        run: uv sync --locked
+
+      - name: Install Galaxy dependencies
+        run: make install
+
+      - name: mypy + ruff
+        run: make typecheck
+
+      - name: ansible-lint
+        run: uv run ansible-lint
+
+  leak-scan:
+    name: Identity leak scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Guards the scrub done before open-sourcing: no real operator IPs,
+      # consumer names, or private hostnames may re-enter the framework repo.
+      # Docs must use RFC 5737 (203.0.113.0/24) and example.com.
+      - name: Scan for consumer identity and real infrastructure
+        run: bash scripts/leak-scan.sh

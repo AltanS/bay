@@ -1,0 +1,39 @@
+---
+# Docker Compose role defaults
+
+deploy_lock_path: "{{ stack_dir }}/.deploy.lock"
+deploy_lock_timeout: 3600  # seconds before a stale lock is ignored
+deploy_audit_log_path: "{{ stack_dir }}/deploy.log"
+
+# Telegram deploy notifications (empty = disabled)
+docker_monitor_telegram_bot_token: ""
+docker_monitor_telegram_chat_id: ""
+
+# Alert message branding (fallback — real values set by docker_monitor role)
+docker_monitor_alert_header: ""
+
+# See roles/alert_channel/defaults/main.yml. Duplicated because deploy_stack
+# does not depend on that role; the two are asserted equal in CI.
+bay_host_label: ""
+bay_alert_host: "{% set _n = (bay_host_label | default('', true)) or (ansible_hostname | default('', true)) or inventory_hostname %}{{ _n }}{% if _n != inventory_hostname %} ({{ inventory_hostname }}){% endif %}"
+docker_monitor_alert_footer: ""
+
+# Per-container log rotation defaults (applied to every compose service/accessory/infra
+# container unless a per-container `log_rotation` override is set). Individual keys can
+# be overridden per-service via `log_rotation: {...}` in services.yml; setting
+# `log_rotation: false` on a service skips the compose-level logging block entirely
+# and lets the container inherit the daemon-level log-opts from docker_daemon_options.
+log_rotation_defaults:
+  driver: json-file
+  max_size: "50m"
+  max_file: 3
+
+# log_retention — host-side log archival budget ceiling.
+# Sum of max_total_size across all services+accessories with log_retention
+# enabled on a host must fit within `log_retention_budget_fraction` of
+# `log_retention_disk_bytes`. Validated at deploy time in validate.yml.
+# log_retention_disk_bytes is required on any host that opts a container
+# into log_retention — there is no sensible default because server disks
+# vary; consumers set it in group_vars (e.g. 107374182400 for 100g).
+log_retention_budget_fraction: 0.30
+log_retention_disk_bytes: ~

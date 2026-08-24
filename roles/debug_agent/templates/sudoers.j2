@@ -1,0 +1,11 @@
+# Managed by Ansible — do not edit manually
+#
+# Every file-reading entry goes through a bay-* wrapper. sudoers cannot
+# restrict the ARGUMENT of a command, so a bare `/usr/bin/cat` entry is a
+# grant to read /etc/shadow, and any entry that opens a pager is a root
+# shell (`!sh` inside less).
+Defaults:{{ debug_agent_user }} !use_pty
+Defaults:{{ debug_agent_user }} env_reset
+Defaults:{{ debug_agent_user }} secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+{{ debug_agent_user }} ALL=(root) NOPASSWD: {{ debug_agent_sudoers_commands | join(', ') }}

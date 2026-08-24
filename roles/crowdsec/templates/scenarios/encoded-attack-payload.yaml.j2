@@ -1,0 +1,62 @@
+# CrowdSec Scenario: Encoded Attack Payload Detection
+# Managed by Ansible - do not edit manually
+#
+# Detects double-encoded attack characters and scanner quote probe patterns
+# in URLs. These encoding techniques are used to evade WAF/IDS pattern matching.
+# Legitimate traffic never double-encodes angle brackets or quotes, and never
+# contains adjacent single-quote + double-quote sequences in URL-encoded form.
+#
+# Catches payloads like: %253Cscript%253E (double-encoded <script>)
+#                        %26%23x3c (URL-encoded &#x3c; HTML entity for <)
+#                        %26%23x3e (URL-encoded &#x3e; HTML entity for >)
+#                        %27%22 (URL-encoded '" - scanner probe signature)
+#
+# Note: %252F (double-encoded /) is intentionally excluded — it can appear
+# legitimately in OAuth callbacks and REST API URL parameters.
+# Note: %26%23 is narrowed to specific attack-relevant HTML entities (< and >)
+# rather than matching all HTML entity references.
+
+type: trigger
+name: custom/encoded-attack-payload
+description: "Detect double-encoded, HTML-entity-encoded, and scanner quote probe attack payloads"
+filter: |
+  evt.Meta.service == 'http' and
+  evt.Parsed.static_ressource == 'false' and (
+    evt.Meta.http_args contains '%253C' or
+    evt.Meta.http_args contains '%253c' or
+    evt.Meta.http_args contains '%253E' or
+    evt.Meta.http_args contains '%253e' or
+    evt.Meta.http_args contains '%2522' or
+    evt.Meta.http_args contains '%2527' or
+    evt.Meta.http_args contains '%255C' or
+    evt.Meta.http_args contains '%255c' or
+    evt.Meta.http_args contains '%26%23x3c' or
+    evt.Meta.http_args contains '%26%23x3C' or
+    evt.Meta.http_args contains '%26%23x3e' or
+    evt.Meta.http_args contains '%26%23x3E' or
+    evt.Meta.http_args contains '%26%23060' or
+    evt.Meta.http_args contains '%26%23062' or
+    evt.Meta.http_args contains '%27%22' or
+    evt.Meta.http_args contains '%22%27' or
+    evt.Meta.http_path contains '%253C' or
+    evt.Meta.http_path contains '%253c' or
+    evt.Meta.http_path contains '%253E' or
+    evt.Meta.http_path contains '%253e' or
+    evt.Meta.http_path contains '%2522' or
+    evt.Meta.http_path contains '%2527' or
+    evt.Meta.http_path contains '%255C' or
+    evt.Meta.http_path contains '%255c' or
+    evt.Meta.http_path contains '%26%23x3c' or
+    evt.Meta.http_path contains '%26%23x3C' or
+    evt.Meta.http_path contains '%26%23x3e' or
+    evt.Meta.http_path contains '%26%23x3E' or
+    evt.Meta.http_path contains '%26%23060' or
+    evt.Meta.http_path contains '%26%23062' or
+    evt.Meta.http_path contains '%27%22' or
+    evt.Meta.http_path contains '%22%27'
+  )
+groupby: evt.Meta.source_ip
+labels:
+  service: http
+  type: exploit
+  remediation: true

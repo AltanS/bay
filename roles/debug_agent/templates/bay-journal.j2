@@ -1,0 +1,34 @@
+#!/bin/bash
+# Managed by Ansible — do not edit manually.
+#
+# journalctl for the {{ debug_agent_user }} account with --no-pager forced.
+# A pager under sudo is a root shell: `less` accepts `!sh`. Only the
+# read-only flags below are accepted; --vacuum-*, --rotate, --flush and
+# friends are refused because they mutate the journal.
+set -euo pipefail
+
+PAGER=cat
+SYSTEMD_PAGER=
+SYSTEMD_PAGERSECURE=1
+export PAGER SYSTEMD_PAGER SYSTEMD_PAGERSECURE
+
+die() { echo "bay-journal: $*" >&2; exit 1; }
+
+for arg in "$@"; do
+  case "$arg" in
+    -*)
+      flag=${arg%%=*}
+      case "$flag" in
+        -u|--unit|--user-unit|-n|--lines|--since|--until|-p|--priority|\
+        -o|--output|-b|--boot|-k|--dmesg|-r|--reverse|\
+        -g|--grep|--no-hostname|--no-pager|--utc|-x|--catalog|--identifier|\
+        -t|--facility|--case-sensitive|-q|--quiet)
+          ;;
+        *) die "flag not permitted: $arg" ;;
+      esac
+      ;;
+    *) ;;
+  esac
+done
+
+exec /usr/bin/journalctl --no-pager "$@"

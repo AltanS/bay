@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# archive-logs.sh — host-side per-service log archiver (ADR-002)
+#
+# Called every 60s by bay-logarchive@<svc>.timer. Reads the cursor
+# under /opt/<stack>/logs/services/<svc>/.cursor, runs
+# `docker logs --since <cursor> --timestamps <svc>`, appends clean
+# lines to live.log, routes malformed lines to .malformed/, and
+# updates the cursor atomically.
+#
+# Runs as root (via systemd) with UMask=0027 so new files are
+# group-readable but not world-readable. Live log files are created
+# once by the Ansible role with per-mode ownership (0640
+# app_user:argo-logreaders for normal, 0600 root:root for sensitive);  # legacy-argo: unix group on hosts
+# this script only APPENDS to them, preserving the Ansible-set perms.
+# Malformed sidecar files created here get their final ownership
+# applied via explicit chown/chmod based on the service mode arg.
+#
+# Usage:
+#   archive-logs.sh <service-name> <stack-dir>
+#
+# Per-service retention config (mode, days, max_total_size, compress)
+# is read from <stack-dir>/logs/services/<svc>/.retention at runtime
+# so the systemd unit template stays static. Ansible writes this file
+# when provisioning the service.
+#
+# See bay/docs/adr/002-log-archival.md for the decision record.
+
+set -euo pipefail
+
+SVC="${1:?service name required}"
+STACK_DIR="${2:?stack dir required}"
+
+LOG_DIR="${STACK_DIR}/logs/services/${SVC}"
+LIVE="${LOG_DIR}/live.log"
+CURSOR="${LOG_DIR}/.cursor"
+MALFORMED_DIR="${LOG_DIR}/.malformed"
+RETENTION_FILE="${LOG_DIR}/.retention"
+LOCK="${LOG_DIR}/.archive.lock"
+
+# Source retention config. File is a safe key=value list (no command
+# substitution, no loops). Defaults apply if the file is missing or a
+# key isn't set.
+mode="normal"
+# shellcheck disable=SC1090
+[[ -s "$RETENTION_FILE" ]] && source "$RETENTION_FILE"
+MODE="${mode:-normal}"
+
+# ── perm model (per mode) ────────────────────────────────────────────
+# Apply to .malformed/YYYY-MM-DD.log when we create it. live.log and
+# .cursor were pre-created by Ansible with the same ownership/mode.
+case "$MODE" in
+  normal)
+    FILE_OWNER="{{ app_user }}"
+    FILE_GROUP="{{ log_archive_group }}"
+    FILE_MODE="0640"
+    ;;
+  sensitive)
+    FILE_OWNER="root"
+    FILE_GROUP="root"
+    FILE_MODE="0600"
+    ;;
+  *)
+    echo "archive-logs[$SVC]: unknown mode '$MODE' (expected normal|sensitive)" >&2
+    exit 2
+    ;;
+esac
+
+# ── sanity ────────────────────────────────────────────────────────────
+[[ -d "$LOG_DIR" ]] || { echo "archive-logs[$SVC]: missing dir $LOG_DIR" >&2; exit 2; }
+[[ -d "$MALFORMED_DIR" ]] || mkdir -p "$MALFORMED_DIR"
+
+# ── single-instance lock ─────────────────────────────────────────────
+# Prevent overlap if a tick runs long (docker daemon hiccup etc.) and
+# the next timer fires before we're done. `flock -n` makes a second
+# instance exit immediately — systemd just logs and we catch up on
+# the next tick.
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  echo "archive-logs[$SVC]: another tick is still running, skipping" >&2
+  exit 0
+fi
+
+# ── cleanup ──────────────────────────────────────────────────────────
+# `return 0` at the end is load-bearing: the trap handler's final
+# status becomes the script's exit status under `set -e`. Without it,
+# an early `exit 0` path (e.g. "no such container") can have its rc
+# silently overwritten by `1` from a `[[ -n "" ]] && ...` short-circuit.
+tmp_fetch=""
+tmp_clean=""
+tmp_mal=""
+cleanup() {
+  [[ -n "$tmp_fetch" && -e "$tmp_fetch" ]] && rm -f "$tmp_fetch"
+  [[ -n "$tmp_clean" && -e "$tmp_clean" ]] && rm -f "$tmp_clean"
+  [[ -n "$tmp_mal" && -e "$tmp_mal" ]] && rm -f "$tmp_mal"
+  return 0
+}
+trap cleanup EXIT
+
+# ── resolve cursor ───────────────────────────────────────────────────
+cursor=""
+if [[ -s "$CURSOR" ]]; then
+  cursor="$(head -n1 "$CURSOR" | tr -d '[:space:]')"
+fi
+if [[ -z "$cursor" ]]; then
+  # First run — use the container's StartedAt so we don't lose the
+  # pre-archiver history of an already-running container.
+  cursor="$(docker inspect --format '{{ '{{' }}.State.StartedAt{{ '}}' }}' "$SVC" 2>/dev/null || true)"
+  # Zero value from inspect means container exists but state is odd.
+  if [[ -z "$cursor" || "$cursor" == "0001-01-01T00:00:00Z" ]]; then
+    cursor="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  fi
+fi
+
+# ── fetch ────────────────────────────────────────────────────────────
+tmp_fetch="$(mktemp "${LOG_DIR}/.fetch.XXXXXX")"
+
+docker_rc=0
+docker logs --since "$cursor" --timestamps "$SVC" >"$tmp_fetch" 2>&1 || docker_rc=$?
+
+if (( docker_rc != 0 )); then
+  if grep -qi "no such container" "$tmp_fetch"; then
+    # Transient — container may be mid-recreation. Retry once.
+    sleep 5
+    docker_rc=0
+    : >"$tmp_fetch"
+    docker logs --since "$cursor" --timestamps "$SVC" >"$tmp_fetch" 2>&1 || docker_rc=$?
+    if (( docker_rc != 0 )) && grep -qi "no such container" "$tmp_fetch"; then
+      echo "archive-logs[$SVC]: container absent after retry — skipping tick" >&2
+      exit 0
+    fi
+  fi
+  if (( docker_rc != 0 )); then
+    echo "archive-logs[$SVC]: docker logs failed (exit $docker_rc)" >&2
+    head -n 5 "$tmp_fetch" >&2 || true
+    exit 0
+  fi
+fi
+
+# Nothing to do.
+[[ -s "$tmp_fetch" ]] || exit 0
+
+# ── classify: clean vs malformed ─────────────────────────────────────
+# A clean line begins with an RFC 3339 timestamp followed by a space.
+# Docker's --timestamps prepends this to every line it serves.
+
+tmp_clean="$(mktemp "${LOG_DIR}/.clean.XXXXXX")"
+tmp_mal="$(mktemp "${LOG_DIR}/.mal.XXXXXX")"
+
+awk '
+/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2}) / {
+  print >"'"$tmp_clean"'"; next
+}
+{ print >"'"$tmp_mal"'" }
+' "$tmp_fetch"
+
+# ── dedup: drop lines at or before the cursor ────────────────────────
+# --since is inclusive at second granularity in many docker versions.
+# Lexicographic comparison works because Docker always emits UTC
+# timestamps in RFC 3339 with zero-padded fields.
+
+if [[ -s "$tmp_clean" && -n "$cursor" ]]; then
+  awk -v cur="$cursor" '$1 > cur { print }' "$tmp_clean" >"${tmp_clean}.ded"
+  mv "${tmp_clean}.ded" "$tmp_clean"
+fi
+
+# ── append ───────────────────────────────────────────────────────────
+if [[ -s "$tmp_clean" ]]; then
+  cat "$tmp_clean" >>"$LIVE"
+  # Cursor = last appended line's timestamp. Atomic write via temp+mv.
+  new_cursor="$(tail -n1 "$tmp_clean" | awk '{print $1}')"
+  printf '%s\n' "$new_cursor" >"${CURSOR}.tmp"
+  mv -f "${CURSOR}.tmp" "$CURSOR"
+fi
+
+if [[ -s "$tmp_mal" ]]; then
+  today="$(date -u +%Y-%m-%d)"
+  mal_file="${MALFORMED_DIR}/${today}.log"
+  if [[ ! -e "$mal_file" ]]; then
+    {
+      echo "# bay log_archive: malformed lines for ${today} (UTC)"
+      echo "# Lines here could not be parsed as RFC 3339-timestamped Docker log output."
+      echo "# Common causes: container crashed mid-write, non-UTF-8 bytes, truncated last line."
+    } >"$mal_file"
+    chown "${FILE_OWNER}:${FILE_GROUP}" "$mal_file" 2>/dev/null || true
+    chmod "$FILE_MODE" "$mal_file" 2>/dev/null || true
+  fi
+  cat "$tmp_mal" >>"$mal_file"
+fi
+
+exit 0

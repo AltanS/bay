@@ -1,0 +1,89 @@
+---
+# One-shot schema migration for circuit-breaker state files.
+#
+# Walks {{ stack_dir }}/state/*.json and rewrites any legacy-shape files
+# (missing "version" key) to schema v1 in place. Idempotent — files already
+# at schema v1 are skipped.
+#
+# Cut-off: remove this task after v0.80.0. By then all hosts will have been
+# deployed at least once since schema v1 landed (v0.76.x), so lazy migration
+# in rebuild.sh's _read_state is sufficient and this eager pass is redundant.
+
+- name: Deploy CB state migration script
+  ansible.builtin.copy:
+    dest: "{{ stack_dir }}/bin/_cb_state_migrate.py"
+    mode: "0755"
+    content: |
+      #!/usr/bin/env python3
+      """Idempotent schema-v0 -> schema-v1 migration for CB state files."""
+      import json
+      import os
+      import sys
+      import tempfile
+
+      state_dir = sys.argv[1]
+      if not os.path.isdir(state_dir):
+          print("migrated=0 skipped=0")
+          sys.exit(0)
+
+      migrated = 0
+      skipped = 0
+      for name in sorted(os.listdir(state_dir)):
+          if not name.endswith(".json"):
+              continue
+          path = os.path.join(state_dir, name)
+          try:
+              with open(path) as fh:
+                  data = json.load(fh)
+          except Exception:
+              continue
+          if "version" in data:
+              skipped += 1
+              continue
+          # Legacy shape: {failures, last_failure (str), last_notified_sha}
+          # v1 shape: last_failure is a dict with sha/stage/reason/at
+          legacy_last = data.get("last_failure")
+          if isinstance(legacy_last, dict):
+              last_failure = legacy_last
+          elif isinstance(legacy_last, str) and legacy_last:
+              last_failure = {
+                  "sha": data.get("last_notified_sha", "") or "",
+                  "stage": "",
+                  "reason": "",
+                  "at": legacy_last,
+              }
+          else:
+              last_failure = None
+          consecutive = int(data.get("consecutive_failures", data.get("failures", 0)) or 0)
+          new = {
+              "version": 1,
+              "consecutive_failures": consecutive,
+              "opened_at": data.get("opened_at"),
+              "last_failure": last_failure,
+              "alerts": {
+                  "opened_sent": bool(data.get("opened_sent", False)),
+                  "last_blocked_alert_at": data.get("last_blocked_alert_at"),
+              },
+          }
+          fd, tmp = tempfile.mkstemp(dir=state_dir)
+          try:
+              os.write(fd, json.dumps(new).encode())
+          finally:
+              os.close(fd)
+          os.chmod(tmp, 0o644)
+          os.rename(tmp, path)
+          migrated += 1
+
+      print("migrated={} skipped={}".format(migrated, skipped))
+  tags:
+    - git_deploy
+    - cb_state_migration
+
+- name: Migrate legacy CB state files to schema v1
+  ansible.builtin.command:
+    cmd: "python3 {{ stack_dir }}/bin/_cb_state_migrate.py {{ stack_dir }}/state"
+  register: _cb_state_migration
+  changed_when: "'migrated=0' not in _cb_state_migration.stdout"
+  tags:
+    - git_deploy
+    - cb_state_migration

@@ -1,0 +1,83 @@
+---
+# Post-push local image cleanup (remote strategy)
+#
+# After `docker push` succeeds in remote_build.yml, the local build-server
+# daemon still holds the image. Over many builds these content-hash tags
+# accumulate — each ~1 GB for a typical monorepo service — and are never
+# pulled again (consumers fetch from Zot, not from the build server's local
+# daemon). This trims that "write-only cache" back to the last N tags per
+# repo while preserving `latest` and anything referenced by a running
+# container.
+#
+# Called by remote_build.yml with `_image_repo` (e.g.
+# "registry.infra.example.com/demo/storefront-platform") in
+# scope. Runs only for services whose resolved strategy is `remote`.
+#
+# Running-container match is on the full `<repo>:<tag>` reference rather than
+# image ID: `docker ps --format '{{.ImageID}}'` is rejected by Moby's
+# container formatter (only `.Image` is exposed), and the `.Image` field is
+# the reference the container was started with — exactly what we need to
+# protect.
+
+- name: "{{ _svc_name }} — List running container image refs"
+  ansible.builtin.command:
+    cmd: "docker ps --format '{{ '{{' }}.Image{{ '}}' }}'"
+  register: _cleanup_running_refs
+  changed_when: false
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — List all tags for {{ _image_repo }} sorted newest-first"
+  ansible.builtin.command:
+    cmd: >-
+      docker images {{ _image_repo }}
+      --format '{{ '{{' }}.Tag{{ '}}' }}|{{ '{{' }}.CreatedAt{{ '}}' }}'
+  register: _cleanup_all_tags
+  changed_when: false
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — Compute removable tags (keep latest + newest {{ git_deploy_build_keep_tags }} content-hash tags, skip running containers)"
+  ansible.builtin.set_fact:
+    _cleanup_tags_to_remove: >-
+      {{
+        (_cleanup_all_tags.stdout_lines | default([]))
+        | map('split', '|')
+        | rejectattr('0', 'eq', 'latest')
+        | rejectattr('0', 'eq', '<none>')
+        | list
+        | sort(attribute=1, reverse=true)
+        | map(attribute=0)
+        | reject('in', _running_tags_for_repo)
+        | list
+      }}
+  vars:
+    # Tags from running containers that reference this repo — e.g. if a
+    # container runs `<repo>:abc123`, we add `abc123` to this list so it is
+    # excluded from removal. Strips the repo prefix so the remaining string
+    # matches the tag column produced by `docker images`.
+    _running_tags_for_repo: >-
+      {{
+        (_cleanup_running_refs.stdout_lines | default([]))
+        | select('match', '^' ~ (_image_repo | regex_escape) ~ ':')
+        | map('regex_replace', '^' ~ (_image_repo | regex_escape) ~ ':', '')
+        | list
+      }}
+
+- name: "{{ _svc_name }} — Prune old content-hash tags (keeping {{ git_deploy_build_keep_tags }})"
+  ansible.builtin.command:
+    cmd: "docker rmi {{ _image_repo }}:{{ item }}"
+  loop: "{{ _cleanup_tags_to_remove[git_deploy_build_keep_tags:] | default([]) }}"
+  loop_control:
+    label: "{{ _image_repo }}:{{ item }}"
+  register: _cleanup_rmi_result
+  changed_when: _cleanup_rmi_result.rc == 0
+  failed_when:
+    - _cleanup_rmi_result.rc != 0
+    - '"image is being used" not in _cleanup_rmi_result.stderr'
+    - '"No such image" not in _cleanup_rmi_result.stderr'
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"

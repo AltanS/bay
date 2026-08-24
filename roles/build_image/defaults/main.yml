@@ -1,0 +1,3 @@
+---
+# Build image role defaults
+# (No configurable defaults — image pulling uses service-level image: fields)

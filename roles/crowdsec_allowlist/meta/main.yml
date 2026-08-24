@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  role_name: crowdsec_allowlist
+  author: bay
+  description: >-
+    Full-sync the argo-inventory CrowdSec allowlist with every peer host in  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+    the Ansible inventory (public IP + tailnet IP). Runs during provision and
+    deploy so inventory changes propagate automatically.
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - focal
+
+dependencies: []

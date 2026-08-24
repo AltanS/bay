@@ -1,0 +1,14 @@
+---
+# Production domain configuration
+# Override service domains per environment if needed
+#
+# By default, domains come from services.yml.
+# This file provides the Let's Encrypt email and optional domain overrides.
+
+{% if not multi_region %}
+# Base domain for services (referenced in services.yml)
+domain_base: {{ domain_base }}
+
+{% endif %}
+# Let's Encrypt ACME email (required for SSL certificates)
+letsencrypt_email: {{ letsencrypt_email }}

@@ -1,0 +1,50 @@
+---
+# Install restic binary from GitHub releases
+# Requires root privileges since /usr/local/bin is root-owned
+
+- name: Check if restic is already installed
+  ansible.builtin.stat:
+    path: "{{ backup_restic_bin }}"
+  register: _restic_bin_stat
+  become: true
+  become_user: root
+
+- name: Download and install restic {{ backup_restic_version }}
+  become: true
+  become_user: root
+  when: not _restic_bin_stat.stat.exists
+  block:
+    - name: Download restic binary archive
+      ansible.builtin.get_url:
+        url: "https://github.com/restic/restic/releases/download/v{{ backup_restic_version }}/restic_{{ backup_restic_version }}_linux_amd64.bz2"
+        dest: "/tmp/restic_{{ backup_restic_version }}_linux_amd64.bz2"
+        mode: "0644"
+
+    - name: Decompress and install restic binary
+      ansible.builtin.shell:
+        cmd: "bunzip2 -c /tmp/restic_{{ backup_restic_version }}_linux_amd64.bz2 > {{ backup_restic_bin }}"
+        creates: "{{ backup_restic_bin }}"
+
+    - name: Set restic binary permissions
+      ansible.builtin.file:
+        path: "{{ backup_restic_bin }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Clean up downloaded archive
+      ansible.builtin.file:
+        path: "/tmp/restic_{{ backup_restic_version }}_linux_amd64.bz2"
+        state: absent
+
+- name: Verify restic installation
+  ansible.builtin.command:
+    cmd: "{{ backup_restic_bin }} version"
+  changed_when: false
+  register: _restic_version
+  become: true
+  become_user: root
+
+- name: Display restic version
+  ansible.builtin.debug:
+    msg: "{{ _restic_version.stdout }}"

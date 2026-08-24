@@ -1,0 +1,38 @@
+---
+# External Ansible Galaxy dependencies
+# Roles:       ansible-galaxy install -r requirements.yml -p vendor/roles
+# Collections: ansible-galaxy collection install -r requirements.yml -p vendor/collections
+
+# Roles ARE pinned, for the same reason collections are (see below). Unpinned,
+# every fresh `sync_deps` silently took whatever galaxy served that day, so the
+# three checkouts of this repo had three different sets: the framework's own
+# vendor sat on security 3.0.0 / lazydocker 2.7.4 from April while both
+# consumers had moved to 3.0.2 / 2.7.5. A breaking upstream release would land
+# in production with no diff and no changelog. Versions below are exactly what
+# the consumers vendor today, so pinning is a no-op for them and only pulls the
+# framework's stale April vendor forward. Bump deliberately, not by accident.
+roles:
+  - name: geerlingguy.git
+    version: "3.0.1"
+  - name: geerlingguy.security
+    version: "3.0.2"
+  - name: geerlingguy.pip
+    version: "3.1.2"
+  - name: geerlingguy.docker
+    version: "8.0.0"
+  - name: darkwizard242.lazydocker
+    version: "2.7.5"
+# Collections ARE pinned. They were not until v0.107.3, which meant "vendored"
+# only ever meant "whatever galaxy served when install last ran" — three copies
+# of this repo had three different sets. Combined with the `collections_paths`
+# typo (which made ansible ignore vendor/ entirely and fall back to
+# ~/.ansible/collections), deploys ran on whatever the operator happened to
+# have. docker/general are pinned to the versions production has been running;
+# posix to the version the framework's own tests validate against.
+collections:
+  - name: community.docker
+    version: "5.2.0"
+  - name: community.general
+    version: "12.6.0"
+  - name: ansible.posix
+    version: "2.1.0"

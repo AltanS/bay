@@ -1,0 +1,57 @@
+---
+# Bay - Webhook Setup
+# Deploys webhook receiver and generates deploy keys for build: services
+#
+# Usage:
+#   ansible-playbook webhook.yml -e target_host=production
+
+- name: Bootstrap webhook directories
+  hosts: "{{ target_host }}"
+  become: true
+  vars_files:
+    - version.yml
+
+  tasks:
+    - name: Ensure stack directory exists
+      ansible.builtin.file:
+        path: "{{ stack_dir }}"
+        state: directory
+        mode: "0755"
+        owner: "{{ app_user }}"
+        group: docker
+
+    - name: Ensure triggers directory exists
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/triggers"
+        state: directory
+        mode: "0777"
+        owner: "{{ app_user }}"
+        group: docker
+
+- name: Deploy webhook infrastructure
+  hosts: "{{ target_host }}"
+  become: true
+  become_user: "{{ app_user }}"
+  vars_files:
+    - version.yml
+
+  pre_tasks:
+    - name: Initialize active services
+      ansible.builtin.set_fact:
+        active_services: {}
+      tags: [always]
+
+    - name: Compute active services for this host
+      ansible.builtin.set_fact:
+        active_services: "{{ active_services | combine({item.key: item.value}) }}"
+      loop: "{{ (services | default({})) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      when: >-
+        item.value.regions is not defined
+        or item.value.regions | length == 0
+        or (item.value.regions | intersect(group_names) | length > 0)
+      tags: [always]
+
+  roles:
+    - { role: git_deploy, tags: [git_deploy] }

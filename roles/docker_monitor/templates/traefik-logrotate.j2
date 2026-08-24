@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+{{ traefik_access_log_path }} {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 root root
+    postrotate
+        docker kill --signal=USR1 {{ traefik_container_name }} 2>/dev/null || true
+    endscript
+}

@@ -1,0 +1,92 @@
+---
+# Traefik reverse proxy setup
+# Deploys static config, creates log directory, sets up Docker network
+# Traefik itself runs as a container managed by the container_lifecycle role
+# ACME cert file is created in the root bootstrap play (deploy.yml) — requires root ownership
+# Runs as app user (become_user inherited from play)
+
+# ── Directory Setup ─────────────────────────────────────────────────────
+
+- name: Ensure Traefik log directory exists
+  ansible.builtin.file:
+    path: "{{ traefik_access_log_path | dirname }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0755"
+
+# ── Static Configuration ───────────────────────────────────────────────
+
+- name: Deploy Traefik static config
+  ansible.builtin.template:
+    src: traefik.yml.j2
+    dest: "{{ traefik_config_path }}"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0644"
+  notify: Restart traefik
+
+# ── Docker Network ─────────────────────────────────────────────────────
+
+- name: Create services bridge network
+  community.docker.docker_network:
+    name: "{{ traefik_docker_network }}"
+    state: present
+
+# ── Tailnet HTTPS ingress (opt-in: traefik_dns_challenge_enabled) ───────
+# DNS-01 wildcard cert resolver + file provider for routing to remote
+# tailnet upstreams. See docs/tailnet-ingress.md.
+
+- name: Ensure Traefik env directory exists (DNS-01 token)
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/env"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0750"
+  when: traefik_dns_challenge_enabled | default(false)
+
+- name: Render Traefik env file (Cloudflare DNS-01 token)
+  ansible.builtin.template:
+    src: traefik.env.j2
+    dest: "{{ stack_dir }}/env/traefik.env"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0600"
+  no_log: true
+  notify: Restart traefik
+  when: traefik_dns_challenge_enabled | default(false)
+
+- name: Ensure DNS-01 ACME storage file exists (root-owned, like acme.json)
+  ansible.builtin.file:
+    path: "{{ traefik_acme_dns_path }}"
+    state: touch
+    owner: root
+    group: root
+    mode: "0600"
+    modification_time: preserve
+    access_time: preserve
+  become: true
+  become_user: root
+  when: traefik_dns_challenge_enabled | default(false)
+
+- name: Ensure Traefik dynamic-config directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/dynamic"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0755"
+  when: traefik_dns_challenge_enabled | default(false)
+
+- name: Render tailnet-proxy dynamic routes (remote tailnet upstreams)
+  ansible.builtin.template:
+    src: dynamic/tailnet-proxies.yml.j2
+    dest: "{{ stack_dir }}/dynamic/tailnet-proxies.yml"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0644"
+  # File provider watches the directory (watch: true) — no restart needed.
+  when:
+    - traefik_dns_challenge_enabled | default(false)
+    - tailnet_proxies | default({}) | length > 0

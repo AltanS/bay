@@ -1,0 +1,63 @@
+# CrowdSec Scenario: Extended XSS Detection
+# Managed by Ansible - do not edit manually
+#
+# Supplements the Hub's crowdsecurity/http-xss-probbing scenario with patterns
+# it does not cover. The Hub detects XSS via HTML tag injection (%3Cscript,
+# %3Csvg, etc.) and some JS functions (alert, prompt). This scenario adds:
+#
+#   - Event handler attributes: onerror=, onload=, onfocus=, onmouseover=
+#   - DOM property access: document.cookie, document.domain
+#
+# Both scenarios are response-code-independent (fire on any HTTP status).
+# This is a leaky bucket — triggers after multiple distinct attack payloads
+# from a single IP, reducing false positive risk.
+#
+# http_args contains the RAW (not decoded) query string from Nginx.
+# Event handler names and DOM properties contain no special characters that
+# require URL encoding, so they appear literally. The = after handlers is
+# encoded as %3D by most clients.
+
+type: leaky
+name: custom/xss-extended
+description: "Detect XSS event handler and DOM access patterns (supplements Hub)"
+filter: |
+  evt.Meta.service == 'http' and
+  evt.Parsed.static_ressource == 'false' and (
+    evt.Meta.http_args contains 'onerror%3D' or
+    evt.Meta.http_args contains 'onerror%3d' or
+    evt.Meta.http_args contains 'ONERROR%3D' or
+    evt.Meta.http_args contains 'ONERROR%3d' or
+    evt.Meta.http_args contains 'onload%3D' or
+    evt.Meta.http_args contains 'onload%3d' or
+    evt.Meta.http_args contains 'ONLOAD%3D' or
+    evt.Meta.http_args contains 'ONLOAD%3d' or
+    evt.Meta.http_args contains 'onfocus%3D' or
+    evt.Meta.http_args contains 'onfocus%3d' or
+    evt.Meta.http_args contains 'ONFOCUS%3D' or
+    evt.Meta.http_args contains 'ONFOCUS%3d' or
+    evt.Meta.http_args contains 'onmouseover%3D' or
+    evt.Meta.http_args contains 'onmouseover%3d' or
+    evt.Meta.http_args contains 'ONMOUSEOVER%3D' or
+    evt.Meta.http_args contains 'ONMOUSEOVER%3d' or
+    evt.Meta.http_args contains 'onmouseenter%3D' or
+    evt.Meta.http_args contains 'onmouseenter%3d' or
+    evt.Meta.http_args contains 'onclick%3D' or
+    evt.Meta.http_args contains 'onclick%3d' or
+    evt.Meta.http_args contains 'oninput%3D' or
+    evt.Meta.http_args contains 'oninput%3d' or
+    evt.Meta.http_args contains 'onchange%3D' or
+    evt.Meta.http_args contains 'onchange%3d' or
+    evt.Meta.http_args contains 'document.cookie' or
+    evt.Meta.http_args contains 'document.domain' or
+    evt.Meta.http_args contains 'document.location' or
+    evt.Meta.http_args contains 'window.location'
+  )
+groupby: evt.Meta.source_ip
+distinct: "evt.Meta.http_args"
+capacity: {{ crowdsec_scenario_xss_extended_capacity }}
+leakspeed: {{ crowdsec_scenario_xss_extended_leakspeed }}
+blackhole: {{ crowdsec_scenario_xss_extended_blackhole }}
+labels:
+  service: http
+  type: scan
+  remediation: true

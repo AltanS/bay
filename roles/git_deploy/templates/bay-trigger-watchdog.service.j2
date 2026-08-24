@@ -1,0 +1,13 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Bay build pipeline stall watchdog
+# No OnFailure= — the watchdog is itself the alert channel. Cascading to
+# bay-build-alert@ would misclassify a watchdog bug as a build failure.
+
+[Service]
+Type=oneshot
+User={{ app_user }}
+ExecStart={{ stack_dir }}/bin/bay-trigger-watchdog.sh
+# Best-effort: even if the script is buggy, never mark the unit failed.
+# The script itself is designed to always `exit 0`.
+SuccessExitStatus=0

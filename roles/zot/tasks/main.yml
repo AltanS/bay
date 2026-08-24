@@ -1,0 +1,241 @@
+---
+# Zot container registry
+# Deploys config, htpasswd, and data directories for the self-hosted OCI registry.
+# The container itself is managed by the container_lifecycle role.
+#
+# Auth credentials are derived from the docker_registries entry matching
+# zot_domain — no separate zot_admin_username/password vars needed.
+
+# -- Credential lookup --------------------------------------------------------
+
+- name: Look up Zot credentials from docker_registries
+  ansible.builtin.set_fact:
+    _zot_creds: >-
+      {{ docker_registries | default([])
+         | selectattr('domain', 'eq', zot_domain)
+         | first | default({}) }}
+  tags: [zot]
+
+# -- Validation ---------------------------------------------------------------
+
+- name: Validate zot_domain is set
+  ansible.builtin.assert:
+    that:
+      - zot_domain | length > 0
+    fail_msg: >-
+      zot_domain must be set to the public FQDN of the registry
+      (e.g. registry.example.com). Set it in group_vars.
+  tags: [zot]
+
+- name: Validate Zot credentials found in docker_registries
+  ansible.builtin.assert:
+    that:
+      - (_zot_creds.username | default('')) | length > 0
+      - (_zot_creds.password | default('')) | length > 0
+    fail_msg: >-
+      No credentials found for '{{ zot_domain }}' in docker_registries.
+      Add an entry with domain, username, and password to docker_registries
+      in group_vars.
+  tags: [zot]
+
+- name: Validate zot_storage_driver value
+  ansible.builtin.assert:
+    that:
+      - zot_storage_driver in ['filesystem', 's3']
+    fail_msg: >-
+      zot_storage_driver must be 'filesystem' or 's3', got
+      '{{ zot_storage_driver }}'.
+  tags: [zot]
+
+- name: Validate S3 storage driver requirements
+  ansible.builtin.assert:
+    that:
+      - (zot_s3_bucket | default('')) | length > 0
+      - (zot_s3_region | default('')) | length > 0
+      - (zot_aws_access_key_id | default('')) | length > 0
+      - (zot_aws_secret_access_key | default('')) | length > 0
+    fail_msg: >-
+      zot_storage_driver=s3 requires zot_s3_bucket, zot_s3_region,
+      zot_aws_access_key_id, and zot_aws_secret_access_key to be non-empty.
+      Stash AWS credentials in vault (e.g. zot_aws_access_key_id) and
+      reference them from group_vars/<region>/main.yml — never inline them
+      in plain group_vars.
+  when: zot_storage_driver == 's3'
+  tags: [zot]
+
+# -- Tailnet self-reach pin (GitHub #27) --------------------------------------
+# The control host must reach its own registry over the tailnet — resolving
+# zot_domain to its own public IP hairpins large layer uploads (they time out).
+# This role runs ONLY on the control host (deploy.yml gates on zot_server), so
+# the pin is scoped there without re-gating. zot_domain is validated non-empty
+# above, so the regexp below is always a real host match.
+
+- name: Pin zot registry domain to tailnet IP in /etc/hosts
+  # regexp matches ANY existing line for zot_domain, so a stale or manual
+  # entry is healed (rewritten with the bay-managed marker) and the task is
+  # idempotent once the managed line is in place.
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    line: "{{ zot_tailnet_pin_ip }} {{ zot_domain }}  # bay-managed: zot registry tailnet pin (see roles/zot)"
+    regexp: '^\S+\s+{{ zot_domain | regex_escape }}(\s.*)?$'
+    state: present
+  become: true
+  become_user: root
+  when: zot_tailnet_pin_ip | length > 0
+  tags: [zot]
+
+- name: Remove bay-managed zot registry tailnet pin from /etc/hosts
+  # Anchored on the marker comment so ONLY the managed line is removed —
+  # unmanaged manual entries for zot_domain are left untouched.
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    # Matches the pre-1.0 marker spelling too, so a host pinned before the
+    # rename still gets its stale line removed.
+    regexp: '^.*# (argo|bay)-managed: zot registry tailnet pin.*$'  # legacy-argo: dual-read, remove in a future major release
+    state: absent
+  become: true
+  become_user: root
+  when: zot_tailnet_pin_ip | length == 0
+  tags: [zot]
+
+# -- Directory Setup ----------------------------------------------------------
+
+- name: Create zot config directory
+  ansible.builtin.file:
+    path: "{{ zot_config_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0755"
+  become: true
+  become_user: root
+  tags: [zot]
+
+- name: Create zot data directory
+  ansible.builtin.file:
+    path: "{{ zot_data_dir }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0755"
+  become: true
+  become_user: root
+  tags: [zot]
+
+# -- Dependencies -------------------------------------------------------------
+
+- name: Install apache2-utils for htpasswd
+  ansible.builtin.apt:
+    name: apache2-utils
+    state: present
+  become: true
+  become_user: root
+  tags: [zot]
+
+# -- Configuration ------------------------------------------------------------
+
+- name: Template zot config
+  ansible.builtin.template:
+    src: config.json.j2
+    dest: "{{ zot_config_dir }}/config.json"
+    owner: "{{ app_user }}"
+    mode: "0644"
+  notify: Restart zot
+  tags: [zot]
+
+# htpasswd -B is bcrypt, which mixes in a RANDOM SALT: regenerating the
+# hash produces different bytes on every run even for unchanged credentials.
+# Writing it unconditionally therefore reported `changed` on every deploy and
+# fired `Restart zot` every deploy — bouncing the registry that other regions
+# pull images FROM mid-rollout. So verify the stored hash FIRST and only
+# regenerate when it does not match the configured credentials.
+#
+# `htpasswd -bv` exits 0 only on a match. Every failure mode we care about is
+# non-zero and must regenerate (verified against apache2-utils):
+#   rc 1  file missing / unreadable      rc 3  password changed
+#   rc 6  username changed, or empty file (user not found)
+#   rc 7  malformed file / empty hash
+# so `rc != 0` is the correct regenerate condition — no rc allow-list.
+
+- name: Verify existing htpasswd file matches configured credentials
+  ansible.builtin.command:
+    cmd: >-
+      htpasswd -bvB {{ zot_config_dir }}/htpasswd
+      {{ _zot_creds.username }} {{ _zot_creds.password }}
+  register: _zot_htpasswd_check
+  changed_when: false
+  failed_when: false
+  # Read-only probe: run it in --check too, otherwise the skipped command
+  # registers rc 0 (ansible-core >= 2.19) and check mode would silently
+  # predict "no change needed" even for a real credential rotation.
+  check_mode: false
+  no_log: true
+  tags: [zot]
+
+- name: Generate htpasswd file
+  ansible.builtin.command:
+    cmd: >-
+      htpasswd -bBn {{ _zot_creds.username }} {{ _zot_creds.password }}
+  register: _zot_htpasswd
+  changed_when: false
+  # Writes to stdout only, never to disk — safe to run under --check so the
+  # write task below has real content to diff against.
+  check_mode: false
+  no_log: true
+  when: _zot_htpasswd_check.rc != 0
+  tags: [zot]
+
+- name: Write htpasswd file
+  ansible.builtin.copy:
+    content: "{{ _zot_htpasswd.stdout }}\n"
+    dest: "{{ zot_config_dir }}/htpasswd"
+    owner: "{{ app_user }}"
+    mode: "0600"
+  no_log: true
+  when: _zot_htpasswd_check.rc != 0
+  notify: Restart zot
+  tags: [zot]
+
+# -- S3 driver: AWS credential env file ---------------------------------------
+# Renders {{ stack_dir }}/env/zot.env (mode 0600) when the S3 driver is
+# active. The Zot container reads AWS_* from process env on startup —
+# keeping creds out of the world-readable config.json (mounted ro into
+# the container) and out of the rendered docker-compose.yml.
+#
+# zot runs before deploy_stack in deploy.yml, so {{ stack_dir }}/env may
+# not exist yet on a fresh host — create it idempotently here.
+
+- name: Ensure stack env directory exists (S3 driver)
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/env"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0755"
+  become: true
+  become_user: root
+  when: zot_storage_driver == 's3'
+  tags: [zot]
+
+- name: Render Zot AWS credentials env file (S3 driver)
+  ansible.builtin.copy:
+    dest: "{{ stack_dir }}/env/zot.env"
+    content: |
+      AWS_ACCESS_KEY_ID={{ zot_aws_access_key_id }}
+      AWS_SECRET_ACCESS_KEY={{ zot_aws_secret_access_key }}
+      AWS_REGION={{ zot_s3_region }}
+    owner: "{{ app_user }}"
+    group: "{{ app_user }}"
+    mode: "0600"
+  no_log: true
+  notify: Restart zot
+  when: zot_storage_driver == 's3'
+  tags: [zot]
+
+- name: Remove Zot AWS credentials env file (filesystem driver)
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/env/zot.env"
+    state: absent
+  notify: Restart zot
+  when: zot_storage_driver != 's3'
+  tags: [zot]

@@ -1,0 +1,46 @@
+# CrowdSec Scenario: Aggressive Crawl Detection (WordPress-compatible)
+# Managed by Ansible - do not edit manually
+#
+# Supplements the Hub's http-crawl-non_statics scenario which fails on
+# WordPress sites using pretty permalinks. The Hub scenario uses
+# distinct: "evt.Parsed.file_name" — but WordPress URLs end with /
+# (e.g. /bonus/, /tipps/match-prognose/), so file_name is always empty
+# and the distinct filter collapses all requests into one bucket entry.
+#
+# This scenario uses distinct: "evt.Meta.http_path" instead, counting
+# each unique URL path as a separate entry. Combined with a slower leak
+# rate (5s vs 0.5s), it catches both fast scrapers (~9 req/sec, triggers
+# in ~5s) and slow persistent scrapers (~0.5 req/sec, triggers in ~2min).
+#
+# Paths matching crowdsec_crawl_exclude_paths are excluded to avoid false
+# positives from frontend JavaScript firing multiple API requests per page
+# view. API abuse (injection, XSS, SQLi) is still caught by dedicated
+# attack-detection scenarios.
+#
+# User agents matching crowdsec_crawl_exclude_user_agents are excluded for
+# legitimate crawlers. Googlebot/Bingbot are already excluded by
+# crowdsecurity/whitelist-good-actors.
+
+type: leaky
+name: custom/aggressive-crawl
+description: "Detect aggressive crawling on WordPress sites (pretty permalink compatible)"
+filter: |
+  evt.Meta.log_type in ['http_access-log', 'http_error-log'] and
+  evt.Parsed.static_ressource == 'false' and
+  evt.Parsed.verb in ['GET', 'HEAD'] and
+{% for path in crowdsec_crawl_exclude_paths | default([]) %}
+  !(evt.Meta.http_path startsWith '{{ path }}') and
+{% endfor %}
+{% for ua in crowdsec_crawl_exclude_user_agents | default([]) %}
+  !(evt.Meta.http_user_agent contains '{{ ua }}'){{ " and" if not loop.last else "" }}
+{% endfor %}
+distinct: "evt.Meta.http_path"
+groupby: evt.Meta.source_ip
+capacity: {{ crowdsec_scenario_aggressive_crawl_capacity }}
+leakspeed: {{ crowdsec_scenario_aggressive_crawl_leakspeed }}
+blackhole: {{ crowdsec_scenario_aggressive_crawl_blackhole }}
+cache_size: 5
+labels:
+  service: http
+  type: crawl
+  remediation: true

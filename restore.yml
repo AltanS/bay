@@ -1,0 +1,236 @@
+---
+# Restore playbook — streams restic snapshot data into containers
+#
+# Usage:
+#   bin/bay backup restore <env> <accessory> [--snapshot ID]
+#
+# Direct ansible-playbook usage:
+#   ansible-playbook restore.yml -e target_host=production -e accessory=postgres -e confirm=yes
+#   Optional: -e snapshot=abc123 -e skip_pre_backup=true -e database=mydb
+
+- name: "Restore {{ accessory }} on {{ target_host | default('unset') }}"
+  hosts: "{{ target_host | default('all') }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+  vars_files:
+    - "{{ playbook_dir }}/version.yml"
+
+  vars:
+    # Inline defaults for backup role variables (role defaults not available outside roles)
+    _backup_s3_endpoint: "{{ secrets.backup_s3_endpoint | default(S3_ENDPOINT | default('')) }}"
+    _backup_s3_bucket: "{{ secrets.backup_s3_bucket | default(S3_BUCKET | default('')) }}"
+    _backup_s3_prefix: "{{ backup_s3_prefix | default('backups') }}"
+    _backup_s3_access_key_id: "{{ secrets.backup_s3_access_key_id | default(S3_ACCESS_KEY_ID | default('')) }}"
+    _backup_s3_secret_access_key: "{{ secrets.backup_s3_secret_access_key | default(S3_SECRET_ACCESS_KEY | default('')) }}"
+    _backup_restic_password: "{{ secrets.backup_restic_password | default('') }}"
+    _backup_restic_bin: "{{ backup_restic_bin | default('/usr/local/bin/restic') }}"
+    _backup_scripts_dir: "{{ backup_scripts_dir | default(stack_dir + '/backup') }}"
+    _snapshot: "{{ snapshot | default('latest') }}"
+    _skip_pre_backup: "{{ skip_pre_backup | default(false) | bool }}"
+    _accessory_config: "{{ accessories[accessory] }}"
+    _image: "{{ _accessory_config.image | default('') }}"
+    _backup_raw: "{{ _accessory_config.backup }}"
+    _method: >-
+      {{ _backup_raw.method | default('')
+         if _backup_raw is mapping
+         else '' }}
+    _auto_method: >-
+      {{ 'pg_dump' if 'postgres' in _image
+         else 'mysql' if ('mysql' in _image or 'mariadb' in _image)
+         else 'redis' if 'redis' in _image
+         else 'file' }}
+    _restore_method: "{{ (_method | trim) if (_method | trim) else (_auto_method | trim) }}"
+    _restic_env:
+      RESTIC_REPOSITORY: "s3:{{ _backup_s3_endpoint }}/{{ _backup_s3_bucket }}/{{ _backup_s3_prefix }}/{{ inventory_hostname }}/{{ accessory }}"
+      RESTIC_PASSWORD: "{{ _backup_restic_password }}"
+      AWS_ACCESS_KEY_ID: "{{ _backup_s3_access_key_id }}"
+      AWS_SECRET_ACCESS_KEY: "{{ _backup_s3_secret_access_key }}"
+      RESTIC_CACHE_DIR: "{{ _backup_scripts_dir }}/cache/{{ accessory }}"
+    _pg_user: "{{ _accessory_config.env['clear'].POSTGRES_USER | default('app') }}"
+    _pg_database: "{{ database | default(_accessory_config.env['clear'].POSTGRES_DB | default('app')) }}"
+    _restore_tmp_dir: "{{ stack_dir }}/backup/restore-tmp"
+
+  pre_tasks:
+    - name: Validate required variables
+      ansible.builtin.assert:
+        that:
+          - accessory is defined
+          - accessory in accessories
+          - accessories[accessory].backup is defined
+        fail_msg: >-
+          Required variable 'accessory' must be defined and must reference
+          an accessory with backup enabled in services.yml.
+
+  tasks:
+    - name: Verify snapshot exists
+      ansible.builtin.command:
+        cmd: "{{ _backup_restic_bin }} snapshots {{ _snapshot }} --json --retry-lock 15m"
+      environment: "{{ _restic_env }}"
+      register: _snapshot_info
+      changed_when: false
+      failed_when: _snapshot_info.rc != 0 or (_snapshot_info.stdout | from_json | length) == 0
+      become: true
+      become_user: root
+
+    - name: Parse snapshot details
+      ansible.builtin.set_fact:
+        _snap: "{{ (_snapshot_info.stdout | from_json | last) }}"
+
+    - name: Display restore plan
+      ansible.builtin.debug:
+        msg: |
+          ====================================================
+                             RESTORE PLAN
+          ====================================================
+            Accessory:  {{ accessory }}
+            Method:     {{ _restore_method }}
+            Snapshot:   {{ _snap.short_id }} ({{ _snap.time | regex_replace('T.*', '') }})
+            Host:       {{ inventory_hostname }}
+          ====================================================
+
+    - name: Require confirmation
+      ansible.builtin.assert:
+        that: confirm | default('no') | bool
+        fail_msg: >-
+          Restore requires explicit confirmation. Re-run with -e confirm=yes
+          or use 'bin/bay backup restore' for interactive confirmation.
+
+    # -- Pre-restore backup ------------------------------------------------
+
+    - name: Create pre-restore backup
+      ansible.builtin.command:
+        cmd: "{{ _backup_scripts_dir }}/backup-{{ accessory }}.sh"
+      environment:
+        RESTIC_TAG_EXTRA: pre-restore
+      when: not _skip_pre_backup
+      register: _pre_backup_result
+      failed_when: _pre_backup_result.rc != 0
+
+    # -- Restore -----------------------------------------------------------
+
+    - name: Ensure restore temp directory exists
+      ansible.builtin.file:
+        path: "{{ _restore_tmp_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0750"
+
+    - name: Restore PostgreSQL database
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+          /{{ accessory }}{% if database is defined %}-{{ database }}{% endif %}.sql
+          --retry-lock 15m |
+          docker exec {{ accessory }}
+          psql -U {{ _pg_user }} -d {{ _pg_database }}
+        executable: /bin/bash
+      environment: "{{ _restic_env }}"
+      become: true
+      become_user: root
+      when: _restore_method == 'pg_dump'
+
+    - name: Restore MySQL database
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+          /{{ accessory }}.sql
+          --retry-lock 15m |
+          docker exec -i
+          -e MYSQL_PWD="{{ _accessory_config.env['clear'].MYSQL_ROOT_PASSWORD | default(_accessory_config.env['clear'].MYSQL_PASSWORD | default('')) }}"
+          {{ accessory }}
+          mysql -u {{ _accessory_config.env['clear'].MYSQL_USER | default('root') }} {{ _accessory_config.env['clear'].MYSQL_DATABASE | default('app') }}
+        executable: /bin/bash
+      environment: "{{ _restic_env }}"
+      become: true
+      become_user: root
+      when: _restore_method == 'mysql'
+
+    - name: Stop Redis container for restore
+      ansible.builtin.command:
+        cmd: "docker stop {{ accessory }}"
+      when: _restore_method == 'redis'
+
+    - name: Restore Redis RDB file
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+          /{{ accessory }}.rdb
+          --retry-lock 15m >
+          {{ _restore_tmp_dir }}/dump.rdb &&
+          docker
+          cp {{ _restore_tmp_dir }}/dump.rdb {{ accessory }}:/data/dump.rdb
+        executable: /bin/bash
+      environment: "{{ _restic_env }}"
+      become: true
+      become_user: root
+      when: _restore_method == 'redis'
+
+    - name: Start Redis container after restore
+      ansible.builtin.command:
+        cmd: "docker start {{ accessory }}"
+      when: _restore_method == 'redis'
+
+    - name: Restore file backup
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+          /{{ accessory }}.tar
+          --retry-lock 15m |
+          docker
+          cp - {{ accessory }}:{{ _accessory_config.backup.source_path | default('/data') }}
+        executable: /bin/bash
+      environment: "{{ _restic_env }}"
+      become: true
+      become_user: root
+      when: _restore_method == 'file'
+
+    # -- Validation --------------------------------------------------------
+
+    - name: Verify restored PostgreSQL database has tables
+      ansible.builtin.shell:
+        cmd: >-
+          docker exec {{ accessory }}
+          psql -U {{ _pg_user }} -d {{ _pg_database }}
+          -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';"
+      register: _table_count
+      failed_when: (_table_count.stdout | trim | int) == 0
+      when: _restore_method == 'pg_dump'
+
+    - name: Verify Redis is responding
+      ansible.builtin.shell:
+        cmd: >-
+          docker exec {{ accessory }}
+          redis-cli PING
+      register: _redis_ping
+      failed_when: "'PONG' not in _redis_ping.stdout"
+      when: _restore_method == 'redis'
+      retries: 5
+      delay: 2
+
+    # -- Cleanup -----------------------------------------------------------
+
+    - name: Clean up restore temp directory
+      ansible.builtin.file:
+        path: "{{ _restore_tmp_dir }}"
+        state: absent
+
+    # -- Notification ------------------------------------------------------
+
+    - name: Send restore success notification
+      ansible.builtin.uri:
+        url: "https://api.telegram.org/bot{{ docker_monitor_telegram_bot_token }}/sendMessage"
+        method: POST
+        body_format: json
+        body:
+          chat_id: "{{ docker_monitor_telegram_chat_id }}"
+          text: "{{ docker_monitor_alert_header | default('') }}Restore complete\nAccessory: {{ accessory }}\nSnapshot: {{ _snap.short_id }}\nHost: {{ inventory_hostname }}{{ docker_monitor_alert_footer | default('') }}"
+          parse_mode: HTML
+          disable_web_page_preview: true
+      ignore_errors: true
+      when: (docker_monitor_telegram_bot_token | default('')) | length > 0

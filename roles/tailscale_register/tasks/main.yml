@@ -1,0 +1,181 @@
+---
+# Tailscale register — connect VPS to Headscale
+# Runs AFTER container_lifecycle so the headscale container is available.
+# Idempotent: skips registration if tailscale is already connected.
+#
+# Breaking change: headscale_server_user now defaults to stack_name
+# instead of "server". Existing deployments with nodes registered under user
+# "server" should run `bin/bay gateway migrate-namespace` to rename the old
+# user. Re-deploying without migrating creates a new user (stack_name) but the
+# VPS node stays connected under "server" until its next registration.
+
+# -- Status Check ---------------------------------------------------------------
+
+- name: Check tailscale status
+  ansible.builtin.command: tailscale status --json
+  register: tailscale_status_result
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: root
+  tags: [tailscale_register]
+
+# -- Determine registration need ------------------------------------------------
+
+- name: Set registration needed fact
+  ansible.builtin.set_fact:
+    _needs_registration: >-
+      {{ tailscale_status_result.rc != 0 or
+         ('BackendState' in (tailscale_status_result.stdout | from_json) and
+          (tailscale_status_result.stdout | from_json).BackendState != 'Running') }}
+  tags: [tailscale_register]
+
+# == Local path (control region — headscale_server is true) ====================
+# Uses `docker exec` on the co-located headscale container.
+
+- name: Wait for headscale container to be running
+  ansible.builtin.command: docker inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' headscale
+  register: headscale_container_status
+  until: headscale_container_status.stdout | trim == 'running'
+  retries: 12
+  delay: 5
+  changed_when: false
+  become: true
+  become_user: root
+  when: _needs_registration and (headscale_server | default(true) | bool)
+  tags: [tailscale_register]
+
+- name: Create headscale server user
+  ansible.builtin.command: >-
+    docker exec headscale headscale users create {{ headscale_server_user }}
+  register: headscale_user_result
+  changed_when: "'Created' in headscale_user_result.stdout"
+  failed_when: >-
+    headscale_user_result.rc != 0 and
+    'already exists' not in headscale_user_result.stderr and
+    'UNIQUE constraint failed' not in headscale_user_result.stderr
+  when: _needs_registration and (headscale_server | default(true) | bool)
+  tags: [tailscale_register]
+
+- name: Get server user ID
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      docker exec headscale headscale users list -o json |
+      python3 -c "import sys,json; users=json.load(sys.stdin);
+      print(next(u['id'] for u in users if u['name'] == '{{ headscale_server_user }}'))"
+    executable: /bin/bash
+  register: headscale_user_id_result
+  changed_when: false
+  when: _needs_registration and (headscale_server | default(true) | bool)
+  tags: [tailscale_register]
+
+- name: Generate pre-auth key
+  ansible.builtin.command: >-
+    docker exec headscale headscale preauthkeys create
+    --user {{ headscale_user_id_result.stdout | trim }} --expiration 5m
+  register: headscale_preauth_result
+  no_log: true
+  when: _needs_registration and (headscale_server | default(true) | bool)
+  tags: [tailscale_register]
+
+- name: Connect tailscale to headscale
+  ansible.builtin.command: >-
+    tailscale up
+    --login-server=https://{{ headscale_domain }}
+    --authkey={{ headscale_preauth_result.stdout | trim }}
+    --hostname={{ headscale_node_hostname }}
+  become: true
+  become_user: root
+  no_log: true
+  when: _needs_registration and (headscale_server | default(true) | bool)
+  tags: [tailscale_register]
+
+# == Remote path (non-control region — headscale_server is false) ==============
+# Uses the Headscale REST API — no local container required.
+
+- name: Fail if no API key for remote registration
+  ansible.builtin.fail:
+    msg: >-
+      headscale_api_key is required in the secrets dict for remote region registration.
+      Generate one with: bin/bay gateway apikey
+  when: >-
+    _needs_registration and not (headscale_server | default(true) | bool) and
+    (secrets.headscale_api_key is not defined or secrets.headscale_api_key | length == 0)
+  tags: [tailscale_register]
+
+- name: Create headscale user (API)
+  ansible.builtin.uri:
+    url: "https://{{ headscale_domain }}/api/v1/user"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ secrets.headscale_api_key }}"
+    body_format: json
+    body:
+      name: "{{ headscale_server_user }}"
+    status_code: [200, 409, 500]
+  register: _create_user_result
+  no_log: true
+  when: _needs_registration and not (headscale_server | default(true) | bool)
+  tags: [tailscale_register]
+
+- name: Fail if user creation returned unexpected error
+  ansible.builtin.fail:
+    msg: "Failed to create headscale user: {{ _create_user_result.json.message | default(_create_user_result.msg) }}"
+  when:
+    - _create_user_result is not skipped
+    - _create_user_result.status | default(0) == 500
+    - "'UNIQUE constraint' not in (_create_user_result.json.message | default(''))"
+  tags: [tailscale_register]
+
+- name: Look up server user ID (API)
+  ansible.builtin.uri:
+    url: "https://{{ headscale_domain }}/api/v1/user"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ secrets.headscale_api_key }}"
+    status_code: [200]
+  register: _user_list_result
+  no_log: true
+  when: _needs_registration and not (headscale_server | default(true) | bool)
+  tags: [tailscale_register]
+
+- name: Extract server user ID
+  ansible.builtin.set_fact:
+    _headscale_user_id: >-
+      {{ (_user_list_result.json.users
+          | selectattr('name', 'equalto', headscale_server_user)
+          | first).id }}
+  when: _needs_registration and not (headscale_server | default(true) | bool)
+  tags: [tailscale_register]
+
+- name: Generate pre-auth key (API)
+  ansible.builtin.uri:
+    url: "https://{{ headscale_domain }}/api/v1/preauthkey"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ secrets.headscale_api_key }}"
+    body_format: json
+    body:
+      user: "{{ _headscale_user_id | int }}"
+      reusable: false
+      ephemeral: false
+      expiration: "{{ '%Y-%m-%dT%H:%M:%SZ' | strftime(ansible_facts['date_time']['epoch'] | int + 300) }}"
+    status_code: [200]
+  register: _headscale_preauthkey_api
+  no_log: true
+  when: _needs_registration and not (headscale_server | default(true) | bool)
+  tags: [tailscale_register]
+
+- name: Connect tailscale to headscale (API path)
+  ansible.builtin.command: >-
+    tailscale up
+    --login-server=https://{{ headscale_domain }}
+    --authkey={{ _headscale_preauthkey_api.json.preAuthKey.key }}
+    --accept-routes
+    --hostname={{ headscale_node_hostname }}
+  become: true
+  become_user: root
+  no_log: true
+  when: _needs_registration and not (headscale_server | default(true) | bool)
+  tags: [tailscale_register]

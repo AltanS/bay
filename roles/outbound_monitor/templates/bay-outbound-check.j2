@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# bay-outbound-check — Outbound internet connectivity probe
+# Managed by Ansible (outbound_monitor role). Do not edit manually.
+#
+# Motivation: When a server loses its public IP, Tailscale VPN can remain up,
+# making SSH-based health checks appear green. This probe detects internet loss
+# independently of Tailscale reachability by curling well-known external endpoints.
+#
+# Known limitation: If internet is completely gone, the down-alert cannot reach
+# Telegram's API either. That is acceptable by design — the recovery alert fires
+# when internet is restored, giving a timestamped record of the outage window.
+# The bay_notify function uses "|| true" so the probe never fails on send errors.
+
+set -euo pipefail
+
+STATE_DIR="{{ outbound_check_state_dir }}"
+STATE_FILE="${STATE_DIR}/state"
+TIMEOUT="{{ outbound_check_timeout }}"
+
+# ── Alert helper ─────────────────────────────────────────────────────────────
+# Fire-and-forget. Failure is expected when internet is down (down-alert case).
+{% set docker_monitor_telegram_bot_token = docker_monitor_telegram_bot_token | default('') or telegram_bot_token | default('') %}
+{% set docker_monitor_telegram_chat_id = docker_monitor_telegram_chat_id | default('') or telegram_chat_id | default('') %}
+{% include '_notify.sh.j2' %}
+
+# ── Connectivity probe ───────────────────────────────────────────────────────
+check_connectivity() {
+{% for endpoint in outbound_check_endpoints %}
+  if curl --silent --max-time "${TIMEOUT}" --output /dev/null "{{ endpoint }}"; then
+    return 0
+  fi
+{% endfor %}
+  return 1
+}
+
+# ── State management ─────────────────────────────────────────────────────────
+mkdir -p "${STATE_DIR}"
+
+# Treat missing state file as "up" (first-run default)
+if [[ -f "${STATE_FILE}" ]]; then
+  previous_state=$(cat "${STATE_FILE}")
+else
+  previous_state="up"
+fi
+
+# Run probe
+if check_connectivity; then
+  current_state="up"
+else
+  current_state="down"
+fi
+
+# ── Transition detection ─────────────────────────────────────────────────────
+if [[ "${current_state}" == "${previous_state}" ]]; then
+  # No state change — suppress alert flood
+  exit 0
+fi
+
+echo "${current_state}" > "${STATE_FILE}"
+
+if [[ "${current_state}" == "down" ]]; then
+  # NOTE: This alert may not arrive if internet is completely gone.
+  # The recovery alert below will fire when connectivity is restored,
+  # providing a timestamped record of the outage.
+  bay_notify host.outbound_lost "[{{ stack_name }}] [${BAY_HOST}] Outbound internet LOST — Tailscale SSH still reachable"
+else
+  bay_notify host.outbound_restored "[{{ stack_name }}] [${BAY_HOST}] Outbound internet RESTORED"
+fi

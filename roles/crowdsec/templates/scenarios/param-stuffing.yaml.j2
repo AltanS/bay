@@ -1,0 +1,26 @@
+# CrowdSec Scenario: Parameter Stuffing Detection
+# Managed by Ansible - do not edit manually
+#
+# Detects requests with 20+ query parameters, a strong indicator of parameter
+# fuzzing. Scanners test many redirect/injection parameter names at once by
+# stuffing them all into a single query string.
+#
+# The regex counts ampersands (&): 19+ occurrences of [^&]*& means 20+ params.
+#
+# Why 20+ params is safe as an instant trigger:
+#   - No legitimate WordPress/WooCommerce request sends 20+ query string params
+#   - WordPress bulk admin operations use POST body, not query strings
+#   - WooCommerce product filters rarely exceed 10 params
+
+type: trigger
+name: custom/param-stuffing
+description: "Detect parameter stuffing with 20+ query parameters"
+filter: |
+  evt.Meta.service == 'http' and
+  evt.Parsed.static_ressource == 'false' and
+  evt.Meta.http_args matches "([^&]*&){19,}"
+groupby: evt.Meta.source_ip
+labels:
+  service: http
+  type: scan
+  remediation: true

@@ -1,0 +1,18 @@
+# Custom CrowdSec Scenario
+# Managed by Ansible - do not edit manually
+
+type: {{ item.type | default('leaky') }}
+name: custom/{{ item.name }}
+description: "{{ item.description }}"
+filter: |
+  {{ item.filter | trim | indent(2) }}
+groupby: {{ item.groupby | default('evt.Meta.source_ip') }}
+{% if item.type | default('leaky') != 'trigger' %}
+capacity: {{ item.capacity }}
+leakspeed: {{ item.leakspeed }}
+blackhole: {{ item.blackhole }}
+{% endif %}
+labels:
+{% for key, value in item.labels.items() %}
+  {{ key }}: {{ value }}
+{% endfor %}

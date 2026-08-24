@@ -1,0 +1,3 @@
+{% set active_svc_names = git_deploy_rebuild_services | default([]) %}
+{% set image_map = services | default({}) | bay_image_consumers(active_svc_names) %}
+{{ image_map | to_nice_json }}

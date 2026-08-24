@@ -1,0 +1,30 @@
+# CrowdSec Scenario: Custom Bad User Agent Detection
+# Managed by Ansible - do not edit manually
+#
+# Supplements the Hub's http-bad-user-agent scenario with immediate blocking
+# for the most egregious scanner user agents. Hub scenario triggers after 2
+# requests; this triggers immediately on first match.
+
+type: trigger
+name: custom/custom-bad-user-agent
+description: "Immediate block for obvious scanner user agents (supplements Hub)"
+filter: |
+  evt.Meta.http_user_agent contains 'Fuzz Faster' or
+  evt.Meta.http_user_agent contains 'sqlmap' or
+  evt.Meta.http_user_agent contains 'nikto' or
+  evt.Meta.http_user_agent contains 'nuclei' or
+  evt.Meta.http_user_agent contains 'gobuster' or
+  evt.Meta.http_user_agent contains 'dirbuster' or
+  evt.Meta.http_user_agent contains 'wpscan' or
+  evt.Meta.http_user_agent contains 'Team Anon Force' or
+  evt.Meta.http_user_agent contains 'Mozlila' or
+  evt.Meta.http_user_agent startsWith 'Moz111a' or
+  evt.Meta.http_user_agent contains 'depconf_deep_scanner' or
+  evt.Meta.http_user_agent contains 'getodin.com' or
+  evt.Meta.http_user_agent contains 'cypex.ai/scanning' or
+  evt.Meta.http_user_agent contains 'onlyscans.com'
+groupby: evt.Meta.source_ip
+labels:
+  service: http
+  type: scan
+  remediation: true

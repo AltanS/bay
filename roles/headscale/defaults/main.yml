@@ -1,0 +1,72 @@
+---
+# Headscale — coordination server for the tailnet (mesh VPN that links
+# regions for cross-region service links and operator peer-to-peer
+# debugging).
+#
+# Split-DNS gotchas (operators):
+#
+# - **Hardcoded domains in multi-region cause duplicate YAML keys** — If a
+#   service uses a literal domain (e.g., `blog.example.com`) instead of
+#   `{{ domain_base }}`, the split-DNS template iterates all hosts and
+#   emits the same domain twice in `dns.nameservers.split`. Headscale
+#   0.28's Go YAML parser is strict and crashes on duplicate mapping keys.
+#   Fixed in v0.43.1: templates now filter by `svc.regions` and
+#   deduplicate by domain.
+# - **Partial deploys leave split-DNS stale** — The headscale role only
+#   runs on the control region host. If you add a VPN service and deploy
+#   only the service's region (`--tags deploy_stack`), the headscale
+#   split-DNS records on the control server are not updated. Always
+#   redeploy the headscale tag on the control region after adding/changing
+#   VPN services: `bin/bay deploy production --tags headscale`.
+# - **`bay logs` and `bay restart` don't work for infrastructure
+#   containers** — Headscale and Traefik are not in
+#   `services.yml`, so CLI commands that validate against it will reject
+#   them. Use `bay gateway status` to check headscale health, or ansible
+#   ad-hoc for direct container access.
+
+headscale_domain: ""
+headscale_dns_global_nameservers: []
+# Operator-defined split-DNS A records, merged into extra-records.json and
+# config.yaml's dns.nameservers.split alongside the auto-generated
+# `access: vpn` service and `tailnet_proxies` records (same seen_domains
+# dedup — first writer wins). Use this for a manual mapping Bay can't derive
+# on its own, e.g. an externally-managed tailnet node that publicly resolves
+# elsewhere but should resolve to its tailnet IP for tailnet clients:
+#   headscale_extra_dns_records:
+#     - name: example.com      # domain
+#       value: 100.64.0.7      # tailnet IP
+#       # type: A              # optional, defaults to A
+# See docs/access-gateways.md#split-dns-for-vpn-services.
+headscale_extra_dns_records: []
+headscale_magic_dns_domain: "{{ stack_name }}.tailnet.internal"
+headscale_version: "0.29.2"
+headscale_oidc_issuer: ""
+headscale_oidc_client_id: ""
+headscale_oidc_client_secret: ""
+# Headscale user that owns VPS server nodes. Defaults to stack_name so each
+# Bay project gets its own isolated user when sharing a Headscale server.
+# Override in group_vars if you need a custom user name.
+headscale_server_user: "{{ stack_name }}"
+
+# ── ACL policy (file mode) ───────────────────────────────────────────────────
+# UNDEFINED by default → no `policy:` block is rendered and no policy.hujson is
+# written → Headscale stays in its default ALLOW-ALL mode (every tailnet node can
+# reach every node/port). Defining this var renders an ACL policy and switches the
+# whole tailnet to DEFAULT-DENY.
+#
+# !! BLAST RADIUS !! The moment a policy exists, anything NOT explicitly accepted
+# is blocked. You MUST enumerate every required flow (cross-region service links,
+# rig/monitoring, operator SSH, per-peer SSH, control/DNS) or you will break
+# production tailnet traffic. Validate the rendered HuJSON and stage + cut over
+# deliberately with a rollback (revert this var → redeploy --tags headscale).
+#
+# Shape: a HuJSON policy as a YAML dict (serialized to JSON by policy.hujson.j2):
+#   headscale_acl_policy:
+#     hosts:
+#       infra: 100.64.0.5/32
+#       laptop: 100.64.0.3/32
+#     acls:
+#       - action: accept
+#         src: ["infra"]
+#         dst: ["laptop:8787"]   # homelab-app ingress — infra-only
+# See docs/tailnet-ingress.md. Left undefined here — opt in per consumer.

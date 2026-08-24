@@ -1,0 +1,30 @@
+---
+- name: Reload crowdsec
+  ansible.builtin.service:
+    name: crowdsec
+    state: reloaded
+
+- name: Restart crowdsec
+  ansible.builtin.service:
+    name: crowdsec
+    state: restarted
+
+- name: Restart crowdsec-firewall-bouncer
+  ansible.builtin.service:
+    name: crowdsec-firewall-bouncer
+    state: restarted
+
+- name: Reload systemd daemon
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Apply nftables blocklist
+  ansible.builtin.command:
+    cmd: nft -f /etc/nftables.d/trellis-blocklist.conf
+  changed_when: true
+
+- name: Remove nftables blocklist table
+  ansible.builtin.command:
+    cmd: nft delete table inet trellis_blocklist
+  failed_when: false
+  changed_when: true

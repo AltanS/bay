@@ -1,0 +1,16 @@
+---
+# Container registries — credentials for pulling and pushing images.
+# All deployment servers log in to each registry before pulling.
+# The build server also logs in before pushing (strategy: remote).
+#
+# Add entries for any registries your services pull from or push to.
+# Example:
+#   docker_registries:
+#     - domain: ghcr.io
+#       username: myuser
+#       password: "{{ '{{ secrets.GHCR_TOKEN }}' }}"
+#     - domain: docker.io
+#       username: myuser
+#       password: "{{ '{{ secrets.DOCKER_HUB_TOKEN }}' }}"
+
+docker_registries: []

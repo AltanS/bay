@@ -1,0 +1,7 @@
+---
+# Boot safety defaults
+# Systemd oneshot service to recreate missing infra containers on boot
+
+boot_safety_enabled: true
+boot_safety_compose_file: "{{ stack_dir }}/docker-compose.infra.yml"
+boot_safety_service_name: bay-infra-boot

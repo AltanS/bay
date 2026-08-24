@@ -1,0 +1,7 @@
+---
+# Region-specific overrides for the NA server
+# These override values from all/ and production/
+# See docs/multi-region.md for the full pattern.
+
+domain_base: na.example.com
+letsencrypt_email: admin@na.example.com

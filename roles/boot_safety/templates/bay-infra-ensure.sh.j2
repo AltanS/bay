@@ -1,0 +1,98 @@
+#!/bin/bash
+# {{ ansible_managed }}
+#
+# Ensure all infrastructure containers defined in the infra compose file exist.
+# Creates any that are absent; skips any that already exist (running or stopped).
+#
+# Uses `docker inspect` to check existence — NOT compose project labels.
+# Compose v5 uses project labels to track "its" containers; containers restarted
+# by Docker's restart policy after a hard reboot lose those labels. --no-recreate
+# is therefore blind and tries to create every service, hitting name conflicts on
+# already-running containers. docker inspect by name is authoritative.
+#
+# Triggered on every boot by bay-infra-boot.service. The normal path (all
+# containers exist) is a fast no-op. Only acts when a container was deleted
+# outright (OOM hard kill, manual removal, corruption).
+
+set -euo pipefail
+
+COMPOSE_FILE="{{ boot_safety_compose_file }}"
+TRAEFIK_CONTAINER="{{ traefik_container_name | default('traefik') }}"
+
+{% raw %}
+echo "bay-infra-ensure: checking infra containers from $COMPOSE_FILE"
+
+# Extract container names from compose config (only services with explicit container_name).
+# Services without container_name use compose's default naming (<project>_<svc>_1) and
+# are not managed by this script — they recover via Docker's own restart policy.
+mapfile -t CONTAINER_NAMES < <(
+  /usr/bin/docker compose -f "$COMPOSE_FILE" config --format json 2>/dev/null \
+    | python3 -c "
+import sys, json
+cfg = json.load(sys.stdin)
+for svc in cfg.get('services', {}).values():
+    name = svc.get('container_name', '')
+    if name:
+        print(name)
+"
+)
+
+if [ "${#CONTAINER_NAMES[@]}" -eq 0 ]; then
+  echo "bay-infra-ensure: no container_name entries found in compose file, nothing to do"
+  exit 0
+fi
+
+created=0
+for name in "${CONTAINER_NAMES[@]}"; do
+  state=$(docker inspect "$name" --format '{{.State.Status}}' 2>/dev/null || echo "absent")
+  if [ "$state" = "absent" ]; then
+    echo "bay-infra-ensure: $name absent — creating via compose"
+    # Retry up to 3 times; treat 'already in use' as success (TOCTOU)
+    for attempt in 1 2 3; do
+      out=$(/usr/bin/docker compose -f "$COMPOSE_FILE" up -d "$name" 2>&1) && break
+      if grep -q "already in use" <<<"$out"; then
+        echo "bay-infra-ensure: $name already appeared between check and create — OK"
+        break
+      fi
+      echo "bay-infra-ensure: $name create attempt $attempt failed: $out"
+      [ "$attempt" -lt 3 ] && sleep 2
+    done
+    created=$((created + 1))
+  else
+    echo "bay-infra-ensure: $name exists (state=$state) — skipping"
+  fi
+done
+
+echo "bay-infra-ensure: done. ${created} container(s) created."
+
+# ── Verify Traefik port bindings ──────────────────────────────────────────
+# Traefik uses host networking — ports are bound by the process, not Docker.
+# A running container with an unhealthy process won't serve traffic.
+traefik_state=$(docker inspect "$TRAEFIK_CONTAINER" --format '{{.State.Status}}' 2>/dev/null || echo "absent")
+if [ "$traefik_state" = "running" ]; then
+  echo "bay-infra-ensure: verifying $TRAEFIK_CONTAINER port bindings..."
+  bound=false
+  for i in $(seq 1 30); do
+    if ss -tlnp 2>/dev/null | grep -q ':80 '; then
+      bound=true
+      break
+    fi
+    sleep 1
+  done
+  if [ "$bound" = true ]; then
+    echo "bay-infra-ensure: $TRAEFIK_CONTAINER port 80 bound — OK"
+  else
+    echo "bay-infra-ensure: $TRAEFIK_CONTAINER running but port 80 not bound after 30s — recreating"
+    docker rm -f "$TRAEFIK_CONTAINER"
+    /usr/bin/docker compose -f "$COMPOSE_FILE" up -d "$TRAEFIK_CONTAINER"
+    for i in $(seq 1 15); do
+      if ss -tlnp 2>/dev/null | grep -q ':80 '; then
+        echo "bay-infra-ensure: $TRAEFIK_CONTAINER port 80 bound after recreate — OK"
+        break
+      fi
+      [ "$i" -eq 15 ] && echo "bay-infra-ensure: WARNING — $TRAEFIK_CONTAINER port 80 still not bound after recreate"
+      sleep 1
+    done
+  fi
+fi
+{% endraw %}

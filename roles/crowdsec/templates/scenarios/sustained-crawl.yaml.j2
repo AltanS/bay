@@ -1,0 +1,43 @@
+# CrowdSec Scenario: Sustained Crawl Detection
+# Managed by Ansible - do not edit manually
+#
+# Complements custom/aggressive-crawl by catching slow-but-persistent scrapers
+# that evade unique-path-based detection. Uses raw request count (no distinct
+# filter) with a higher capacity and slower drain, targeting IPs that sustain
+# a high volume of non-static requests over minutes rather than seconds.
+#
+# Example: Coordinated scraper clusters using 4+ IPs, each doing 25-40
+# non-static requests/min — too slow for aggressive-crawl's distinct filter
+# but clearly not human browsing behavior over sustained periods.
+#
+# Paths matching crowdsec_crawl_exclude_paths are excluded to avoid false
+# positives from frontend JavaScript firing multiple API requests per page
+# view. API abuse (injection, XSS, SQLi) is still caught by dedicated
+# attack-detection scenarios.
+#
+# User agents matching crowdsec_crawl_exclude_user_agents are excluded for
+# legitimate crawlers. Googlebot/Bingbot are already excluded by
+# crowdsecurity/whitelist-good-actors.
+
+type: leaky
+name: custom/sustained-crawl
+description: "Detect slow-but-persistent crawling by total request volume"
+filter: |
+  evt.Meta.log_type in ['http_access-log', 'http_error-log'] and
+  evt.Parsed.static_ressource == 'false' and
+  evt.Parsed.verb in ['GET', 'HEAD'] and
+{% for path in crowdsec_crawl_exclude_paths | default([]) %}
+  !(evt.Meta.http_path startsWith '{{ path }}') and
+{% endfor %}
+{% for ua in crowdsec_crawl_exclude_user_agents | default([]) %}
+  !(evt.Meta.http_user_agent contains '{{ ua }}'){{ " and" if not loop.last else "" }}
+{% endfor %}
+groupby: evt.Meta.source_ip
+capacity: {{ crowdsec_scenario_sustained_crawl_capacity }}
+leakspeed: {{ crowdsec_scenario_sustained_crawl_leakspeed }}
+blackhole: {{ crowdsec_scenario_sustained_crawl_blackhole }}
+cache_size: 5
+labels:
+  service: http
+  type: crawl
+  remediation: true

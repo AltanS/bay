@@ -1,0 +1,24 @@
+# {{ ansible_managed }}
+{# Convert cron schedule to systemd OnCalendar format #}
+{% set parts = timer_schedule.split() %}
+{% set cron_min = parts[0] %}
+{% set cron_hour = parts[1] %}
+{% set cron_dom = parts[2] %}
+{% set cron_month = parts[3] %}
+{% set cron_dow = parts[4] %}
+{% set dow_map = {'0': 'Sun', '1': 'Mon', '2': 'Tue', '3': 'Wed', '4': 'Thu', '5': 'Fri', '6': 'Sat', '7': 'Sun'} %}
+{% set cal_dow = dow_map[cron_dow] if cron_dow in dow_map else '' %}
+{% set cal_month = '%02d' | format(cron_month | int) if cron_month != '*' else '*' %}
+{% set cal_dom = '%02d' | format(cron_dom | int) if cron_dom != '*' else '*' %}
+{% set cal_hour = '%02d' | format(cron_hour | int) if cron_hour != '*' else '*' %}
+{% set cal_min = '%02d' | format(cron_min | int) if cron_min != '*' else '*' %}
+[Unit]
+Description=Bay backup timer for {{ accessory_name }}
+
+[Timer]
+OnCalendar={{ cal_dow ~ ' ' if cal_dow }}*-{{ cal_month }}-{{ cal_dom }} {{ cal_hour }}:{{ cal_min }}:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

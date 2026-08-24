@@ -1,0 +1,29 @@
+---
+# swap role defaults
+#
+# Provisions a swapfile as a safety net against OOM-kills when memory spikes
+# (e.g. concurrent container builds, pnpm install bursts). Without swap, a
+# memory spike kills sshd/traefik/tailscale and wedges the host.
+#
+# On network-mounted volumes (NFS, object-storage-backed VMs without direct
+# block access) set `swap_enabled: false` — a swapfile on slow remote storage
+# hurts more than it helps.
+
+swap_enabled: true
+
+# Swap file size. Must use uppercase suffix (G/M) — systemd convention.
+# Sizing: rule of thumb is 50–100% of RAM on hosts ≤ 8 GiB. On build hosts
+# with a MemoryMax cap on runaway processes, swap is a safety net, not a
+# working store, so err smaller.
+swap_size: "2G"
+
+swap_path: "/swapfile"
+
+# vm.swappiness — lower means "prefer not to swap". 10 is a reasonable default
+# for servers where swap is a safety net, not a hot-path cache.
+swap_swappiness: 10
+
+# fstab priority. Negative values deprioritize this swap relative to any future
+# zram/dedicated swap partition. -2 is intentionally lower than the kernel's
+# default of -1 for /swapfile-style entries.
+swap_priority: -2

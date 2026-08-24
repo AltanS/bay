@@ -1,0 +1,194 @@
+---
+# Build and push Docker images for services using the remote strategy.
+# Runs on the build server (delegate_to: build_server).
+# Called with _svc_name as loop var.
+
+- name: "{{ _svc_name }} — Resolve remote build config"
+  ansible.builtin.set_fact:
+    _build: "{{ services[_svc_name].build }}"
+    _image_ref: "{{ services[_svc_name].image }}"
+    _image_repo: "{{ services[_svc_name].image | regex_replace(':.*$', '') }}"
+    _branch: "{{ services[_svc_name].build.branch | default('main') }}"
+    _dockerfile: "{{ services[_svc_name].build.dockerfile | default('Dockerfile') }}"
+    _context: "{{ services[_svc_name].build.context | default('.') }}"
+    _remote_clone_dir: "{{ git_deploy_remote_build_dir }}/{{ _svc_name }}"
+
+- name: "{{ _svc_name }} — Ensure remote clone directory exists"
+  ansible.builtin.file:
+    path: "{{ _remote_clone_dir }}"
+    state: directory
+    mode: "0755"
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — Check if repo already cloned on build server"
+  ansible.builtin.stat:
+    path: "{{ _remote_clone_dir }}/repo/.git"
+  register: _remote_repo_stat
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — Clone repository on build server"
+  ansible.builtin.command:
+    cmd: >-
+      git clone --branch {{ _branch }} --single-branch
+      {{ _build.repo | bay_token_url(_build.token) }}
+      {{ _remote_clone_dir }}/repo
+  when:
+    - not _remote_repo_stat.stat.exists
+    - _build.token is defined
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+  no_log: true
+
+- name: "{{ _svc_name }} — Clone repository on build server (SSH)"
+  ansible.builtin.command:
+    cmd: >-
+      git clone --branch {{ _branch }} --single-branch
+      {{ _build.repo }}
+      {{ _remote_clone_dir }}/repo
+  when:
+    - not _remote_repo_stat.stat.exists
+    - _build.token is not defined
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — Refresh remote.origin.url with current token"
+  ansible.builtin.command:
+    cmd: git remote set-url origin {{ _build.repo | bay_token_url(_build.token) }}
+    chdir: "{{ _remote_clone_dir }}/repo"
+  when:
+    - _remote_repo_stat.stat.exists
+    - _build.token is defined
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+  no_log: true
+  changed_when: false
+
+- name: "{{ _svc_name }} — Fetch latest changes"
+  ansible.builtin.command:
+    cmd: >-
+      git -c url.{{ _build.repo | bay_token_url(_build.token) }}.insteadOf={{ _build.repo }}
+      fetch origin {{ _branch }}
+    chdir: "{{ _remote_clone_dir }}/repo"
+  when:
+    - _remote_repo_stat.stat.exists
+    - _build.token is defined
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+  no_log: true
+
+- name: "{{ _svc_name }} — Fetch latest changes (SSH)"
+  ansible.builtin.command:
+    cmd: git fetch origin {{ _branch }}
+    chdir: "{{ _remote_clone_dir }}/repo"
+  when:
+    - _remote_repo_stat.stat.exists
+    - _build.token is not defined
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — Reset to fetched HEAD (force-push safe)"
+  ansible.builtin.command:
+    cmd: git reset --hard FETCH_HEAD
+    chdir: "{{ _remote_clone_dir }}/repo"
+  when: _remote_repo_stat.stat.exists
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — Get current commit SHA"
+  ansible.builtin.command:
+    cmd: git rev-parse --short=12 HEAD
+    chdir: "{{ _remote_clone_dir }}/repo"
+  register: _remote_sha
+  changed_when: false
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — Check if image already in registry"
+  ansible.builtin.command:
+    cmd: "docker manifest inspect {{ _image_repo }}:{{ _remote_sha.stdout }}"
+  register: _remote_image_exists
+  failed_when: false
+  changed_when: false
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — Build and push image"
+  when: _remote_image_exists.rc != 0
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+  block:
+    - name: "{{ _svc_name }} — Ensure secrets directory exists"
+      ansible.builtin.file:
+        path: "{{ git_deploy_remote_build_dir }}/.secrets"
+        state: directory
+        mode: "0700"
+      when: (_build.secrets | default({})) | length > 0
+
+    - name: "{{ _svc_name }} — Write build secrets to temp files"
+      ansible.builtin.copy:
+        content: "{{ item.value }}"
+        dest: "{{ git_deploy_remote_build_dir }}/.secrets/{{ _svc_name }}-{{ item.key }}"
+        mode: "0600"
+      loop: "{{ _build.secrets | default({}) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      no_log: true
+
+    - name: "{{ _svc_name }} — Build Docker image on build server"
+      ansible.builtin.command:
+        cmd: >-
+          docker buildx build
+          --builder {{ bay_buildx_builder }}
+          --provenance=false
+          --load
+          -t {{ _image_repo }}:{{ _remote_sha.stdout }}
+          -t {{ _image_ref }}
+          -f {{ _dockerfile }}
+          {% for key, value in (_build.args | default({})).items() %}
+          --build-arg {{ key }}={{ value }}
+          {% endfor %}
+          {% for key in (_build.secrets | default({})).keys() %}
+          --secret id={{ key }},src={{ git_deploy_remote_build_dir }}/.secrets/{{ _svc_name }}-{{ key }}
+          {% endfor %}
+          {{ _context }}
+        chdir: "{{ _remote_clone_dir }}/repo"
+
+    - name: "{{ _svc_name }} — Push image to registry (SHA tag)"
+      ansible.builtin.command:
+        cmd: "docker push {{ _image_repo }}:{{ _remote_sha.stdout }}"
+
+    - name: "{{ _svc_name }} — Push image to registry (latest tag)"
+      ansible.builtin.command:
+        cmd: "docker push {{ _image_ref }}"
+
+  always:
+    - name: "{{ _svc_name }} — Clean up build secret temp files"
+      ansible.builtin.file:
+        path: "{{ git_deploy_remote_build_dir }}/.secrets/{{ _svc_name }}-{{ item.key }}"
+        state: absent
+      loop: "{{ _build.secrets | default({}) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      no_log: true
+
+- name: "{{ _svc_name }} — Image already at {{ _remote_sha.stdout }}"
+  ansible.builtin.debug:
+    msg: "Image {{ _image_repo }}:{{ _remote_sha.stdout }} already in registry, skipping build"
+  when: _remote_image_exists.rc == 0
+
+- name: "{{ _svc_name }} — Prune old local content-hash tags"
+  ansible.builtin.include_tasks: cleanup_local_images.yml
+  when: (git_deploy_build_keep_tags | int) > 0

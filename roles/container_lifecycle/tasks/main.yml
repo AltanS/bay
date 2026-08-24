@@ -1,0 +1,21 @@
+---
+# Container lifecycle orchestration (server-side reconciler).
+#
+# build_specs derives the desired container set from services.yml + infra
+# vars; the bay_reconcile engine then observes actual state and reconciles
+# in ONE server-side pass: create / recreate / canary-swap (zero-downtime
+# services) / orphan-removal, in dependency order (infra → accessory →
+# service). The per-container Ansible deploy loops (deploy_infra / _accessory
+# / _service + the _prepare and cleanup helpers) were retired once
+# the reconciler soaked clean in production — git history (≤ v0.96.2) holds
+# the old per-container path if it is ever needed.
+#
+# Input: container_specs (list of container spec dicts). If not provided,
+#        auto-builds from active_services / active_accessories.
+
+- name: Build container specs from services.yml
+  ansible.builtin.include_tasks: build_specs.yml
+  when: container_specs is not defined
+
+- name: Reconcile via server-side reconciler
+  ansible.builtin.include_tasks: reconcile.yml

@@ -1,0 +1,178 @@
+---
+# CrowdSec Inventory Allowlist — full-sync argo-inventory with inventory IPs  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+# Tags: security, crowdsec, allowlist
+#
+# Reads every host in groups[crowdsec_inventory_allowlist_group] INCLUDING
+# inventory_hostname itself, extracts each host's public IP (ansible_host, or
+# the inventory hostname when it is already a bare IP), netplan_address, and
+# the access-gateway overlay IP, then adds missing IPs and removes stale ones
+# from the argo-inventory allowlist. Self-inclusion is deliberate: a host that  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+# bans its OWN IP severs its own control-plane and service traffic — the
+# 2026-07-01 infra self-ban incident (hairpin 404s → nftables ban → tailscaled
+# lost its Headscale control connection → node offline for hours).
+#
+# Requires CrowdSec >= 1.5.0 (cscli allowlists subcommand). Silently skips on
+# older versions so existing installations are not broken.
+
+# =============================================================================
+# Opt-out guard
+# =============================================================================
+- name: Skip allowlist role when disabled
+  ansible.builtin.meta: end_host
+  when: not (crowdsec_inventory_allowlist_enabled | bool)
+
+# =============================================================================
+# CrowdSec version guard
+# =============================================================================
+- name: Get CrowdSec version
+  ansible.builtin.command:
+    cmd: cscli version
+  register: _cscli_version_raw
+  changed_when: false
+  failed_when: false
+
+# `cscli version` ignores the global `-o json` flag on CrowdSec 1.7.x —
+# always emits human-readable text like `version: v1.7.6-debian-...`.
+# Parsing with a regex works for both the text form and the theoretical
+# JSON form (which also contains the literal `"version":` substring).
+- name: Parse CrowdSec version
+  ansible.builtin.set_fact:
+    _cscli_version: >-
+      {{ _cscli_version_raw.stdout
+         | regex_search('version["\s:]+v?([0-9]+\.[0-9]+\.[0-9]+)', '\1')
+         | first
+         | default('') }}
+  when:
+    - _cscli_version_raw.rc == 0
+    - _cscli_version_raw.stdout | length > 0
+
+- name: Warn that allowlist role requires CrowdSec >= 1.5.0
+  ansible.builtin.debug:
+    msg: >-
+      crowdsec_allowlist: skipping on {{ inventory_hostname }} —
+      cscli not found or version < 1.5.0
+      (rc={{ _cscli_version_raw.rc }},
+      version={{ _cscli_version | default('unknown') }}).
+      Upgrade CrowdSec to 1.5.0+ to enable the peer-inventory allowlist.
+  when: >-
+    _cscli_version_raw.rc != 0 or
+    _cscli_version is not defined or
+    _cscli_version | length == 0 or
+    not (_cscli_version is version('1.5.0', '>='))
+
+- name: Skip allowlist role on unsupported CrowdSec version
+  ansible.builtin.meta: end_host
+  when: >-
+    _cscli_version_raw.rc != 0 or
+    _cscli_version is not defined or
+    _cscli_version | length == 0 or
+    not (_cscli_version is version('1.5.0', '>='))
+
+# =============================================================================
+# Compute desired IP list from inventory
+# =============================================================================
+# Every host in the group — inventory_hostname INCLUDED — must allowlist its
+# OWN IPs, or hairpin/self-traffic matching a CrowdSec scenario lets the host
+# ban itself and cut its own control-plane/service traffic (see header:
+# 2026-07-01 infra self-ban incident).
+#
+# For each host, collect in priority order:
+#   - ansible_host if defined, else the inventory hostname (in the normal
+#     bare-IP consumer inventory the hostname IS the public IP)
+#   - netplan_address if defined (framework-canonical per-host public IP —
+#     the IP that actually got banned in the incident)
+#   - the access-gateway overlay IP via bay_gateway_bind_ip (empty under
+#     access_gateway: none, so nothing is exempted)
+# Keep only IP-shaped values (IPv4 dotted-quad, or anything containing ':' for
+# IPv6): inventory hostnames may be DNS names, and `cscli allowlists add`
+# takes IPs/CIDRs, not names. Dedupe preserving first-seen order.
+#
+# Iterating host NAMES (not `map('extract', hostvars)`) is what makes the
+# ansible_host→hostname fallback expressible. The trailing `{{ ips }}` is the
+# sole output expression, so Ansible's Templar returns a real list (verified) —
+# consumed correctly by `difference()` (both directions) and `loop:` below.
+- name: Compute desired allowlist IPs from inventory
+  ansible.builtin.set_fact:
+    _bay_desired_ips: >-
+      {%- set ips = [] -%}
+      {%- for h in groups[crowdsec_inventory_allowlist_group] | default([]) -%}
+        {%- set hv = hostvars[h] -%}
+        {%- for cand in [hv.ansible_host | default(h), hv.netplan_address | default(''), hv | bay_gateway_bind_ip] -%}
+          {%- if cand and (cand is match('^\d{1,3}(\.\d{1,3}){3}$') or ':' in cand) and cand not in ips -%}
+            {%- set _ = ips.append(cand) -%}
+          {%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ ips }}
+
+# =============================================================================
+# Create the argo-inventory allowlist if it does not exist  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+# =============================================================================
+- name: Create argo-inventory allowlist  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+  ansible.builtin.command:
+    cmd: cscli allowlists create argo-inventory -d "Peer hosts from Ansible inventory"  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+  register: _alw_create
+  failed_when:
+    - _alw_create.rc != 0
+    - "'already exists' not in (_alw_create.stderr | default(''))"
+    - "'already exists' not in (_alw_create.stdout | default(''))"
+  changed_when: _alw_create.rc == 0
+
+# =============================================================================
+# Read current allowlist to enable full-sync (add missing, prune stale)
+# =============================================================================
+- name: Inspect current argo-inventory allowlist  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+  ansible.builtin.command:
+    cmd: cscli allowlists inspect argo-inventory -o json  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+  register: _alw_inspect
+  changed_when: false
+  failed_when: false
+
+# Bracket notation for `items` — `.items` resolves to Python's dict.items()
+# method, not the JSON key (same gotcha as `env.clear`, `svc.update`, etc.
+# documented in CLAUDE.md). `default([], true)` also handles a literal
+# `null`/missing items field on a freshly created allowlist.
+- name: Parse current allowlist entries
+  ansible.builtin.set_fact:
+    _bay_current_ips: >-
+      {{
+        ((_alw_inspect.stdout | from_json)['items'] | default([], true))
+        | map(attribute='value')
+        | list
+      }}
+  when:
+    - _alw_inspect.rc == 0
+    - _alw_inspect.stdout | length > 0
+
+- name: Default to empty current list on parse failure
+  ansible.builtin.set_fact:
+    _bay_current_ips: []
+  when: >-
+    _alw_inspect.rc != 0 or
+    _alw_inspect.stdout | length == 0 or
+    _bay_current_ips is not defined
+
+# =============================================================================
+# Full-sync: add missing IPs, remove stale IPs
+# =============================================================================
+- name: Compute IPs to add (desired - current)
+  ansible.builtin.set_fact:
+    _bay_ips_to_add: "{{ _bay_desired_ips | difference(_bay_current_ips) | list }}"
+
+- name: Compute IPs to remove (current - desired)
+  ansible.builtin.set_fact:
+    _bay_ips_to_remove: "{{ _bay_current_ips | difference(_bay_desired_ips) | list }}"
+
+- name: Add missing IPs to argo-inventory allowlist  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+  ansible.builtin.command:
+    cmd: "cscli allowlists add argo-inventory {{ item }} -d 'Argo peer {{ item }}'"  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+  loop: "{{ _bay_ips_to_add }}"
+  changed_when: true
+  when: _bay_ips_to_add | length > 0
+
+- name: Remove stale IPs from argo-inventory allowlist  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+  ansible.builtin.command:
+    cmd: "cscli allowlists remove argo-inventory {{ item }}"  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+  loop: "{{ _bay_ips_to_remove }}"
+  changed_when: true
+  when: _bay_ips_to_remove | length > 0

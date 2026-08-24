@@ -1,0 +1,11 @@
+# Bay alert policy overrides — generated, do not edit by hand.
+#
+# PARSED, NEVER SOURCED. Readers extract a whitelist of KEY=value lines. This
+# file is root-owned precisely so that a compromised container cannot use it as
+# a code-execution path into the privileged cron and backup scripts.
+#
+# Absence of this file means "no mutes" — every alert fires. That direction is
+# deliberate: a torn write must never be able to silence the fleet.
+BAY_ALERTS_SCHEMA={{ alert_policy_schema_version | default(1) }}
+BAY_ALERTS_MUTE={{ alert_policy_mute | default([]) | join(' ') }}
+BAY_ALERTS_MUTE_UNTIL={{ alert_policy_mute_until | default(0) | int }}

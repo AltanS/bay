@@ -1,0 +1,17 @@
+---
+# Production-specific configuration
+
+# Docker registry credentials (reference vault secrets)
+docker_registry_username: "{{ secrets.DOCKER_REGISTRY_USERNAME }}"
+docker_registry_token: "{{ secrets.DOCKER_REGISTRY_TOKEN }}"
+
+# Telegram alerts
+docker_monitor_telegram_bot_token: "{{ secrets.TELEGRAM_BOT_TOKEN }}"
+docker_monitor_telegram_chat_id: ""
+# Optional second alert sink, fired alongside Telegram. Point it at Campfire,
+# Slack, or anything that accepts an HTTP POST. Empty = disabled.
+# The vault key must be LOWERCASE — it is an Ansible role var, and UPPERCASE
+# keys in `secrets:` are container env vars. See docs/alerting.md.
+# alert_webhook_url: "{{ secrets.alert_webhook_url }}"
+# alert_webhook_format: campfire   # campfire | slack | raw
+

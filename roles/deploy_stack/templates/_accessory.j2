@@ -1,0 +1,30 @@
+  # ── Accessory: {{ name }} ────────────────────────────────────────────
+  {{ name }}:
+{{ macros.container_base(name, acc) }}
+{% if acc.network_mode is defined %}
+    network_mode: {{ acc.network_mode }}
+{% else %}
+    networks:
+      - {{ traefik_docker_network }}
+{% endif %}
+{% if watchtower_enabled | default(false) %}
+    labels:
+{# Watchtower update labels: monitor (default), auto, or false #}
+{% set _update = acc['update'] | default('monitor') %}
+{% if _update == 'auto' %}
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=false"
+{% elif _update == false or _update == 'false' %}
+      - "com.centurylinklabs.watchtower.enable=false"
+{% else %}
+      - "com.centurylinklabs.watchtower.enable=true"
+      - "com.centurylinklabs.watchtower.monitor-only=true"
+{% endif %}
+{% endif %}
+{% if acc.healthcheck is defined %}
+    healthcheck:
+      test: {{ acc.healthcheck.test | to_json }}
+      interval: {{ acc.healthcheck.interval | default('10s') }}
+      retries: {{ acc.healthcheck.retries | default(3) }}
+{% endif %}
+

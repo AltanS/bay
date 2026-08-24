@@ -1,0 +1,30 @@
+---
+meta:
+  id: postgres
+  name: PostgreSQL database
+  category: accessory
+  dependencies: []
+  post_add_instructions: []
+
+defaults:
+  regions: []
+
+spec:
+  image: postgres:17
+  port: "127.0.0.1:5432:5432"
+  volumes:
+    - pg_data:/var/lib/postgresql/data
+  env:
+    clear:
+      POSTGRES_DB: app
+      POSTGRES_USER: app
+    secret:
+      POSTGRES_PASSWORD: POSTGRES_PASSWORD
+  healthcheck:
+    test: ["CMD", "pg_isready", "-U", "app"]
+    interval: 5s
+    retries: 5
+  backup:
+    method: pg_dump
+    schedule: "0 3 * * *"
+    retain: 7

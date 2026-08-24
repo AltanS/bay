@@ -1,0 +1,93 @@
+---
+# Provision databases for services with database: binding
+# Called after container_lifecycle deploys, runs idempotent SQL via docker exec
+
+- name: Collect services with database bindings
+  ansible.builtin.set_fact:
+    _db_bindings: >-
+      {{
+        active_services | dict2items
+        | selectattr('value.database', 'defined')
+        | list
+      }}
+
+- name: Provision databases
+  when: _db_bindings | length > 0
+  block:
+    - name: Check if database exists
+      ansible.builtin.command:
+        cmd: >-
+          docker exec {{ item.value.database.accessory }}
+          psql -U {{ (active_accessories[item.value.database.accessory].env['clear'].POSTGRES_USER) | default('postgres') }} -tc
+          "SELECT 1 FROM pg_database WHERE datname = '{{ item.value.database.name | default(item.key) }}'"
+      register: _db_exists
+      changed_when: false
+      loop: "{{ _db_bindings }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: "Create databases that don't exist"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec {{ item.item.value.database.accessory }}
+          psql -U {{ (active_accessories[item.item.value.database.accessory].env['clear'].POSTGRES_USER) | default('postgres') }} -c
+          "CREATE DATABASE {{ item.item.value.database.name | default(item.item.key) }}"
+      loop: "{{ _db_exists.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+      when: item.stdout is defined and item.stdout.strip() != '1'
+      changed_when: true
+
+    - name: "Check if database users exist"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec {{ item.value.database.accessory }}
+          psql -U {{ (active_accessories[item.value.database.accessory].env['clear'].POSTGRES_USER) | default('postgres') }} -tc
+          "SELECT 1 FROM pg_roles WHERE rolname = '{{ item.value.database.user | default(item.key) }}'"
+      register: _user_exists
+      changed_when: false
+      loop: "{{ _db_bindings }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: "Create or update database users"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec -i {{ item.item.value.database.accessory }}
+          psql -U {{ (active_accessories[item.item.value.database.accessory].env['clear'].POSTGRES_USER) | default('postgres') }}
+        stdin: |
+          {% if item.stdout is defined and item.stdout.strip() == '1' %}
+          ALTER ROLE {{ item.item.value.database.user | default(item.item.key) }} WITH PASSWORD '{{ secrets[((item.item.value.database.user | default(item.item.key)) | upper | replace('-', '_')) + '_POSTGRES_PASSWORD'] | replace("'", "''") }}';
+          {% else %}
+          CREATE ROLE {{ item.item.value.database.user | default(item.item.key) }} WITH LOGIN PASSWORD '{{ secrets[((item.item.value.database.user | default(item.item.key)) | upper | replace('-', '_')) + '_POSTGRES_PASSWORD'] | replace("'", "''") }}';
+          {% endif %}
+      loop: "{{ _user_exists.results }}"
+      loop_control:
+        label: "{{ item.item.key }}"
+      no_log: true
+      changed_when: true
+
+    - name: "Grant privileges"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec {{ item.value.database.accessory }}
+          psql -U {{ (active_accessories[item.value.database.accessory].env['clear'].POSTGRES_USER) | default('postgres') }} -c
+          "GRANT ALL PRIVILEGES ON DATABASE {{ item.value.database.name | default(item.key) }} TO {{ item.value.database.user | default(item.key) }}"
+      loop: "{{ _db_bindings }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false
+
+    - name: "Grant schema permissions (PG15+)"
+      ansible.builtin.command:
+        cmd: >-
+          docker exec -i {{ item.value.database.accessory }}
+          psql -U {{ (active_accessories[item.value.database.accessory].env['clear'].POSTGRES_USER) | default('postgres') }} -d {{ item.value.database.name | default(item.key) }}
+        stdin: |
+          GRANT ALL ON SCHEMA public TO {{ item.value.database.user | default(item.key) }};
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO {{ item.value.database.user | default(item.key) }};
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO {{ item.value.database.user | default(item.key) }};
+      loop: "{{ _db_bindings }}"
+      loop_control:
+        label: "{{ item.key }}"
+      changed_when: false

@@ -1,0 +1,52 @@
+---
+# After container_lifecycle has run, capture post-recreate IDs and
+# write a sentinel line to live.log for each container whose ID
+# changed (i.e. was actually recreated). The cursor-based archiver
+# picks up from where it left off on the new container, but without a
+# sentinel the grep-through-time story has a subtle discontinuity —
+# the same service name, different kernel lineage, no visual break.
+# This fixes that by appending:
+#
+#   --- bay: container <name> recreated at <ts>, old-id <short>, new-id <short> ---
+#
+# to live.log immediately after recreation (and BEFORE the next
+# archiver tick fires).
+
+- name: Capture post-recreate container IDs
+  ansible.builtin.command:
+    cmd: "docker inspect --format {% raw %}'{{.Id}}'{% endraw %} {{ item }}"
+  register: _log_retention_post_ids_raw
+  changed_when: false
+  failed_when: false
+  loop: "{{ _log_retention_boundary_containers | default([]) }}"
+  loop_control:
+    label: "{{ item }}"
+  when: (_log_retention_boundary_containers | default([])) | length > 0
+
+# The sentinel-write below uses the raw post-IDs result plus the pre
+# ID map. We iterate post results (keyed by item.item = service name)
+# so each entry can independently compute old/new short IDs.
+
+- name: Write container-recreated boundary sentinel to live.log
+  ansible.builtin.shell:
+    cmd: >-
+      printf '%s\n'
+      '--- bay: container {{ item.item }} recreated at
+      {{ ansible_facts["date_time"]["iso8601"] }}, old-id
+      {{ (_log_retention_pre_ids | default({}))[item.item] | default("(none)") | truncate(12, true, "") }},
+      new-id {{ item.stdout | truncate(12, true, "") }} ---'
+      >> '{{ stack_dir }}/logs/services/{{ item.item }}/live.log'
+  loop: "{{ _log_retention_post_ids_raw.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when:
+    - (_log_retention_boundary_containers | default([])) | length > 0
+    - item is defined
+    - item.stdout is defined
+    - item.stdout != ''
+    # Skip first creations: pre_id empty means this is the container's
+    # initial deploy, not a recreation. No sentinel needed because
+    # there's nothing earlier in live.log to segment from.
+    - ((_log_retention_pre_ids | default({}))[item.item] | default('')) != ''
+    - item.stdout != ((_log_retention_pre_ids | default({}))[item.item] | default(''))
+  changed_when: true

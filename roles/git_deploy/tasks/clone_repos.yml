@@ -1,0 +1,73 @@
+---
+# Clone or pull a shared repo for a group of services.
+# Called with _repo_group as loop var (from bay_repo_groups filter).
+# Deduplicates: N services sharing (repo, branch) = 1 clone + 1 pull.
+
+- name: "{{ _repo_group.slug }} — Ensure shared repo directory exists"
+  ansible.builtin.file:
+    path: "{{ git_deploy_build_dir }}/shared/{{ _repo_group.slug }}"
+    state: directory
+    mode: "0755"
+
+- name: "{{ _repo_group.slug }} — Check if repo already cloned"
+  ansible.builtin.stat:
+    path: "{{ git_deploy_build_dir }}/shared/{{ _repo_group.slug }}/repo/.git"
+  register: _shared_repo_stat
+
+- name: "{{ _repo_group.slug }} — Clone repository (token)"
+  ansible.builtin.command:
+    cmd: >-
+      git clone --branch {{ _repo_group.branch }} --single-branch
+      {{ _repo_group.clone_url }}
+      {{ git_deploy_build_dir }}/shared/{{ _repo_group.slug }}/repo
+  when:
+    - not _shared_repo_stat.stat.exists
+    - _repo_group.has_token
+  no_log: true
+
+- name: "{{ _repo_group.slug }} — Clone repository (deploy key)"
+  ansible.builtin.command:
+    cmd: >-
+      git clone --branch {{ _repo_group.branch }} --single-branch
+      {{ _repo_group.repo }}
+      {{ git_deploy_build_dir }}/shared/{{ _repo_group.slug }}/repo
+  environment:
+    GIT_SSH_COMMAND: >-
+      ssh -i {{ git_deploy_build_dir }}/{{ _repo_group.auth_svc }}/.deploy_key
+      -o StrictHostKeyChecking=accept-new
+  when:
+    - not _shared_repo_stat.stat.exists
+    - not _repo_group.has_token
+
+- name: "{{ _repo_group.slug }} — Refresh remote.origin.url with current token"
+  ansible.builtin.command:
+    cmd: git remote set-url origin {{ _repo_group.clone_url }}
+    chdir: "{{ git_deploy_build_dir }}/shared/{{ _repo_group.slug }}/repo"
+  when:
+    - _shared_repo_stat.stat.exists
+    - _repo_group.has_token
+  no_log: true
+  changed_when: false
+
+- name: "{{ _repo_group.slug }} — Pull latest changes (token)"
+  ansible.builtin.command:
+    cmd: >-
+      git -c url.{{ _repo_group.clone_url }}.insteadOf={{ _repo_group.repo }}
+      pull origin {{ _repo_group.branch }}
+    chdir: "{{ git_deploy_build_dir }}/shared/{{ _repo_group.slug }}/repo"
+  when:
+    - _shared_repo_stat.stat.exists
+    - _repo_group.has_token
+  no_log: true
+
+- name: "{{ _repo_group.slug }} — Pull latest changes (deploy key)"
+  ansible.builtin.command:
+    cmd: git pull origin {{ _repo_group.branch }}
+    chdir: "{{ git_deploy_build_dir }}/shared/{{ _repo_group.slug }}/repo"
+  environment:
+    GIT_SSH_COMMAND: >-
+      ssh -i {{ git_deploy_build_dir }}/{{ _repo_group.auth_svc }}/.deploy_key
+      -o StrictHostKeyChecking=accept-new
+  when:
+    - _shared_repo_stat.stat.exists
+    - not _repo_group.has_token

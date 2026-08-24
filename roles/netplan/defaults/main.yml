@@ -1,0 +1,8 @@
+---
+netplan_enabled: false             # Opt-in — set true in group_vars/<env>/network.yml
+
+netplan_interface: eth0
+netplan_prefix_length: 32          # Hetzner /32 topology — override for other providers
+netplan_dns_servers:
+  - "185.12.64.1"                  # Hetzner DNS primary — override for other providers
+  - "185.12.64.2"                  # Hetzner DNS secondary

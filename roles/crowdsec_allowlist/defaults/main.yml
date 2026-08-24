@@ -1,0 +1,54 @@
+---
+# =============================================================================
+# CrowdSec Inventory Allowlist Role
+# =============================================================================
+#
+# Runs during `provision` and `deploy` (tagged `crowdsec,allowlist`). Reads
+# every host in `groups[crowdsec_inventory_allowlist_group]` (default:
+# `all`) — INCLUDING `inventory_hostname` itself — and full-syncs the
+# `argo-inventory` allowlist in the local CrowdSec LAPI. For each host it  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+# collects the public IP (`ansible_host`, or the inventory hostname itself
+# when that is already a bare IP — the normal consumer inventory shape),
+# `netplan_address` (the framework's canonical per-host public IP), and
+# the per-host access-gateway overlay IP. Only IP-shaped values
+# survive an IPv4/IPv6 filter, so DNS-name inventory hostnames are dropped.
+#
+# Self-inclusion is deliberate. A host that bans its OWN IP severs its own
+# control-plane and service traffic: on 2026-07-01, infra's CrowdSec banned
+# the host's own public IP after hairpin 404s matched http-probing, the
+# nftables ban dropped tailscaled's connection to its own Headscale, and the
+# node went offline on the tailnet for hours. Never exclude the host from its
+# own allowlist.
+#
+# Verify the allowlist:
+#
+#   ssh debugbot@<host> "sudo cscli allowlists inspect argo-inventory"  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+#   # Should list every host's IPs, self included. On demo infra, all six:
+#   #   infra 203.0.113.14 / 100.64.0.5,
+#   #   EU    203.0.113.11   / 100.64.0.1,
+#   #   NA    203.0.113.12  / 100.64.0.2.
+#
+# Warning — fully managed list: Manual entries added with
+# `cscli allowlists add argo-inventory <ip>` will be PRUNED on the next  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+# provision or deploy. To make an entry permanent, add the IP to the
+# inventory (as `ansible_host`, `netplan_address`, or
+# an access-gateway overlay IP on a host) or override
+# `crowdsec_inventory_allowlist_group` to a group that includes it.
+#
+# Workstation IPs: Operator laptop IPs are explicitly out of scope.
+# Operator access to production servers routes through wg-ss VPN; that
+# VPN's gateway IP is handled separately. Do not add workstation IPs
+# here.
+#
+# Requires CrowdSec >= 1.5.0 (`cscli allowlists` subcommand). On older
+# versions the role silently skips (logs a warning) and does not fail
+# the playbook.
+
+# Master switch — set to false to skip all allowlist tasks for a consumer/env
+# (override in group_vars/all/main.yml or group_vars/<env>/main.yml)
+crowdsec_inventory_allowlist_enabled: true
+
+# Which Ansible group to read peer IPs from.
+# Default 'all' includes every host in the inventory.
+# Override to 'production' (or any group name) to scope to a subset.
+crowdsec_inventory_allowlist_group: "all"

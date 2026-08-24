@@ -1,0 +1,42 @@
+#!/bin/bash
+# Managed by Ansible — do not edit manually.
+#
+# Read-only systemctl for the {{ debug_agent_user }} account.
+# `systemctl status` pages by default, and a pager under sudo is a root
+# shell (`!sh` in less), so --no-pager is forced here and the mutating
+# verbs (start/stop/restart/enable/mask/...) are simply not reachable.
+set -euo pipefail
+
+PAGER=cat
+SYSTEMD_PAGER=
+SYSTEMD_PAGERSECURE=1
+export PAGER SYSTEMD_PAGER SYSTEMD_PAGERSECURE
+
+die() { echo "bay-systemctl-ro: $*" >&2; exit 1; }
+
+[ "$#" -ge 1 ] || die "usage: bay-systemctl-ro <status|is-active|is-enabled|is-failed|list-units|list-timers|show|cat> [unit]"
+
+verb=$1
+shift
+
+case "$verb" in
+  status|is-active|is-enabled|is-failed|list-units|list-timers|list-sockets|show|cat) ;;
+  *) die "verb not permitted: $verb" ;;
+esac
+
+for arg in "$@"; do
+  case "$arg" in
+    -*)
+      flag=${arg%%=*}
+      case "$flag" in
+        -l|--full|-a|--all|--no-legend|--no-pager|-t|--type|--state|\
+        -p|--property|-n|--lines|-o|--output|--plain|--failed|--value|--quiet|-q)
+          ;;
+        *) die "flag not permitted: $arg" ;;
+      esac
+      ;;
+    *) ;;
+  esac
+done
+
+exec /usr/bin/systemctl --no-pager "$verb" "$@"

@@ -1,0 +1,32 @@
+---
+outbound_check_enabled: true
+outbound_check_interval: "5min"
+outbound_check_endpoints:
+  - "https://1.1.1.1"
+  - "https://8.8.8.8"
+  - "https://www.google.com"
+outbound_check_timeout: 10
+outbound_check_state_dir: "/var/lib/bay-outbound-check"
+
+# Alert credentials. This role historically read the BARE names below while
+# every other role reads docker_monitor_telegram_*, so a consumer that
+# configured Telegram the normal way got outbound and disk alerts rendered
+# with an empty token — the alerts were built, POSTed to
+# https://api.telegram.org/bot/sendMessage, and silently discarded by the
+# `|| true` guard. Both templates now prefer docker_monitor_telegram_* and
+# fall back to these names, so existing overrides keep working.
+#
+# Deprecated: set docker_monitor_telegram_bot_token / _chat_id instead.
+telegram_bot_token: ""
+telegram_chat_id: ""
+
+# Disk pressure alerts. State-file deduped so the on-call only
+# hears about threshold crossings, not every 15-minute tick while pressure
+# persists. Alert body includes `df -h /` and `docker system df` so the
+# first responder can tell Docker bloat from other consumers without
+# SSHing. A 2026-04-17 incident hit 76% disk with zero warning —
+# this is the safety net.
+disk_alert_enabled: true
+disk_alert_warn_pct: 80
+disk_alert_page_pct: 90
+disk_alert_interval: "15min"

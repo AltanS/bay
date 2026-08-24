@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Bay outbound connectivity check every {{ outbound_check_interval }}
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec={{ outbound_check_interval }}
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

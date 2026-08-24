@@ -1,0 +1,20 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Rebuild and deploy - %i
+# On timeout/OOM/signal (not normal exit), fire the alert unit
+OnFailure=bay-build-alert@%i.service
+
+[Service]
+Type=oneshot
+User={{ app_user }}
+OOMScoreAdjust=1000
+# Caps the rebuild.sh wrapper's cgroup. The buildkit sidecar runs in its
+# own cgroup and is sized independently via git_deploy_buildkit_memory_max
+# (applied with `docker update --memory` on buildx_buildkit_argo-builder0).  # legacy-argo: live buildx builder name on hosts, migrate separately
+{% if git_deploy_build_mem_limit | default('') | length > 0 %}
+MemoryMax={{ git_deploy_build_mem_limit }}
+{% endif %}
+# Kill hung builds after this timeout (override: git_deploy_build_timeout)
+TimeoutStartSec={{ git_deploy_build_timeout }}
+ExecStart={{ stack_dir }}/bin/rebuild.sh %i
+ExecStartPost=/usr/bin/rm -f {{ stack_dir }}/triggers/%i.trigger

@@ -1,0 +1,366 @@
+{#
+  Canonical alert fan-out for bay's shell emitters.
+
+  This is the single definition of "send an alert" shared by every role that
+  has one. It lives in roles/alert_channel/templates/ and is SYMLINKED into
+  each consuming role's templates/ directory, because Ansible's template
+  loader searches only the current role's templates/ — there is no cross-role
+  include path. Git stores the links as mode 120000 and `bin/bay install`
+  restores them (it is a `git clone` + `git checkout`, both symlink-safe).
+
+  A rendered-in snippet rather than a library installed on the host: it is
+  self-contained by construction, so it cannot drift out of sync with the
+  script that uses it under a `--tags` partial deploy, and it works in every
+  execution context (systemd unit, cron, container).
+
+  Include it near the top of a script template, at column 0:
+
+      {% include '_notify.sh.j2' %}
+
+  Public interface:
+
+      bay_notify <id> <message>  fan one Telegram-HTML message out to all sinks
+      bay_html_escape <text>     escape untrusted text for embedding in a message
+
+  <id> is the alert's registry ID from alerts/registry.yml (e.g. build.failed).
+  It MUST be written as a bare literal at the call site — never a variable.
+  tests/test_alert_registry.py enforces that, because the registry drift check
+  scans for literals: a variable would make the scan under-report and the guard
+  would go green while the registry rotted. The ID is currently accepted and
+  ignored here; the recipient-routing layer uses it to route per recipient.
+
+  Caller-settable shell variables (read at call time, so order is irrelevant):
+
+      BAY_ALERT_HEADER           prepended to every message   (default: empty)
+      BAY_ALERT_FOOTER           appended to every message    (default: empty)
+      BAY_ALERT_FAILURE_LOG      append delivery failures here (default: off)
+
+  Jinja context flags — set with {% set %} BEFORE the include:
+
+      alert_telegram_env          read the Telegram credentials from the
+                                  environment (TELEGRAM_BOT_TOKEN /
+                                  TELEGRAM_CHAT_ID) instead of baking them in.
+                                  log_archive's systemd unit supplies them
+                                  that way.
+
+  Message format: Telegram HTML is the canonical internal representation.
+  Call sites compose in it and never learn about sinks; each sink's
+  adapter translates from it. The vocabulary is closed — <b>, <code>, <pre>
+  and the &amp;/&lt;/&gt; entities — which is what makes the string
+  substitutions below safe. If a call site ever introduces a new tag, teach
+  the adapters about it here.
+
+  The defaults below intentionally repeat roles/alert_channel/defaults/main.yml
+  so the snippet works when included from a role that does not depend on
+  alert_channel. tests/test_alert_channel.py asserts the two stay in sync.
+#}
+# ── Alert fan-out (bay alert_channel; do not edit — generated from
+#    roles/alert_channel/templates/_notify.sh.j2) ────────────────────────────
+{% if alert_telegram_env | default(false) %}
+BAY_TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
+BAY_TG_CHAT="${TELEGRAM_CHAT_ID:-}"
+{% else %}
+BAY_TG_TOKEN='{{ docker_monitor_telegram_bot_token | default('') }}'
+BAY_TG_CHAT='{{ docker_monitor_telegram_chat_id | default('') }}'
+{% endif %}
+BAY_ALERT_URL='{{ alert_webhook_url | default('') }}'
+
+{#
+  Host identity. One definition for every emitter, shell and Python alike —
+  see _host_label.j2 for why, and for the resolution order. Before this, each
+  script picked its own: inventory_hostname (a bare IP wherever the inventory
+  lists addresses), `hostname -f`, or `region`. Three answers to "which
+  machine is on fire" is two too many.
+
+  BAY_HOST is the display form and the one call sites use.
+#}
+BAY_HOST='{% include '_host_label.j2' %}'
+BAY_ALERT_FORMAT='{{ alert_webhook_format | default('campfire') }}'
+BAY_ALERT_MAX_CHARS={{ alert_webhook_max_chars | default(3500) }}
+BAY_ALERT_TIMEOUT={{ alert_webhook_timeout | default(10) }}
+
+# Escape untrusted text (build output, error strings, container logs) before
+# embedding it in a message. Telegram rejects malformed HTML with a 400 and
+# the alert is lost, so anything that can contain a literal < or & must go
+# through this first. Ampersand is replaced first — the others introduce one.
+# The backslash before each & is load-bearing. Bash expands an unescaped & in
+# a substitution's replacement to the text that matched the pattern, so the
+# obvious spelling turns "<" into "<lt;" rather than "&lt;". Verified correct
+# on bash 5.0, 5.1 and 5.3.
+bay_html_escape() {
+  local s="$1"
+  s="${s//&/\&amp;}"
+  s="${s//</\&lt;}"
+  s="${s//>/\&gt;}"
+  printf '%s' "${s}"
+}
+
+_bay_html_unescape() {
+  local s="$1"
+  s="${s//&lt;/<}"
+  s="${s//&gt;/>}"
+  s="${s//&amp;/\&}"
+  printf '%s' "${s}"
+}
+
+# Clip an oversized payload deterministically. Campfire and Slack both reject
+# messages past a limit, and a silently dropped alert is worse than a clipped
+# one. Applies to the webhook sink only; Telegram delivery is unchanged.
+_bay_clip() {
+  local s="$1"
+  # Length test written as "is there anything past the limit" rather than with
+  # bash's string-length expansion. That spelling opens a brace immediately
+  # followed by a hash, which Jinja lexes as the start of a comment and the
+  # template then fails to compile. Do not "simplify" this back.
+  [[ -z "${s:${BAY_ALERT_MAX_CHARS}}" ]] && { printf '%s' "${s}"; return 0; }
+  s="${s:0:${BAY_ALERT_MAX_CHARS}}"
+  # Drop a tag fragment left dangling by the cut (e.g. a trailing "<cod").
+  local frag="${s##*<}"
+  if [[ "${frag}" != "${s}" && "${frag}" != *">"* ]]; then
+    s="${s%<*}"
+  fi
+  printf '%s\n… [truncated]' "${s}"
+}
+
+_bay_to_mrkdwn() {
+  local s="$1"
+  s="${s//<pre>/\`\`\`}"
+  s="${s//<\/pre>/\`\`\`}"
+  s="${s//<code>/\`}"
+  s="${s//<\/code>/\`}"
+  s="${s//<b>/\*}"
+  s="${s//<\/b>/\*}"
+  _bay_html_unescape "${s}"
+}
+
+_bay_strip_tags() {
+  local s="$1"
+  s="${s//<pre>/}"
+  s="${s//<\/pre>/}"
+  s="${s//<code>/}"
+  s="${s//<\/code>/}"
+  s="${s//<b>/}"
+  s="${s//<\/b>/}"
+  _bay_html_unescape "${s}"
+}
+
+# Record a delivery failure when the caller asked for one. Never fails.
+_bay_log_send_failure() {
+  [[ -z "${BAY_ALERT_FAILURE_LOG:-}" ]] && return 0
+  mkdir -p "$(dirname "${BAY_ALERT_FAILURE_LOG}")" 2>/dev/null || true
+  printf '[%s] %s send failed sink=%s http_code=%s\n' \
+    "$(date -Iseconds)" "${BAY_ALERT_FAILURE_CONTEXT:-alert}" "$1" "$2" \
+    >> "${BAY_ALERT_FAILURE_LOG}" 2>/dev/null || true
+}
+
+_bay_send_telegram() {
+  local message="$1"
+  [[ -z "${BAY_TG_TOKEN}" || -z "${BAY_TG_CHAT}" ]] && return 0
+  local http_code
+  http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+    -X POST "https://api.telegram.org/bot${BAY_TG_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${BAY_TG_CHAT}" \
+    --data-urlencode "text=${message}" \
+    --data-urlencode "parse_mode=HTML" \
+    --data-urlencode "disable_web_page_preview=true" \
+    2>/dev/null) || http_code="000"
+  [[ "${http_code}" == "200" ]] && return 0
+  _bay_log_send_failure telegram "${http_code}"
+  return 0
+}
+
+_bay_send_webhook() {
+  [[ -z "${BAY_ALERT_URL}" ]] && return 0
+  local message http_code payload
+  message="$(_bay_clip "$1")"
+  case "${BAY_ALERT_FORMAT}" in
+    campfire)
+      # Campfire renders our tag subset directly, which is why the fan-out is
+      # cheap: the canonical message is already a valid body.
+      http_code=$(printf '%s' "${message}" | curl -s -o /dev/null \
+        -w '%{http_code}' --max-time "${BAY_ALERT_TIMEOUT}" \
+        -X POST "${BAY_ALERT_URL}" \
+        -H 'Content-Type: text/html' \
+        --data-binary @- 2>/dev/null) || http_code="000"
+      ;;
+    slack)
+      payload="$(_bay_to_mrkdwn "${message}")"
+      http_code=$(printf '%s' "${payload}" | jq -Rs '{text: .}' \
+        | curl -s -o /dev/null -w '%{http_code}' \
+          --max-time "${BAY_ALERT_TIMEOUT}" \
+          -X POST "${BAY_ALERT_URL}" \
+          -H 'Content-Type: application/json' \
+          --data-binary @- 2>/dev/null) || http_code="000"
+      ;;
+    *)
+      payload="$(_bay_strip_tags "${message}")"
+      http_code=$(printf '%s' "${payload}" | curl -s -o /dev/null \
+        -w '%{http_code}' --max-time "${BAY_ALERT_TIMEOUT}" \
+        -X POST "${BAY_ALERT_URL}" \
+        -H 'Content-Type: text/plain' \
+        --data-binary @- 2>/dev/null) || http_code="000"
+      ;;
+  esac
+  [[ "${http_code}" == 2* ]] && return 0
+  _bay_log_send_failure "${BAY_ALERT_FORMAT}" "${http_code}"
+  return 0
+}
+
+{#
+  Explicit recipients. The two senders above remain the LEGACY pair,
+  driven by alert_webhook_url / docker_monitor_telegram_*. They are unchanged
+  and unconditional, which is what makes an existing consumer's rendered output
+  byte-identical to before: adopting recipients is additive, never a rewrite of
+  what already works.
+
+  Routing is flattened HERE, at render time. bay_alert_ids_for resolves the
+  registry's id->level against this recipient's min_level and returns a literal
+  list of IDs, so the host does one `case` glob match per recipient — no list
+  parsing, no level arithmetic, no jq (which no framework task installs).
+#}
+{% set _bay_recipients = alert_recipients | default([]) %}
+{% for _r in _bay_recipients %}
+{% set _rn = _r | bay_alert_recipient %}
+{% set _rc = _rn.config %}
+# Recipient: {{ _rn.name | default('unnamed') }} ({{ _rn.adapter }}, min_level {{ _rn.min_level }})
+_bay_send_r{{ loop.index }}() {
+  local message="$1"
+{% if _rn.adapter == 'telegram' %}
+{% if _rc.token_env is defined %}
+  local token="${% raw %}{{% endraw %}{{ _rc.token_env }}:-}"
+{% else %}
+  local token='{{ _rc.bot_token | default('') }}'
+{% endif %}
+{% if _rc.chat_id_env is defined %}
+  local chat="${% raw %}{{% endraw %}{{ _rc.chat_id_env }}:-}"
+{% else %}
+  local chat='{{ _rc.chat_id | default('') }}'
+{% endif %}
+  [[ -z "${token}" || -z "${chat}" ]] && return 0
+  local http_code
+  http_code=$(curl -s -o /dev/null -w '%{http_code}' \
+    --max-time "${BAY_ALERT_TIMEOUT}" \
+    -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+    --data-urlencode "chat_id=${chat}" \
+    --data-urlencode "text=${message}" \
+    --data-urlencode "parse_mode=HTML" \
+    --data-urlencode "disable_web_page_preview=true" \
+    2>/dev/null) || http_code="000"
+  [[ "${http_code}" == "200" ]] && return 0
+  _bay_log_send_failure '{{ _rn.name | default('unnamed') }}' "${http_code}"
+  return 0
+{% else %}
+{% if _rc.url_env is defined %}
+  local url="${% raw %}{{% endraw %}{{ _rc.url_env }}:-}"
+{% else %}
+  local url='{{ _rc.url | default('') }}'
+{% endif %}
+  [[ -z "${url}" ]] && return 0
+  local payload http_code
+  message="$(_bay_clip "${message}")"
+{% if _rc.transform == 'html' %}
+  payload="${message}"
+{% elif _rc.transform == 'mrkdwn' %}
+  payload="$(_bay_to_mrkdwn "${message}")"
+{% elif _rc.transform == 'mrkdwn_json' %}
+  payload="$(_bay_to_mrkdwn "${message}")"
+{% elif _rc.transform == 'json' %}
+  payload="$(_bay_strip_tags "${message}")"
+{% else %}
+  payload="$(_bay_strip_tags "${message}")"
+{% endif %}
+{% if _rc.transform in ('mrkdwn_json', 'json') %}
+  payload="$(printf '%s' "${payload}" | jq -Rs '{text: .}')"
+{% endif %}
+  http_code=$(printf '%s' "${payload}" | curl -s -o /dev/null \
+    -w '%{http_code}' --max-time "${BAY_ALERT_TIMEOUT}" \
+    -X {{ _rc.method | default('POST') }} "${url}" \
+    -H 'Content-Type: {{ _rc.content_type | default('text/plain') }}' \
+{% for _hk, _hv in (_rc.headers | default({})).items() %}
+    -H '{{ _hk }}: {{ _hv }}' \
+{% endfor %}
+    --data-binary @- 2>/dev/null) || http_code="000"
+  [[ "${http_code}" == 2* ]] && return 0
+  _bay_log_send_failure '{{ _rn.name | default('unnamed') }}' "${http_code}"
+  return 0
+{% endif %}
+}
+
+{% endfor %}
+# Operator mute overrides. Read at CALL time from a root-owned file
+# so a mute takes effect without a full deploy.
+#
+# PARSED, NEVER SOURCED. The obvious spelling — `. "${file}"` — would be local
+# root code execution: this runs from privileged cron and backup scripts, and
+# an earlier draft put the file under ${stack_dir}/state, which is mode 0777 so
+# the webhook container can write it. Only these three keys are extracted, and
+# only their expected value shapes.
+#
+# Fail-open has a direction here. Every failure path — missing file, unreadable
+# file, truncated write, unknown schema, malformed epoch — yields NO mutes, so
+# the alert still fires. The inverse would make a failed `mv` silence the
+# fleet, which is GH#33 arriving via the filesystem.
+BAY_ALERT_POLICY_FILE='{{ alert_policy_path | default('/etc/bay/alert-overrides') }}'
+BAY_ALERT_POLICY_SCHEMA=1
+
+_bay_muted() {
+  local alert_id="$1"
+  local file="${BAY_ALERT_POLICY_FILE}"
+  [[ -r "${file}" ]] || return 1
+
+  local schema mute until now
+  schema="$(grep -m1 '^BAY_ALERTS_SCHEMA=' "${file}" 2>/dev/null | cut -d= -f2-)"
+  [[ "${schema}" =~ ^[0-9]+$ ]] || return 1
+  # An older framework must ignore a newer file rather than guess at it.
+  [[ "${schema}" -eq "${BAY_ALERT_POLICY_SCHEMA}" ]] || return 1
+
+  until="$(grep -m1 '^BAY_ALERTS_MUTE_UNTIL=' "${file}" 2>/dev/null | cut -d= -f2-)"
+  [[ "${until}" =~ ^[0-9]+$ ]] || return 1
+  # An expired mute is inert, not extended. A mute with no expiry is how an
+  # incident-time silence becomes a permanent blind spot.
+  now="$(date +%s 2>/dev/null)" || return 1
+  [[ "${until}" -gt "${now}" ]] || return 1
+
+  mute="$(grep -m1 '^BAY_ALERTS_MUTE=' "${file}" 2>/dev/null | cut -d= -f2-)"
+  [[ -n "${mute}" ]] || return 1
+
+  local entry
+  for entry in ${mute}; do
+    [[ "${entry}" == "${alert_id}" ]] && return 0
+  done
+  return 1
+}
+
+# Route one alert to the explicit recipients that want it. The ID lists below
+# were resolved at render time from alerts/registry.yml.
+_bay_route() {
+  local alert_id="$1"
+  local message="$2"
+{% for _r in _bay_recipients %}
+{% set _ids = _r | bay_alert_ids_for(alerts_disabled | default([]), alerts_enabled | default([])) %}
+{% if _ids %}
+  case "${alert_id}" in {{ _ids | join('|') }}) _bay_send_r{{ loop.index }} "${message}" ;; esac
+{% endif %}
+{% endfor %}
+  return 0
+}
+
+# Fan one message out to every configured sink. Always succeeds: a dead sink
+# must never fail a deploy, a backup or a build.
+#
+# $1 is the alert's registry ID (see the header); $2 is the Telegram-HTML
+# message. The legacy pair fires unconditionally — that is what keeps an
+# existing consumer's delivery unchanged — and explicit recipients are routed
+# by severity on top.
+bay_notify() {  # bay-alert-id: forwarder
+  local alert_id="$1"
+  local message="${BAY_ALERT_HEADER:-}$2${BAY_ALERT_FOOTER:-}"
+  # A mute suppresses every sink, legacy included — otherwise "disable this
+  # alert" would still deliver to the two sinks people actually have.
+  _bay_muted "${alert_id}" && return 0
+  _bay_send_telegram "${message}"
+  _bay_send_webhook "${message}"
+  _bay_route "${alert_id}" "${message}"
+  return 0
+}
+# ── end alert fan-out ────────────────────────────────────────────────────────

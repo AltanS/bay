@@ -1,0 +1,101 @@
+---
+# Build Docker image for a service using the shared repo clone.
+# Called with _svc_name as loop var.
+# Repo is already cloned/pulled by clone_repos.yml.
+
+- name: "{{ _svc_name }} — Resolve build config"
+  ansible.builtin.set_fact:
+    _build: "{{ services[_svc_name].build }}"
+    _image_name: "{{ git_deploy_image_prefix }}-{{ _svc_name }}"
+    _build_dir: "{{ git_deploy_build_dir }}/{{ _svc_name }}"
+    _repo_dir: "{{ git_deploy_build_dir }}/shared/{{ services[_svc_name].build.repo | bay_repo_slug(services[_svc_name].build.branch | default('main')) }}/repo"
+    _branch: "{{ services[_svc_name].build.branch | default('main') }}"
+    _dockerfile: "{{ services[_svc_name].build.dockerfile | default('Dockerfile') }}"
+    _context: "{{ services[_svc_name].build.context | default('.') }}"
+
+- name: "{{ _svc_name }} — Get current commit SHA"
+  ansible.builtin.command:
+    cmd: git rev-parse --short HEAD
+    chdir: "{{ _repo_dir }}"
+  register: _git_sha
+  changed_when: false
+
+- name: "{{ _svc_name }} — Check if image with SHA tag already exists"
+  ansible.builtin.command:
+    cmd: "docker image inspect {{ _image_name }}:{{ _git_sha.stdout }}"
+  register: _image_exists
+  failed_when: false
+  changed_when: false
+
+- name: "{{ _svc_name }} — Re-tag from primary (build dedup)"
+  ansible.builtin.command:
+    cmd: >-
+      docker tag
+      {{ git_deploy_image_prefix }}-{{ _build_dedup_map[_svc_name].primary_svc }}:{{ _git_sha.stdout }}
+      {{ _image_name }}:{{ _git_sha.stdout }}
+  register: _retag_from_primary
+  failed_when: false
+  changed_when: _retag_from_primary.rc == 0
+  when:
+    - _image_exists.rc != 0
+    - not _build_dedup_map[_svc_name].primary
+
+- name: "{{ _svc_name }} — Tag deduped image as :latest"
+  ansible.builtin.command:
+    cmd: "docker tag {{ _image_name }}:{{ _git_sha.stdout }} {{ _image_name }}:latest"
+  when:
+    - _retag_from_primary is changed
+
+- name: "{{ _svc_name }} — Build image"
+  when:
+    - _image_exists.rc != 0
+    - _retag_from_primary is not changed
+  block:
+    - name: "{{ _svc_name }} — Write build secrets to temp files"
+      ansible.builtin.copy:
+        content: "{{ item.value }}"
+        dest: "/tmp/build-secret-{{ _svc_name }}-{{ item.key }}"
+        mode: "0600"
+      loop: "{{ _build.secrets | default({}) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      no_log: true
+
+    - name: "{{ _svc_name }} — Re-tag current :latest as :previous"
+      ansible.builtin.command:
+        cmd: "docker tag {{ _image_name }}:latest {{ _image_name }}:previous"
+      register: _retag
+      failed_when: false
+      changed_when: _retag.rc == 0
+
+    - name: "{{ _svc_name }} — Build Docker image"
+      ansible.builtin.command:
+        cmd: >-
+          docker buildx build
+          --builder {{ bay_buildx_builder }}
+          --load
+          -t {{ _image_name }}:{{ _git_sha.stdout }}
+          -f {{ _dockerfile }}
+          {% for key, value in (_build.args | default({})).items() %}
+          --build-arg {{ key }}={{ value }}
+          {% endfor %}
+          {% for key in (_build.secrets | default({})).keys() %}
+          --secret id={{ key }},src=/tmp/build-secret-{{ _svc_name }}-{{ key }}
+          {% endfor %}
+          {{ _context }}
+        chdir: "{{ _repo_dir }}"
+      register: _docker_build
+
+    - name: "{{ _svc_name }} — Tag as :latest"
+      ansible.builtin.command:
+        cmd: "docker tag {{ _image_name }}:{{ _git_sha.stdout }} {{ _image_name }}:latest"
+
+  always:
+    - name: "{{ _svc_name }} — Clean up build secret temp files"
+      ansible.builtin.file:
+        path: "/tmp/build-secret-{{ _svc_name }}-{{ item.key }}"
+        state: absent
+      loop: "{{ _build.secrets | default({}) | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+      no_log: true

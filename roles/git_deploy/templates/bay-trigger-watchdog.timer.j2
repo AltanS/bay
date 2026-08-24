@@ -1,0 +1,18 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Scan {{ stack_dir }}/triggers for stale files every 5 minutes
+Documentation=file://{{ stack_dir }}/bin/bay-trigger-watchdog.sh
+
+[Timer]
+# First scan 5 minutes after boot so the system has time to settle.
+OnBootSec=5min
+# Then every 5 minutes.
+OnUnitActiveSec=5min
+AccuracySec=30s
+# Catch up on missed runs after resume / host downtime so stall detection
+# isn't silenced by a long outage.
+Persistent=true
+Unit=bay-trigger-watchdog.service
+
+[Install]
+WantedBy=timers.target

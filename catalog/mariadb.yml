@@ -1,0 +1,32 @@
+---
+meta:
+  id: mariadb
+  name: MariaDB database
+  category: accessory
+  dependencies: []
+  post_add_instructions:
+    - "Add MARIADB_ROOT_PASSWORD and MARIADB_PASSWORD to vault: bin/bay vault edit <environment>"
+
+defaults:
+  regions: []
+
+spec:
+  image: mariadb:11
+  port: "127.0.0.1:3306:3306"
+  volumes:
+    - mariadb_data:/var/lib/mysql
+  env:
+    clear:
+      MARIADB_DATABASE: app
+      MARIADB_USER: app
+    secret:
+      MARIADB_ROOT_PASSWORD: MARIADB_ROOT_PASSWORD
+      MARIADB_PASSWORD: MARIADB_PASSWORD
+  healthcheck:
+    test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+    interval: 5s
+    retries: 5
+  backup:
+    method: mysqldump
+    schedule: "0 3 * * *"
+    retain: 7

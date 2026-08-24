@@ -1,0 +1,37 @@
+---
+# Generate ed25519 deploy key for a service
+# Called with _svc_name as loop var
+
+- name: "{{ _svc_name }} — Ensure build directory exists"
+  ansible.builtin.file:
+    path: "{{ git_deploy_build_dir }}/{{ _svc_name }}"
+    state: directory
+    mode: "0755"
+
+- name: "{{ _svc_name }} — Check if deploy key exists"
+  ansible.builtin.stat:
+    path: "{{ git_deploy_build_dir }}/{{ _svc_name }}/.deploy_key"
+  register: _deploy_key_stat
+
+- name: "{{ _svc_name }} — Generate ed25519 deploy key"
+  ansible.builtin.command:
+    cmd: >-
+      ssh-keygen -t ed25519 -N ""
+      -C "bay-deploy-{{ _svc_name }}"
+      -f {{ git_deploy_build_dir }}/{{ _svc_name }}/.deploy_key
+  when: not _deploy_key_stat.stat.exists
+
+- name: "{{ _svc_name }} — Set deploy key permissions"
+  ansible.builtin.file:
+    path: "{{ git_deploy_build_dir }}/{{ _svc_name }}/.deploy_key"
+    mode: "0600"
+
+- name: "{{ _svc_name }} — Ensure public key exists"
+  ansible.builtin.stat:
+    path: "{{ git_deploy_build_dir }}/{{ _svc_name }}/.deploy_key.pub"
+  register: _deploy_pub_stat
+
+- name: "{{ _svc_name }} — Verify public key was generated"
+  ansible.builtin.assert:
+    that: _deploy_pub_stat.stat.exists
+    fail_msg: "Deploy key public key not found at {{ git_deploy_build_dir }}/{{ _svc_name }}/.deploy_key.pub"

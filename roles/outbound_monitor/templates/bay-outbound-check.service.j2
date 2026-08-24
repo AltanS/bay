@@ -1,0 +1,8 @@
+[Unit]
+Description=Bay outbound connectivity check
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bay-outbound-check
+User=root

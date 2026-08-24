@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# Managed by Bay (roles/cronjobs) — edits are overwritten on the next deploy.
+#
+# Prunes buildkit cache across every builder in `docker_prune_builders`.
+#
+# Why a script and not a one-line cron entry — two separate traps:
+#
+#  1. `docker builder prune` operates on the *default* builder only, but
+#     git_deploy builds with a docker-container-driver builder whose cache
+#     lives inside its own Docker volume (buildx_buildkit_<builder>0_state).
+#     That volume is invisible to `docker builder prune` and, because the
+#     buildkit container holds it open, also survives
+#     `docker system prune -af --volumes`. Nothing reclaimed it — a host that
+#     runs no local builds at all accumulated 41 GB of stale cache and tripped
+#     an 80% disk alert while every scheduled prune logged
+#     "Total reclaimed space: 0B" (GH#34).
+#
+#  2. **buildx builder registrations are per-user.** git_deploy creates the
+#     builder as the app user, so it appears in ~<app_user>/.docker/buildx and
+#     root — who runs this cron — cannot see it at all. Naming the builder from
+#     a root shell fails with "no builder found", which would have reproduced
+#     exactly the silent no-op this script exists to fix. So each builder is
+#     tried as the current user first, then as each user in
+#     PRUNE_AS_USERS.
+#
+# Anything that cannot be reached is reported, not swallowed: a prune that
+# quietly does nothing is the whole bug.
+set -u
+
+KEEP="{{ docker_prune_builder_keep_storage }}"
+PRUNE_AS_USERS="{{ docker_prune_builder_users | reject('equalto', '') | join(' ') }}"
+
+# buildx renamed --keep-storage to --reserved-space; the old spelling still
+# parses but warns (buildx v0.31+) and will eventually be removed. Probe once
+# rather than pinning a version. Captured into a variable instead of piped
+# into `grep -q` on purpose: grep exiting early can SIGPIPE the producer.
+_prune_help="$(docker buildx prune --help 2>&1 || true)"
+case "${_prune_help}" in
+  *--reserved-space*) KEEP_FLAG="--reserved-space" ;;
+  *)                  KEEP_FLAG="--keep-storage" ;;
+esac
+
+# Emit the command for `builder` as the given user ("" = current user), so the
+# inspect probe and the prune itself always run in the same buildx registry.
+run_as() {
+    local user="$1"; shift
+    if [ -z "${user}" ]; then
+        "$@"
+    else
+        runuser -u "${user}" -- "$@"
+    fi
+}
+
+# Echo the first user (possibly "") whose buildx registry knows this builder.
+owner_of() {
+    local builder="$1" user
+    for user in "" ${PRUNE_AS_USERS}; do
+        if [ -n "${user}" ] && ! id "${user}" >/dev/null 2>&1; then
+            continue
+        fi
+        if run_as "${user}" docker buildx inspect "${builder}" >/dev/null 2>&1; then
+            printf '%s' "${user}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+for builder in {{ docker_prune_builders | unique | join(' ') }}; do
+    if ! owner="$(owner_of "${builder}")"; then
+        # A registered builder nobody can reach is different from one that was
+        # never created — the first means cache is growing unpruned.
+        if docker inspect "buildx_buildkit_${builder}0" >/dev/null 2>&1; then
+            echo "$(date -Is) WARNING builder=${builder} has a running buildkit container but is not registered for root or [${PRUNE_AS_USERS}] — its cache is NOT being pruned"
+        else
+            echo "$(date -Is) skip builder=${builder} (not present)"
+        fi
+        continue
+    fi
+    echo "$(date -Is) prune builder=${builder} as=${owner:-root} ${KEEP_FLAG}=${KEEP}"
+    # rc captured into a variable: `|| echo "... $?"` would report date(1)'s
+    # status, since the command substitution in the message runs first.
+    rc=0
+    run_as "${owner}" docker buildx prune -af --builder "${builder}" "${KEEP_FLAG}" "${KEEP}" || rc=$?
+    if [ "${rc}" -ne 0 ]; then
+        echo "$(date -Is) prune FAILED builder=${builder} (rc=${rc})"
+    fi
+done

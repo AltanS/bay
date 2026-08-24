@@ -1,0 +1,33 @@
+[Unit]
+Description=Bay per-service log rotation + prune ({{ '%i' }})
+Documentation=https://github.com/AltanS/bay/blob/main/docs/adr/002-log-archival.md
+After=docker.service
+
+[Service]
+Type=oneshot
+UMask=0027
+ExecStart={{ log_archive_bin_dir }}/rotate-logs.sh {{ '%i' }} {{ stack_dir }}
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=600
+
+# Environment for Telegram alerts — script skips alerting when unset.
+Environment=TELEGRAM_BOT_TOKEN={{ docker_monitor_telegram_bot_token | default('') }}
+Environment=TELEGRAM_CHAT_ID={{ docker_monitor_telegram_chat_id | default('') }}
+Environment=TELEGRAM_HEADER={{ docker_monitor_alert_header | default('') }}
+Environment=BAY_STACK={{ stack_name }}
+Environment=BAY_LOG_CHATTR={{ (log_retention_chattr | default(false)) | string | lower }}
+
+# Hardening — rotator needs to write under {{ stack_dir }}/logs/ and
+# toggle archiver timer via systemctl.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths={{ stack_dir }}/logs
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

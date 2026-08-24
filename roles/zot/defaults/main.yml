@@ -1,0 +1,126 @@
+---
+# Zot container registry — self-hosted OCI registry for remote build strategy
+# Deployed as an infra container on the controller host (like headscale).
+#
+# Why this isn't in services.yml: Zot is part of the rig (the framework-managed
+# plumbing layer alongside Traefik, Watchtower, Headscale, the webhook
+# receiver), not a consumer-defined application service. Two pieces wire it up:
+#
+#   1. This role (`roles/zot/`) — runs ONLY on the host where
+#      `region == zot_control_region`. Creates host dirs, renders
+#      `config.json`, generates htpasswd from the `docker_registries` entry
+#      whose `domain` matches `zot_domain`. Does not start the container.
+#   2. `roles/deploy_stack/templates/_zot.j2` — compose snippet pulled into
+#      `docker-compose.yml.j2` whenever `zot_enabled: true`. The container
+#      itself is started by the same `docker compose up -d` that brings up
+#      services and accessories.
+#
+# Credentials: there is no separate zot_admin_username / zot_admin_password.
+# The role derives htpasswd from the `docker_registries` entry matching
+# `zot_domain`, so the same credential authenticates both `docker login`
+# (deployment servers, build server) and the registry's own auth challenge.
+#
+# Tailnet self-reach (GitHub #27): under traefik_split_entrypoints the zot
+# router binds both `websecure` and `websecure_tailnet` so infra-originated
+# pushes (which resolve zot_domain to the tailnet IP) reach the registry;
+# override the entrypoint set via group_vars `zot_entrypoints`. This role
+# also pins zot_domain → the control host's own tailnet IP in /etc/hosts
+# (`zot_tailnet_pin_ip`) so the host pushes to its own registry over the
+# tailnet instead of hairpinning its public IP — large layer uploads time
+# out on the hairpin. Deployment nodes use public DNS and are unaffected.
+
+zot_enabled: false
+zot_image: "ghcr.io/project-zot/zot:v2.1.15"
+zot_domain: ""
+zot_port: 5000
+
+# Which region runs the registry. Multi-region deployments set this once
+# in group_vars/all/. Single-server setups leave it unset (defaults to true).
+# zot_control_region: eu
+zot_server: >-
+  {{ zot_control_region is not defined
+     or (region | default('')) == zot_control_region }}
+
+# ── Tailnet self-reach (GitHub #27) ───────────────────────────────
+# The control host must reach its OWN registry over the tailnet:
+# resolving zot_domain to its own public IP hairpins large layer
+# uploads and times them out. When non-empty, an Ansible-managed
+# /etc/hosts line pins zot_domain → this IP on the control host only
+# (deployment nodes use public DNS and are unaffected). Set to '' to
+# disable — the managed /etc/hosts line is then removed.
+zot_tailnet_pin_ip: "{{ gateway_bind_ip | default('', true) }}"
+
+# Traefik router entrypoints for the zot registry. Left unset, the
+# reconciler binds `websecure` (or `websecure,websecure_tailnet` under
+# traefik_split_entrypoints). Set this in group_vars to force a specific
+# set — e.g. tailnet-only. NOT a real role var here: role defaults do not
+# leak into container_lifecycle/build_specs.yml where the label is built,
+# so it only takes effect from group_vars. Commented example:
+# zot_entrypoints: websecure_tailnet
+
+# Directories on host
+zot_config_dir: /opt/zot/config
+zot_data_dir: /opt/zot/data
+
+# Storage path inside container
+zot_storage_root: /var/lib/registry
+
+# Auth credentials are derived from the docker_registries entry matching
+# zot_domain. No separate credential vars needed — docker_registries is
+# the single source of truth for all registry authentication.
+
+# ── Garbage collection ────────────────────────────────────────────
+# gcDelay: minimum age of a blob before it's eligible for GC. Must be
+# larger than the slowest legitimate "build → push manifest → reference
+# blob" round-trip on this host, otherwise GC can reap a blob whose
+# manifest was uploaded but not yet linked. Old default 1h was too
+# aggressive — bumped to 4h after issue #10's counsel review.
+# gcInterval: how often the GC loop runs. 24h aligns with scrub.
+# untaggedImageRetentionDelay: how long an untagged manifest survives
+# before GC. 72h gives ops a workday-plus to retag a mistakenly-pushed
+# image before it's collected.
+zot_gc_enabled: true
+zot_gc_delay: "4h"
+zot_gc_interval: "24h"
+zot_untagged_retention_delay: "72h"
+
+# Tag retention — keep N most recent tags per repo
+zot_retention_keep_count: 10
+zot_retention_keep_within: "720h"
+
+# ── Storage driver ────────────────────────────────────────────────
+# `filesystem` (default) keeps OCI blobs on local disk under
+# zot_data_dir. `s3` offloads blobs to an S3-compatible object store
+# while keeping a small local boltdb for dedupe state — suitable for
+# hosts with limited disk (demo-infra: 38 GiB, hit ceiling within
+# weeks of moderate push volume; issue #10).
+zot_storage_driver: filesystem   # filesystem | s3
+
+# S3 driver settings (required when zot_storage_driver == s3)
+zot_s3_bucket: ""
+zot_s3_region: ""
+zot_s3_rootdirectory: "/zot"     # prefix inside the bucket
+zot_s3_secure: true              # https endpoint (set false only for local minio dev)
+zot_s3_force_path_style: false   # AWS = false; Minio/Backblaze/etc. = true
+
+# AWS credentials — must be supplied via vault, never inline. The role
+# refuses to render config when zot_storage_driver == s3 and these are
+# empty. Delivered to the container via env_file (mode 0600) — never
+# baked into config.json which is mounted read-only into the container.
+zot_aws_access_key_id: ""
+zot_aws_secret_access_key: ""
+
+# Cache driver — Zot v2 only accepts an explicit `cacheDriver` block when
+# `remoteCache: true`. For single-node deployments (the common case),
+# leave zot_remote_cache=false and Zot uses an implicit local boltdb
+# alongside the storage root. Setting an explicit cacheDriver block
+# without remoteCache=true triggers "unsupported database driver" at
+# startup (issue #11).
+#
+# Flip zot_remote_cache=true only for HA setups with a real remote cache
+# backend (redis, dynamodb). zot_cache_driver / zot_cache_dir are then
+# rendered into the cacheDriver block; rootDir must be a *directory*,
+# not a file path — Zot creates `cache.db` inside it.
+zot_remote_cache: false
+zot_cache_driver: boltdb         # boltdb | redis | dynamodb (only when zot_remote_cache=true)
+zot_cache_dir: "{{ zot_storage_root }}"   # directory inside container (Zot drops cache.db here)

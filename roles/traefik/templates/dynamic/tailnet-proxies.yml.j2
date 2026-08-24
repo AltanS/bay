@@ -1,0 +1,55 @@
+# {{ ansible_managed }}
+# Tailnet-proxy routes — Traefik file provider (dynamic config).
+#
+# Each entry routes a tailnet hostname to a remote upstream living on ANOTHER
+# tailnet node (something Docker-label routing cannot express), terminated
+# with a DNS-01 wildcard cert and gated by the vpn-only IP allowlist. When
+# traefik_split_entrypoints is on, these bind the tailnet-only entrypoint —
+# no public socket. Generated from the `tailnet_proxies` map.
+http:
+  routers:
+{% for name, proxy in (tailnet_proxies | default({})).items() %}
+    {{ name }}-tailnet:
+      rule: "{{ proxy.domains | map('regex_replace', '^(.+)$', 'Host(`\\1`)') | join(' || ') }}"
+      entryPoints:
+        - "{{ proxy.entrypoint | default('websecure_tailnet' if traefik_split_entrypoints | default(false) else 'websecure') }}"
+      service: "{{ name }}-tailnet"
+      middlewares:
+{% if proxy.identity_inject | default(false) and tailnet_identity_enabled | default(false) %}
+        # Resolve the real client tailnet IP → device name and inject it as a
+        # trusted header (the upstream hop would otherwise collapse identity).
+        - "tailnet-identity@file"
+{% endif %}
+        - "vpn-only@docker"
+      tls:
+        certResolver: "{{ traefik_dns_resolver_name }}"
+        domains:
+          - main: "{{ tailnet_ingress_cert_domain | default(proxy.domains[0]) }}"
+{% endfor %}
+  services:
+{% for name, proxy in (tailnet_proxies | default({})).items() %}
+    {{ name }}-tailnet:
+      loadBalancer:
+{% if proxy.pass_host_header is defined and not proxy.pass_host_header %}
+        # Forward the upstream URL's host as Host (not the client's). Needed when
+        # the backend Host-routes (e.g. behind `tailscale serve`, which only
+        # serves the node's own MagicDNS name) — point `upstream` at that name.
+        passHostHeader: false
+{% endif %}
+        servers:
+          - url: "{{ proxy.upstream }}"
+{% endfor %}
+{% if tailnet_identity_enabled | default(false) %}
+  middlewares:
+    # ForwardAuth to the tailnet-identity sidecar — resolves the client tailnet
+    # IP to its Headscale device name and copies the result onto the upstream
+    # request. Only routes with `identity_inject: true` reference it.
+    tailnet-identity:
+      forwardAuth:
+        # 127.0.0.1 (not the container name): Traefik is network_mode: host, so it
+        # reaches the sidecar via its loopback-published port, not docker DNS.
+        address: "http://127.0.0.1:{{ tailnet_identity_port }}/auth"
+        authResponseHeaders:
+          - "{{ tailnet_identity_device_header }}"
+          - "{{ tailnet_identity_device_id_header }}"
+{% endif %}

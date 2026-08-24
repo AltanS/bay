@@ -1,0 +1,49 @@
+---
+# Deploy the webhook receiver container
+# Only runs when build services exist and webhook config is defined
+
+- name: Ensure triggers directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/triggers"
+    state: directory
+    mode: "0777"
+
+- name: Ensure state directory exists
+  # Shared between rebuild.sh (writes CB state files) and the webhook
+  # container (writes telegram-failures.log). Permissive mode so both the
+  # app_user and the webhook container's webhook user can write.
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/state"
+    state: directory
+    mode: "0777"
+
+- name: Ensure webhook config directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/webhook"
+    state: directory
+    mode: "0755"
+
+- name: Render webhook service config
+  ansible.builtin.template:
+    src: webhook-config.json.j2
+    dest: "{{ stack_dir }}/webhook/config.json"
+    mode: "0644"
+
+- name: Render image-to-services map for pull signal handler
+  # Extracted to render_image_map.yml so it can also run under --tags
+  # deploy_stack (issue #13). The include is idempotent — facts
+  # already populated by main.yml are reused via `when: var is not defined`
+  # guards in render_image_map.yml.
+  ansible.builtin.include_tasks: render_image_map.yml
+
+- name: Copy webhook receiver files
+  ansible.builtin.copy:
+    src: webhook/
+    dest: "{{ git_deploy_build_dir }}/webhook/"
+    mode: "0644"
+  register: _webhook_files
+
+- name: Build webhook receiver image
+  ansible.builtin.command:
+    cmd: "docker build -t bay-webhook:latest {{ git_deploy_build_dir }}/webhook/"
+  when: _webhook_files.changed

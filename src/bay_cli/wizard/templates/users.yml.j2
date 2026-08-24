@@ -1,0 +1,41 @@
+---
+# User accounts and SSH keys
+# Each user gets created with the specified groups and authorized keys
+#
+# Apply just this role:
+#   make bay:provision <env> tags=users
+
+users:
+  # Automation account — used by Ansible (ansible_user / admin_user)
+  - name: "{{ '{{ admin_user }}' }}"
+    groups:
+      - sudo
+      - ssh-access
+      - docker
+    keys:
+{% if ssh_keys %}
+{% for key in ssh_keys %}
+      - "{{ key.public_key }}"
+{% endfor %}
+{% else %}
+      # Add GitHub username URLs or direct public keys
+      # - https://github.com/YourUsername.keys
+      []
+{% endif %}
+
+  # Personal login — for manual SSH access and debugging
+  # Duplicate this block for each team member
+  # - name: jdoe
+  #   groups:
+  #     - sudo
+  #     - ssh-access
+  #     - docker
+  #   keys:
+  #     - https://github.com/jdoe.keys
+
+  # Application service account — no SSH, no password, Docker only
+  - name: "{{ '{{ app_user }}' }}"
+    groups:
+      - "{{ '{{ app_user_group }}' }}"
+      - docker
+    keys: []

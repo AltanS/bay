@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Fired by systemd OnFailure= when bay-build@<svc> is killed externally.
+# Only sends Telegram for systemd-level kills (timeout, OOM, signal).
+# Normal exit-code failures are handled by rebuild.sh itself.
+set -euo pipefail
+
+SERVICE="$1"
+STACK_DIR="{{ stack_dir }}"
+BAY_ALERT_HEADER={{ docker_monitor_alert_header | to_json }}
+BUILD_TIMEOUT={{ git_deploy_build_timeout }}
+
+# Read the result of the failed unit
+RESULT=$(systemctl show "bay-build@${SERVICE}.service" --property=Result --value 2>/dev/null || echo "unknown")
+
+# Only alert for systemd-level kills — not exit-code (rebuild.sh already notified)
+# Also skip "success" — race condition where path unit already restarted the service
+if [[ "${RESULT}" == "exit-code" || "${RESULT}" == "success" ]]; then
+  echo "[build-alert] ${SERVICE}: result=${RESULT} — skipping (not a systemd-level kill)"
+  exit 0
+fi
+
+format_timestamp() {
+  date -u +"%b %d, %H:%M UTC"
+}
+
+{% include '_notify.sh.j2' %}
+HOSTNAME="${BAY_HOST}"
+
+# Build alert message based on failure type
+case "${RESULT}" in
+  timeout)
+    MSG="$(printf '\u23f0 <b>Build timed out</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Timeout:    %ds\n\u25b8 Time:       %s\n\nBuild exceeded the timeout limit.\nInvestigate: <code>journalctl -u bay-build@%s --since '\''20 min ago'\''</code>' \
+      "${HOSTNAME}" "${SERVICE}" "${BUILD_TIMEOUT}" "$(format_timestamp)" "${SERVICE}")"
+    ;;
+  oom-kill)
+    MSG="$(printf '\U0001f4a5 <b>Build OOM killed</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 MemoryMax:  {{ git_deploy_build_mem_limit | default("unset") }}\n\u25b8 Time:       %s\n\nProcess exceeded memory limit.\nInvestigate: <code>journalctl -u bay-build@%s --since '\''20 min ago'\''</code>' \
+      "${HOSTNAME}" "${SERVICE}" "$(format_timestamp)" "${SERVICE}")"
+    ;;
+  signal)
+    MSG="$(printf '\U0001f6d1 <b>Build killed by signal</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Time:       %s\n\nProcess was killed by an external signal.\nInvestigate: <code>journalctl -u bay-build@%s --since '\''20 min ago'\''</code>' \
+      "${HOSTNAME}" "${SERVICE}" "$(format_timestamp)" "${SERVICE}")"
+    ;;
+  *)
+    MSG="$(printf '\u26a0\ufe0f <b>Build failed (systemd)</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Result:     <code>%s</code>\n\u25b8 Time:       %s\n\nInvestigate: <code>journalctl -u bay-build@%s --since '\''20 min ago'\''</code>' \
+      "${HOSTNAME}" "${SERVICE}" "${RESULT}" "$(format_timestamp)" "${SERVICE}")"
+    ;;
+esac
+
+echo "[build-alert] ${SERVICE}: systemd result=${RESULT} — sending alert"
+bay_notify build.killed "${MSG}"
+
+# Also clean up the trigger file (ExecStartPost may not have run)
+rm -f "${STACK_DIR}/triggers/${SERVICE}.trigger"

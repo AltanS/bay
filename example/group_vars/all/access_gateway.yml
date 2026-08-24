@@ -1,0 +1,62 @@
+---
+# Access Gateway
+#
+# Controls how VPN-protected services are secured.
+# Services using `access: vpn` in services.yml are only reachable
+# from the VPN subnet or tailnet defined here.
+#
+# Options:
+#   wireguard  — Manually managed WireGuard VPN. You configure peers
+#                and provide vpn_allowed_ips. Bay only configures
+#                the allowlist. (default)
+#
+#   headscale  — Bay deploys and manages Headscale (self-hosted
+#                Tailscale control server) and a Tailscale node on the
+#                VPS. Users install the Tailscale app and enroll via
+#                OIDC or pre-auth key. Manage via `bin/bay gateway`.
+
+# Three backends are available:
+#
+#   none       — no private overlay at all; every service is public. Start
+#                here if you just want a working deploy and have no VPN.
+#                `access: vpn` services are rejected at validation time.
+#   wireguard  — plain WireGuard, peers configured by hand below. (default)
+#   headscale  — self-hosted Tailscale control plane: managed tunnels,
+#                split-DNS, ACLs, and the `bin/bay gateway` CLI.
+#
+# See docs/access-gateways.md — "The adapter contract" — to add a backend.
+access_gateway: wireguard
+
+# ── WireGuard config (used when access_gateway: wireguard) ──────────
+#
+# IPs and CIDRs allowed to reach vpn-protected services.
+# Add your WireGuard peer IPs or subnet here.
+vpn_allowed_ips:
+  - 127.0.0.1
+  - "::1"
+  # - 10.0.0.0/24
+  # - 203.0.113.50
+
+# ── Headscale config (used when access_gateway: headscale) ──────────
+#
+# Uncomment and configure these when switching to headscale.
+
+# Public domain where Headscale coordination server is reachable.
+# A DNS record must point this domain to your VPS.
+# headscale_domain: hs.example.com
+#
+# Multi-region: which region runs the Headscale server.
+# All other regions run only the Tailscale daemon and register via API.
+# Single-server setups leave this unset.
+# headscale_control_region: eu
+#
+# MagicDNS base domain — used for internal DNS resolution within the tailnet.
+# Must NOT match headscale_domain. Default: {{ stack_name }}.tailnet.internal
+# headscale_magic_dns_domain: "{{ stack_name }}.tailnet.internal"
+
+# OIDC (optional) — enables self-service user enrollment via SSO.
+# Without OIDC, users enroll via pre-auth keys generated with
+# `bin/bay gateway key <username>`.
+# headscale_oidc_issuer: https://auth.example.com
+# headscale_oidc_client_id: headscale
+# headscale_oidc_client_secret: "{{ vault_headscale_oidc_secret }}"

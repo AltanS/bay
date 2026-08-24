@@ -1,0 +1,441 @@
+---
+# Validate service definitions before deployment
+
+- name: Validate build/image mutual exclusivity
+  ansible.builtin.fail:
+    msg: >-
+      Service '{{ item.key }}' specifies both 'build:' and 'image:' —
+      these are mutually exclusive unless using strategy 'remote' (or 'push').
+      Use 'build:' for GitHub-sourced services, 'image:' for registry images,
+      or both with 'strategy: remote' for build-server-built images.
+  loop: "{{ active_services | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+  when:
+    - item.value.build is defined
+    - item.value.image is defined
+    - (item.value.build.strategy | default('local')) not in ['remote', 'push']
+
+- name: Validate service has build or image
+  ansible.builtin.fail:
+    msg: >-
+      Service '{{ item.key }}' specifies neither 'build:' nor 'image:' —
+      one of these is required.
+  loop: "{{ active_services | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  no_log: true
+  when:
+    - item.value.build is not defined
+    - item.value.image is not defined
+
+- name: Validate database binding vault keys exist
+  ansible.builtin.fail:
+    msg: >-
+      Service '{{ item.key }}' has database binding to '{{ item.value.database.accessory }}'
+      but vault key '{{ _db_vault_key }}' is missing from secrets.
+      Add it with: bay vault set <env> {{ _db_vault_key }} <password>
+  loop: "{{ active_services | dict2items | selectattr('value.database', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    _db_user: "{{ item.value.database.user | default(item.key) }}"
+    _db_vault_key: "{{ _db_user | upper | replace('-', '_') }}_POSTGRES_PASSWORD"
+  no_log: true
+  when: secrets[_db_vault_key] is not defined
+
+# ── log_rotation schema validation ──────────────────────────────────
+# Catches typos and invalid values at deploy time so operators see a
+# clear error instead of a cryptic compose/docker-cli failure. Applies
+# uniformly to services and accessories.
+
+- name: Validate log_rotation shape
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' has an invalid 'log_rotation' value
+      ({{ item.value.log_rotation | to_json }}). Expected either `false`
+      (opt out, inherit daemon log-opts) or a mapping with keys from
+      {driver, max_size, max_file}.
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.log_rotation is defined
+    - item.value.log_rotation is not mapping
+    - item.value.log_rotation is not sameas false
+
+- name: Validate log_rotation driver
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' sets log_rotation.driver='{{ item.value.log_rotation.driver }}'.
+      Only 'json-file', 'local', and 'none' are supported.
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.log_rotation is defined
+    - item.value.log_rotation is mapping
+    - item.value.log_rotation.driver is defined
+    - item.value.log_rotation.driver not in ['json-file', 'local', 'none']
+
+- name: Validate log_rotation max_size
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' sets log_rotation.max_size='{{ item.value.log_rotation.max_size }}'.
+      Expected a Docker size literal (digits optionally followed by k/m/g, case-insensitive).
+      Examples: '50m', '200m', '2g'.
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.log_rotation is defined
+    - item.value.log_rotation is mapping
+    - item.value.log_rotation.max_size is defined
+    - not (item.value.log_rotation.max_size | string is match('^[0-9]+[kKmMgG]?$'))
+
+- name: Validate log_rotation max_file
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' sets log_rotation.max_file='{{ item.value.log_rotation.max_file }}'.
+      Expected a positive integer (number of rotated files to retain).
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.log_rotation is defined
+    - item.value.log_rotation is mapping
+    - item.value.log_rotation.max_file is defined
+    - not (item.value.log_rotation.max_file | string is match('^[1-9][0-9]*$'))
+
+# ── service expose: validation ─────────────────────────────────────
+# Services declare host-port exposure via `ports.expose:` (nested) — distinct
+# from accessories which use top-level `expose:`. Required for cross-region
+# `links:` to a service: the link target must be reachable on the host's
+# tailnet IP. Without `ports.expose:`, a Traefik-fronted service has no host
+# binding (reachable only inside the docker network) and LINKS_*_PORT
+# resolves but no daemon is listening.
+
+- name: Validate service ports.expose value
+  ansible.builtin.fail:
+    msg: >-
+      Service '{{ item.key }}' sets ports.expose='{{ item.value.ports.expose }}'.
+      Only 'loopback', 'tailnet', and 'host' are supported.
+  loop: "{{ active_services | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.ports is defined
+    - item.value.ports.expose is defined
+    - item.value.ports.expose not in ['loopback', 'gateway', 'tailnet', 'host']
+
+# This guard used to test the backend's own bind-IP var for
+# `is not defined`, which was dead code — that var carries a play-wide default
+# of 100.64.0.1 and is therefore ALWAYS defined, so the check never once fired
+# on the default path. It now tests the
+# adapter's `gateway_bind_ip`, which is genuinely empty under
+# `access_gateway: none`. Same lesson as the `owner: root` test: a guard
+# that reads like the thing you care about but is not.
+- name: Validate service ports.expose gateway binding is available
+  ansible.builtin.fail:
+    msg: >-
+      Service '{{ item.key }}' sets ports.expose: {{ item.value.ports.expose }}
+      but your access gateway provides no bind IP on this host
+      (access_gateway: {{ access_gateway | default('wireguard') }}). Without it
+      the service has no host-port binding, and any cross-region link target
+      pointing here will resolve LINKS_{{ item.key | upper | replace('-', '_') }}_PORT
+      but connect to nothing. Either configure an access gateway, set
+      gateway_bind_ip in group_vars/<region>/main.yml (or per-host), or remove
+      ports.expose:.
+  loop: "{{ active_services | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.ports is defined
+    - item.value.ports.expose is defined
+    - item.value.ports.expose in ['gateway', 'tailnet']
+    - not (gateway_bind_ip | default('', true) | trim)
+
+- name: Warn when service ports.expose=host (explicit public bind bypasses Traefik)
+  ansible.builtin.debug:
+    msg: >-
+      Service '{{ item.key }}' sets ports.expose: host — the port will be
+      publicly reachable on every interface, bypassing Traefik (no TLS, no
+      IPAllowList, no middleware). This is almost always wrong for a
+      Traefik-fronted service; confirm the bind is intentional.
+    verbosity: 0
+  loop: "{{ active_services | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.ports is defined
+    - item.value.ports.expose is defined
+    - item.value.ports.expose == 'host'
+
+- name: Warn when service ports.expose=tailnet (direct tailnet bind bypasses Traefik)
+  ansible.builtin.debug:
+    msg: >-
+      Service '{{ item.key }}' sets ports.expose: tailnet — the port binds
+      directly on the tailnet interface, bypassing Traefik (no TLS, no
+      IPAllowList, no middleware). This is the expected posture for
+      cross-region link targets reached via headscale tailnet IP. Confirm
+      the link consumer authenticates appropriately.
+    verbosity: 0
+  loop: "{{ active_services | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.ports is defined
+    - item.value.ports.expose is defined
+    - item.value.ports.expose == 'tailnet'
+
+# ── accessory expose: validation ─────────────────────────────────────
+# The `expose:` field on an accessory controls which host interface the
+# container's published port binds to (loopback | tailnet | host). Default
+# is loopback. Severing the old links:-driven port rewrite means there
+# is no deprecation shim left — these checks enforce the declared contract.
+
+- name: Validate accessory expose value
+  ansible.builtin.fail:
+    msg: >-
+      Accessory '{{ item.key }}' sets expose='{{ item.value.expose }}'.
+      Only 'loopback', 'tailnet', and 'host' are supported.
+  loop: "{{ active_accessories | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.expose is defined
+    - item.value.expose not in ['loopback', 'gateway', 'tailnet', 'host']
+
+- name: Validate accessory expose gateway binding is available
+  ansible.builtin.fail:
+    msg: >-
+      Accessory '{{ item.key }}' sets expose: {{ item.value.expose }} but your
+      access gateway provides no bind IP on this host
+      (access_gateway: {{ access_gateway | default('wireguard') }}). Either
+      configure an access gateway, set gateway_bind_ip in
+      group_vars/<region>/main.yml (or per-host), or change expose: to
+      loopback (same-stack only) or host (public bind).
+  loop: "{{ active_accessories | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.expose is defined
+    - item.value.expose in ['gateway', 'tailnet']
+    - not (gateway_bind_ip | default('', true) | trim)
+
+- name: Warn when expose=host (explicit public bind on accessory)
+  ansible.builtin.debug:
+    msg: >-
+      Accessory '{{ item.key }}' sets expose: host — the port will be
+      publicly reachable on every interface. Confirm this is intentional
+      and that the accessory requires authentication.
+    verbosity: 0
+  loop: "{{ active_accessories | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.expose is defined
+    - item.value.expose == 'host'
+
+- name: Validate log_rotation keys are recognized
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' sets unknown log_rotation keys:
+      {{ item.value.log_rotation.keys() | difference(['driver', 'max_size', 'max_file']) }}.
+      Only {driver, max_size, max_file} are recognized.
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.log_rotation is defined
+    - item.value.log_rotation is mapping
+    - (item.value.log_rotation.keys() | difference(['driver', 'max_size', 'max_file']) | length) > 0
+
+# ── log_retention schema validation ───────────────────────────────────
+# Opt-in host-side archival. Archives land under /opt/<stack>/logs/
+# services/<svc>/ and survive container recreation. These assertions
+# catch invalid shapes early so operators see a clear error before
+# any systemd units or directories are created.
+
+- name: Validate log_retention shape
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' has an invalid 'log_retention' value
+      ({{ item.value.log_retention | to_json }}). Expected a mapping
+      with keys from {days, max_total_size, compress, mode}.
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.log_retention is defined
+    - item.value.log_retention is not mapping
+
+- name: Validate log_retention keys are recognized
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' sets unknown log_retention keys:
+      {{ item.value.log_retention.keys() | difference(['days', 'max_total_size', 'compress', 'mode']) }}.
+      Only {days, max_total_size, compress, mode} are recognized.
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.log_retention is defined
+    - item.value.log_retention is mapping
+    - (item.value.log_retention.keys() | difference(['days', 'max_total_size', 'compress', 'mode']) | length) > 0
+
+- name: Validate log_retention days
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' sets log_retention.days='{{ item.value.log_retention.days }}'.
+      Expected a positive integer (number of days to retain archives before prune).
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.log_retention is defined
+    - item.value.log_retention is mapping
+    - item.value.log_retention.days is defined
+    - not (item.value.log_retention.days | string is match('^[1-9][0-9]*$'))
+
+- name: Validate log_retention max_total_size
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' sets log_retention.max_total_size='{{ item.value.log_retention.max_total_size }}'.
+      Expected a size literal (digits optionally followed by k/m/g, case-insensitive).
+      Examples: '500m', '2g'.
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.log_retention is defined
+    - item.value.log_retention is mapping
+    - item.value.log_retention.max_total_size is defined
+    - not (item.value.log_retention.max_total_size | string is match('^[0-9]+[kKmMgG]?$'))
+
+- name: Validate log_retention mode
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' sets log_retention.mode='{{ item.value.log_retention.mode }}'.
+      Only 'normal' (0640 <app_user>:<log_archive_group>) and 'sensitive' (0600 root:root) are supported.
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.log_retention is defined
+    - item.value.log_retention is mapping
+    - item.value.log_retention.mode is defined
+    - item.value.log_retention.mode not in ['normal', 'sensitive']
+
+- name: Validate log_retention driver compatibility
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' has log_retention enabled but its resolved
+      docker log driver is '{{ _resolved_driver }}'. Archival reads from the
+      container's json-file output via `docker logs --since`, which requires
+      the driver to be 'json-file' or 'local'. Either set
+      log_rotation.driver accordingly, or remove log_retention from this
+      container.
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    _resolved_driver: >-
+      {{ (item.value.log_rotation.driver
+          if (item.value.log_rotation is defined
+              and item.value.log_rotation is mapping
+              and item.value.log_rotation.driver is defined)
+          else log_rotation_defaults.driver) }}
+  when:
+    - item.value.log_retention is defined
+    - item.value.log_retention is mapping
+    - item.value.log_rotation is not sameas false
+    - _resolved_driver not in ['json-file', 'local']
+
+# ── log_retention disk budget ──────────────────────────────────────────
+# Sum max_total_size across services+accessories that opt into
+# archival on this host, compare against
+# log_retention_budget_fraction * log_retention_disk_bytes. Fails fast
+# with a "trim these services" list so operators cannot silently fill
+# the disk.
+
+- name: Require log_retention_disk_bytes when log_retention is in use
+  ansible.builtin.fail:
+    msg: >-
+      One or more containers on this host have log_retention enabled but
+      log_retention_disk_bytes is not set. Set it in group_vars (e.g.
+      log_retention_disk_bytes: 107374182400  # 100g) so the budget
+      ceiling can be computed.
+  vars:
+    _retention_users: >-
+      {{ (active_services | combine(active_accessories))
+         | dict2items
+         | selectattr('value.log_retention', 'defined')
+         | selectattr('value.log_retention', 'mapping')
+         | list }}
+  when:
+    - _retention_users | length > 0
+    - log_retention_disk_bytes is not defined or (log_retention_disk_bytes | int) == 0
+
+- name: Assert log_retention disk budget fits within configured fraction
+  ansible.builtin.fail:
+    msg: >-
+      log_retention total ({{ _budget_total | human_readable }}) exceeds
+      {{ (log_retention_budget_fraction * 100) | int }}% of disk
+      ({{ _budget_ceiling | human_readable }}). Reduce max_total_size on:
+      {{ _over_budget_services | join(', ') }}.
+  vars:
+    _retention_users: >-
+      {{ (active_services | combine(active_accessories))
+         | dict2items
+         | selectattr('value.log_retention', 'defined')
+         | selectattr('value.log_retention', 'mapping')
+         | selectattr('value.log_retention.max_total_size', 'defined')
+         | list }}
+    _sizes_bytes: >-
+      {{ _retention_users | map(attribute='value.log_retention.max_total_size')
+         | map('human_to_bytes') | list }}
+    _budget_total: "{{ _sizes_bytes | sum }}"
+    _budget_ceiling: >-
+      {{ (log_retention_disk_bytes | int) * (log_retention_budget_fraction | float) }}
+    _over_budget_services: >-
+      {{ _retention_users | map(attribute='key') | list }}
+  when:
+    - _retention_users | length > 0
+    - log_retention_disk_bytes is defined
+    - (log_retention_disk_bytes | int) > 0
+    - (_budget_total | int) > (_budget_ceiling | int)
+
+# ── basicauth $$ escape detection ─────────────────────────────────────────
+# The bay_traefik_labels Python filter passes label values directly to the
+# Docker API via community.docker.docker_container — NO Compose interpolation
+# occurs. If a pre-hashed user string contains $$ (double-dollar), Traefik
+# will receive $$ literally and reject all credentials silently.
+#
+# This check catches the case where operators copy a Compose-escaped hash
+# (with $$) into the `users:` list — the correct format is single $ (the
+# raw APR1 hash output from htpasswd/openssl passwd -apr1).
+
+- name: Validate basicauth.users entries do not contain $$ (Compose escape artifact)
+  ansible.builtin.fail:
+    msg: >-
+      Service '{{ item.key }}' has middleware.basic_auth.users entries
+      containing '$$'. The bay_traefik_labels filter passes labels directly
+      to the Docker API (no Compose interpolation). Traefik will receive '$$'
+      literally and reject all credentials. Use single '$' in APR1 hashes
+      (the raw output of `openssl passwd -apr1` or `htpasswd -nbB`).
+      Offending entries: {{ _ba_double_dollar_entries | join(', ') }}
+  loop: "{{ active_services | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    _ba: "{{ item.value.middleware.basic_auth | default({}) }}"
+    _ba_users: "{{ _ba.users | default([]) }}"
+    _ba_double_dollar_entries: >-
+      {{ _ba_users | select('search', '\\$\\$') | list }}
+  when:
+    - item.value.middleware is defined
+    - item.value.middleware.basic_auth is defined
+    - item.value.middleware.basic_auth.users is defined
+    - _ba_double_dollar_entries | length > 0

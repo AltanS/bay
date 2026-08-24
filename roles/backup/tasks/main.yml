@@ -1,0 +1,267 @@
+---
+# Backup role: installs restic, resolves per-accessory backup config,
+# initializes S3 repositories. Runs as app_user with targeted become for root ops.
+
+- name: Install restic binary
+  ansible.builtin.include_tasks: install.yml
+  when: backup_enabled
+
+- name: Resolve backup configuration for each accessory
+  ansible.builtin.set_fact:
+    _backup_accessories: "{{ _backup_accessories | default([]) + [_entry] }}"
+  loop: "{{ active_accessories | dict2items | selectattr('value.backup', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    _backup_raw: "{{ item.value.backup }}"
+    _backup_is_dict: "{{ _backup_raw is mapping }}"
+    _image: "{{ item.value.image | default('') }}"
+    _auto_method: >-
+      {{ 'pg_dump' if 'postgres' in _image
+         else 'mysql' if ('mysql' in _image or 'mariadb' in _image)
+         else 'redis' if 'redis' in _image
+         else '' }}
+    _method: >-
+      {{ (_backup_raw.method if _backup_is_dict and _backup_raw.method is defined
+          else _auto_method) | trim }}
+    _schedule: >-
+      {{ (_backup_raw.schedule if _backup_is_dict and _backup_raw.schedule is defined
+          else backup_schedule) | trim }}
+    _retain: >-
+      {{ _backup_raw.retain if _backup_is_dict and _backup_raw.retain is defined
+         else backup_retain }}
+    _entry:
+      name: "{{ item.key }}"
+      method: "{{ _method }}"
+      schedule: "{{ _schedule }}"
+      retain: "{{ _retain }}"
+      image: "{{ _image }}"
+      repo: "s3:{{ backup_s3_endpoint }}/{{ backup_s3_bucket }}/{{ backup_s3_prefix }}/{{ inventory_hostname }}/{{ item.key }}"
+      config: "{{ item.value }}"
+  when: backup_enabled
+
+- name: Register Headscale control-plane state as a backup target (control region only)
+  ansible.builtin.set_fact:
+    _backup_accessories: "{{ (_backup_accessories | default([])) + [_headscale_backup_entry] }}"
+  vars:
+    _headscale_backup_entry:
+      name: "{{ backup_headscale_container }}"
+      method: file
+      schedule: "{{ backup_headscale_schedule }}"
+      retain: "{{ backup_headscale_retain }}"
+      image: ""
+      repo: "s3:{{ backup_s3_endpoint }}/{{ backup_s3_bucket }}/{{ backup_s3_prefix }}/{{ inventory_hostname }}/{{ backup_headscale_container }}"
+      config:
+        backup:
+          source_path: "{{ backup_headscale_source_path }}"
+  when:
+    - backup_enabled
+    - backup_headscale_state | bool
+    - access_gateway | default('wireguard') == 'headscale'
+    - headscale_server | default(true) | bool
+
+- name: Discover databases bound to accessories via service database blocks
+  ansible.builtin.set_fact:
+    _bound_databases: >-
+      {{
+        _bound_databases | default({}) | combine({
+          item.value.database.accessory:
+            (_bound_databases | default({}))[item.value.database.accessory] | default([])
+            + [item.value.database.name | default(item.key)]
+        })
+      }}
+  loop: "{{ active_services | dict2items | selectattr('value.database', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.key }} → {{ item.value.database.accessory }}"
+  when: backup_enabled
+
+- name: Fail if any accessory has no detectable backup method
+  ansible.builtin.fail:
+    msg: >-
+      Accessory '{{ item.name }}' has backup enabled but no method could be detected
+      from image '{{ item.image }}'. Set an explicit method:
+      backup: { method: pg_dump|mysql|redis|file }
+  loop: "{{ _backup_accessories | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - backup_enabled
+    - item.method == ''
+
+- name: Display resolved backup accessories
+  ansible.builtin.debug:
+    msg: "{{ item.name }}: method={{ item.method }}, schedule={{ item.schedule }}, retain={{ item.retain }}"
+  loop: "{{ _backup_accessories | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: backup_enabled
+
+- name: Ensure backup directories exist
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0750"
+  loop:
+    - "{{ backup_scripts_dir }}"
+    - "{{ backup_lock_dir }}"
+  when: backup_enabled
+
+- name: Initialize restic repositories
+  ansible.builtin.include_tasks:
+    file: init-repos.yml
+  loop: "{{ _backup_accessories | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: backup_enabled
+
+- name: Generate backup scripts for accessories
+  ansible.builtin.template:
+    src: backup.sh.j2
+    dest: "{{ backup_scripts_dir }}/backup-{{ item.name }}.sh"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0750"
+  loop: "{{ _backup_accessories | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    accessory_name: "{{ item.name }}"
+    method: "{{ item.method }}"
+    retain: "{{ item.retain }}"
+    repo: "{{ item.repo }}"
+    accessory_config: "{{ item.config }}"
+    bound_databases: "{{ (_bound_databases | default({}))[item.name] | default([]) }}"
+  when: backup_enabled
+
+- name: Write restic environment file for CLI
+  ansible.builtin.template:
+    src: restic.env.j2
+    dest: "{{ backup_scripts_dir }}/restic.env"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0640"
+  when: backup_enabled
+
+# ── Systemd Units ──────────────────────────────────────────────────────
+
+- name: Deploy backup service unit
+  ansible.builtin.template:
+    src: bay-backup@.service.j2
+    dest: /etc/systemd/system/bay-backup@.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  become_user: root
+  notify: Reload systemd daemon
+  when: backup_enabled
+
+- name: Deploy backup timer units
+  ansible.builtin.template:
+    src: bay-backup@.timer.j2
+    dest: "/etc/systemd/system/bay-backup@{{ item.name }}.timer"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _backup_accessories | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    accessory_name: "{{ item.name }}"
+    timer_schedule: "{{ item.schedule }}"
+  become: true
+  become_user: root
+  notify: Reload systemd daemon
+  when: backup_enabled
+
+- name: Flush handlers for systemd reload
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start backup timers
+  ansible.builtin.systemd:
+    name: "bay-backup@{{ item.name }}.timer"
+    enabled: true
+    state: started
+  loop: "{{ _backup_accessories | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  become: true
+  become_user: root
+  when: backup_enabled
+
+- name: Remove legacy backup cron jobs
+  ansible.builtin.cron:
+    name: "backup-{{ item.key }}"
+    user: "{{ app_user }}"
+    state: absent
+  loop: "{{ active_accessories | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - backup_enabled
+    - item.value.backup is defined
+  become: true
+  become_user: root
+
+# ── Maintenance ──────────────────────────────────────────────────────
+
+- name: Generate maintenance scripts for accessories
+  ansible.builtin.template:
+    src: maintenance.sh.j2
+    dest: "{{ backup_scripts_dir }}/maintenance-{{ item.name }}.sh"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0750"
+  loop: "{{ _backup_accessories | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    accessory_name: "{{ item.name }}"
+    repo: "{{ item.repo }}"
+  when: backup_enabled
+
+- name: Deploy maintenance service unit
+  ansible.builtin.template:
+    src: bay-backup-maintenance@.service.j2
+    dest: /etc/systemd/system/bay-backup-maintenance@.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  become_user: root
+  notify: Reload systemd daemon
+  when: backup_enabled
+
+- name: Deploy maintenance timer units
+  ansible.builtin.template:
+    src: bay-backup-maintenance@.timer.j2
+    dest: "/etc/systemd/system/bay-backup-maintenance@{{ item.name }}.timer"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _backup_accessories | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  vars:
+    accessory_name: "{{ item.name }}"
+  become: true
+  become_user: root
+  notify: Reload systemd daemon
+  when: backup_enabled
+
+- name: Flush handlers for maintenance systemd reload
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start maintenance timers
+  ansible.builtin.systemd:
+    name: "bay-backup-maintenance@{{ item.name }}.timer"
+    enabled: true
+    state: started
+  loop: "{{ _backup_accessories | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  become: true
+  become_user: root
+  when: backup_enabled

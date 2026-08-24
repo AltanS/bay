@@ -1,0 +1,32 @@
+---
+meta:
+  id: n8n
+  name: n8n workflow automation
+  category: service
+  domain_prefix: n8n
+  dependencies:
+    - postgres
+  post_add_instructions:
+    - "Add DB_POSTGRESDB_PASSWORD to vault: bin/bay vault edit <environment>"
+
+defaults:
+  access: vpn
+  regions: []
+
+spec:
+  image: n8nio/n8n:latest
+  ports:
+    internal: 5678
+  depends_on:
+    - postgres
+  volumes:
+    - n8n_data:/home/node/.n8n
+  env:
+    clear:
+      N8N_PROTOCOL: https
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n
+    secret:
+      - DB_POSTGRESDB_PASSWORD

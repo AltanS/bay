@@ -1,0 +1,37 @@
+---
+# log_archive role defaults
+#
+# Host-side per-service log archival. Reads from `docker logs --since
+# <cursor> --timestamps <container>` on a 1-minute systemd timer, appends
+# to /opt/<stack>/logs/services/<svc>/live.log, and maintains an RFC 3339
+# cursor file.
+#
+# Enabled per-container via `log_retention:` in services.yml. When no
+# container opts in, this role is a no-op.
+
+log_archive_group: argo-logreaders  # legacy-argo: unix group on hosts
+log_archive_bin_dir: "{{ stack_dir }}/bin"
+log_archive_log_root: "{{ stack_dir }}/logs/services"
+
+# Default mode values applied when a container's `log_retention:` omits
+# them. `compress: true` and `mode: normal` match the design defaults
+# documented in ADR-002.
+log_archive_default_compress: true
+log_archive_default_mode: normal
+
+# Timer cadence. The script tolerates missed ticks (it re-fetches from
+# the cursor on every run), so `Persistent=true` (hard-coded in the
+# unit template) catches up after a reboot without replaying long
+# backlogs.
+log_archive_timer_oncalendar: "*:*:0/1"
+
+# Systemd unit naming — keep the instance syntax (`@.service`) so the
+# unit template can be instantiated per service with a simple suffix.
+log_archive_unit_name: bay-logarchive
+
+# Opt-in filesystem append-only lock on rotated .gz archives and
+# .prune-log. Requires ext_attr-capable filesystem (ext4 etc.). When
+# true, rotate-logs.sh applies `chattr +a` after writing each archive
+# and after each .prune-log append; it also `chattr -a`s before any
+# deletion. Silently no-ops if chattr is unavailable.
+log_retention_chattr: false

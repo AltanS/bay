@@ -1,0 +1,16 @@
+---
+meta:
+  id: redis
+  name: Redis cache
+  category: accessory
+  dependencies: []
+  post_add_instructions: []
+
+defaults:
+  regions: []
+
+spec:
+  image: redis:7-alpine
+  port: "127.0.0.1:6379:6379"
+  volumes:
+    - redis_data:/data

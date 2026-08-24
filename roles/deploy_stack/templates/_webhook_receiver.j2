@@ -1,0 +1,54 @@
+{% set _has_local_builds = (active_services | dict2items | selectattr('value.build', 'defined') | list | length > 0) %}
+{% set _is_build_server = ((build_server | default('')) == inventory_hostname) %}
+{% set _default_strategy = git_deploy_build_strategy | default('local') %}
+{% set ns = namespace(has_remote=false) %}
+{% for item in (services | default({})) | dict2items | selectattr('value.build', 'defined') %}
+{%   set raw = item.value.build.strategy | default(_default_strategy) %}
+{%   set strat = 'remote' if raw == 'push' else raw %}
+{%   if strat == 'remote' %}
+{%     set ns.has_remote = true %}
+{%   endif %}
+{% endfor %}
+{% if webhook is defined and (_has_local_builds or (_is_build_server and ns.has_remote)) %}
+  # ── Webhook Receiver (auto-deployed for build: services) ──────────
+  bay-webhook:
+    image: bay-webhook:latest
+    pull_policy: never
+    container_name: bay-webhook
+    restart: unless-stopped
+    networks:
+      - {{ traefik_docker_network }}
+    environment:
+      - WEBHOOK_SECRET={{ webhook.secret }}
+      - TRIGGER_DIR=/triggers
+      - TELEGRAM_FAILURES_LOG=/state/telegram-failures.log
+      - SERVICE_BRANCHES={% for svc_name in active_services | dict2items | selectattr('value.build', 'defined') | map(attribute='key') %}{{ svc_name }}:{{ active_services[svc_name].build.branch | default('main') }}{% if not loop.last %},{% endif %}{% endfor %}
+
+      - TELEGRAM_BOT_TOKEN={{ docker_monitor_telegram_bot_token | default('') }}
+      - TELEGRAM_CHAT_ID={{ docker_monitor_telegram_chat_id | default('') }}
+      - TELEGRAM_HEADER={{ docker_monitor_alert_header | default('') }}
+      - HOSTNAME={% include '_host_label.j2' +%}
+      - LOCAL_REGION={{ region | default('') }}
+      - WEBHOOK_PEER_TIMEOUT={{ git_deploy_webhook_peer_timeout | default(10) }}
+{% if _is_build_server and ns.has_remote %}
+      - IS_BUILD_SERVER=true
+{% endif %}
+
+    volumes:
+      - {{ stack_dir }}/triggers:/triggers
+      - {{ stack_dir }}/state:/state
+      - {{ stack_dir }}/webhook/config.json:/config/services.json:ro
+      - {{ stack_dir }}/webhook/image-map.json:/config/image-map.json:ro
+{{ macros.logging_block({}) }}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network={{ traefik_docker_network }}"
+      - "traefik.http.routers.bay-webhook.rule=Host(`{{ webhook.domain }}`)"
+      - "traefik.http.routers.bay-webhook.entrypoints=websecure"
+      - "traefik.http.routers.bay-webhook.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.bay-webhook.middlewares=public-chain"
+      - "traefik.http.services.bay-webhook.loadbalancer.server.port=9000"
+{% if watchtower_enabled | default(false) %}
+      - "com.centurylinklabs.watchtower.enable=false"
+{% endif %}
+{% endif %}

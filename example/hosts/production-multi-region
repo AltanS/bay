@@ -1,0 +1,15 @@
+# Multi-region inventory example
+# bin/bay deploy eu       → targets EU server only
+# bin/bay deploy na       → targets NA server only
+# bin/bay deploy production → targets all regions
+# See docs/multi-region.md for the full pattern.
+
+[eu]
+eu-server ansible_host=10.0.1.1
+
+[na]
+na-server ansible_host=10.0.2.1
+
+[production:children]
+eu
+na

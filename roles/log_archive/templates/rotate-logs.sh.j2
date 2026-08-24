@@ -1,0 +1,286 @@
+#!/usr/bin/env bash
+# rotate-logs.sh — daily rotation + age/size prune (ADR-002)
+#
+# Called at UTC midnight by bay-logrotate@<svc>.timer. Rotates
+# live.log to a date-named gzip + sha256 sidecar, then prunes archives
+# older than .retention's `days` and (if set) enforces `max_total_size`
+# by oldest-first delete. Every deletion is alerted via Telegram AND
+# recorded in .prune-log BEFORE the file is removed — the alert gives
+# operators a window to copy files off the host; the manifest
+# preserves a receipt for any deletion that does happen.
+#
+# Usage: rotate-logs.sh <service-name> <stack-dir>
+#
+# Env (from the systemd unit template):
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_HEADER — optional.
+#       When unset or empty, Telegram alerts are skipped but the
+#       .prune-log manifest still records every deletion.
+#   BAY_STACK — for alert context. The host name comes from BAY_HOST,
+#   rendered by _host_label.j2 so it is identical to every other alert.
+#   BAY_LOG_CHATTR — "true" enables chattr +a on rotated .gz files
+#       and .prune-log. Script silently falls back if chattr is
+#       unavailable or the filesystem doesn't support the attribute.
+
+set -euo pipefail
+
+SVC="${1:?service name required}"
+STACK_DIR="${2:?stack dir required}"
+
+LOG_DIR="${STACK_DIR}/logs/services/${SVC}"
+LIVE="${LOG_DIR}/live.log"
+TODAY_LINK="${LOG_DIR}/today.log"
+PRUNE_LOG="${LOG_DIR}/.prune-log"
+RETENTION_FILE="${LOG_DIR}/.retention"
+LOCK="${LOG_DIR}/.archive.lock"
+ARCHIVER_TIMER="bay-logarchive@${SVC}.timer"
+
+BAY_ALERT_HEADER="${TELEGRAM_HEADER:-}"
+STACK="${BAY_STACK:-unknown}"
+CHATTR_ENABLED="${BAY_LOG_CHATTR:-false}"
+
+[[ -d "$LOG_DIR" ]] || { echo "rotate-logs[$SVC]: missing dir $LOG_DIR" >&2; exit 2; }
+
+# ── retention config ────────────────────────────────────────────────
+# Safe key=value sourcing — .retention is written by Ansible with
+# schema-validated values (mode enum, days int, max_total_size
+# regex-checked, compress bool). No command substitution is possible.
+mode="normal"
+days=""
+max_total_size=""
+compress="true"
+# shellcheck disable=SC1090
+[[ -s "$RETENTION_FILE" ]] && source "$RETENTION_FILE"
+
+case "$mode" in
+  normal)
+    FILE_OWNER="{{ app_user }}"
+    FILE_GROUP="{{ log_archive_group }}"
+    FILE_MODE="0640"
+    ;;
+  sensitive)
+    FILE_OWNER="root"
+    FILE_GROUP="root"
+    FILE_MODE="0600"
+    ;;
+  *)
+    echo "rotate-logs[$SVC]: unknown mode '$mode' in .retention" >&2
+    exit 2
+    ;;
+esac
+
+# ── helpers ──────────────────────────────────────────────────────────
+
+short_ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+human_to_bytes() {
+  # Accepts: digits with optional single-letter unit (k, K, m, M, g, G).
+  # Returns bytes. 500m -> 524288000, 2g -> 2147483648, bare digits as-is.
+  local v="$1"
+  [[ -z "$v" ]] && { echo "0"; return; }
+  local n u
+  if [[ "$v" =~ ^([0-9]+)([kKmMgG])?$ ]]; then
+    n="${BASH_REMATCH[1]}"
+    u="${BASH_REMATCH[2]}"
+  else
+    echo "0"
+    return
+  fi
+  case "$u" in
+    k|K) echo "$((n * 1024))" ;;
+    m|M) echo "$((n * 1024 * 1024))" ;;
+    g|G) echo "$((n * 1024 * 1024 * 1024))" ;;
+    *)   echo "$n" ;;
+  esac
+}
+
+sha256_of() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+{# Credentials arrive as env from bay-logrotate@.service, not as Ansible vars. #}
+{% set alert_telegram_env = true %}
+{% include '_notify.sh.j2' %}
+HOST="${BAY_HOST}"
+
+maybe_chattr_a() {
+  [[ "$CHATTR_ENABLED" != "true" ]] && return 0
+  chattr +a "$1" 2>/dev/null || true
+}
+
+maybe_chattr_unlock() {
+  [[ "$CHATTR_ENABLED" != "true" ]] && return 0
+  chattr -a "$1" 2>/dev/null || true
+}
+
+audit_line() {
+  # Appends a manifest line to .prune-log BEFORE the file is deleted:
+  #   <ISO8601_UTC> <svc>/<filename> <bytes> sha256:<hex> reason=<age|size>
+  local path="$1" reason="$2"
+  local bytes hex ts
+  bytes="$(stat -c '%s' "$path" 2>/dev/null || echo 0)"
+  hex="$(sha256_of "$path" 2>/dev/null || echo '')"
+  ts="$(short_ts)"
+  maybe_chattr_unlock "$PRUNE_LOG"
+  printf '%s %s/%s %s sha256:%s reason=%s\n' \
+    "$ts" "$SVC" "$(basename "$path")" "$bytes" "$hex" "$reason" >>"$PRUNE_LOG"
+  maybe_chattr_a "$PRUNE_LOG"
+}
+
+safe_rm() {
+  # chattr-unlock the file, then delete. Caller MUST have written a
+  # manifest entry (via audit_line) first — that ordering is the
+  # evidence-preservation contract.
+  local path="$1"
+  maybe_chattr_unlock "$path"
+  rm -f "$path"
+}
+
+# ── ROTATE ───────────────────────────────────────────────────────────
+# Pause the archiver so we don't race live.log writes with the rename.
+# Use a wait-lock on the archiver's flock file rather than a sleep —
+# if the archiver is in the middle of a tick we wait up to 30s and
+# then take the lock ourselves.
+
+systemctl stop "$ARCHIVER_TIMER" 2>/dev/null || true
+
+exec 8>"$LOCK"
+if ! flock -w 30 8; then
+  echo "rotate-logs[$SVC]: archiver still running after 30s — aborting rotation" >&2
+  systemctl start "$ARCHIVER_TIMER" 2>/dev/null || true
+  exit 1
+fi
+
+# Yesterday's UTC date — the calendar day this rotation's content covers.
+YESTERDAY="$(date -u -d 'yesterday' +%Y-%m-%d)"
+ROTATED="${LOG_DIR}/${YESTERDAY}.log"
+GZ="${ROTATED}.gz"
+SHA="${GZ}.sha256"
+
+if [[ -s "$LIVE" ]]; then
+  # Defensive: if a prior run already produced yesterday's file (timer
+  # re-fired via Persistent=true after host downtime), append current
+  # live.log to it and re-compress rather than overwrite the archive.
+  if [[ -e "$ROTATED" || -e "$GZ" ]]; then
+    echo "rotate-logs[$SVC]: ${YESTERDAY}.log[.gz] exists — appending current live.log" >&2
+    if [[ -e "$GZ" ]]; then
+      maybe_chattr_unlock "$GZ"
+      gunzip -f "$GZ"
+    fi
+    cat "$LIVE" >>"$ROTATED"
+    : >"$LIVE"
+  else
+    mv "$LIVE" "$ROTATED"
+    : >"$LIVE"
+  fi
+
+  chown "${FILE_OWNER}:${FILE_GROUP}" "$LIVE" 2>/dev/null || true
+  chmod "$FILE_MODE" "$LIVE" 2>/dev/null || true
+  ln -sfn live.log "$TODAY_LINK"
+
+  if [[ "$compress" == "true" ]]; then
+    gzip -9 "$ROTATED"
+    target="$GZ"
+  else
+    target="$ROTATED"
+  fi
+  chown "${FILE_OWNER}:${FILE_GROUP}" "$target" 2>/dev/null || true
+  chmod "$FILE_MODE" "$target" 2>/dev/null || true
+
+  sha256_hex="$(sha256_of "$target")"
+  printf '%s  %s\n' "$sha256_hex" "$(basename "$target")" >"$SHA"
+  chown "${FILE_OWNER}:${FILE_GROUP}" "$SHA" 2>/dev/null || true
+  chmod "$FILE_MODE" "$SHA" 2>/dev/null || true
+
+  maybe_chattr_a "$target"
+else
+  echo "rotate-logs[$SVC]: live.log empty — nothing to rotate this cycle" >&2
+fi
+
+flock -u 8
+exec 8>&-
+systemctl start "$ARCHIVER_TIMER" 2>/dev/null || true
+
+# ── PRUNE: age ────────────────────────────────────────────────────────
+# Files older than `days` days by mtime. `find -mtime +N` means strictly
+# more than N full 24-hour periods, so +((days-1)) catches files that
+# have entered their `days`th day — matches "retain for `days` days".
+
+age_candidates=()
+if [[ -n "$days" && "$days" =~ ^[0-9]+$ && "$days" -gt 0 ]]; then
+  while IFS= read -r -d '' f; do
+    age_candidates+=("$f")
+  done < <(find "$LOG_DIR" -maxdepth 1 -type f -name '*.log.gz' -mtime +"$((days - 1))" -print0 2>/dev/null || true)
+fi
+
+age_count=${{ '{' }}#age_candidates[@]}
+if (( age_count > 0 )); then
+  total_bytes=0
+  for f in "${age_candidates[@]}"; do
+    sz="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
+    total_bytes=$((total_bytes + sz))
+  done
+  bay_notify log.retention_prune "$(printf '[bay] log retention prune — %s/%s will remove %d file(s) totaling %d bytes from %s. Reason: age (> %s days).' \
+    "$HOST" "$STACK" "$age_count" "$total_bytes" "$SVC" "$days")"
+
+  for f in "${age_candidates[@]}"; do
+    audit_line "$f" "age"
+    safe_rm "$f"
+    if [[ -e "${f}.sha256" ]]; then
+      audit_line "${f}.sha256" "age"
+      safe_rm "${f}.sha256"
+    fi
+  done
+fi
+
+# ── PRUNE: size ──────────────────────────────────────────────────────
+# If total .gz bytes exceed max_total_size, delete oldest-first until
+# we fit. Alert + manifest every deletion, same ordering as age prune.
+
+if [[ -n "$max_total_size" ]]; then
+  ceiling="$(human_to_bytes "$max_total_size")"
+
+  current=()
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    current+=("$f")
+  done < <(find "$LOG_DIR" -maxdepth 1 -type f -name '*.log.gz' -printf '%T@\t%p\n' 2>/dev/null | sort -n | cut -f2-)
+
+  total=0
+  for f in "${current[@]}"; do
+    sz="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
+    total=$((total + sz))
+  done
+
+  size_candidates=()
+  if (( total > ceiling )); then
+    over=$((total - ceiling))
+    for f in "${current[@]}"; do
+      (( over <= 0 )) && break
+      sz="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
+      size_candidates+=("$f")
+      over=$((over - sz))
+    done
+  fi
+
+  size_count=${{ '{' }}#size_candidates[@]}
+  if (( size_count > 0 )); then
+    batch_bytes=0
+    for f in "${size_candidates[@]}"; do
+      sz="$(stat -c '%s' "$f" 2>/dev/null || echo 0)"
+      batch_bytes=$((batch_bytes + sz))
+    done
+    bay_notify log.retention_prune "$(printf '[bay] log retention prune — %s/%s will remove %d file(s) totaling %d bytes from %s. Reason: size (threshold %s).' \
+      "$HOST" "$STACK" "$size_count" "$batch_bytes" "$SVC" "$max_total_size")"
+
+    for f in "${size_candidates[@]}"; do
+      audit_line "$f" "size"
+      safe_rm "$f"
+      if [[ -e "${f}.sha256" ]]; then
+        audit_line "${f}.sha256" "size"
+        safe_rm "${f}.sha256"
+      fi
+    done
+  fi
+fi
+
+exit 0

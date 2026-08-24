@@ -1,0 +1,66 @@
+---
+# Image pull for registry-based services and accessories.
+# Services with build: blocks that use local strategy are handled by git_deploy.
+# Remote-strategy services are skipped here — they are built on the build server,
+# pushed to a registry, and then pulled in git_deploy after the push completes.
+# This role pulls images for:
+#   - Services with image: field (excludes build.strategy: remote)
+#   - Accessories (always image-based)
+# Runs as app user (become_user inherited from play; app user has docker group)
+
+- name: Log in to Docker registries
+  community.docker.docker_login:
+    registry_url: "https://{{ item.domain }}"
+    username: "{{ item.username }}"
+    password: "{{ item.password }}"
+  loop: "{{ docker_registries | default([]) }}"
+  loop_control:
+    label: "{{ item.domain }}"
+  when: (item.username | default('')) | length > 0
+  no_log: true
+
+- name: Collect images produced by remote builds
+  ansible.builtin.set_fact:
+    _remote_built_images: >-
+      {{
+        (services | default({})) | dict2items
+        | selectattr('value.build.strategy', 'defined')
+        | selectattr('value.build.strategy', 'eq', 'remote')
+        | selectattr('value.image', 'defined')
+        | map(attribute='value.image')
+        | list
+        | unique
+      }}
+
+- name: Pull service images
+  ansible.builtin.command:
+    cmd: "docker pull {{ item.value.image }}"
+  # Skip remote-strategy services AND any service whose image is produced by a
+  # remote build (e.g. locale services sharing a single remotely-built image).
+  # git_deploy's remote_build.yml builds, pushes, then pulls these post-push.
+  loop: >-
+    {{
+      active_services | dict2items
+      | selectattr('value.image', 'defined')
+      | rejectattr('value.image', 'in', _remote_built_images)
+      | list
+    }}
+  loop_control:
+    label: "{{ item.key }}"
+  register: _pull_result
+  changed_when: true
+  retries: 3
+  delay: 10
+  until: _pull_result.rc == 0
+
+- name: Pull accessory images
+  ansible.builtin.command:
+    cmd: "docker pull {{ item.value.image }}"
+  loop: "{{ active_accessories | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}: {{ item.value.image }}"
+  register: _acc_pull_result
+  changed_when: true
+  retries: 3
+  delay: 10
+  until: _acc_pull_result.rc == 0

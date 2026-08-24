@@ -1,0 +1,25 @@
+---
+meta:
+  id: plausible
+  name: Plausible analytics
+  category: service
+  domain_prefix: plausible
+  dependencies:
+    - postgres
+  post_add_instructions:
+    - "Add SECRET_KEY_BASE and DB_PASSWORD to vault: bin/bay vault edit <environment>"
+
+defaults:
+  access: public
+  regions: []
+
+spec:
+  image: ghcr.io/plausible/community-edition:latest
+  ports:
+    internal: 8000
+  depends_on:
+    - postgres
+  env:
+    secret:
+      - SECRET_KEY_BASE
+      - DB_PASSWORD

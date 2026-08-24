@@ -1,0 +1,9 @@
+---
+- name: Validate watchtower schedule is set
+  ansible.builtin.assert:
+    that:
+      - watchtower_schedule is defined
+      - watchtower_schedule | length > 0
+    fail_msg: "watchtower_schedule must be set when watchtower_enabled is true"
+    success_msg: "Watchtower schedule: {{ watchtower_schedule }}"
+  when: watchtower_enabled | default(false)

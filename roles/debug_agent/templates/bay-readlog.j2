@@ -1,0 +1,113 @@
+#!/bin/bash
+# Managed by Ansible — do not edit manually.
+#
+# Path-validated file reader for the {{ debug_agent_user }} account.
+# Granted through sudo so the agent can read root-owned logs WITHOUT
+# `sudo cat`, which sudoers cannot restrict to a directory.
+#
+#   bay-readlog cat   <file>
+#   bay-readlog tail  -n 200 <file>
+#   bay-readlog grep  -i pattern <file>
+#   bay-readlog ls    <dir>
+#
+# The path operand is always the LAST argument. It is resolved with
+# `realpath -e`, so a symlink that points out of the allowlist is refused.
+set -euo pipefail
+
+PAGER=cat
+SYSTEMD_PAGER=
+export PAGER SYSTEMD_PAGER
+
+ALLOWED_DIRS=(
+{% for path in debug_agent_readable_paths %}
+  '{{ path }}'
+{% endfor %}
+)
+
+# Refused anywhere in the resolved path, even under an allowed directory.
+DENY_SUBSTRINGS=(
+  '/.ssh' 'authorized_keys' 'id_rsa' 'id_ed25519'
+  'secret' 'vault' '.env' 'shadow' 'gshadow' '.pgpass' '.netrc'
+  'credential' 'password' '.git-credentials' 'private'
+)
+
+DENY_PREFIXES=( '/root' '/etc/shadow' '/etc/gshadow' '/etc/sudoers' '/proc' '/sys' '/dev' )
+
+die() { echo "bay-readlog: $*" >&2; exit 1; }
+
+usage() { die "usage: bay-readlog <cat|head|tail|grep|wc|ls> [safe-args] <path>"; }
+
+[ "$#" -ge 2 ] || usage
+
+op=$1
+shift
+
+case "$op" in
+  cat|head|tail|grep|wc|ls) ;;
+  *) die "operation not permitted: $op" ;;
+esac
+
+# Last argument is the path operand; everything before it must be a safe flag
+# or a plain (non-flag) value such as a grep pattern or a -n count.
+args=( "$@" )
+last_index=$(( $# - 1 ))
+path=${args[$last_index]}
+unset 'args[last_index]'
+
+for arg in ${args[@]+"${args[@]}"}; do
+  case "$arg" in
+    -*)
+      flag=${arg%%=*}
+      case "$flag" in
+        -n|-c|-i|-l|-E|-F|-A|-B|-C|-q|-s|-w|-x|--lines|--bytes|--ignore-case|\
+        --color|--color=never|--extended-regexp|--fixed-strings|--words|--max-count)
+          ;;
+        *)
+          # -n200 / -c50 style short flags with an inline count.
+          if [[ "$flag" =~ ^-[nc][0-9]+$ ]]; then
+            continue
+          fi
+          die "flag not permitted: $arg"
+          ;;
+      esac
+      ;;
+    *) ;;
+  esac
+done
+
+case "$path" in
+  -*) die "path operand looks like a flag: $path" ;;
+esac
+
+real=$(realpath -e -- "$path" 2>/dev/null) || die "no such path: $path"
+
+lower=${real,,}
+for bad in "${DENY_SUBSTRINGS[@]}"; do
+  if [[ "$lower" == *"$bad"* ]]; then
+    die "path is on the deny list: $real"
+  fi
+done
+for bad in "${DENY_PREFIXES[@]}"; do
+  if [[ "$real" == "$bad" || "$real" == "$bad"/* ]]; then
+    die "path is on the deny list: $real"
+  fi
+done
+
+allowed=no
+for dir in "${ALLOWED_DIRS[@]}"; do
+  dir=${dir%/}
+  # shellcheck disable=SC2053 — glob match is intentional
+  if [[ "$real" == $dir/* || "$real" == $dir ]]; then
+    allowed=yes
+    break
+  fi
+done
+[ "$allowed" = yes ] || die "path is outside the readable allowlist: $real"
+
+if [ "$op" = ls ]; then
+  exec /bin/ls -la -- "$real"
+fi
+
+[ -f "$real" ] || die "not a regular file: $real"
+
+exec "/usr/bin/$op" ${args[@]+"${args[@]}"} -- "$real"

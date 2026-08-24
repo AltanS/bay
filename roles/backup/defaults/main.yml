@@ -1,0 +1,44 @@
+---
+backup_enabled: false
+backup_restic_version: "0.17.3"
+backup_restic_bin: /usr/local/bin/restic
+
+# S3 backend — reads from secrets dict, falls back to shared S3_* vars
+# endpoint example: "s3.eu-central-1.amazonaws.com" (AWS) or "fsn1.your-objectstorage.com" (Hetzner)
+backup_s3_endpoint: "{{ secrets.backup_s3_endpoint | default(S3_ENDPOINT | default('')) }}"
+backup_s3_bucket: "{{ secrets.backup_s3_bucket | default(S3_BUCKET | default('')) }}"
+backup_s3_access_key_id: "{{ secrets.backup_s3_access_key_id | default(S3_ACCESS_KEY_ID | default('')) }}"
+backup_s3_secret_access_key: "{{ secrets.backup_s3_secret_access_key | default(S3_SECRET_ACCESS_KEY | default('')) }}"
+
+# Prefix within the bucket (repo path: s3:endpoint/bucket/prefix/hostname/accessory)
+backup_s3_prefix: "backups"
+
+# Restic encryption (consumer must set in secrets dict)
+backup_restic_password: "{{ secrets.backup_restic_password | default('') }}"
+
+# Default schedule and retention (overridable per-accessory)
+backup_schedule: "0 3 * * *"
+backup_retain: 30
+
+# Paths
+backup_scripts_dir: "{{ stack_dir }}/backup"
+backup_lock_dir: "{{ stack_dir }}/backup/locks"
+
+# ── Rig-infrastructure state backups ──────────────────────────────────────
+# The accessory loop only covers things declared in services.yml. Headscale is
+# rig infrastructure (the tailnet coordination server) whose state is NOT modeled
+# as an accessory and was therefore never backed up. That state — the sqlite node
+# DB plus the noise + DERP private keys — all lives under the container's
+# /var/lib/headscale (bind-mounted from /opt/headscale/data on the host). Losing it
+# loses the tailnet identity, every node's IP assignment, and the keys.
+#
+# We capture it through the existing restic 'file' method (docker cp → restic
+# --stdin), which reads via the docker daemon and so sidesteps the root-owned
+# on-disk DB/key permissions. It is gated to the control-region host (the only host
+# running the headscale container). The config dir (/etc/headscale) is re-rendered
+# on every deploy and is intentionally NOT backed up.
+backup_headscale_state: true
+backup_headscale_container: headscale
+backup_headscale_source_path: /var/lib/headscale
+backup_headscale_schedule: "{{ backup_schedule }}"
+backup_headscale_retain: "{{ backup_retain }}"

@@ -1,0 +1,26 @@
+---
+# Container lifecycle defaults
+
+# See roles/alert_channel/defaults/main.yml. Duplicated because this role
+# does not depend on alert_channel; the copies are asserted equal in CI.
+bay_host_label: ""
+bay_alert_host: "{% set _n = (bay_host_label | default('', true)) or (ansible_hostname | default('', true)) or inventory_hostname %}{{ _n }}{% if _n != inventory_hostname %} ({{ inventory_hostname }}){% endif %}"
+
+# How long to wait for a canary container to become healthy (seconds)
+container_lifecycle_healthcheck_timeout: 120
+
+# How often to poll canary health status (seconds)
+container_lifecycle_healthcheck_poll: 5
+
+# Grace period for SIGTERM before SIGKILL when stopping containers (seconds)
+container_lifecycle_stop_timeout: 30
+
+# Suffix appended to canary containers during zero-downtime deploy
+container_lifecycle_canary_suffix: "-new"
+
+# Labels applied to all managed containers
+container_lifecycle_managed_label: "bay.managed"
+container_lifecycle_stack_label: "bay.stack"
+
+# Remove containers not in current specs after deploy
+container_lifecycle_cleanup: true

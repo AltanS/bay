@@ -1,0 +1,3 @@
+---
+# Headscale user that owns VPS server nodes — defaults to stack_name.
+headscale_server_user: "{{ stack_name }}"

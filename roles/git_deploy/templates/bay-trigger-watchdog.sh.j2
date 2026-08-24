@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Trigger stall watchdog.
+#
+# Scans ${TRIGGER_DIR} for *.trigger files older than STALE_AGE_SEC and
+# emits a single Telegram alert listing them. Rate-limited by comparing
+# the current stale set against ${STATE_DIR}/watchdog-last-alert.json —
+# re-alerts only when the set of stale services changes OR the last alert
+# is older than WATCHDOG_REPEAT_SEC.
+#
+# The watchdog MUST NOT exit non-zero: a watchdog bug should not cascade
+# into systemd OnFailure= alerts, because the external failure channel
+# (bay-build-alert@) is reserved for build unit failures, not for the
+# observability plumbing itself. Any internal error is swallowed and
+# logged to the audit file.
+
+# NOTE: no `set -euo pipefail` — we want to survive unexpected failures
+# in awk/jq/find rather than exit 1 and fire a false systemd alert.
+
+STACK_DIR="{{ stack_dir }}"
+TRIGGER_DIR="${STACK_DIR}/triggers"
+STATE_DIR="${STACK_DIR}/state"
+AUDIT_LOG="${STATE_DIR}/stall-watchdog.log"
+LAST_ALERT_FILE="${STATE_DIR}/watchdog-last-alert.json"
+
+STALE_AGE_SEC={{ git_deploy_stall_watchdog_threshold | default(600) }}
+# Re-alert cadence when the same set of stale services stays stale.
+WATCHDOG_REPEAT_SEC={{ git_deploy_stall_watchdog_repeat_sec | default(1800) }}
+
+BAY_ALERT_HEADER={{ docker_monitor_alert_header | to_json }}
+
+mkdir -p "${STATE_DIR}" 2>/dev/null || true
+
+format_timestamp() {
+  date -u +"%b %d, %H:%M UTC"
+}
+
+{% include '_notify.sh.j2' %}
+HOSTNAME="${BAY_HOST}"
+
+_audit() {
+  # Append a single-line audit record. Never fail the script.
+  local count="$1" action="$2"
+  printf '[%s] host=%s stale_count=%d action=%s\n' \
+    "$(date -Iseconds)" "${HOSTNAME}" "${count}" "${action}" \
+    >> "${AUDIT_LOG}" 2>/dev/null || true
+}
+
+# If the triggers directory doesn't exist (fresh host, no builds yet),
+# log and exit cleanly.
+if [[ ! -d "${TRIGGER_DIR}" ]]; then
+  _audit 0 "no-trigger-dir"
+  exit 0
+fi
+
+# Collect stale *.trigger files. STALE_AGE_SEC -> minutes for find -mmin.
+STALE_MINUTES=$(( STALE_AGE_SEC / 60 ))
+# Guard against bogus thresholds
+if [[ "${STALE_MINUTES}" -lt 1 ]]; then
+  STALE_MINUTES=1
+fi
+
+# Find stale triggers. Suppress errors so a missing dir / race / perms
+# issue doesn't exit the script non-zero.
+STALE_FILES=$(find "${TRIGGER_DIR}" -maxdepth 1 -type f -name '*.trigger' \
+  -mmin +"${STALE_MINUTES}" 2>/dev/null | sort || true)
+
+if [[ -z "${STALE_FILES}" ]]; then
+  _audit 0 "clean"
+  # Clear the last-alert state so the next stall alerts immediately
+  # instead of being rate-limited against a stale snapshot.
+  rm -f "${LAST_ALERT_FILE}" 2>/dev/null || true
+  exit 0
+fi
+
+# Build the stale-service list, preserving sort order.
+STALE_SVCS=()
+STALE_DETAILS=""
+NOW_EPOCH=$(date +%s)
+while IFS= read -r path; do
+  [[ -z "${path}" ]] && continue
+  fname="${path##*/}"
+  svc="${fname%.trigger}"
+  STALE_SVCS+=("${svc}")
+  # Age in minutes (integer). `stat -c %Y` = mtime in epoch seconds.
+  mtime=$(stat -c %Y "${path}" 2>/dev/null || echo "${NOW_EPOCH}")
+  age_min=$(( (NOW_EPOCH - mtime) / 60 ))
+  # Content is "pull" for pull-signal triggers, empty for push triggers.
+  # Read defensively — never fail the script on a missing/unreadable file.
+  content=$(head -c 32 "${path}" 2>/dev/null | tr '\n' ' ' | tr -d '\r' || true)
+  [[ -z "${content}" ]] && content="(empty: push trigger)"
+  STALE_DETAILS+="$(printf '• <code>%s</code>: %d min old [%s]\n' "${svc}" "${age_min}" "${content}")"
+done <<< "${STALE_FILES}"
+
+STALE_COUNT="$(printf '%s\n' "${STALE_SVCS[@]}" | grep -c . 2>/dev/null || echo 0)"
+[[ -z "${STALE_COUNT}" ]] && STALE_COUNT=0
+
+# ── Rate-limit: only alert when the set changes or WATCHDOG_REPEAT_SEC has passed.
+CURRENT_SET=$(printf '%s\n' "${STALE_SVCS[@]}" | sort -u | tr '\n' ',' | sed 's/,$//')
+SHOULD_ALERT=1
+
+if [[ -f "${LAST_ALERT_FILE}" ]]; then
+  LAST_SET=$(jq -r '.services // "" | if type == "array" then join(",") else . end' \
+    "${LAST_ALERT_FILE}" 2>/dev/null || echo "")
+  LAST_TS=$(jq -r '.ts_epoch // 0' "${LAST_ALERT_FILE}" 2>/dev/null || echo "0")
+  # Default 0 if jq/file was malformed.
+  [[ -z "${LAST_TS}" || "${LAST_TS}" == "null" ]] && LAST_TS=0
+  AGE=$(( NOW_EPOCH - LAST_TS ))
+  if [[ "${LAST_SET}" == "${CURRENT_SET}" && "${AGE}" -lt "${WATCHDOG_REPEAT_SEC}" ]]; then
+    SHOULD_ALERT=0
+  fi
+fi
+
+if [[ "${SHOULD_ALERT}" -eq 1 ]]; then
+  MSG=$(printf '\u26a0\ufe0f <b>Build pipeline stall</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Stale:      %d trigger(s) older than %d min\n\u25b8 Time:       %s\n\n%s\nInspect cause: <code>journalctl -u bay-build@&lt;svc&gt; --since 2h ago</code>\nIf circuit breaker tripped: <code>bay build reset &lt;svc&gt;</code>\nClear stale file: <code>rm %s/&lt;svc&gt;.trigger</code>' \
+    "${HOSTNAME}" "${STALE_COUNT}" "${STALE_MINUTES}" "$(format_timestamp)" "${STALE_DETAILS}" "${TRIGGER_DIR}")
+  bay_notify build.pipeline_stalled "${MSG}"
+
+  # Persist current set + timestamp for rate-limit comparison.
+  # Use jq if available for a properly formatted JSON doc; fall back to
+  # a hand-built string. Writing uses mktemp + mv for atomicity.
+  tmpfile=$(mktemp "${LAST_ALERT_FILE}.XXXXXX" 2>/dev/null || echo "${LAST_ALERT_FILE}.tmp")
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "${CURRENT_SET}" | jq -Rc --argjson ts "${NOW_EPOCH}" \
+      '{services: (split(",") | map(select(length > 0))), ts_epoch: $ts}' \
+      > "${tmpfile}" 2>/dev/null || \
+      printf '{"services":"%s","ts_epoch":%s}\n' "${CURRENT_SET}" "${NOW_EPOCH}" > "${tmpfile}"
+  else
+    printf '{"services":"%s","ts_epoch":%s}\n' "${CURRENT_SET}" "${NOW_EPOCH}" > "${tmpfile}"
+  fi
+  mv -f "${tmpfile}" "${LAST_ALERT_FILE}" 2>/dev/null || true
+  _audit "${STALE_COUNT}" "alerted"
+else
+  _audit "${STALE_COUNT}" "suppressed"
+fi
+
+# Always succeed.
+exit 0

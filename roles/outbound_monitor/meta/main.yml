@@ -1,0 +1,16 @@
+---
+galaxy_info:
+  role_name: outbound_monitor
+  author: bay
+  description: Systemd timer that probes external endpoints and alerts via Telegram on connectivity loss/recovery
+  min_ansible_version: "2.12"
+  platforms:
+    - name: Debian
+      versions:
+        - bookworm
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+
+dependencies: []

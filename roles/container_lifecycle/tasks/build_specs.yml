@@ -1,0 +1,462 @@
+---
+# Build container specs from active_services, active_accessories, and infra config
+#
+# Input:  active_services, active_accessories (from deploy.yml pre_tasks)
+#         + traefik/watchtower/headscale role defaults (from play vars)
+# Output: container_specs (list of container spec dicts)
+#
+# Called automatically by main.yml when container_specs is not provided.
+
+# ── Traefik config for label generation ──────────────────────────────────
+
+- name: Assemble traefik config for label generation
+  ansible.builtin.set_fact:
+    _traefik_config:
+      traefik_docker_network: "{{ traefik_docker_network | default('services') }}"
+      traefik_security_headers_enabled: "{{ traefik_security_headers_enabled | default(true) }}"
+      traefik_compress_enabled: "{{ traefik_compress_enabled | default(true) }}"
+      traefik_error_pages_enabled: "{{ traefik_error_pages_enabled | default(false) }}"
+      traefik_rate_limit_average: "{{ traefik_rate_limit_average | default(100) }}"
+      traefik_rate_limit_burst: "{{ traefik_rate_limit_burst | default(50) }}"
+      traefik_rate_limit_period: "{{ traefik_rate_limit_period | default('1s') }}"
+      traefik_in_flight_req_amount: "{{ traefik_in_flight_req_amount | default(100) }}"
+      traefik_circuit_breaker_expression: "{{ traefik_circuit_breaker_expression | default('NetworkErrorRatio() > 0.5') }}"
+      traefik_retry_attempts: "{{ traefik_retry_attempts | default(4) }}"
+      stack_name: "{{ stack_name | default('bay') }}"
+      # Per-router entrypoints (traefik_split_entrypoints). Default 'websecure'
+      # → non-split hosts render byte-identically; a split host sets these so
+      # VPN routers also bind the tailnet listener (websecure_tailnet).
+      vpn_entrypoints: "{{ vpn_entrypoints | default('websecure') }}"
+      public_entrypoints: "{{ public_entrypoints | default('websecure') }}"
+
+# ── Service specs ────────────────────────────────────────────────────────
+
+- name: Initialize container spec lists
+  ansible.builtin.set_fact:
+    _service_specs: []
+    _accessory_specs: []
+    _infra_specs: []
+
+- name: Build service container specs
+  ansible.builtin.set_fact:
+    _service_specs: "{{ _service_specs + [_base | combine(_optional)] }}"
+  loop: "{{ (active_services | default({})) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    _name: "{{ item.key }}"
+    _svc: "{{ item.value }}"
+    _traefik_labels: "{{ _svc | bay_traefik_labels(_name, _traefik_config) }}"
+    _wt_labels: "{{ (_svc['update'] | default('monitor')) | bay_watchtower_labels(watchtower_enabled | default(false)) }}"
+    _log_rotation: "{{ _svc.log_rotation | default(None) | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    # Service host-port binding via `ports.expose:`. Mirrors the
+    # accessory builder's `_acc_port_rendered` block below, but reads from
+    # `_svc.ports.expose` (nested) and renders both halves of the binding
+    # from `_svc.ports.internal` (host port == container port for services
+    # — there is no remap path). `.get()` chain protects against the
+    # `dict object has no attribute 'expose'` trap when `ports:` is absent
+    # (impossible in schema-valid services but defended for safety, same
+    # pattern as the env.get() fix in deploy_stack/tasks/main.yml).
+    _svc_ports: "{{ _svc.get('ports', {}) }}"
+    _svc_expose: "{{ _svc_ports.get('expose', '') }}"
+    _svc_internal: "{{ _svc_ports.get('internal', 0) }}"
+    _svc_port_rendered: >-
+      {%- if _svc_expose == 'loopback' -%}127.0.0.1:{{ _svc_internal }}:{{ _svc_internal }}{%- elif _svc_expose in ['gateway', 'tailnet'] -%}{{ gateway_bind_ip }}:{{ _svc_internal }}:{{ _svc_internal }}{%- elif _svc_expose == 'host' -%}0.0.0.0:{{ _svc_internal }}:{{ _svc_internal }}{%- endif -%}
+    _base:
+      name: "{{ _name }}"
+      type: service
+      image: "{{ _svc.image | default('argo-' ~ stack_name ~ '-' ~ _name ~ ':latest') }}"  # legacy-argo: live image tag on hosts, migrate separately
+      restart_policy: unless-stopped
+      networks:
+        - "{{ traefik_docker_network | default('services') }}"
+      labels: "{{ _traefik_labels | combine(_wt_labels) }}"
+      zero_downtime: "{{ _svc['zero_downtime'] | default(false) }}"
+    _optional: >-
+      {{ {}
+         | combine({'env_file': stack_dir ~ '/env/' ~ _name ~ '.env'}
+                   if (_svc.env is defined or _svc.database is defined)
+                   else {})
+         | combine({'volumes': _svc.volumes | bay_prefix_volumes(stack_name | default('bay'))}
+                   if _svc.volumes is defined and _svc.volumes
+                   else {})
+         | combine({'healthcheck': _svc.healthcheck | bay_healthcheck(_svc.ports.internal | default(80))}
+                   if _svc.healthcheck is defined
+                   else {})
+         | combine({'mem_limit': _svc.mem_limit}
+                   if _svc.mem_limit is defined
+                   else {})
+         | combine({'command': _svc.command}
+                   if _svc.command is defined
+                   else {})
+         | combine({'entrypoint': _svc.entrypoint}
+                   if _svc.entrypoint is defined
+                   else {})
+         | combine({'build': true}
+                   if _svc.build is defined
+                   else {})
+         | combine({'health_check_timeout': _svc.health_check_timeout}
+                   if _svc.health_check_timeout is defined
+                   else {})
+         | combine({'ports': [_svc_port_rendered]}
+                   if (_svc_expose != '')
+                   else {})
+         | combine(_log_rotation)
+      }}
+
+# ── Accessory specs ──────────────────────────────────────────────────────
+
+- name: Build accessory container specs
+  ansible.builtin.set_fact:
+    _accessory_specs: "{{ _accessory_specs + [_base | combine(_optional)] }}"
+  loop: "{{ (active_accessories | default({})) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    _name: "{{ item.key }}"
+    _acc: "{{ item.value }}"
+    _wt_labels: "{{ (_acc['update'] | default('monitor')) | bay_watchtower_labels(watchtower_enabled | default(false)) }}"
+    _log_rotation: "{{ _acc.log_rotation | default(None) | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    # Resolve the accessory's host-port binding. Mirrors the expose: logic in
+    # deploy_stack/templates/_macros.j2:container_base so _spec.ports carries
+    # the fully-rendered `<host_ip>:<host_port>:<ctr_port>` string — the
+    # drift-check and docker_container module both rely on this matching the
+    # actual binding. `expose:` is authoritative (default: loopback). A later
+    # change severed the `links:`-driven rewrite that pre-empted this path.
+    _acc_port_pair: "{{ _acc.port | default('') | regex_replace('^\\d+\\.\\d+\\.\\d+\\.\\d+:', '') }}"
+    _acc_expose: "{{ _acc.expose | default('loopback') }}"
+    _acc_port_rendered: >-
+      {%- if _acc_expose == 'loopback' -%}127.0.0.1:{{ _acc_port_pair }}{%- elif _acc_expose in ['gateway', 'tailnet'] -%}{{ gateway_bind_ip }}:{{ _acc_port_pair }}{%- elif _acc_expose == 'host' -%}0.0.0.0:{{ _acc_port_pair }}{%- endif -%}
+    _base:
+      name: "{{ _name }}"
+      type: accessory
+      image: "{{ _acc.image }}"
+      restart_policy: unless-stopped
+      labels: "{{ _wt_labels }}"
+    _optional: >-
+      {{ {}
+         | combine({'networks': [traefik_docker_network | default('services')]}
+                   if _acc.network_mode is not defined
+                   else {})
+         | combine({'network_mode': _acc.network_mode}
+                   if _acc.network_mode is defined
+                   else {})
+         | combine({'env_file': stack_dir ~ '/env/' ~ _name ~ '.env'}
+                   if _acc.env is defined
+                   else {})
+         | combine({'volumes': _acc.volumes | bay_prefix_volumes(stack_name | default('bay'))}
+                   if _acc.volumes is defined and _acc.volumes
+                   else {})
+         | combine({'ports': [_acc_port_rendered]}
+                   if _acc.port is defined
+                   else {})
+         | combine({'healthcheck': {'test': _acc.healthcheck.test,
+                                    'interval': _acc.healthcheck.interval | default('10s'),
+                                    'retries': _acc.healthcheck.retries | default(3)}}
+                   if _acc.healthcheck is defined
+                   else {})
+         | combine({'mem_limit': _acc.mem_limit}
+                   if _acc.mem_limit is defined
+                   else {})
+         | combine({'command': _acc.command}
+                   if _acc.command is defined
+                   else {})
+         | combine({'entrypoint': _acc.entrypoint}
+                   if _acc.entrypoint is defined
+                   else {})
+         | combine(_log_rotation)
+      }}
+
+# ── Infrastructure specs ─────────────────────────────────────────────────
+# Built conditionally based on which infra features are enabled.
+# These mirror the dedicated partial templates (_traefik.j2, _watchtower.j2, etc.)
+
+- name: Build traefik container spec
+  ansible.builtin.set_fact:
+    _infra_specs: "{{ _infra_specs + [_traefik_spec | combine(_traefik_optional) | combine(_traefik_log_rotation)] }}"
+  vars:
+    _traefik_label_config:
+      vpn_allowed_ips: "{{ vpn_allowed_ips | default(['127.0.0.1']) }}"
+      traefik_security_headers_enabled: "{{ traefik_security_headers_enabled | default(true) }}"
+      traefik_security_headers: "{{ traefik_security_headers | default({}) }}"
+      traefik_compress_enabled: "{{ traefik_compress_enabled | default(true) }}"
+      traefik_error_pages_enabled: "{{ traefik_error_pages_enabled | default(false) }}"
+      traefik_error_pages_status: "{{ traefik_error_pages_status | default('400-599') }}"
+      traefik_error_pages_query: "{{ traefik_error_pages_query | default('/{status}.html') }}"
+    _traefik_log_rotation: "{{ traefik_log_rotation | default(None) | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    # Mirror the gated block in roles/deploy_stack/templates/_traefik.j2: when the
+    # DNS-01 challenge is on (tailnet ingress), Traefik needs the acme-dns.json
+    # store + the file-provider dynamic dir mounted, and CF_DNS_API_TOKEN from
+    # {{ stack_dir }}/env/traefik.env (slurped by reconcile.yml). Gated so a
+    # non-ingress host builds a byte-identical spec.
+    _traefik_dns_enabled: "{{ traefik_dns_challenge_enabled | default(false) | bool }}"
+    _traefik_dns_volumes: >-
+      {{ [(traefik_acme_dns_path | default(stack_dir ~ '/acme-dns.json')) ~ ':/etc/traefik/acme-dns.json',
+          stack_dir ~ '/dynamic:/etc/traefik/dynamic:ro']
+         if _traefik_dns_enabled else [] }}
+    _traefik_optional: "{{ {'env_file': stack_dir ~ '/env/traefik.env'} if _traefik_dns_enabled else {} }}"
+    _traefik_spec:
+      name: "{{ traefik_container_name | default('traefik') }}"
+      type: infra
+      image: "{{ traefik_image | default('traefik:v3.6') }}"
+      restart_policy: unless-stopped
+      network_mode: host
+      volumes: >-
+        {{ ['/var/run/docker.sock:/var/run/docker.sock:ro',
+            (traefik_config_path | default(stack_dir ~ '/traefik.yml')) ~ ':/etc/traefik/traefik.yml:ro',
+            (traefik_acme_path | default(stack_dir ~ '/acme.json')) ~ ':/etc/traefik/acme.json',
+            ((traefik_access_log_path | default(stack_dir ~ '/logs/traefik/access.log')) | dirname) ~ ':/var/log/traefik']
+           + _traefik_dns_volumes }}
+      labels: "{{ _traefik_label_config | bay_traefik_global_labels }}"
+
+- name: Build watchtower container spec
+  ansible.builtin.set_fact:
+    _infra_specs: "{{ _infra_specs + [_watchtower_spec | combine(_infra_log_rotation)] }}"
+  when: watchtower_enabled | default(true)
+  vars:
+    _infra_log_rotation: "{{ None | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    _watchtower_spec:
+      name: watchtower
+      type: infra
+      image: "{{ watchtower_image | default('nickfedor/watchtower:latest') }}"
+      restart_policy: unless-stopped
+      networks:
+        - "{{ traefik_docker_network | default('services') }}"
+      volumes:
+        - /var/run/docker.sock:/var/run/docker.sock:ro
+      env:
+        WATCHTOWER_LABEL_ENABLE: "true"
+        WATCHTOWER_CLEANUP: "true"
+        WATCHTOWER_SCHEDULE: "{{ watchtower_schedule | default('0 0 4 * * *') }}"
+        WATCHTOWER_MONITOR_ONLY: "{{ watchtower_monitor_only | default(true) | string | lower }}"
+        WATCHTOWER_NOTIFICATION_URL: "{{ 'telegram://' ~ watchtower_telegram_bot_token ~ '@telegram?chats=' ~ watchtower_telegram_chat_id if ((watchtower_telegram_bot_token | default('')) | length > 0 and (watchtower_telegram_chat_id | default('')) | length > 0) else omit }}"
+      labels:
+        com.centurylinklabs.watchtower.enable: "false"
+
+- name: Build headscale container spec
+  ansible.builtin.set_fact:
+    _infra_specs: "{{ _infra_specs + [_headscale_spec | combine(_infra_log_rotation)] }}"
+  when:
+    - (access_gateway | default('wireguard')) == 'headscale'
+    - headscale_server | default(false)
+  vars:
+    _infra_log_rotation: "{{ None | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    _headscale_spec:
+      name: headscale
+      type: infra
+      image: "headscale/headscale:{{ headscale_version }}"
+      command: serve
+      restart_policy: unless-stopped
+      networks:
+        - "{{ traefik_docker_network | default('services') }}"
+      volumes:
+        - /opt/headscale/config:/etc/headscale
+        - /opt/headscale/data:/var/lib/headscale
+      ports:
+        - "3478:3478/udp"
+      labels:
+        traefik.enable: "true"
+        traefik.docker.network: "{{ traefik_docker_network | default('services') }}"
+        traefik.http.routers.headscale.rule: "Host(`{{ headscale_domain }}`)"
+        traefik.http.routers.headscale.entrypoints: websecure
+        traefik.http.routers.headscale.tls.certresolver: letsencrypt
+        traefik.http.routers.headscale.middlewares: public-chain
+        traefik.http.services.headscale.loadbalancer.server.port: "8080"
+        com.centurylinklabs.watchtower.enable: "false"
+
+- name: Build webhook receiver container spec
+  ansible.builtin.set_fact:
+    _infra_specs: "{{ _infra_specs + [_webhook_spec | combine(_infra_log_rotation)] }}"
+  when:
+    - webhook is defined
+    - >-
+      (active_services | default({}) | dict2items | selectattr('value.build', 'defined') | list | length) > 0
+      or (_is_build_server_for_webhook and _has_global_remote_builds)
+  vars:
+    _infra_log_rotation: "{{ None | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    # Both of these already evaluate to native bools (`==` and `> 0`), so they
+    # are used bare below. Do NOT add `| bool`: these are task-level vars, and
+    # ansible-lint statically renders a `vars:` block without resolving sibling
+    # references — `bool` then receives the raw "{{ ... }}" text, coerces it to
+    # False, and emits a deprecation that becomes a hard error in core 2.23.
+    # Runtime was always correct; only the lint-time render was affected.
+    _is_build_server_for_webhook: "{{ (build_server | default('')) == inventory_hostname }}"
+    _has_global_remote_builds: >-
+      {{
+        (
+          (services | default({})) | dict2items
+          | selectattr('value.build', 'defined')
+          | selectattr('value.build.strategy', 'defined')
+          | selectattr('value.build.strategy', 'in', ['remote', 'push'])
+          | list | length
+        )
+        +
+        (
+          (services | default({})) | dict2items
+          | selectattr('value.build', 'defined')
+          | rejectattr('value.build.strategy', 'defined')
+          | list | length
+          if (git_deploy_build_strategy | default('local')) in ['remote', 'push']
+          else 0
+        )
+        > 0
+      }}
+    _build_services: "{{ active_services | dict2items | selectattr('value.build', 'defined') | list }}"
+    _all_build_services_for_webhook: >-
+      {{
+        (services | default({})) | dict2items
+        | selectattr('value.build', 'defined')
+        | list
+        if (_is_build_server_for_webhook and _has_global_remote_builds)
+        else _build_services
+      }}
+    _service_branches: "{{ _all_build_services_for_webhook | map(attribute='key') | zip(_all_build_services_for_webhook | map(attribute='value.build.branch', default='main')) | map('join', ':') | join(',') }}"
+    _webhook_spec:
+      name: bay-webhook
+      type: infra
+      image: bay-webhook:latest
+      build: true
+      restart_policy: unless-stopped
+      networks:
+        - "{{ traefik_docker_network | default('services') }}"
+      env:
+        WEBHOOK_SECRET: "{{ webhook.secret }}"
+        TRIGGER_DIR: /triggers
+        SERVICE_BRANCHES: "{{ _service_branches }}"
+        TELEGRAM_BOT_TOKEN: "{{ docker_monitor_telegram_bot_token | default('') }}"
+        TELEGRAM_CHAT_ID: "{{ docker_monitor_telegram_chat_id | default('') }}"
+        TELEGRAM_HEADER: "{{ docker_monitor_alert_header | default('') }}"
+        HOSTNAME: "{{ bay_alert_host }}"
+        LOCAL_REGION: "{{ region | default('') }}"
+        WEBHOOK_PEER_TIMEOUT: "{{ git_deploy_webhook_peer_timeout | default(10) | string }}"
+        IS_BUILD_SERVER: "{{ 'true' if _is_build_server_for_webhook else '' }}"
+        # `else omit` is load-bearing. A plain `| default('')` would add these
+        # keys to every consumer's container spec, change config_hash, and
+        # recreate the webhook receiver on the next deploy for everyone —
+        # including those who never enable the feature. Same pattern as
+        # WATCHTOWER_NOTIFICATION_URL above.
+        ALERT_WEBHOOK_URL: "{{ alert_webhook_url if (alert_webhook_url | default('')) | length > 0 else omit }}"
+        ALERT_WEBHOOK_FORMAT: "{{ alert_webhook_format | default('campfire') if (alert_webhook_url | default('')) | length > 0 else omit }}"
+      volumes:
+        - "{{ stack_dir }}/triggers:/triggers"
+        - "{{ stack_dir }}/webhook/config.json:/config/services.json:ro"
+        - "{{ stack_dir }}/webhook/image-map.json:/config/image-map.json:ro"
+      labels:
+        traefik.enable: "true"
+        traefik.docker.network: "{{ traefik_docker_network | default('services') }}"
+        traefik.http.routers.bay-webhook.rule: "Host(`{{ webhook.domain }}`)"
+        traefik.http.routers.bay-webhook.entrypoints: websecure
+        traefik.http.routers.bay-webhook.tls.certresolver: letsencrypt
+        traefik.http.routers.bay-webhook.middlewares: public-chain
+        traefik.http.services.bay-webhook.loadbalancer.server.port: "9000"
+        com.centurylinklabs.watchtower.enable: "false"
+
+- name: Build zot registry container spec
+  ansible.builtin.set_fact:
+    _infra_specs: "{{ _infra_specs + [_zot_spec | combine(_zot_optional) | combine(_infra_log_rotation)] }}"
+  when:
+    - zot_enabled | default(false)
+    - zot_server | default(false)
+  vars:
+    _infra_log_rotation: "{{ None | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    # Mirror the gate from roles/deploy_stack/templates/_zot.j2: when the S3
+    # driver is active, the zot role renders {{ stack_dir }}/env/zot.env with
+    # AWS_* and the container must read it on startup. Without env_file, the
+    # S3 driver fails with `s3aws: NoCredentialProviders` and restart-loops.
+    # Gated (not unconditional) because the zot role removes the env file on
+    # the filesystem driver, and reconcile.yml slurps every spec's env_file
+    # into the bundle — a missing file would fail the play.
+    _zot_optional: >-
+      {{ {'env_file': stack_dir ~ '/env/zot.env'}
+         if (zot_storage_driver | default('filesystem')) == 's3'
+         else {} }}
+    # Kept as a named intermediate (not inlined into the default() arg of the
+    # label below): a ternary inside default() renders differently across
+    # Jinja configurations — the two-step form is unambiguous everywhere.
+    _zot_entrypoints_default: "{{ 'websecure,websecure_tailnet' if traefik_split_entrypoints | default(false) | bool else 'websecure' }}"
+    _zot_spec:
+      name: zot
+      type: infra
+      image: "{{ zot_image | default('ghcr.io/project-zot/zot:v2.1.15') }}"
+      restart_policy: unless-stopped
+      networks:
+        - "{{ traefik_docker_network | default('services') }}"
+      volumes:
+        - "{{ zot_config_dir | default('/opt/zot/config') }}:/etc/zot:ro"
+        - "{{ zot_data_dir | default('/opt/zot/data') }}:/var/lib/registry"
+      labels:
+        traefik.enable: "true"
+        traefik.docker.network: "{{ traefik_docker_network | default('services') }}"
+        traefik.http.routers.zot.rule: "Host(`{{ zot_domain }}`)"
+        # Split entrypoints: bind BOTH the public and tailnet listeners (see
+        # _zot_entrypoints_default above). The infra build host resolves
+        # zot_domain to its own tailnet IP (avoids a public-IP hairpin on
+        # large layer pushes) and so hits websecure_tailnet; deployment nodes
+        # resolve it to the public IP and hit websecure. Binding only
+        # websecure 404s every infra-originated push (see GitHub #27). A
+        # consumer can override the whole set via group_vars `zot_entrypoints`
+        # (mirrors the vpn_entrypoints idiom above). Mirror of
+        # roles/deploy_stack/templates/_zot.j2.
+        traefik.http.routers.zot.entrypoints: "{{ zot_entrypoints | default(_zot_entrypoints_default) }}"
+        traefik.http.routers.zot.tls.certresolver: letsencrypt
+        traefik.http.routers.zot.middlewares: public-chain
+        traefik.http.services.zot.loadbalancer.server.port: "{{ zot_port | default(5000) | string }}"
+        com.centurylinklabs.watchtower.enable: "false"
+
+- name: Build error pages container spec
+  ansible.builtin.set_fact:
+    _infra_specs: "{{ _infra_specs + [_error_pages_spec | combine(_infra_log_rotation)] }}"
+  when: traefik_error_pages_enabled | default(false)
+  vars:
+    _infra_log_rotation: "{{ None | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    _error_pages_spec:
+      name: error-pages
+      type: infra
+      image: "{{ traefik_error_pages_image | default('tarampampam/error-pages:3') }}"
+      restart_policy: unless-stopped
+      networks:
+        - "{{ traefik_docker_network | default('services') }}"
+      env:
+        TEMPLATE_NAME: "{{ traefik_error_pages_template | default('ghost') }}"
+      labels:
+        traefik.enable: "true"
+        traefik.http.services.error-pages.loadbalancer.server.port: "{{ traefik_error_pages_port | default(8080) | string }}"
+        com.centurylinklabs.watchtower.enable: "false"
+
+- name: Build tailnet-identity container spec
+  ansible.builtin.set_fact:
+    _infra_specs: "{{ _infra_specs + [_tailnet_identity_spec | combine(_ti_optional) | combine(_infra_log_rotation)] }}"
+  when:
+    - tailnet_identity_enabled | default(false)
+    - headscale_server | default(false)
+  vars:
+    _infra_log_rotation: "{{ None | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    # sqlite source needs Headscale state mounted read-only; api source (default)
+    # mounts nothing. Mirror of the gate in deploy_stack/templates/_tailnet_identity.j2.
+    _ti_optional: >-
+      {{ {'volumes': ['/opt/headscale/data:/data:ro']}
+         if (tailnet_identity_source | default('api')) == 'sqlite'
+         else {} }}
+    _tailnet_identity_spec:
+      name: tailnet-identity
+      type: infra
+      image: "{{ tailnet_identity_image | default('argo-tailnet-identity:latest') }}"  # legacy-argo: live image tag on hosts, migrate separately
+      build: true
+      restart_policy: unless-stopped
+      networks:
+        - "{{ traefik_docker_network | default('services') }}"
+      # Published on loopback ONLY so the host-networked Traefik can reach the
+      # ForwardAuth endpoint (Traefik runs network_mode: host and can't resolve
+      # container DNS names). Not exposed to the tailnet/public. The sidecar still
+      # joins the bridge network above to reach headscale:8080 for the api source.
+      ports:
+        - "127.0.0.1:{{ tailnet_identity_port | default(9100) }}:{{ tailnet_identity_port | default(9100) }}"
+      env_file: "{{ stack_dir }}/tailnet-identity/tailnet-identity.env"
+      labels:
+        traefik.enable: "false"
+        com.centurylinklabs.watchtower.enable: "false"
+
+# ── Combine all specs ────────────────────────────────────────────────────
+
+- name: Assemble container_specs
+  ansible.builtin.set_fact:
+    container_specs: "{{ _infra_specs + _accessory_specs + _service_specs }}"

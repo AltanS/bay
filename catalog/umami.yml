@@ -1,0 +1,25 @@
+---
+meta:
+  id: umami
+  name: Umami web analytics
+  category: service
+  domain_prefix: umami
+  dependencies:
+    - postgres
+  post_add_instructions:
+    - "Add APP_SECRET and DB_PASSWORD to vault: bin/bay vault edit <environment>"
+
+defaults:
+  access: public
+  regions: []
+
+spec:
+  image: ghcr.io/umami-software/umami:postgresql-latest
+  ports:
+    internal: 3000
+  depends_on:
+    - postgres
+  env:
+    secret:
+      - APP_SECRET
+      - DB_PASSWORD

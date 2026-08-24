@@ -1,0 +1,11 @@
+---
+# Users role defaults
+
+users_default_shell: /bin/bash
+
+# Whether to create home directories
+users_create_home: true
+
+# Sudoers config for admin user
+users_admin_sudoers: true
+users_admin_sudo_nopasswd: true

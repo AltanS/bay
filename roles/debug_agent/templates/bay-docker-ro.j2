@@ -1,0 +1,70 @@
+#!/bin/bash
+# Managed by Ansible — do not edit manually.
+#
+# Read-only docker surface for the {{ debug_agent_user }} account.
+# Granted through sudo INSTEAD of the `docker` group: group membership is
+# root, because any member can bind-mount / into a container.
+#
+# Permitted: ps, logs, inspect, stats --no-stream, images, system df,
+#            compose ps, compose logs
+# Refused:   everything else, and every flag outside the small allowlist.
+set -euo pipefail
+
+DOCKER=/usr/bin/docker
+
+die() { echo "bay-docker-ro: $*" >&2; exit 1; }
+
+[ "$#" -ge 1 ] || die "usage: bay-docker-ro <ps|logs|inspect|stats|images|system df|compose ps|compose logs> [args]"
+
+verb=$1
+shift
+
+case "$verb" in
+  ps|logs|inspect|images)
+    cmd=( "$verb" )
+    ;;
+  stats)
+    cmd=( stats --no-stream )
+    ;;
+  system)
+    [ "${1:-}" = df ] || die "only 'system df' is permitted"
+    shift
+    cmd=( system df )
+    ;;
+  compose)
+    sub=${1:-}
+    shift || true
+    case "$sub" in
+      ps|logs) cmd=( compose "$sub" ) ;;
+      *) die "only 'compose ps' and 'compose logs' are permitted" ;;
+    esac
+    ;;
+  *)
+    die "subcommand not permitted: $verb"
+    ;;
+esac
+
+for arg in "$@"; do
+  case "$arg" in
+    exec|run|cp|attach|build|create|kill|rm|rmi|start|stop|restart|update|\
+    login|save|load|push|pull|commit|export|import|network|volume|swarm|\
+    secret|config|plugin|service|node|context|builder|buildx)
+      die "token not permitted: $arg"
+      ;;
+    -v|--volume|--mount|-u|--user|--privileged|--entrypoint|-w|--workdir|\
+    --host|-H|--config|--context|-c|--tlscert|--tlskey|--tlscacert)
+      die "flag not permitted: $arg"
+      ;;
+    -*)
+      flag=${arg%%=*}
+      case "$flag" in
+        --tail|--since|--until|-n|--no-stream|--format|-a|--all|--timestamps|-t|--no-trunc)
+          ;;
+        *) die "flag not permitted: $arg" ;;
+      esac
+      ;;
+    *) ;;
+  esac
+done
+
+exec "$DOCKER" "${cmd[@]}" "$@"

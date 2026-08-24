@@ -1,0 +1,7 @@
+---
+# Region-specific overrides for the EU server
+# These override values from all/ and production/
+# See docs/multi-region.md for the full pattern.
+
+domain_base: eu.example.com
+letsencrypt_email: admin@eu.example.com

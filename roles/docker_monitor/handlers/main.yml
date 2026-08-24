@@ -1,0 +1,7 @@
+---
+- name: Restart docker-monitor
+  ansible.builtin.systemd:
+    name: docker-monitor
+    state: restarted
+    daemon_reload: true
+  become: true

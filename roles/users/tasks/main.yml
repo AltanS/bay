@@ -1,0 +1,51 @@
+---
+# User and SSH key management
+# Creates users, assigns groups, deploys SSH authorized keys
+
+- name: Ensure user groups exist
+  ansible.builtin.group:
+    name: "{{ item }}"
+    state: present
+  loop: "{{ users | map(attribute='groups') | flatten | unique }}"
+  become: true
+
+- name: Create user accounts
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: "{{ item.groups | join(',') }}"
+    append: true
+    shell: "{{ item.shell | default(users_default_shell) }}"
+    create_home: "{{ users_create_home }}"
+    state: present
+  loop: "{{ users }}"
+  loop_control:
+    label: "{{ item.name }}"
+  become: true
+
+- name: Deploy SSH authorized keys
+  ansible.posix.authorized_key:
+    user: "{{ item.0.name }}"
+    key: "{{ item.1 }}"
+    state: present
+    exclusive: false
+  loop: "{{ users | subelements('keys', skip_missing=True) }}"
+  loop_control:
+    label: "{{ item.0.name }}"
+  become: true
+
+- name: Configure passwordless sudo for admin user
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/{{ admin_user }}"
+    content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: "visudo -cf %s"
+  when: users_admin_sudoers and users_admin_sudo_nopasswd
+  become: true
+
+- name: Lock password for service user (key-only access)
+  ansible.builtin.user:
+    name: "{{ app_user }}"
+    password_lock: true
+  become: true

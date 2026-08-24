@@ -1,0 +1,123 @@
+---
+# Docker monitoring setup
+# Container crash monitor, Traefik log rotation, Prometheus config
+
+# ── Container Crash Monitor ────────────────────────────────────────────
+
+- name: Deploy docker-monitor script
+  ansible.builtin.template:
+    src: docker-monitor.py.j2
+    dest: "{{ docker_monitor_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart docker-monitor
+  when: docker_monitor_enabled
+  become: true
+
+- name: Deploy docker-monitor systemd service
+  ansible.builtin.template:
+    src: docker-monitor.service.j2
+    dest: /etc/systemd/system/docker-monitor.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart docker-monitor
+  when: docker_monitor_enabled
+  become: true
+
+- name: Enable and start docker-monitor
+  ansible.builtin.systemd:
+    name: docker-monitor
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: docker_monitor_enabled
+  become: true
+
+# ── Traefik Access Log Rotation ────────────────────────────────────────
+
+- name: Deploy Traefik logrotate config
+  ansible.builtin.template:
+    src: traefik-logrotate.j2
+    dest: /etc/logrotate.d/traefik
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+# ── Prometheus Config ──────────────────────────────────────────────────
+
+- name: Ensure Prometheus config directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/config/prometheus"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Deploy Prometheus configuration
+  ansible.builtin.template:
+    src: prometheus.yml.j2
+    dest: "{{ stack_dir }}/config/prometheus/prometheus.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+# ── Grafana Provisioning ─────────────────────────────────────────────
+
+- name: Create Grafana provisioning datasources directory
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/config/grafana/provisioning/datasources"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Create Grafana provisioning dashboards directory
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/config/grafana/provisioning/dashboards"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Create Grafana dashboards data directory
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/config/grafana/dashboards"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Deploy Grafana datasource provisioning config
+  ansible.builtin.template:
+    src: grafana-datasource.yml.j2
+    dest: "{{ stack_dir }}/config/grafana/provisioning/datasources/datasource.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Deploy Grafana dashboard provider config
+  ansible.builtin.template:
+    src: grafana-dashboard-provider.yml.j2
+    dest: "{{ stack_dir }}/config/grafana/provisioning/dashboards/dashboard-provider.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Copy Traefik dashboard JSON
+  ansible.builtin.copy:
+    src: grafana-traefik-dashboard.json
+    dest: "{{ stack_dir }}/config/grafana/dashboards/traefik-overview.json"
+    owner: root
+    group: root
+    mode: "0644"
+  become: true

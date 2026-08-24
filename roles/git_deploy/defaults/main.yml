@@ -1,0 +1,132 @@
+---
+# git_deploy role defaults
+
+# Name of the buildx builder instance git_deploy creates and builds with
+# (docker-container driver). Kept in sync with the identical default in
+# roles/cronjobs/defaults/main.yml, which needs it to prune the right cache —
+# `docker builder prune` only touches the *default* builder, so a mismatch
+# means the build cache is never reclaimed (GH#34). tests/test_builder_prune.py
+# asserts the two defaults agree.
+bay_buildx_builder: "argo-builder"  # legacy-argo: live buildx builder / image prefix on hosts, migrate separately
+
+git_deploy_build_dir: "{{ stack_dir }}/builds"
+git_deploy_image_prefix: "argo-{{ stack_name }}"  # legacy-argo: live buildx builder / image prefix on hosts, migrate separately
+
+# Default build strategy for services with build: blocks.
+# Per-service build.strategy overrides this. Values: local | remote | registry
+# ('push' is a deprecated alias for 'remote')
+git_deploy_build_strategy: local
+
+# Persistent clone directory on the build server for remote strategy.
+# Keeps "push-builds" path name for backwards compat on servers that already have it.
+git_deploy_remote_build_dir: "/opt/{{ stack_name }}/push-builds"
+
+# systemd MemoryMax for bay-build@.service — caps the rebuild.sh wrapper
+# (and anything it spawns directly, e.g. git, jq, curl). Does NOT cap the
+# buildkit container — that runs in a separate cgroup; see
+# git_deploy_buildkit_memory_max below.
+# Uppercase G required — systemd rejects lowercase (seen in prod journalctl
+# as "Invalid memory limit '2g', ignoring"). Set to empty string to disable.
+git_deploy_build_mem_limit: "2G"
+
+# Hard memory limit for the buildx builder container (the buildkit sidecar
+# that does the actual `docker build`). Applied via `docker update --memory`
+# on `buildx_buildkit_argo-builder0`. The wrapper cgroup (above) typically  # legacy-argo: live buildx builder / image prefix on hosts, migrate separately
+# uses 30–100 MB; all real build memory pressure is in this container.
+# Defaults to the wrapper var so consumers who already overrode
+# git_deploy_build_mem_limit (e.g. infra hosts that bumped it to 3G) keep a
+# unified cap on upgrade. Override this var explicitly when you need
+# asymmetric caps (e.g. systemd at 2G, buildkit at 2.5G for headroom).
+# Docker accepts decimals here (`2.5G`) — systemd does not.
+git_deploy_buildkit_memory_max: "{{ git_deploy_build_mem_limit }}"
+
+# Cross-service build serialization. rebuild.sh acquires an exclusive flock
+# on this path before doing any work, so when two bay-build@* path units
+# fire simultaneously (common with monorepo pushes that match multiple
+# service path globs) at most one buildkit invocation runs at a time.
+# Without this, concurrent builds OOM-kill the shared buildkit container —
+# issue #9.
+#
+# Path lives under stack_dir (bay-owned) so the unprivileged service user
+# can create it on first run. /run is tmpfs and would be the conventional
+# choice, but it's root-owned and would require a tmpfiles.d drop-in per
+# stack — needless complexity for a per-host mutex. Surviving reboot does
+# no harm: flock is kernel inode-level, not file-content based.
+# Timeout is in seconds.
+git_deploy_build_lock_path: "{{ stack_dir }}/build.lock"
+git_deploy_build_lock_timeout: 3600
+
+# Post-push image retention on the build server (remote strategy only).
+# After `docker push` succeeds, delete all-but-the-N most-recent content-hash
+# tags per image repo on the build host. `latest` is always preserved. Images
+# referenced by a running container are never removed. Registry is the source
+# of truth; local copies are a convenience cache for debugging and fast
+# rollback. This addresses ~2-3 GB/day disk accumulation from untouched
+# content-hash tags on the build server.
+git_deploy_build_keep_tags: 3
+
+# Telegram notifications (reuse docker_monitor vars)
+docker_monitor_telegram_bot_token: ""
+docker_monitor_telegram_chat_id: ""
+docker_monitor_alert_header: ""
+
+# Cross-region webhook fan-out: map of region name -> webhook base URL.
+# Required when a service runs on region A but GitHub only hits region B's webhook.
+# Webhook receives a push for a non-local service and forwards the raw payload to
+# the peer. Leave empty on single-region consumers.
+# Example:
+#   git_deploy_peer_webhook_urls:
+#     eu: https://deploy.eu.example.com
+#     na: https://deploy.na.example.com
+git_deploy_peer_webhook_urls: {}
+
+# Timeout (seconds) for each peer webhook forward POST. Keep short so GitHub's
+# hook delivery window isn't blown by a single unreachable peer.
+git_deploy_webhook_peer_timeout: 10
+
+# Circuit breaker: max consecutive build failures before disabling auto-builds.
+# After this many failures, rebuild.sh blocks subsequent pushes and emits a
+# rate-limited Telegram alert (see the Phase 3 visibility fix).
+# Reset with: bin/bay build reset <service>
+# Bumped from 3 -> 5 after the 2026-04-16 incident: 3 was too aggressive
+# during active dev/debug — a single broken commit pushed three times in
+# rapid succession would silently trip the breaker. 5 leaves operators headroom
+# for iteration while still bounding runaway loops.
+git_deploy_cb_max_failures: 5
+
+# Health check: seconds to wait for a container to pass health checks after restart.
+# If the container is not healthy after this timeout, it's rolled back to :previous.
+# Must be >= the longest per-service healthcheck.start_period (typically 60s default).
+# Bumped from 30 -> 90 after the 2026-04-16 incident: a container with
+# start_period=60s was falsely rolled back because the 30s timeout expired while
+# the container was legitimately still in its start period.
+# Use per-service health_check_timeout in services.yml for services with start_period > 90s.
+git_deploy_health_check_timeout: 90
+
+# Systemd timeout: seconds before systemd kills a hung build process.
+# First-run builds of large images on constrained VPS can take 10+ minutes.
+# Override per-consumer in group_vars if needed.
+git_deploy_build_timeout: 1200
+
+# ── Trigger stall watchdog ──────────────────────────────────────────────
+# A systemd timer fires bay-trigger-watchdog.sh every 5 minutes. The
+# script scans ${stack_dir}/triggers/ for *.trigger files older than
+# `git_deploy_stall_watchdog_threshold` seconds and emits a Telegram
+# alert listing them. Stale triggers indicate the .path unit failed
+# to fire, the bay-build@<svc>.service silently failed before
+# ExecStartPost could clean up, or an operator wrote a trigger by
+# hand that never got picked up — all of which are invisible today.
+
+# Max age (seconds) of a trigger file before it is considered stale.
+# Default 600 (10 min) — rebuilds normally complete in 1–3 min; anything
+# >10 min without being consumed is almost certainly stuck.
+git_deploy_stall_watchdog_threshold: 600
+
+# Re-alert interval (seconds) when the SAME set of stale services stays
+# stale across runs. Default 1800 (30 min) — matches the spec's rate
+# limit so operators aren't spammed while investigating.
+git_deploy_stall_watchdog_repeat_sec: 1800
+
+# Set to false to skip deploying the watchdog entirely (e.g. a consumer
+# that has an external monitoring system covering the same signal).
+git_deploy_stall_watchdog_enabled: true

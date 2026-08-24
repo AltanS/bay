@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# Authoritative infrastructure container definitions.
+# Used by bay-infra-boot.service to recreate missing containers after boot/OOM.
+# Rendered by Ansible — do not edit manually.
+{% import '_macros.j2' as macros with context %}
+
+services:
+{% include '_traefik.j2' %}
+{% include '_watchtower.j2' %}
+{% include '_headscale.j2' %}
+{% include '_webhook_receiver.j2' %}
+
+networks:
+  {{ traefik_docker_network }}:
+    external: true

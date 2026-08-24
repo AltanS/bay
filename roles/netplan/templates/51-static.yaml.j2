@@ -1,0 +1,21 @@
+# Managed by Bay — do not edit manually
+# Static IP configuration. DHCP disabled to prevent systemd-networkd failure mode
+# where a transient netlink timeout permanently marks the interface as "Failed".
+network:
+  version: 2
+  ethernets:
+    {{ netplan_interface }}:
+      match:
+        macaddress: "{{ netplan_mac }}"
+      set-name: {{ netplan_interface }}
+      dhcp4: false
+      dhcp6: false
+      addresses:
+        - "{{ netplan_address }}/{{ netplan_prefix_length }}"
+      routes:
+        - to: "{{ netplan_gateway }}/32"
+          scope: link
+        - to: default
+          via: "{{ netplan_gateway }}"
+      nameservers:
+        addresses: {{ netplan_dns_servers | to_yaml | trim }}

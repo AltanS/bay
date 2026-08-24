@@ -1,0 +1,116 @@
+---
+# swap role — provision a swapfile safety net
+#
+# Idempotent: checks actual file size (not just existence) and recreates only
+# when `swap_size` has changed. Running this role repeatedly with the same
+# `swap_size` produces no changed tasks.
+
+- name: Resolve swap_size to bytes
+  ansible.builtin.set_fact:
+    _swap_size_bytes: "{{ swap_size | human_to_bytes }}"
+  when: swap_enabled | bool
+
+- name: Stat swapfile
+  ansible.builtin.stat:
+    path: "{{ swap_path }}"
+  register: _swap_file
+
+- name: Configure swapfile (swap_enabled)
+  when: swap_enabled | bool
+  become: true
+  block:
+    - name: Detect size mismatch requiring recreate
+      ansible.builtin.set_fact:
+        _swap_needs_recreate: "{{ _swap_file.stat.exists and (_swap_file.stat.size | int) != (_swap_size_bytes | int) }}"
+
+    - name: Disable existing swapfile (size mismatch)
+      ansible.builtin.command:
+        cmd: "swapoff {{ swap_path }}"
+      register: _swapoff_result
+      changed_when: _swapoff_result.rc == 0
+      failed_when:
+        - _swapoff_result.rc != 0
+        - '"Invalid argument" not in _swapoff_result.stderr'
+        - '"not found" not in _swapoff_result.stderr'
+      when: _swap_needs_recreate
+
+    - name: Remove existing swapfile (size mismatch)
+      ansible.builtin.file:
+        path: "{{ swap_path }}"
+        state: absent
+      when: _swap_needs_recreate
+
+    - name: Re-stat after potential removal
+      ansible.builtin.stat:
+        path: "{{ swap_path }}"
+      register: _swap_file_post
+
+    - name: Allocate swapfile
+      ansible.builtin.command:
+        cmd: "fallocate -l {{ swap_size }} {{ swap_path }}"
+      when: not _swap_file_post.stat.exists
+      register: _swap_allocated
+
+    - name: Set swapfile permissions
+      ansible.builtin.file:
+        path: "{{ swap_path }}"
+        owner: root
+        group: root
+        mode: "0600"
+      when: _swap_allocated is changed
+
+    - name: Format swapfile
+      ansible.builtin.command:
+        cmd: "mkswap {{ swap_path }}"
+      when: _swap_allocated is changed
+
+    - name: Enable swapfile
+      ansible.builtin.command:
+        cmd: "swapon --priority {{ swap_priority }} {{ swap_path }}"
+      register: _swapon_result
+      changed_when: _swapon_result.rc == 0
+      failed_when:
+        - _swapon_result.rc != 0
+        - '"Device or resource busy" not in _swapon_result.stderr'
+      when: _swap_allocated is changed
+
+    - name: Ensure swapfile entry in /etc/fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: "^{{ swap_path | regex_escape }}\\s"
+        line: "{{ swap_path }} none swap sw,pri={{ swap_priority }} 0 0"
+        state: present
+
+    - name: Set vm.swappiness
+      ansible.posix.sysctl:
+        name: vm.swappiness
+        value: "{{ swap_swappiness | string }}"
+        sysctl_file: /etc/sysctl.d/99-swap.conf
+        reload: true
+
+- name: Remove swapfile (swap_enabled=false)
+  when:
+    - not (swap_enabled | bool)
+    - _swap_file.stat.exists
+  become: true
+  block:
+    - name: Disable swapfile
+      ansible.builtin.command:
+        cmd: "swapoff {{ swap_path }}"
+      register: _swapoff_disable
+      changed_when: _swapoff_disable.rc == 0
+      failed_when:
+        - _swapoff_disable.rc != 0
+        - '"Invalid argument" not in _swapoff_disable.stderr'
+        - '"not found" not in _swapoff_disable.stderr'
+
+    - name: Remove swapfile from /etc/fstab
+      ansible.builtin.lineinfile:
+        path: /etc/fstab
+        regexp: "^{{ swap_path | regex_escape }}\\s"
+        state: absent
+
+    - name: Delete swapfile
+      ansible.builtin.file:
+        path: "{{ swap_path }}"
+        state: absent

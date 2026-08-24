@@ -1,0 +1,71 @@
+---
+# Resolve build strategy per service and group by strategy type.
+#
+# Input:  _all_build_services (list of service names with build: blocks)
+# Output: _local_build_services, _remote_build_services, _registry_build_services
+#
+# Normalization: 'push' is a deprecated alias for 'remote'. It is resolved
+# to 'remote' early so all downstream code only checks one value.
+
+- name: Resolve per-service build strategies (raw)
+  ansible.builtin.set_fact:
+    _build_strategy_raw: >-
+      {{
+        _build_strategy_raw | default({}) | combine({
+          item: services[item].build.strategy
+                | default(git_deploy_build_strategy)
+                | default('local')
+        })
+      }}
+  loop: "{{ _all_build_services }}"
+  loop_control:
+    label: "{{ item }}: {{ services[item].build.strategy | default(git_deploy_build_strategy) | default('local') }}"
+
+- name: Detect deprecated 'push' strategy usage
+  ansible.builtin.set_fact:
+    _push_deprecated_services: >-
+      {{ _build_strategy_raw | default({}) | dict2items
+         | selectattr('value', 'eq', 'push')
+         | map(attribute='key') | list }}
+
+- name: "DEPRECATION: 'push' strategy renamed to 'remote'"
+  ansible.builtin.debug:
+    msg: >-
+      Services using deprecated 'push' strategy: {{ _push_deprecated_services | join(', ') }}.
+      Rename build.strategy from 'push' to 'remote' in services.yml.
+      'push' will be removed in a future release.
+  when: _push_deprecated_services | length > 0
+
+- name: Normalize strategy — push becomes remote
+  ansible.builtin.set_fact:
+    _build_strategy_map: >-
+      {{
+        _build_strategy_map | default({}) | combine({
+          item.key: (item.value == 'push') | ternary('remote', item.value)
+        })
+      }}
+  loop: "{{ _build_strategy_raw | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}: {{ (item.value == 'push') | ternary('remote', item.value) }}"
+
+- name: Group services by build strategy
+  ansible.builtin.set_fact:
+    _local_build_services: >-
+      {{ _build_strategy_map | default({}) | dict2items
+         | selectattr('value', 'eq', 'local')
+         | map(attribute='key') | list }}
+    _remote_build_services: >-
+      {{ _build_strategy_map | default({}) | dict2items
+         | selectattr('value', 'eq', 'remote')
+         | map(attribute='key') | list }}
+    _registry_build_services: >-
+      {{ _build_strategy_map | default({}) | dict2items
+         | selectattr('value', 'eq', 'registry')
+         | map(attribute='key') | list }}
+
+- name: Log strategy resolution
+  ansible.builtin.debug:
+    msg: >-
+      Build strategies — local: {{ _local_build_services | join(', ') | default('none') }},
+      remote: {{ _remote_build_services | join(', ') | default('none') }},
+      registry: {{ _registry_build_services | join(', ') | default('none') }}
