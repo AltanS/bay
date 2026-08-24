@@ -42,9 +42,48 @@
 # sections 1, 2, 2b, 4, and 5 still scan it.
 #
 # Run locally: bash scripts/leak-scan.sh
+#
+# Optional first argument: a git REF (commit or tree) to scan INSTEAD of the
+# working tree, e.g. `bash scripts/leak-scan.sh HEAD~3`. The pre-push hook
+# uses it to scan every commit it is about to publish — a leak that was
+# introduced and then fixed is still in the history that gets pushed.
 set -uo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+
+REF="${1:-}"
+
+# git grep, with the REF spliced in immediately before the `--` pathspec
+# separator. With no REF this is plain `git grep` over the worktree/index.
+ggrep() {
+    if [ -z "$REF" ]; then
+        git grep "$@"
+        return
+    fi
+    local args=() a
+    for a in "$@"; do
+        if [ "$a" = "--" ]; then args+=("$REF"); fi
+        args+=("$a")
+    done
+    git grep "${args[@]}"
+}
+
+# The tracked-file LIST for section 6. With a REF that is the ref's tree, not
+# the index — same reasoning as ggrep.
+gls() {
+    if [ -z "$REF" ]; then
+        git ls-files
+    else
+        git ls-tree -r --name-only "$REF"
+    fi
+}
+
+# When a REF is given, `git grep -n` prefixes each line with `REF:`. Strip it
+# so downstream filters that anchor on `^path:line:` keep matching. `-h`
+# output carries no prefix at all, so this is only needed on the -n calls.
+strip_ref() {
+    if [ -n "$REF" ]; then sed -e "s#^${REF}:##"; else cat; fi
+}
 
 SELF="scripts/leak-scan.sh"
 # `vendor` is EXCLUDED ONLY from the entropy/hex checks (VENDOR_NO_LOCK,
@@ -61,6 +100,10 @@ VENDOR_EXCLUDES=("${EXCLUDES[@]}" ':!vendor')
 NO_LOCK=("${EXCLUDES[@]}" ':!uv.lock')
 VENDOR_NO_LOCK=("${VENDOR_EXCLUDES[@]}" ':!uv.lock')
 status=0
+
+if [ -n "$REF" ]; then
+    echo "leak-scan: scanning ref $REF"
+fi
 
 fail() {
     status=1
@@ -100,7 +143,8 @@ pattern=$(IFS='|'; echo "${TERMS[*]}")
 # — it is the clone URL every adopter needs — but a bare `SPRQVNTRS` or a
 # bare account name ANYWHERE ELSE still fails, which is the point.
 REPO_SLUG_RE='(github\.com[:/])?(SPRQVNTRS|AltanS)/(argo|bay)(\.git)?'  # legacy-argo: old slug still a leak vector
-hits=$(git grep -IinE "$pattern" -- "${EXCLUDES[@]}" 2>/dev/null \
+hits=$(ggrep -IinE "$pattern" -- "${EXCLUDES[@]}" 2>/dev/null \
+        | strip_ref \
         | sed -E "s#${REPO_SLUG_RE}##g" \
         | grep -iE "$pattern" \
         | grep -vE '^LICENSE:[0-9]+:\s*(Copyright \(c\)|Licensor:|The Licensed Work is)')
@@ -127,14 +171,14 @@ ALLOW+='|1\.1\.1\.1|8\.8\.8\.8|8\.8\.4\.4|9\.9\.9\.9'
 ALLOW+='|1\.2\.3\.4|5\.6\.7\.8|9\.8\.7\.6|2\.2\.2\.2|3\.3\.3\.3|999\.'
 ALLOW+='|185\.12\.64\.[12])'
 
-bad_ips=$(git grep -IhoE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' -- "${EXCLUDES[@]}" 2>/dev/null \
+bad_ips=$(ggrep -IhoE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' -- "${EXCLUDES[@]}" 2>/dev/null \
             | sort -u | grep -vE "$ALLOW" || true)
 
 if [ -n "$bad_ips" ]; then
     fail "Non-documentation IP address found — use RFC 5737 ranges in docs:"
     echo "$bad_ips" >&2
     for ip in $bad_ips; do
-        git grep -In --fixed-strings "$ip" -- "${EXCLUDES[@]}" >&2
+        ggrep -In --fixed-strings "$ip" -- "${EXCLUDES[@]}" | strip_ref >&2
     done
 fi
 
@@ -155,14 +199,14 @@ IPV6_ALLOW='^::1?$'
 IPV6_ALLOW+='|^f[cd][0-9a-f]{2}:'
 IPV6_ALLOW+='|^fe80:'
 IPV6_ALLOW+='|^2001:0?db8:'
-bad_ipv6=$(git grep -IihoE '\b([0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}\b' -- "${EXCLUDES[@]}" 2>/dev/null \
+bad_ipv6=$(ggrep -IihoE '\b([0-9a-f]{1,4}:){2,7}[0-9a-f]{0,4}\b' -- "${EXCLUDES[@]}" 2>/dev/null \
              | tr 'A-Z' 'a-z' | sort -u | grep -E '::|[a-f]' | grep -viE "($IPV6_ALLOW)" || true)
 
 if [ -n "$bad_ipv6" ]; then
     fail "Non-documentation IPv6 address found — use the 2001:db8::/32 documentation prefix:"
     echo "$bad_ipv6" >&2
     for ip6 in $bad_ipv6; do
-        git grep -Iin --fixed-strings "$ip6" -- "${EXCLUDES[@]}" >&2
+        ggrep -Iin --fixed-strings "$ip6" -- "${EXCLUDES[@]}" | strip_ref >&2
     done
 fi
 
@@ -182,7 +226,7 @@ CRED_PATTERNS+='|tskey-auth-[A-Za-z0-9-]{16,}'
 CRED_PATTERNS+='|-----BEGIN [A-Z ]*PRIVATE KEY-----'
 CRED_PATTERNS+='|\$2[aby]\$[0-9]{2}\$[A-Za-z0-9./]{53}'
 
-if hits=$(git grep -InE "$CRED_PATTERNS" -- "${NO_LOCK[@]}" 2>/dev/null); then
+if hits=$(ggrep -InE "$CRED_PATTERNS" -- "${NO_LOCK[@]}" 2>/dev/null | strip_ref); then
     if [ -n "$hits" ]; then
         fail "Credential-shaped token found:"
         echo "$hits" >&2
@@ -209,14 +253,14 @@ ENTROPY_ALLOW+='|^com/integrations/BOTKEY/rooms/'           # alert_channel exam
 ENTROPY_ALLOW+='|^var/lib/crowdsec/data/GeoLite2-'          # doc'd GeoLite2 db paths
 ENTROPY_ALLOW+='|^test_[A-Za-z0-9_]+$'                      # pytest test-id identifiers
 
-ent=$(git grep -IhoE '\b[A-Za-z0-9+/_-]{32,}={0,2}\b' -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null \
+ent=$(ggrep -IhoE '\b[A-Za-z0-9+/_-]{32,}={0,2}\b' -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null \
         | grep -E '[A-Z]' | grep -E '[a-z]' | grep -E '[0-9]' | sort -u \
         | grep -vE "($ENTROPY_ALLOW)" || true)
 if [ -n "$ent" ]; then
     fail "High-entropy string found — looks like a secret:"
     echo "$ent" >&2
     for blob in $ent; do
-        git grep -In --fixed-strings "$blob" -- "${VENDOR_NO_LOCK[@]}" >&2
+        ggrep -In --fixed-strings "$blob" -- "${VENDOR_NO_LOCK[@]}" | strip_ref >&2
     done
 fi
 
@@ -234,11 +278,17 @@ fi
 #     `sha256:` prefix that a value-anchored allowlist pattern would need,
 #     so the digest case is allowlisted by re-checking each candidate's
 #     context (`sha256:<hex>` on the same line) instead of its bare value.
-hex_raw=$(git grep -IihoE '\b[0-9a-f]{32,}\b' -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null \
+#
+#     `PRIVATE_ROOTS="<sha>"` in .githooks/pre-push is the same shape: a git
+#     commit SHA, not a secret. It is allowlisted by context for the same
+#     reason — the value changes if the gate is ever re-pointed, so pinning
+#     the value here would rot.
+HEX_CONTEXT_ALLOW='(sha256:|PRIVATE_ROOTS=")'
+hex_raw=$(ggrep -IihoE '\b[0-9a-f]{32,}\b' -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null \
              | tr 'A-Z' 'a-z' | sort -u || true)
 hex_hits=""
 for hx in $hex_raw; do
-    if ! git grep -qiE "sha256:${hx}\b" -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null; then
+    if ! ggrep -qiE "${HEX_CONTEXT_ALLOW}${hx}\b" -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null; then
         hex_hits="${hex_hits}${hx}"$'\n'
     fi
 done
@@ -247,7 +297,7 @@ if [ -n "$hex_hits" ]; then
     fail "Long hex string found — looks like a secret or digest:"
     echo "$hex_hits" >&2
     for hx in $hex_hits; do
-        git grep -Iin --fixed-strings "$hx" -- "${VENDOR_NO_LOCK[@]}" >&2
+        ggrep -Iin --fixed-strings "$hx" -- "${VENDOR_NO_LOCK[@]}" | strip_ref >&2
     done
 fi
 
@@ -299,9 +349,9 @@ ALLOWED_DOMAINS+='|blogco\.de|wrong-domain\.com|yourdomain\.com'           # tes
 # `rebuild.sh` is not flagged, but `evil.rebuild.sh` would be.
 APEX_TLDS='com|de|net|io|org|dev|ai|me|co|cloud'
 CHAIN_TLDS='sh|app|internal|local'
-bad_hosts=$( { git grep -IihoE "\\b[a-z0-9][a-z0-9-]*(\\.[a-z0-9-]+)*\\.(${APEX_TLDS})\\b" \
+bad_hosts=$( { ggrep -IihoE "\\b[a-z0-9][a-z0-9-]*(\\.[a-z0-9-]+)*\\.(${APEX_TLDS})\\b" \
                 -- "${NO_LOCK[@]}" 2>/dev/null; \
-              git grep -IihoE "\\b[a-z0-9][a-z0-9-]*(\\.[a-z0-9-]+)+\\.(${CHAIN_TLDS})\\b" \
+              ggrep -IihoE "\\b[a-z0-9][a-z0-9-]*(\\.[a-z0-9-]+)+\\.(${CHAIN_TLDS})\\b" \
                 -- "${NO_LOCK[@]}" 2>/dev/null; } \
               | tr 'A-Z' 'a-z' \
               | sed -E "s/.*\\.([a-z0-9-]+\\.(${APEX_TLDS}|${CHAIN_TLDS}))\$/\\1/" \
@@ -320,7 +370,7 @@ fi
 # covers exactly that form — a templated unit type after the final dot, and
 # nothing else. A real address like `someone@company.com` still fails.
 SYSTEMD_UNIT_RE='^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]*\.(service|timer|path|socket|mount|target)$'
-bad_mail=$(git grep -IhoE '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b' \
+bad_mail=$(ggrep -IhoE '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b' \
              -- "${NO_LOCK[@]}" 2>/dev/null \
              | grep -viE '@([a-z0-9-]+\.)*(example|test)\.(com|org|net|de)$|@github\.com$' \
              | grep -vE "$SYSTEMD_UNIT_RE" \
@@ -336,7 +386,7 @@ fi
 # only need to be checked against the tracked file LIST, not scanned by
 # content, so this uses `git ls-files` rather than `git grep`.
 JUNK_RE='\.pyc$|(^|/)__pycache__/|\.retry$|(^|/)\.env$|\.swp$|\.swo$|~$|(^|/)\.DS_Store$'
-bad_junk=$(git ls-files | grep -E "$JUNK_RE" || true)
+bad_junk=$(gls | grep -E "$JUNK_RE" || true)
 if [ -n "$bad_junk" ]; then
     fail "Tracked dev-artifact file found — should not be committed:"
     echo "$bad_junk" >&2

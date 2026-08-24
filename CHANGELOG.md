@@ -7,6 +7,38 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [Unreleased]
+
+### Added
+
+- **`.githooks/pre-push` — two gates on every push out of this repo.**
+  - *History gate.* If the remote is recognised as the public one, a ref that
+    descends from the private root commit is refused. The public repo is a
+    separate orphan history; publishing such a ref would expose everything
+    behind it.
+  - *Content gate.* `scripts/leak-scan.sh` now runs against **every commit
+    being pushed**, not just the tip. A leak introduced in one commit and
+    fixed in the next leaves a clean worktree and a dirty history — and
+    history is what a push publishes.
+- **`scripts/leak-scan.sh` takes an optional REF argument.**
+  `bash scripts/leak-scan.sh <commit>` scans that commit's tree instead of the
+  working tree. With no argument the behaviour is unchanged.
+- **Environment variables read by the hook:**
+  - `BAY_PUSH_SKIP_GUARDS=1` — skip both gates. Prints a loud multi-line
+    warning to stderr. For a human who has read the runbook, not for scripts.
+  - `BAY_PUBLIC_REMOTE_PATTERN` — extra extended regex that marks a remote URL
+    as public, on top of the built-in match.
+  - `BAY_PRIVATE_ROOTS` — space-separated root commit SHAs, overriding the
+    built-in list. Used by the tests.
+- `tests/test_pre_push_hook.py` proves both gates go red, including the
+  leak-in-a-middle-commit case that a tip-only scan would wave through.
+
+### Upgrade notes
+
+- Run `make hooks` (or `make install`) in every existing clone, **including the
+  public one**. `core.hooksPath` is per-clone git config, so a clone that has
+  never run it has no hooks at all and neither gate applies.
+
 ## [0.1.1] — 2026-08-24
 
 Post-launch hygiene pass over the public tree.

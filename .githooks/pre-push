@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# Gate every push out of the framework repo.
+#
+# Bay lives in two places: a private repo that carries the operator's real
+# infrastructure history, and a public repo (a separate orphan history) that
+# carries a scrubbed tree. Nothing from the private history may ever reach the
+# public remote, and no commit carrying an identifier, a real IP, a domain or a
+# credential may reach either.
+#
+# Two gates, cheapest first:
+#
+#   A. History. If the remote is the PUBLIC one, refuse any ref that descends
+#      from a known private root commit. The public repo is a fresh orphan
+#      root; a ref that contains the private root is the private history.
+#
+#   B. Content. Run scripts/leak-scan.sh against EVERY commit being pushed,
+#      not just the tip. A leak introduced in one commit and fixed in the next
+#      leaves a clean worktree and a dirty history — and history is what a
+#      push publishes.
+#
+# Installed by `make hooks` (sets core.hooksPath=.githooks). A fresh clone,
+# INCLUDING the public one, has no hooks until that runs.
+#
+# Env:
+#   BAY_PUSH_SKIP_GUARDS=1        bypass both gates (loud). Humans only.
+#   BAY_PUBLIC_REMOTE_PATTERN     extra ERE marking a remote URL as public.
+#   BAY_PRIVATE_ROOTS             space-separated root SHAs (overrides default).
+#
+# git passes: $1 = remote name, $2 = remote URL, ref lines on stdin as
+#   <local_ref> <local_sha> <remote_ref> <remote_sha>
+#
+# bash 3.2 compatible on purpose (macOS): no mapfile, no associative arrays.
+set -euo pipefail
+
+RUNBOOK="docs/public-cutover-runbook.md (workspace repo)"
+
+if [ "${BAY_PUSH_SKIP_GUARDS:-}" = "1" ]; then
+    {
+        echo "=============================================================="
+        echo " WARNING: pre-push guards SKIPPED (BAY_PUSH_SKIP_GUARDS=1)"
+        echo ""
+        echo " Neither the private-history gate nor the per-commit leak scan"
+        echo " ran. Whatever this push publishes, nothing checked it."
+        echo " See $RUNBOOK"
+        echo "=============================================================="
+    } >&2
+    exit 0
+fi
+
+remote_name="${1:-}"
+remote_url="${2:-}"
+if [ -z "$remote_url" ] && [ -n "$remote_name" ]; then
+    remote_url="$(git remote get-url "$remote_name" 2>/dev/null || true)"
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+SCAN="$repo_root/scripts/leak-scan.sh"
+
+# The private repo's root commit. Any ref that descends from it is private
+# history, whatever branch name it wears.
+PRIVATE_ROOTS="1fcc34ad08c8560868b2be668f5f2a0152620303"
+if [ -n "${BAY_PRIVATE_ROOTS:-}" ]; then
+    PRIVATE_ROOTS="$BAY_PRIVATE_ROOTS"
+fi
+
+is_public_remote() {
+    [ -n "$remote_url" ] || return 1
+    if printf '%s' "$remote_url" | grep -qiE 'AltanS/bay'; then
+        return 0
+    fi
+    if [ -n "${BAY_PUBLIC_REMOTE_PATTERN:-}" ] \
+        && printf '%s' "$remote_url" | grep -qE "${BAY_PUBLIC_REMOTE_PATTERN}"; then
+        return 0
+    fi
+    return 1
+}
+
+is_zero_sha() {
+    case "$1" in
+        *[!0]*) return 1 ;;
+        "") return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+public=0
+if is_public_remote; then
+    public=1
+fi
+
+# Read the ref lines once; both gates need them.
+refs=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ -n "${local_sha:-}" ] || continue
+    # A zero local sha is a branch deletion: nothing to inspect.
+    if is_zero_sha "$local_sha"; then continue; fi
+    refs="${refs}${local_ref} ${local_sha} ${remote_ref:-} ${remote_sha:-0}
+"
+done
+
+if [ -z "$refs" ]; then
+    exit 0
+fi
+
+# ── Gate A: private history must never reach the public remote ──────────────
+if [ "$public" -eq 1 ]; then
+    printf '%s' "$refs" | while read -r local_ref local_sha remote_ref remote_sha; do
+        for root in $PRIVATE_ROOTS; do
+            git cat-file -e "$root^{commit}" 2>/dev/null || continue
+            if git merge-base --is-ancestor "$root" "$local_sha" 2>/dev/null; then
+                {
+                    echo "pre-push: DENIED — private history pushed to a public remote"
+                    echo ""
+                    echo "  remote:      ${remote_name:-?} <$remote_url>"
+                    echo "  ref:         $local_ref -> ${remote_ref:-?}"
+                    echo "  commit:      $local_sha"
+                    echo "  private root: $root is an ancestor of it"
+                    echo ""
+                    echo "  The public repo is a separate orphan history. Publishing a"
+                    echo "  ref that descends from the private root would expose every"
+                    echo "  commit behind it. See $RUNBOOK"
+                } >&2
+                exit 1
+            fi
+        done
+    done || exit 1
+fi
+
+# ── Gate B: leak-scan every commit being published ──────────────────────────
+if [ ! -x "$SCAN" ] && [ ! -f "$SCAN" ]; then
+    echo "pre-push: scripts/leak-scan.sh not found — cannot verify this push" >&2
+    exit 1
+fi
+
+commits=$(
+    printf '%s' "$refs" | while read -r local_ref local_sha remote_ref remote_sha; do
+        if is_zero_sha "$remote_sha"; then
+            # New branch on the remote: everything not already published there.
+            git rev-list "$local_sha" --not --remotes="${remote_name:-origin}" 2>/dev/null \
+                || git rev-list "$local_sha" --not --remotes 2>/dev/null \
+                || true
+        else
+            git rev-list "${remote_sha}..${local_sha}" 2>/dev/null || true
+        fi
+    done | sort -u
+)
+
+if [ -z "$commits" ]; then
+    exit 0
+fi
+
+count=$(printf '%s\n' "$commits" | grep -c . || true)
+echo "pre-push: leak-scan $count commit(s)"
+if [ "$count" -gt 200 ]; then
+    echo "pre-push: that is a lot of commits; scanning all of them, this will take a while" >&2
+fi
+
+failed=0
+for sha in $commits; do
+    if ! out=$(bash "$SCAN" "$sha" 2>&1); then
+        {
+            echo "pre-push: DENIED — leak-scan failed on commit $sha"
+            echo "  $(git log -1 --format='%h %s' "$sha" 2>/dev/null || echo "$sha")"
+            echo "$out"
+            echo ""
+            echo "  Every commit being pushed is scanned, not just the tip. Rewrite"
+            echo "  the offending commit (interactive rebase / filter) — reverting it"
+            echo "  in a later commit does not remove it from the pushed history."
+            echo "  See $RUNBOOK"
+        } >&2
+        failed=1
+        break
+    fi
+done
+
+if [ "$failed" -ne 0 ]; then
+    exit 1
+fi
+
+echo "pre-push: guards passed"
+exit 0
