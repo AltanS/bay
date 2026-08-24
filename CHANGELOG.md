@@ -7,7 +7,7 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
-## [Unreleased]
+## [0.2.0] — 2026-08-24
 
 ### Added
 
@@ -32,6 +32,17 @@ before upgrading — anything needing manual action is called out under
     built-in list. Used by the tests.
 - `tests/test_pre_push_hook.py` proves both gates go red, including the
   leak-in-a-middle-commit case that a tip-only scan would wave through.
+
+### Fixed
+
+- **`--check` no longer kills the deploy play.** `container_lifecycle`'s
+  `Reconciler report` task debug-printed `_reconcile_result.stdout |
+  from_json`. In check mode the reconciler command task is skipped, so
+  `stdout` is empty and `from_json` raised — the play died with exit 2 and
+  `bin/bay deploy <env> -- --check --diff` was unusable as a dry run. The
+  report is now guarded by `when: _reconcile_result is not skipped`. It is
+  deliberately not an `rc`-based guard: a command task skipped by check mode
+  still registers `rc: 0`.
 
 ### Upgrade notes
 
