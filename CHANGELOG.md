@@ -7,6 +7,26 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.2.3] — 2026-08-25
+
+### Changed
+
+- Docs pass from a newcomer review: aligned `example/README.md`'s Setup
+  section with the main README's Quick Start (wizard-first, manual `.vault_pass`
+  path kept as a fallback); added `bin/bay validate` ahead of provision/deploy
+  in the README and onboarding guide, with `doctor` (environment) vs
+  `validate` (config, also runs automatically on every deploy) spelled out;
+  fixed the "copied by bootstrap.sh" attribution to `bin/bay setup`; fixed a
+  broken doc-server pointer in `docs/README.md` and added a Glossary; fixed
+  the `docs/tailnet-ingress.md` ACL-policy anchor in `docs/access-gateways.md`;
+  gave the public pre-push hook a runbook pointer that resolves for outside
+  contributors; documented accessory `expose:` and a worked `database:`
+  binding example in `docs/services.md`, plus a new "Rotating a secret"
+  section covering the config-hash/env-digest recreate behavior; clarified
+  how an operator alert mute reaches the hosts in `docs/alerting.md`; added
+  CrowdSec lockout-recovery re-enable + verify steps; and documented the
+  first-provision-as-root command form.
+
 ## [0.2.2] — 2026-08-25
 
 ### Changed
