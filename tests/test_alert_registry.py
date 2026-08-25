@@ -23,7 +23,12 @@ Call-site conventions (all three are scanned):
   shell    bay_notify <id> "<message>"        # bare literal, no quotes/$
            notify_build <id> "<message>"       # rebuild.sh's correlation wrapper
   python   send_alert("<id>", message)
-  ansible  _bay_alert_id: <id>                # set_fact beside the uri tasks
+  ansible  _bay_alert_id: <id>                # set_fact beside the include_role
+
+The ansible form fires from the CONTROL NODE, where no host-side emitter exists.
+Those call sites live in roles/ *and* in the top-level playbooks (restore.yml),
+so both are scanned — a playbook-only scan blind spot is exactly how restore.yml
+kept a private Telegram curl for as long as it did.
 """
 
 from __future__ import annotations
@@ -69,7 +74,14 @@ _FORWARDER_MARKER = "bay-alert-id: forwarder"
 _DEFINITION_FILES = {
     "_notify.sh.j2",
     "bay_alert.py",
+    # The control-node fan-out. It reads _bay_alert_id, it never emits one, and
+    # its header documents the calling convention with an example ID.
+    "send_alert.yml",
 }
+
+# Top-level playbooks emit control-node alerts too (restore.yml). Scanning only
+# roles/ let restore.yml POST straight to Telegram, unrouted and unmutable.
+_PLAYBOOKS = ("deploy.yml", "provision.yml", "restore.yml")
 
 
 def _scan_files() -> list[Path]:
@@ -82,6 +94,7 @@ def _scan_files() -> list[Path]:
             if "__pycache__" in path.parts:
                 continue
             out.append(path)
+    out.extend(p for p in (_REPO_ROOT / name for name in _PLAYBOOKS) if p.is_file())
     return out
 
 

@@ -324,10 +324,12 @@
     - name: Compose deploy complete alert
       ansible.builtin.set_fact:
         _bay_alert_id: deploy.complete
-        _bay_deploy_alert: "{{ docker_monitor_alert_header }}\u2705 <b>Deploy complete</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host }}</code>\n\u25b8 Region:     <code>{{ group_names | reject('equalto', 'all') | first | default('default') }}</code>\n\u25b8 Stack:      <code>{{ stack_name }}</code>\n\u25b8 Services:   <code>{{ active_services | default({}) | length }}</code>\n\u25b8 Version:    <code>{{ _bay_version | default('unknown') }}</code>\n\u25b8 Duration:   <code>{{ ((docker_compose_deploy_end_epoch | int) - (docker_compose_deploy_start_epoch | int)) // 60 }}m {{ ((docker_compose_deploy_end_epoch | int) - (docker_compose_deploy_start_epoch | int)) % 60 }}s</code>\n\u25b8 Time:       {{ '%b %d, %H:%M UTC' | strftime(ansible_facts['date_time']['epoch'] | int) }}{{ docker_monitor_alert_footer }}"
+        _bay_alert_message: "{{ docker_monitor_alert_header }}\u2705 <b>Deploy complete</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host }}</code>\n\u25b8 Region:     <code>{{ group_names | reject('equalto', 'all') | first | default('default') }}</code>\n\u25b8 Stack:      <code>{{ stack_name }}</code>\n\u25b8 Services:   <code>{{ active_services | default({}) | length }}</code>\n\u25b8 Version:    <code>{{ _bay_version | default('unknown') }}</code>\n\u25b8 Duration:   <code>{{ ((docker_compose_deploy_end_epoch | int) - (docker_compose_deploy_start_epoch | int)) // 60 }}m {{ ((docker_compose_deploy_end_epoch | int) - (docker_compose_deploy_start_epoch | int)) % 60 }}s</code>\n\u25b8 Time:       {{ '%b %d, %H:%M UTC' | strftime(ansible_facts['date_time']['epoch'] | int) }}{{ docker_monitor_alert_footer }}"
 
     - name: Deliver deploy alert to routed recipients
-      ansible.builtin.include_tasks: send_deploy_alert.yml
+      ansible.builtin.include_role:
+        name: alert_channel
+        tasks_from: send_alert
 
   rescue:
     - name: Remove any canary containers left by failed deploy
@@ -352,11 +354,13 @@
     - name: Compose deploy failed alert
       ansible.builtin.set_fact:
         _bay_alert_id: deploy.failed
-        _bay_deploy_alert: "{{ docker_monitor_alert_header }}\u274c <b>Deploy failed</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host }}</code>\n\u25b8 Region:     <code>{{ group_names | reject('equalto', 'all') | first | default('default') }}</code>\n\u25b8 Stack:      <code>{{ stack_name }}</code>\n\u25b8 Version:    <code>{{ _bay_version | default('unknown') }}</code>\n\u25b8 Failed at:  <code>{{ ansible_failed_task.name }}</code>\n\u25b8 Time:       {{ '%b %d, %H:%M UTC' | strftime(ansible_facts['date_time']['epoch'] | int) }}{{ docker_monitor_alert_footer }}"
+        _bay_alert_message: "{{ docker_monitor_alert_header }}\u274c <b>Deploy failed</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host }}</code>\n\u25b8 Region:     <code>{{ group_names | reject('equalto', 'all') | first | default('default') }}</code>\n\u25b8 Stack:      <code>{{ stack_name }}</code>\n\u25b8 Version:    <code>{{ _bay_version | default('unknown') }}</code>\n\u25b8 Failed at:  <code>{{ ansible_failed_task.name }}</code>\n\u25b8 Time:       {{ '%b %d, %H:%M UTC' | strftime(ansible_facts['date_time']['epoch'] | int) }}{{ docker_monitor_alert_footer }}"
       ignore_errors: true
 
     - name: Deliver deploy alert to routed recipients
-      ansible.builtin.include_tasks: send_deploy_alert.yml
+      ansible.builtin.include_role:
+        name: alert_channel
+        tasks_from: send_alert
 
     - name: Re-raise deploy failure
       ansible.builtin.fail:

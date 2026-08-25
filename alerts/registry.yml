@@ -25,7 +25,7 @@
 #                       generic rate limiter (see the alert routing README non-goals).
 #
 # Naming: <domain>.<event>, lowercase, underscores within a segment. Domains in
-# use: backup, build, container, deploy, host, log, webhook, alerts.
+# use: backup, build, container, deploy, host, log, restore, webhook, alerts.
 
 # ── backup ───────────────────────────────────────────────────────────────────
 backup.failed:
@@ -168,6 +168,21 @@ deploy.webhook_complete:
   source: git_deploy/rebuild.sh.j2
   summary: A webhook-triggered build and deploy finished successfully.
   enabled_by_default: false
+  rate_limited: false
+
+# ── restore ────────────────────────────────────────────────────────────────
+restore.completed:
+  level: info
+  source: restore.yml
+  summary: A restore finished and the accessory was validated.
+  enabled_by_default: false
+  rate_limited: false
+
+restore.failed:
+  level: critical
+  source: restore.yml
+  summary: A restore failed — the pre-restore backup is the way back.
+  enabled_by_default: true
   rate_limited: false
 
 # ── containers (docker_monitor) ──────────────────────────────────────────────

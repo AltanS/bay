@@ -349,6 +349,8 @@ Generated from `alerts/registry.yml` — do not hand-edit. Run `make docs-alerts
 | `host.outbound_lost` | `critical` | on | `outbound_monitor/bay-outbound-check.j2` | The host lost outbound internet while remaining reachable over Tailscale. |
 | `host.outbound_restored` | `info` | **off** | `outbound_monitor/bay-outbound-check.j2` | Outbound internet came back. |
 | `log.retention_prune` | `info` | **off** | `log_archive/rotate-logs.sh.j2` | Log retention removed archived files (age or size threshold). |
+| `restore.completed` | `info` | **off** | `restore.yml` | A restore finished and the accessory was validated. |
+| `restore.failed` | `critical` | on | `restore.yml` | A restore failed — the pre-restore backup is the way back. |
 | `webhook.fanout_failed` | `warn` | on | `git_deploy/webhook/app.py` | Forwarding a webhook to a peer region failed. |
 | `webhook.image_pull_signal_received` | `info` | **off** | `git_deploy/webhook/app.py` | A registry image-pull signal arrived and triggered pulls. |
 | `webhook.pull_signal_received` | `info` | **off** | `git_deploy/webhook/app.py` | A peer signalled that a new image is ready to pull. |
@@ -375,13 +377,34 @@ bash cannot import Python and the webhook container cannot source bash:
 inputs. Divergence is the failure mode this design exists to prevent.
 
 There is a **third** emitter, and it is the odd one out.
-`deploy.complete` and `deploy.failed` are sent from the **control node** while
-Ansible is mid-play, so they cannot call the host-side `bay_notify()` at all.
-They live in `roles/deploy_stack/tasks/send_deploy_alert.yml` as `uri` tasks
-that resolve recipients through the same filters
-(`bay_alert_recipients` + `bay_alert_ids_for`).
+`deploy.complete`, `deploy.failed`, `restore.completed` and `restore.failed`
+are sent from the **control node** while Ansible is mid-play, so they cannot
+call the host-side `bay_notify()` at all. They live in
+`roles/alert_channel/tasks/send_alert.yml` as `uri` tasks that resolve
+recipients through the same filters
+(`bay_alert_recipients` + `bay_alert_ids_for`). A caller sets two facts and
+includes the role:
 
-Before that file existed, those two alerts were hard-coded POSTs to the legacy
+```yaml
+- name: Compose restore complete alert
+  ansible.builtin.set_fact:
+    _bay_alert_id: restore.completed     # literal, per the registry invariant
+    _bay_alert_message: "<b>Restore complete</b>…"
+
+- name: Deliver restore alert to routed recipients
+  ansible.builtin.include_role:
+    name: alert_channel
+    tasks_from: send_alert
+```
+
+`include_role` rather than `include_tasks` is what makes this reachable from a
+**playbook**: Ansible has no cross-role task include path, so while this file
+lived in `roles/deploy_stack` it was invisible to `restore.yml` — which duly
+grew its own `curl api.telegram.org`, unrouted and unmutable, for every restore
+it ever ran. `tests/test_alert_channel.py` now fails the build on any private
+Telegram request outside `roles/alert_channel`.
+
+Before that file existed, the deploy alerts were hard-coded POSTs to the legacy
 variables, guarded only by "is the URL set". They were unroutable and
 **unmutable**: `_bay_alert_id` was set beside them purely to satisfy the
 registry drift test, and nothing read it, so

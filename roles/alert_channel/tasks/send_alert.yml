@@ -1,30 +1,47 @@
 ---
-# Deliver one control-node deploy alert to every recipient that wants it.
+# Deliver one CONTROL-NODE alert to every recipient that wants it.
 #
 # WHY THIS FILE EXISTS
 # --------------------
-# deploy.complete and deploy.failed are the only alerts Bay sends from the
-# CONTROL NODE. Every other alert is emitted on the host by bay_notify(), which
-# checks the mute file and routes by registry level. These two could not: they
-# were two hard-coded `uri` tasks that POSTed to the legacy Telegram + webhook
-# variables directly, guarded only by "is the URL set".
+# Almost every Bay alert is emitted on the host by bay_notify() (shell) or
+# send_alert() (Python), which check the mute file and route by registry level.
+# A few alerts cannot: they fire from the CONTROL NODE while Ansible is
+# mid-play, so there is no host-side script to call. Those are
+# deploy.complete / deploy.failed (roles/deploy_stack) and
+# restore.completed / restore.failed (restore.yml).
 #
-# That made them unroutable and unmutable. `_bay_alert_id` was set beside them
-# purely to satisfy the registry drift test — nothing ever read it, so
+# Before this file existed they were hard-coded `uri` tasks that POSTed to the
+# legacy Telegram + webhook variables directly, guarded only by "is the URL
+# set". That made them unroutable and unmutable. `_bay_alert_id` was set beside
+# them purely to satisfy the registry drift test — nothing ever read it, so
 # `bin/bay alerts disable deploy.complete` silently did nothing.
 #
 # Now the same three inputs decide delivery here as on the host: the registry's
 # enabled_by_default, the recipient's min_level, and the alerts_disabled /
-# alerts_enabled force lists. deploy.complete ships default-off; deploy.failed
-# is critical and reaches every recipient.
+# alerts_enabled force lists.
 #
-# Callers set _bay_alert_id and _bay_deploy_alert, then include this file.
+# WHY IT LIVES IN alert_channel
+# -----------------------------
+# It used to live in roles/deploy_stack, which made it unreachable from
+# restore.yml — a playbook cannot `include_tasks` a file inside another role,
+# and restore.yml duly grew a private `curl api.telegram.org`. Here it is the
+# one control-node fan-out, reachable from anywhere:
 #
-# Best-effort throughout: a dead sink must never fail — or un-fail — a deploy.
+#   - name: Compose <thing> alert
+#     ansible.builtin.set_fact:
+#       _bay_alert_id: some.literal_id      # LITERAL — see registry drift test
+#       _bay_alert_message: "<b>…</b>"      # Telegram HTML, the canonical format
+#
+#   - name: Deliver <thing> alert to routed recipients
+#     ansible.builtin.include_role:
+#       name: alert_channel
+#       tasks_from: send_alert
+#
+# Best-effort throughout: a dead sink must never fail — or un-fail — the play.
 
-- name: Resolve deploy alert recipients
+- name: Resolve control-node alert recipients
   ansible.builtin.set_fact:
-    _bay_deploy_sinks: >-
+    _bay_alert_sinks: >-
       {{ (alert_recipients | default([]))
          | bay_alert_recipients(
              alert_webhook_url | default(''),
@@ -32,17 +49,17 @@
              docker_monitor_telegram_bot_token | default(''),
              docker_monitor_telegram_chat_id | default('')) }}
 
-- name: Send deploy alert to Telegram recipients
+- name: Send alert to Telegram recipients
   ansible.builtin.uri:
     url: "https://api.telegram.org/bot{{ item.config.bot_token }}/sendMessage"
     method: POST
     body_format: json
     body:
       chat_id: "{{ item.config.chat_id }}"
-      text: "{{ _bay_deploy_alert }}"
+      text: "{{ _bay_alert_message }}"
       parse_mode: HTML
       disable_web_page_preview: true
-  loop: "{{ _bay_deploy_sinks | selectattr('adapter', 'eq', 'telegram') | list }}"
+  loop: "{{ _bay_alert_sinks | selectattr('adapter', 'eq', 'telegram') | list }}"
   loop_control:
     label: "{{ item.name | default('unnamed') }}"
   ignore_errors: true
@@ -55,13 +72,13 @@
     - _bay_alert_id in (item | bay_alert_ids_for(alerts_disabled | default([]),
                                                  alerts_enabled | default([])))
 
-- name: Send deploy alert to webhook recipients
+- name: Send alert to webhook recipients
   ansible.builtin.uri:
     url: "{{ item.config.url }}"
     method: "{{ item.config.method | default('POST') }}"
     body: >-
-      {{ _bay_deploy_alert | bay_alert_body(item.config.format | default('campfire'),
-                                            alert_webhook_max_chars | default(3500)) }}
+      {{ _bay_alert_message | bay_alert_body(item.config.format | default('campfire'),
+                                             alert_webhook_max_chars | default(3500)) }}
     headers: >-
       {{ {'Content-Type': item.config.content_type
                           | default(item.config.format | default('campfire')
@@ -69,7 +86,7 @@
          | combine(item.config.headers | default({})) }}
     timeout: "{{ alert_webhook_timeout | default(10) | int }}"
     status_code: [200, 201, 202, 204]
-  loop: "{{ _bay_deploy_sinks | selectattr('adapter', 'eq', 'webhook') | list }}"
+  loop: "{{ _bay_alert_sinks | selectattr('adapter', 'eq', 'webhook') | list }}"
   loop_control:
     label: "{{ item.name | default('unnamed') }}"
   ignore_errors: true

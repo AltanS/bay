@@ -52,8 +52,28 @@ def _when_str(task: dict) -> str:
     return " ".join(str(c) for c in when)
 
 
+def _flatten(tasks: list[dict]) -> list[dict]:
+    """Walk block/rescue/always so a guard cannot be hidden by nesting.
+
+    restore.yml wraps its whole task list in one block so a failure anywhere
+    reaches the operator through a rescue alert. A flat read would have made
+    every check below vacuously pass on zero tasks.
+    """
+    containers = ("block", "rescue", "always")
+    out: list[dict] = []
+    for task in tasks or []:
+        # Without stripping the container keys the parent's body would contain
+        # every child's text, so one nested `_snap.` reference would be
+        # attributed to the wrapper — which carries no `when` of its own.
+        out.append({k: v for k, v in task.items() if k not in containers})
+        for key in containers:
+            if isinstance(task.get(key), list):
+                out.extend(_flatten(task[key]))
+    return out
+
+
 def _restore_tasks() -> list[dict]:
-    return _load(_RESTORE)[0]["tasks"]
+    return _flatten(_load(_RESTORE)[0]["tasks"])
 
 
 # -- tailscale_register --------------------------------------------------------

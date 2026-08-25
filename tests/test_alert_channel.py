@@ -407,7 +407,7 @@ def test_html_escape_round_trips_through_unescape(sink):
 
 _BAY_ALERT = _ROLES / "alert_channel" / "files" / "bay_alert.py"
 _DEPLOY_TASKS = _ROLES / "deploy_stack" / "tasks" / "main.yml"
-_SEND_DEPLOY_ALERT = _ROLES / "deploy_stack" / "tasks" / "send_deploy_alert.yml"
+_SEND_ALERT = _ROLES / "alert_channel" / "tasks" / "send_alert.yml"
 _BUILD_SPECS = _ROLES / "container_lifecycle" / "tasks" / "build_specs.yml"
 
 
@@ -494,7 +494,8 @@ def test_deploy_stack_sends_both_deploy_alerts_to_the_webhook():
     """Deploy complete/failed are the most visible alerts; the issue omits them.
 
     Delivery moved out of main.yml's two hard-coded `uri` tasks and into
-    send_deploy_alert.yml (routed by recipient like every other alert), so the
+    alert_channel's send_alert.yml (routed by recipient like every other
+    alert), so the
     success and rescue blocks now each just include that file once. The
     best-effort guarantee is checked on the actual delivery tasks there, not
     on the include_tasks call.
@@ -503,7 +504,7 @@ def test_deploy_stack_sends_both_deploy_alerts_to_the_webhook():
     assert content.count("Deliver deploy alert to routed recipients") == 2, (
         "expected one include for the success path and one for the rescue path"
     )
-    assert content.count("include_tasks: send_deploy_alert.yml") == 2
+    assert content.count("tasks_from: send_alert") == 2
     tasks = yaml.safe_load(content)
 
     def _find(name, node):
@@ -524,16 +525,16 @@ def test_deploy_stack_sends_both_deploy_alerts_to_the_webhook():
     deliver = _find("Deliver deploy alert to routed recipients", tasks)
     assert deliver is not None, "task 'Deliver deploy alert to routed recipients' not found"
 
-    send_tasks = yaml.safe_load(_SEND_DEPLOY_ALERT.read_text())
+    send_tasks = yaml.safe_load(_SEND_ALERT.read_text())
     _gate_needle = {
         # Recipients are routed per-adapter now, not gated on the single
         # legacy alert_webhook_url — each task must check its own config key.
-        "Send deploy alert to Telegram recipients": "item.config.bot_token",
-        "Send deploy alert to webhook recipients": "item.config.url",
+        "Send alert to Telegram recipients": "item.config.bot_token",
+        "Send alert to webhook recipients": "item.config.url",
     }
     for name, needle in _gate_needle.items():
         task = _find(name, send_tasks)
-        assert task is not None, f"task {name!r} not found in send_deploy_alert.yml"
+        assert task is not None, f"task {name!r} not found in send_alert.yml"
         assert task.get("ignore_errors") is True, (
             f"{name} must not be able to fail a deploy"
         )
@@ -1067,4 +1068,96 @@ def test_line_ending_includes_disable_block_trimming():
     assert not offenders, (
         "include ends the line but does not disable block trimming: "
         + "; ".join(offenders)
+    )
+
+
+# ── No private Telegram senders, anywhere ────────────────────────────────────
+#
+# `test_no_script_keeps_a_private_telegram_curl` above covers the shell
+# emitters that were converted. This is the repo-wide backstop, and it exists
+# because restore.yml quietly kept a direct `uri` POST to api.telegram.org for
+# its whole life: it was a playbook, not a role, so no role-scoped guard could
+# see it, and its alert reached exactly one hard-coded sink — unrouted,
+# unmutable, invisible to `bay alerts list`.
+
+_TELEGRAM_NEEDLES = ("api.telegram.org", "sendMessage")
+
+# Every file allowed to name the Telegram API, with the reason. Adding a path
+# here is a deliberate, reviewable act — the point is that a NEW private sender
+# cannot appear silently.
+_TELEGRAM_ALLOWED = {
+    # The canonical fan-out. Shell + Python + control-node halves.
+    "roles/alert_channel/templates/_notify.sh.j2",
+    "roles/alert_channel/tasks/send_alert.yml",
+    # The two Python `send_alert()` fan-outs. They are the sanctioned emitters
+    # for their runtimes (registry-recognised call sites, and both hand the
+    # generic sink to the shared bay_send_webhook), but each still carries its
+    # own Telegram transport. Folding that half into bay_alert.py as a shared
+    # bay_send_telegram() is the outstanding cleanup.
+    "roles/docker_monitor/templates/docker-monitor.py.j2",
+    "roles/git_deploy/files/webhook/app.py",
+    # CLI-side audit ping from `bay build`. Not a registry alert: it is an
+    # operator audit trail written from the control node, deliberately
+    # independent of rebuild.sh and systemd env inheritance.
+    "src/bay_cli/commands/build.py",
+}
+
+
+def _tracked_files() -> list[str]:
+    out = subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), "ls-files"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return [line for line in out.splitlines() if line]
+
+
+def test_no_private_telegram_sender_outside_alert_channel():
+    """Every alert fans out from roles/alert_channel. No exceptions by accident."""
+    offenders: list[str] = []
+    for rel in _tracked_files():
+        # Docs are prose about this very rule; tests assert on the string.
+        if rel in _TELEGRAM_ALLOWED or rel.startswith(("tests/", "docs/")):
+            continue
+        if rel.endswith(".md"):
+            continue
+        path = _REPO_ROOT / rel
+        # Symlinks are the sharing mechanism; the target is checked once.
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            content = path.read_text()
+        except (UnicodeDecodeError, OSError):
+            continue
+        for num, line in enumerate(content.splitlines(), start=1):
+            # A comment cannot POST anything, and several of these files
+            # document the rule they enforce.
+            if line.lstrip().startswith(("#", "//")):
+                continue
+            if any(needle in line for needle in _TELEGRAM_NEEDLES):
+                offenders.append(f"{rel}:{num}: {line.strip()[:80]}")
+    assert not offenders, (
+        "Direct Telegram requests outside roles/alert_channel:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nAlerts must fan out from roles/alert_channel so they are routed "
+        "by registry level and recipient min_level, and can be muted. From a "
+        "role or playbook use:\n"
+        "    set_fact: {_bay_alert_id: <literal.id>, _bay_alert_message: '…'}\n"
+        "    include_role: {name: alert_channel, tasks_from: send_alert}\n"
+        "From a shell script, include _notify.sh.j2 and call bay_notify."
+    )
+
+
+def test_the_telegram_allowlist_has_no_dead_entries():
+    """A stale allowlist entry is a hole nobody is watching."""
+    dead = sorted(
+        rel
+        for rel in _TELEGRAM_ALLOWED
+        if not (_REPO_ROOT / rel).is_file()
+        or not any(n in (_REPO_ROOT / rel).read_text() for n in _TELEGRAM_NEEDLES)
+    )
+    assert not dead, (
+        f"_TELEGRAM_ALLOWED entries no longer contain a Telegram request: {dead}. "
+        "Remove them — an unused exemption silently re-opens the hole."
     )

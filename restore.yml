@@ -63,207 +63,242 @@
           an accessory with backup enabled in services.yml.
 
   tasks:
-    - name: Verify snapshot exists
-      ansible.builtin.command:
-        cmd: "{{ _backup_restic_bin }} snapshots {{ _snapshot }} --json --retry-lock 15m"
-      environment: "{{ _restic_env }}"
-      register: _snapshot_info
-      changed_when: false
-      failed_when: _snapshot_info.rc != 0 or (_snapshot_info.stdout | from_json | length) == 0
-      become: true
-      become_user: root
+    # Everything below runs inside one block so a failure anywhere in the
+    # restore path still reaches the operator through the rescue handler.
+    - name: "Restore {{ accessory }}"
+      block:
+        - name: Verify snapshot exists
+          ansible.builtin.command:
+            cmd: "{{ _backup_restic_bin }} snapshots {{ _snapshot }} --json --retry-lock 15m"
+          environment: "{{ _restic_env }}"
+          register: _snapshot_info
+          changed_when: false
+          failed_when: _snapshot_info.rc != 0 or (_snapshot_info.stdout | from_json | length) == 0
+          become: true
+          become_user: root
 
-    # In --check mode `Verify snapshot exists` is SKIPPED, so `stdout` is empty
-    # and `from_json` raises — the play dies with exit 2 instead of dry-running.
-    # Deliberately NOT `rc is defined`: a command task skipped by check mode
-    # still registers rc 0, so that guard passes and the crash happens anyway.
-    #
-    # `_snap` therefore stays undefined in check mode, and every task that
-    # dereferences it carries `_snap is defined`. A restore cannot be dry-run
-    # in any useful sense — without the snapshot metadata there is nothing to
-    # restore FROM — so the correct behaviour is to skip, loudly.
-    - name: Parse snapshot details
-      ansible.builtin.set_fact:
-        _snap: "{{ (_snapshot_info.stdout | from_json | last) }}"
-      when: _snapshot_info is not skipped
+        # In --check mode `Verify snapshot exists` is SKIPPED, so `stdout` is empty
+        # and `from_json` raises — the play dies with exit 2 instead of dry-running.
+        # Deliberately NOT `rc is defined`: a command task skipped by check mode
+        # still registers rc 0, so that guard passes and the crash happens anyway.
+        #
+        # `_snap` therefore stays undefined in check mode, and every task that
+        # dereferences it carries `_snap is defined`. A restore cannot be dry-run
+        # in any useful sense — without the snapshot metadata there is nothing to
+        # restore FROM — so the correct behaviour is to skip, loudly.
+        - name: Parse snapshot details
+          ansible.builtin.set_fact:
+            _snap: "{{ (_snapshot_info.stdout | from_json | last) }}"
+          when: _snapshot_info is not skipped
 
-    - name: Explain skipped restore in check mode
-      ansible.builtin.debug:
-        msg: >-
-          Check mode: the snapshot lookup did not run, so there is no snapshot
-          metadata to restore from and every restore step below is skipped.
-          Re-run without --check to perform the restore.
-      when: _snap is not defined
+        # The rescue handler must never dereference `_snap` — it fires on
+        # paths where the snapshot lookup itself failed. Flatten the one field
+        # an alert needs into a plain string while we know it is there.
+        - name: Record snapshot label for alerts
+          ansible.builtin.set_fact:
+            _snap_label: "{{ _snap.short_id }}"
+          when: _snap is defined
 
-    - name: Display restore plan
-      when: _snap is defined
-      ansible.builtin.debug:
-        msg: |
-          ====================================================
-                             RESTORE PLAN
-          ====================================================
-            Accessory:  {{ accessory }}
-            Method:     {{ _restore_method }}
-            Snapshot:   {{ _snap.short_id }} ({{ _snap.time | regex_replace('T.*', '') }})
-            Host:       {{ inventory_hostname }}
-          ====================================================
+        - name: Explain skipped restore in check mode
+          ansible.builtin.debug:
+            msg: >-
+              Check mode: the snapshot lookup did not run, so there is no snapshot
+              metadata to restore from and every restore step below is skipped.
+              Re-run without --check to perform the restore.
+          when: _snap is not defined
 
-    - name: Require confirmation
-      ansible.builtin.assert:
-        that: confirm | default('no') | bool
-        fail_msg: >-
-          Restore requires explicit confirmation. Re-run with -e confirm=yes
-          or use 'bin/bay backup restore' for interactive confirmation.
+        - name: Display restore plan
+          when: _snap is defined
+          ansible.builtin.debug:
+            msg: |
+              ====================================================
+                                 RESTORE PLAN
+              ====================================================
+                Accessory:  {{ accessory }}
+                Method:     {{ _restore_method }}
+                Snapshot:   {{ _snap.short_id }} ({{ _snap.time | regex_replace('T.*', '') }})
+                Host:       {{ inventory_hostname }}
+              ====================================================
 
-    # -- Pre-restore backup ------------------------------------------------
+        - name: Require confirmation
+          ansible.builtin.assert:
+            that: confirm | default('no') | bool
+            fail_msg: >-
+              Restore requires explicit confirmation. Re-run with -e confirm=yes
+              or use 'bin/bay backup restore' for interactive confirmation.
 
-    - name: Create pre-restore backup
-      ansible.builtin.command:
-        cmd: "{{ _backup_scripts_dir }}/backup-{{ accessory }}.sh"
-      environment:
-        RESTIC_TAG_EXTRA: pre-restore
-      when: not _skip_pre_backup
-      register: _pre_backup_result
-      failed_when: _pre_backup_result.rc != 0
+        # -- Pre-restore backup ------------------------------------------------
 
-    # -- Restore -----------------------------------------------------------
+        - name: Create pre-restore backup
+          ansible.builtin.command:
+            cmd: "{{ _backup_scripts_dir }}/backup-{{ accessory }}.sh"
+          environment:
+            RESTIC_TAG_EXTRA: pre-restore
+          when: not _skip_pre_backup
+          register: _pre_backup_result
+          failed_when: _pre_backup_result.rc != 0
 
-    - name: Ensure restore temp directory exists
-      ansible.builtin.file:
-        path: "{{ _restore_tmp_dir }}"
-        state: directory
-        owner: "{{ app_user }}"
-        group: docker
-        mode: "0750"
+        # -- Restore -----------------------------------------------------------
 
-    - name: Restore PostgreSQL database
-      ansible.builtin.shell:
-        cmd: >-
-          set -o pipefail &&
-          {{ _backup_restic_bin }} dump {{ _snap.short_id }}
-          /{{ accessory }}{% if database is defined %}-{{ database }}{% endif %}.sql
-          --retry-lock 15m |
-          docker exec {{ accessory }}
-          psql -U {{ _pg_user }} -d {{ _pg_database }}
-        executable: /bin/bash
-      environment: "{{ _restic_env }}"
-      become: true
-      become_user: root
-      when:
-        - _restore_method == 'pg_dump'
-        - _snap is defined
+        - name: Ensure restore temp directory exists
+          ansible.builtin.file:
+            path: "{{ _restore_tmp_dir }}"
+            state: directory
+            owner: "{{ app_user }}"
+            group: docker
+            mode: "0750"
 
-    - name: Restore MySQL database
-      ansible.builtin.shell:
-        cmd: >-
-          set -o pipefail &&
-          {{ _backup_restic_bin }} dump {{ _snap.short_id }}
-          /{{ accessory }}.sql
-          --retry-lock 15m |
-          docker exec -i
-          -e MYSQL_PWD="{{ _accessory_config.env['clear'].MYSQL_ROOT_PASSWORD | default(_accessory_config.env['clear'].MYSQL_PASSWORD | default('')) }}"
-          {{ accessory }}
-          mysql -u {{ _accessory_config.env['clear'].MYSQL_USER | default('root') }} {{ _accessory_config.env['clear'].MYSQL_DATABASE | default('app') }}
-        executable: /bin/bash
-      environment: "{{ _restic_env }}"
-      become: true
-      become_user: root
-      when:
-        - _restore_method == 'mysql'
-        - _snap is defined
+        - name: Restore PostgreSQL database
+          ansible.builtin.shell:
+            cmd: >-
+              set -o pipefail &&
+              {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+              /{{ accessory }}{% if database is defined %}-{{ database }}{% endif %}.sql
+              --retry-lock 15m |
+              docker exec {{ accessory }}
+              psql -U {{ _pg_user }} -d {{ _pg_database }}
+            executable: /bin/bash
+          environment: "{{ _restic_env }}"
+          become: true
+          become_user: root
+          when:
+            - _restore_method == 'pg_dump'
+            - _snap is defined
 
-    - name: Stop Redis container for restore
-      ansible.builtin.command:
-        cmd: "docker stop {{ accessory }}"
-      when:
-        - _restore_method == 'redis'
-        - _snap is defined
+        - name: Restore MySQL database
+          ansible.builtin.shell:
+            cmd: >-
+              set -o pipefail &&
+              {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+              /{{ accessory }}.sql
+              --retry-lock 15m |
+              docker exec -i
+              -e MYSQL_PWD="{{ _accessory_config.env['clear'].MYSQL_ROOT_PASSWORD | default(_accessory_config.env['clear'].MYSQL_PASSWORD | default('')) }}"
+              {{ accessory }}
+              mysql -u {{ _accessory_config.env['clear'].MYSQL_USER | default('root') }} {{ _accessory_config.env['clear'].MYSQL_DATABASE | default('app') }}
+            executable: /bin/bash
+          environment: "{{ _restic_env }}"
+          become: true
+          become_user: root
+          when:
+            - _restore_method == 'mysql'
+            - _snap is defined
 
-    - name: Restore Redis RDB file
-      ansible.builtin.shell:
-        cmd: >-
-          set -o pipefail &&
-          {{ _backup_restic_bin }} dump {{ _snap.short_id }}
-          /{{ accessory }}.rdb
-          --retry-lock 15m >
-          {{ _restore_tmp_dir }}/dump.rdb &&
-          docker
-          cp {{ _restore_tmp_dir }}/dump.rdb {{ accessory }}:/data/dump.rdb
-        executable: /bin/bash
-      environment: "{{ _restic_env }}"
-      become: true
-      become_user: root
-      when:
-        - _restore_method == 'redis'
-        - _snap is defined
+        - name: Stop Redis container for restore
+          ansible.builtin.command:
+            cmd: "docker stop {{ accessory }}"
+          when:
+            - _restore_method == 'redis'
+            - _snap is defined
 
-    - name: Start Redis container after restore
-      ansible.builtin.command:
-        cmd: "docker start {{ accessory }}"
-      when:
-        - _restore_method == 'redis'
-        - _snap is defined
+        - name: Restore Redis RDB file
+          ansible.builtin.shell:
+            cmd: >-
+              set -o pipefail &&
+              {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+              /{{ accessory }}.rdb
+              --retry-lock 15m >
+              {{ _restore_tmp_dir }}/dump.rdb &&
+              docker
+              cp {{ _restore_tmp_dir }}/dump.rdb {{ accessory }}:/data/dump.rdb
+            executable: /bin/bash
+          environment: "{{ _restic_env }}"
+          become: true
+          become_user: root
+          when:
+            - _restore_method == 'redis'
+            - _snap is defined
 
-    - name: Restore file backup
-      ansible.builtin.shell:
-        cmd: >-
-          set -o pipefail &&
-          {{ _backup_restic_bin }} dump {{ _snap.short_id }}
-          /{{ accessory }}.tar
-          --retry-lock 15m |
-          docker
-          cp - {{ accessory }}:{{ _accessory_config.backup.source_path | default('/data') }}
-        executable: /bin/bash
-      environment: "{{ _restic_env }}"
-      become: true
-      become_user: root
-      when:
-        - _restore_method == 'file'
-        - _snap is defined
+        - name: Start Redis container after restore
+          ansible.builtin.command:
+            cmd: "docker start {{ accessory }}"
+          when:
+            - _restore_method == 'redis'
+            - _snap is defined
 
-    # -- Validation --------------------------------------------------------
+        - name: Restore file backup
+          ansible.builtin.shell:
+            cmd: >-
+              set -o pipefail &&
+              {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+              /{{ accessory }}.tar
+              --retry-lock 15m |
+              docker
+              cp - {{ accessory }}:{{ _accessory_config.backup.source_path | default('/data') }}
+            executable: /bin/bash
+          environment: "{{ _restic_env }}"
+          become: true
+          become_user: root
+          when:
+            - _restore_method == 'file'
+            - _snap is defined
 
-    - name: Verify restored PostgreSQL database has tables
-      ansible.builtin.shell:
-        cmd: >-
-          docker exec {{ accessory }}
-          psql -U {{ _pg_user }} -d {{ _pg_database }}
-          -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';"
-      register: _table_count
-      failed_when: (_table_count.stdout | trim | int) == 0
-      when: _restore_method == 'pg_dump'
+        # -- Validation --------------------------------------------------------
 
-    - name: Verify Redis is responding
-      ansible.builtin.shell:
-        cmd: >-
-          docker exec {{ accessory }}
-          redis-cli PING
-      register: _redis_ping
-      failed_when: "'PONG' not in _redis_ping.stdout"
-      when: _restore_method == 'redis'
-      retries: 5
-      delay: 2
+        - name: Verify restored PostgreSQL database has tables
+          ansible.builtin.shell:
+            cmd: >-
+              docker exec {{ accessory }}
+              psql -U {{ _pg_user }} -d {{ _pg_database }}
+              -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';"
+          register: _table_count
+          failed_when: (_table_count.stdout | trim | int) == 0
+          when: _restore_method == 'pg_dump'
 
-    # -- Cleanup -----------------------------------------------------------
+        - name: Verify Redis is responding
+          ansible.builtin.shell:
+            cmd: >-
+              docker exec {{ accessory }}
+              redis-cli PING
+          register: _redis_ping
+          failed_when: "'PONG' not in _redis_ping.stdout"
+          when: _restore_method == 'redis'
+          retries: 5
+          delay: 2
 
-    - name: Clean up restore temp directory
-      ansible.builtin.file:
-        path: "{{ _restore_tmp_dir }}"
-        state: absent
+        # -- Cleanup -----------------------------------------------------------
 
-    # -- Notification ------------------------------------------------------
+        - name: Clean up restore temp directory
+          ansible.builtin.file:
+            path: "{{ _restore_tmp_dir }}"
+            state: absent
 
-    - name: Send restore success notification
-      ansible.builtin.uri:
-        url: "https://api.telegram.org/bot{{ docker_monitor_telegram_bot_token }}/sendMessage"
-        method: POST
-        body_format: json
-        body:
-          chat_id: "{{ docker_monitor_telegram_chat_id }}"
-          text: "{{ docker_monitor_alert_header | default('') }}Restore complete\nAccessory: {{ accessory }}\nSnapshot: {{ _snap.short_id }}\nHost: {{ inventory_hostname }}{{ docker_monitor_alert_footer | default('') }}"
-          parse_mode: HTML
-          disable_web_page_preview: true
-      ignore_errors: true
-      when:
-        - (docker_monitor_telegram_bot_token | default('')) | length > 0
-        - _snap is defined
+        # -- Notification --------------------------------------------------
+        #
+        # Control-node alert: this runs on the Ansible side mid-play, so there
+        # is no host-side bay_notify() to call. roles/alert_channel's
+        # send_alert task file is the one fan-out for that case — it routes by
+        # registry level, recipient min_level and the mute lists, exactly like
+        # every other alert. Do NOT put a private curl api.telegram.org back
+        # here; tests/test_alert_channel.py fails the build if you do.
+
+        - name: Compose restore complete alert
+          ansible.builtin.set_fact:
+            _bay_alert_id: restore.completed
+            _bay_alert_message: "{{ docker_monitor_alert_header | default('') }}\u2705 <b>Restore complete</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host | default(inventory_hostname) }}</code>\n\u25b8 Accessory:  <code>{{ accessory }}</code>\n\u25b8 Method:     <code>{{ _restore_method }}</code>\n\u25b8 Snapshot:   <code>{{ _snap.short_id }}</code>{{ docker_monitor_alert_footer | default('') }}"
+          when: _snap is defined
+
+        - name: Deliver restore alert to routed recipients
+          ansible.builtin.include_role:
+            name: alert_channel
+            tasks_from: send_alert
+          when: _snap is defined
+
+      rescue:
+        # A failed restore is the single worst thing this playbook can do
+        # quietly: the pre-restore backup exists, but nobody knows to use it.
+        - name: Compose restore failed alert
+          ansible.builtin.set_fact:
+            _bay_alert_id: restore.failed
+            _bay_alert_message: "{{ docker_monitor_alert_header | default('') }}\u274c <b>Restore failed</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host | default(inventory_hostname) }}</code>\n\u25b8 Accessory:  <code>{{ accessory }}</code>\n\u25b8 Method:     <code>{{ _restore_method }}</code>\n\u25b8 Snapshot:   <code>{{ _snap_label | default('unknown') }}</code>\n\u25b8 Failed at:  <code>{{ ansible_failed_task.name | default('unknown') }}</code>{{ docker_monitor_alert_footer | default('') }}"
+          ignore_errors: true
+
+        - name: Deliver restore alert to routed recipients
+          ansible.builtin.include_role:
+            name: alert_channel
+            tasks_from: send_alert
+          ignore_errors: true
+
+        - name: Re-raise restore failure
+          ansible.builtin.fail:
+            msg: "{{ ansible_failed_result.msg | default('Restore failed') }}"
