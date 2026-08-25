@@ -7,6 +7,12 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.2.2] — 2026-08-25
+
+### Changed
+
+- Corrected the copyright holder named in LICENSE.
+
 ## [0.2.1] — 2026-08-25
 
 ### Fixed
