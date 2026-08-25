@@ -109,12 +109,23 @@ Partial flags pre-fill the wizard; `--defaults` skips prompting entirely. `bin/b
 # Validate DNS, SSH, vault password, gateway config
 bin/bay doctor
 
+# Validate config files — YAML/schema, inventory, vault keys
+bin/bay validate
+
 # Provision server (first time — hardens SSH, installs Docker, firewall)
 bin/bay provision production
+# First provision needs root; if ansible_user isn't root yet, override the SSH user:
+bin/bay provision production -- -u root
 
 # Deploy services
 bin/bay deploy production
 ```
+
+`bin/bay doctor` checks your **environment** (DNS resolution, SSH reachability,
+vault password present). `bin/bay validate` checks your **config** (YAML
+syntax, the services schema, inventory, vault keys) and also runs
+automatically before every deploy, so running it here is optional — useful
+for iterating on config without waiting for a full deploy.
 
 #### Edit existing config
 
@@ -178,7 +189,7 @@ bay/
       backup.py                # backup list/run/restore/status/check
       test.py                  # infrastructure tests
       webhook.py               # webhook setup and GitHub instructions
-  example/                     # Consumer project template (copied by bootstrap.sh)
+  example/                     # Consumer project template (copied by `bin/bay setup`)
     Makefile                   # Sets BAY_REPO, includes .bay/bay.mk
     ansible.cfg                # Points roles_path to .bay/
     deploy.yml                 # Wrapper → imports .bay/deploy.yml

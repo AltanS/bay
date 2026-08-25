@@ -70,7 +70,18 @@ bin/bay setup --force
 
 ## Pre-flight Doctor Check
 
-Before your first deploy, run `bin/bay doctor` to validate your environment (DNS, vault password, SSH connectivity, gateway config — `bin/bay doctor --help` lists the checks). Fix any reported issues before running `bin/bay provision` and `bin/bay deploy`.
+Before your first deploy, run `bin/bay doctor` to validate your environment (DNS, vault password, SSH connectivity, gateway config — `bin/bay doctor --help` lists the checks). Then run `bin/bay validate` to check your config files (YAML syntax, the services schema, inventory, vault keys) — this also runs automatically before every deploy, so running it here just lets you fix issues before the provision step. Fix any reported issues before running `bin/bay provision` and `bin/bay deploy`.
+
+For the very first provision, the target server usually only has a `root`
+account — `ansible_user` in `group_vars/all/main.yml` defaults to
+`bay-admin`, an account provisioning itself creates. Override the SSH user
+for that one run:
+
+```bash
+bin/bay provision production -- -u root
+```
+
+Subsequent provisions/deploys use `bay-admin` as normal.
 
 ## Gateway Paths
 

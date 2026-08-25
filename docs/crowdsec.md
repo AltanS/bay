@@ -53,6 +53,19 @@ If you're locked out by CrowdSec:
    ```bash
    bin/bay provision production --tags nftables,crowdsec
    ```
+4. **Re-enable the bouncer** (you disabled it in step 2, and provisioning
+   does not undo that):
+   ```bash
+   sudo systemctl enable --now crowdsec-firewall-bouncer
+   ```
+5. **Verify** — decisions still being made, and your IP allowlisted:
+   ```bash
+   sudo cscli decisions list
+   sudo cscli allowlists inspect argo-inventory   # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+   sudo systemctl status crowdsec-firewall-bouncer
+   ```
+   Confirm your own IP does not show up in `cscli decisions list`, and that
+   the bouncer service is `active (running)`, not just enabled.
 
 ## Collections
 

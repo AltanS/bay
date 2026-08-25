@@ -69,7 +69,33 @@ for the current architecture.
 | [external-tailscale-research.md](external-tailscale-research.md) | Feasibility research for using tailscale.com's hosted control server. |
 | [external-tailscale-implementation-plan.md](external-tailscale-implementation-plan.md) | Implementation plan for the same — never built. |
 
----
+## Glossary
 
-Reading these in a browser? From the workspace root, `make docs` serves this folder (and the
-tracker blueprints) as a live, sidebar-navigable site — see [`docs-server/`](../../docs-server/README.md).
+- **rig** — The infrastructure layer: Traefik, CrowdSec, Watchtower, Headscale, Zot, the
+  webhook receiver — deployed by dedicated roles, as opposed to consumer-facing apps
+  declared in `services.yml`. Tracked by a `.rig-state` file on the host; see the main
+  README's "Deploy modes: rig vs fast" section.
+- **service vs accessory** — In `services.yml`, a **service** is an app container that gets
+  Traefik routing, SSL, and access control; an **accessory** is infrastructure (a database,
+  a cache) deployed alongside services with no public routing of its own. See
+  `services.md`.
+- **canary swap** — The zero-downtime deploy pattern for `zero_downtime: true` services: a
+  new container starts alongside the old one, passes health checks, then the old one
+  stops — Traefik load-balances across both during the overlap. See `services.md`'s
+  "Zero-Downtime Deploys" section.
+- **config-hash gate** — The mechanism that decides whether a container needs to change: a
+  SHA-256 hash (`bay_spec_hash`) over the compose-visible spec plus a digest of its
+  rendered env file. Same container + same hash = no-op; a mismatch triggers a recreate or
+  canary swap. See `reconciler.md`'s "Parity with the Ansible gate" section.
+- **bundle** — The resolved deploy payload the server-side reconciler consumes: every
+  container spec with secrets already merged and `config_hash` precomputed (vault is
+  decrypted client-side, never on the host). See `reconciler.md`.
+- **given_name** — A Headscale node's display name: what `headscale nodes list` shows, what
+  MagicDNS resolves, and (under `tailnet_identity_enabled`) the identity injected into
+  `X-Tailnet-Device`. Distinct from the enrolling user and from any `hosts:` ACL alias. See
+  `tailnet-naming.md`.
+- **control region** — In a multi-region deploy with `access_gateway: headscale`, the one
+  region that runs the actual Headscale coordination server; every other region runs only
+  the Tailscale daemon and registers against the control region's REST API. Set via
+  `headscale_control_region`. See `multi-region.md`'s "Headscale Access Gateway in
+  Multi-Region" section.

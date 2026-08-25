@@ -239,7 +239,7 @@ tailscale up --login-server=https://hs.example.com --authkey=<key> --hostname=ex
 
 `--user` names the **owner** in Headscale, which is not the same thing as the device's tailnet name. Left to itself the device registers under whatever hostname it happens to have locally, so `ssh external-box` resolves nothing. Since `enroll` is one-user-per-device, it defaults the tailnet name to the user name and adds `--hostname` for you. Override with `--hostname <name>`, or opt out with `--no-hostname` to let the device keep its own.
 
-> **Default-deny tailnets:** if the consumer defines `headscale_acl_policy`, enrollment alone leaves the device unreachable — `enroll` does not touch the policy. It detects this and prints the next steps. See [ACL policy](tailnet-ingress.md#acl-policy) for why an ungranted node doesn't even appear in other nodes' `tailscale status`.
+> **Default-deny tailnets:** if the consumer defines `headscale_acl_policy`, enrollment alone leaves the device unreachable — `enroll` does not touch the policy. It detects this and prints the next steps. See [ACL policy](tailnet-ingress.md#locking-the-upstream-headscale-acl-headscale_acl_policy) for why an ungranted node doesn't even appear in other nodes' `tailscale status`.
 
 Contrast with inventory servers: they join the tailnet automatically during `bin/bay provision` / `bin/bay deploy`, via the `tailscale_register` role (see [Headscale user model](#headscale-user-model) above), with full hardening included. `gateway enroll` skips all of that on purpose — it's for boxes Bay doesn't own or manage.
 

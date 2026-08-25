@@ -32,7 +32,7 @@
 # bash 3.2 compatible on purpose (macOS): no mapfile, no associative arrays.
 set -euo pipefail
 
-RUNBOOK="docs/public-cutover-runbook.md (workspace repo)"
+RUNBOOK="CONTRIBUTING.md (maintainers: see the private cut-over runbook)"
 
 if [ "${BAY_PUSH_SKIP_GUARDS:-}" = "1" ]; then
     {

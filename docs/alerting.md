@@ -166,13 +166,22 @@ alerts_disabled:
   - log.retention_prune
 ```
 
-**Operator mute with a TTL** — takes effect without re-rendering every emitter:
+**Operator mute with a TTL** — `bin/bay alerts disable` records the mute
+locally (in `group_vars/all/alerts.yml`, the same file every `bay alerts`
+command reads); it does not reach the hosts until you deploy. That deploy
+only re-renders `roles/alert_policy`'s `alert-overrides.j2` — the file every
+`bay_notify`/`bay_alert.py` call site checks before sending — not the emitter
+scripts themselves, so it's a small, fast apply:
 
 ```bash
 bin/bay alerts disable 'host.disk_warn' --for 24h
 bin/bay deploy production --tags alert_policy
-bin/bay provision production --tags alert_policy
+bin/bay provision production --tags alert_policy   # provision-only emitters (e.g. disk/outbound checks)
 ```
+
+Both commands are needed because `alert_policy` runs in `provision.yml` as
+well as `deploy.yml` — some emitters (disk pressure, outbound checks) only
+run from provisioning, so a deploy-only apply leaves their overrides stale.
 
 **Every mute should have an expiry.** Alerts are the only observability there
 is, so a mute set during an incident and forgotten is indistinguishable from a

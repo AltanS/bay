@@ -50,6 +50,7 @@ services:
       user: myapp                    #   Database user (default: service name)
 
     healthcheck:                     # Traefik health check
+
       path: /health
       interval: 30s
 
@@ -120,6 +121,60 @@ services:
         attempts: 4
 ```
 
+### Database binding: `database:` vs manual `DATABASE_URL`
+
+A `database:` block does two things: it provisions the database and role on
+the accessory (idempotent, via `roles/deploy_stack/tasks/database_provision.yml`
+— `CREATE DATABASE`/`CREATE ROLE` run over `docker exec ... psql`), and it
+injects connection env vars into the service's env file. Postgres only — the
+provisioning tasks and the env template both hardcode `psql` and port `5432`.
+
+```yaml
+accessories:
+  postgres:
+    image: postgres:16
+    port: "5432:5432"
+    expose: loopback
+
+services:
+  myapp:
+    database:
+      accessory: postgres
+      name: myapp        # defaults to the service name
+      user: myapp         # defaults to the service name
+```
+
+`group_vars/<env>/secrets.yml` (vault-encrypted) needs the role's password,
+looked up directly by the uppercased key `env.j2` and `database_provision.yml`
+both compute — `<DB_USER, upper, - to _>_POSTGRES_PASSWORD`:
+
+```yaml
+secrets:
+  MYAPP_POSTGRES_PASSWORD: "..."
+```
+
+The service's env file (`env/myapp.env` on the host) gets, automatically:
+
+```
+DATABASE_URL=postgres://myapp:<password>@postgres:5432/myapp
+DB_HOST=postgres
+DB_PORT=5432
+DB_NAME=myapp
+DB_USER=myapp
+DB_PASSWORD=<password>
+```
+
+`<password>` is read from vault key `<DB_USER upper, - to _>_POSTGRES_PASSWORD`
+— the same secret `database_provision.yml` uses to create/alter the role, so
+the two always agree.
+
+**Use `database:`** when the service and the database accessory are both
+managed by this `services.yml` (the common case) — it removes a whole class
+of drift between the role Bay creates and the URL the app is handed. **Use a
+manual `DATABASE_URL` under `env.secret`** when the database is external
+(managed Postgres, a different stack, a non-Postgres engine) — `database:`
+has no escape hatch for those; write the connection string yourself.
+
 ## Accessory Schema
 
 ```yaml
@@ -129,7 +184,14 @@ accessories:
     image: <image:tag>               # Docker image
 
     # ── Optional ──────────────────────────────────────────────────
-    port: "127.0.0.1:host:container" # Port binding, localhost-only
+    port: "host:container"           # Port binding (host interface set by expose:)
+    expose: loopback                 # loopback (default) | tailnet | host
+                                      #   loopback — 127.0.0.1 only; in-stack services
+                                      #              reach it via Docker DNS instead
+                                      #   tailnet  — the Headscale server's tailnet IP,
+                                      #              for cross-region access; deploy
+                                      #              fails if that var is unset
+                                      #   host     — 0.0.0.0, an intentional public bind
     network_mode: host               # Use host networking instead of bridge
 
     volumes:                         # Named volumes for persistence
@@ -519,6 +581,27 @@ The list form auto-prefixes vault keys with the service/accessory name to preven
 Docker Compose uses `$` for variable interpolation — `$FOO` would be replaced with the value of `FOO`, silently corrupting secrets that contain `$` (Argon2id hashes, bcrypt hashes, htpasswd entries).  <!-- legacy-argo: unrelated hash algorithm name (Argon2id) -->
 
 Bay handles this automatically: the `env.j2` template escapes every `$` to `$$` when writing `.env` files. No manual escaping needed.
+
+### Rotating a secret
+
+```bash
+bin/bay vault edit production      # edit the value, save, vault re-encrypts on write
+bin/bay deploy production          # re-render env files, apply
+```
+
+An env-only change **does recreate the container** — the reconciler's
+`config_hash` is not just the compose-visible spec (image, volumes, labels,
+ports, ...); it also folds in a SHA-256 digest of the rendered env file
+(`_env_digest` in `roles/container_lifecycle/tasks/reconcile.yml`, fed into
+the `bay_spec_hash` filter). Changing one secret changes the env file changes
+the digest changes the hash, so the planner sees a config-hash mismatch and
+issues a `Recreate` (or a `CanarySwap` for a `zero_downtime: true` service) —
+never a silent no-op.
+
+If you ever need to force a recreate outside that path (e.g. the image and
+env are unchanged but you want a fresh container), the reconciler treats a
+missing container as absent state: `docker rm -f <container_name>` on the
+host, then re-run `bin/bay deploy production`.
 
 ## Basic Auth
 
