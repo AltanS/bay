@@ -7,6 +7,57 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.2.4] — 2026-08-25
+
+### Fixed
+
+- Restore notifications go through the alert channel. `restore.yml` POSTed
+  directly to `api.telegram.org`, so a restore alert reached one hard-coded
+  sink, ignored every recipient's `min_level`, never appeared in
+  `bin/bay alerts list` and could not be muted. It now composes an alert and
+  delegates delivery to `roles/alert_channel`, like every other alert.
+- A failed restore now alerts. Previously only success notified, so the case
+  that matters — the restore broke and the pre-restore backup is the way back
+  — was silent. `restore.yml` runs inside a block with a rescue handler that
+  emits `restore.failed` and re-raises the original failure.
+
+### Added
+
+- Two alert IDs: `restore.completed` (`info`, default **off**) and
+  `restore.failed` (`critical`, default **on**).
+
+### Changed
+
+- The control-node alert fan-out moved from
+  `roles/deploy_stack/tasks/send_deploy_alert.yml` to
+  `roles/alert_channel/tasks/send_alert.yml`, and callers reach it with
+  `include_role` + `tasks_from: send_alert`. Ansible has no cross-role task
+  include path, so while it lived in `deploy_stack` no playbook could use it —
+  which is exactly why `restore.yml` had its own sender. Behaviour for
+  `deploy.complete` / `deploy.failed` is unchanged.
+- `tests/test_alert_registry.py` scans the top-level playbooks as well as
+  `roles/`. A new guard in `tests/test_alert_channel.py` fails the build on any
+  Telegram request outside `roles/alert_channel`.
+
+### Upgrade notes
+
+- Restore alerts are now **routed**, not broadcast. `restore.failed` is
+  `critical`, so it reaches every recipient. `restore.completed` is `info` and
+  ships **default-off** like the other success notices — if you relied on the
+  old unconditional "Restore complete" message, opt back in:
+
+  ```yaml
+  # group_vars/all/alerts.yml
+  alerts_enabled:
+    - restore.completed
+  ```
+
+  A recipient with `min_level: warn` or higher will not receive
+  `restore.completed` unless it is named in `alerts_enabled`, which overrides
+  `min_level`.
+- No deploy is needed for this. Both alerts are sent from the control node by
+  `restore.yml` itself, so `bin/bay update` is enough.
+
 ## [0.2.3] — 2026-08-25
 
 ### Changed
