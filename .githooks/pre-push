@@ -13,6 +13,14 @@
 #      from a known private root commit. The public repo is a fresh orphan
 #      root; a ref that contains the private root is the private history.
 #
+#      "Is the PUBLIC one" is decided by IDENTITY, not by the URL. A URL
+#      substring is defeated by a mirror URL, a rename, or an ssh alias, and
+#      the gate then passes silently. So the hook also asks the remote what it
+#      has (`git ls-remote`) and, when that tip is resolvable locally, walks it
+#      back to its root commit (`rev-list --max-parents=0`) and compares that
+#      against the known public root. The URL pattern stays as the cheap first
+#      hit and as the offline fallback.
+#
 #   B. Content. Run scripts/leak-scan.sh against EVERY commit being pushed,
 #      not just the tip. A leak introduced in one commit and fixed in the next
 #      leaves a clean worktree and a dirty history — and history is what a
@@ -25,6 +33,10 @@
 #   BAY_PUSH_SKIP_GUARDS=1        bypass both gates (loud). Humans only.
 #   BAY_PUBLIC_REMOTE_PATTERN     extra ERE marking a remote URL as public.
 #   BAY_PRIVATE_ROOTS             space-separated root SHAs (overrides default).
+#   BAY_PUBLIC_ROOTS              space-separated public root SHAs (overrides).
+#
+# Every one of those env vars weakens or re-points a gate, so every one of them
+# prints the same loud warning. A quiet bypass is worse than a loud one.
 #
 # git passes: $1 = remote name, $2 = remote URL, ref lines on stdin as
 #   <local_ref> <local_sha> <remote_ref> <remote_sha>
@@ -34,16 +46,20 @@ set -euo pipefail
 
 RUNBOOK="CONTRIBUTING.md (maintainers: see the private cut-over runbook)"
 
-if [ "${BAY_PUSH_SKIP_GUARDS:-}" = "1" ]; then
+loud() {
     {
         echo "=============================================================="
-        echo " WARNING: pre-push guards SKIPPED (BAY_PUSH_SKIP_GUARDS=1)"
-        echo ""
-        echo " Neither the private-history gate nor the per-commit leak scan"
-        echo " ran. Whatever this push publishes, nothing checked it."
+        while [ "$#" -gt 0 ]; do echo " $1"; shift; done
         echo " See $RUNBOOK"
         echo "=============================================================="
     } >&2
+}
+
+if [ "${BAY_PUSH_SKIP_GUARDS:-}" = "1" ]; then
+    loud "WARNING: pre-push guards SKIPPED (BAY_PUSH_SKIP_GUARDS=1)" \
+         "" \
+         " Neither the private-history gate nor the per-commit leak scan" \
+         " ran. Whatever this push publishes, nothing checked it."
     exit 0
 fi
 
@@ -61,9 +77,36 @@ SCAN="$repo_root/scripts/leak-scan.sh"
 PRIVATE_ROOTS="1fcc34ad08c8560868b2be668f5f2a0152620303"
 if [ -n "${BAY_PRIVATE_ROOTS:-}" ]; then
     PRIVATE_ROOTS="$BAY_PRIVATE_ROOTS"
+    loud "WARNING: private-root list OVERRIDDEN (BAY_PRIVATE_ROOTS)" \
+         "" \
+         " Gate A is now checking ancestry against a root you supplied," \
+         " not the one this hook ships with. If that is wrong, private" \
+         " history can reach a public remote and nothing will say so."
 fi
 
-is_public_remote() {
+# The PUBLIC repo's root commit. A remote whose history starts here is the
+# public one, whatever URL it is reached by. This is the fact that matters;
+# the URL pattern below is only a cheap first hit and an offline fallback.
+PUBLIC_ROOTS="4bef5e38bcf5c359c7a36995e1d67a88229174fb"
+if [ -n "${BAY_PUBLIC_ROOTS:-}" ]; then
+    PUBLIC_ROOTS="$BAY_PUBLIC_ROOTS"
+    loud "WARNING: public-root list OVERRIDDEN (BAY_PUBLIC_ROOTS)" \
+         "" \
+         " Gate A identifies the public remote by the root you supplied," \
+         " not the one this hook ships with."
+fi
+
+if [ -n "${BAY_PUBLIC_REMOTE_PATTERN:-}" ]; then
+    loud "WARNING: public-remote URL pattern OVERRIDDEN" \
+         " (BAY_PUBLIC_REMOTE_PATTERN)" \
+         "" \
+         " Gate A's URL test is not the shipped one. The root-identity" \
+         " test still runs, but do not rely on this to mark a remote" \
+         " private: a wrong pattern is a silent hole."
+fi
+
+# Cheap: does the URL say so?
+url_says_public() {
     [ -n "$remote_url" ] || return 1
     if printf '%s' "$remote_url" | grep -qiE 'AltanS/bay'; then
         return 0
@@ -72,6 +115,31 @@ is_public_remote() {
         && printf '%s' "$remote_url" | grep -qE "${BAY_PUBLIC_REMOTE_PATTERN}"; then
         return 0
     fi
+    return 1
+}
+
+# Authoritative: does the remote's own history start at a known public root?
+#
+# `ls-remote` gives tips, not roots, so this can only conclude anything for a
+# tip the local repo can already resolve — the normal case for a remote you
+# track. When nothing resolves (fresh clone, offline, empty remote) it returns
+# non-zero and the URL test is all there is. It never answers "public" on a
+# guess, and it is only consulted when the URL test already said no, so the
+# common push pays no extra round trip.
+remote_root_is_public() {
+    [ -n "$remote_url" ] || return 1
+    ls_out="$(GIT_TERMINAL_PROMPT=0 git ls-remote --heads --tags "$remote_url" 2>/dev/null || true)"
+    [ -n "$ls_out" ] || return 1
+    for sha in $(printf '%s\n' "$ls_out" | awk '{print $1}' | sort -u); do
+        git cat-file -e "${sha}^{commit}" 2>/dev/null || continue
+        for root in $(git rev-list --max-parents=0 "$sha" 2>/dev/null); do
+            for known in $PUBLIC_ROOTS; do
+                if [ "$root" = "$known" ]; then
+                    return 0
+                fi
+            done
+        done
+    done
     return 1
 }
 
@@ -84,8 +152,13 @@ is_zero_sha() {
 }
 
 public=0
-if is_public_remote; then
+public_reason=""
+if url_says_public; then
     public=1
+    public_reason="remote URL matches the public pattern"
+elif remote_root_is_public; then
+    public=1
+    public_reason="remote history starts at a known public root commit"
 fi
 
 # Read the ref lines once; both gates need them.
@@ -112,6 +185,7 @@ if [ "$public" -eq 1 ]; then
                     echo "pre-push: DENIED — private history pushed to a public remote"
                     echo ""
                     echo "  remote:      ${remote_name:-?} <$remote_url>"
+                    echo "  recognised as public: $public_reason"
                     echo "  ref:         $local_ref -> ${remote_ref:-?}"
                     echo "  commit:      $local_sha"
                     echo "  private root: $root is an ancestor of it"

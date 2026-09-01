@@ -28,6 +28,11 @@
 #      (a) provider token formats pinned to their real lengths
 #      (b) bare high-entropy blobs (mixed-case + digit, base64/base64url
 #          alphabet including `/ _ -`)
+#      (b2) lowercase+digit blobs (32+ chars) whose Shannon entropy clears
+#          LOWER_ENTROPY_MIN_BITS — (b) REQUIRES an uppercase character, so a
+#          key drawn from lowercase and digits only (the shape of a great many
+#          API keys, and of the lowercase half of a Telegram bot token) walked
+#          straight through it
 #      (c) long bare hex strings (32+ chars, case-insensitive) — catches
 #          hex-only secrets that (b)'s three-character-class rule misses
 #   4. Hostnames (allowlist of registrable domains, case-insensitive,
@@ -94,7 +99,12 @@ SELF="scripts/leak-scan.sh"
 # is exactly as real a leak as one in our own code, so those sections still
 # scan it.
 EXCLUDES=(':!.venv' ":!$SELF")
-VENDOR_EXCLUDES=("${EXCLUDES[@]}" ':!vendor')
+VENDOR_EXCLUDES=("${EXCLUDES[@]}" ':!vendor' ':!roles/git_deploy/files/github_known_hosts')
+# github_known_hosts is a file of PUBLIC ssh host keys, pinned on purpose
+# (see roles/git_deploy/defaults/main.yml). Base64 public key material is
+# high-entropy by construction and is not a secret, so it is excluded from
+# the entropy/hex sections only — identifiers, IPs, hostnames and emails
+# are still scanned there.
 # uv.lock is machine-generated and full of legitimate hashes; scanning it for
 # entropy produces nothing but noise. It is still scanned for identifiers.
 NO_LOCK=("${EXCLUDES[@]}" ':!uv.lock')
@@ -252,6 +262,12 @@ ENTROPY_ALLOW='^com/AltanS/bay/blob/main/'                 # Documentation= URLs
 ENTROPY_ALLOW+='|^com/integrations/BOTKEY/rooms/'           # alert_channel example webhook URL
 ENTROPY_ALLOW+='|^var/lib/crowdsec/data/GeoLite2-'          # doc'd GeoLite2 db paths
 ENTROPY_ALLOW+='|^test_[A-Za-z0-9_]+$'                      # pytest test-id identifiers
+ENTROPY_ALLOW+='|^ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$'  # the base64 alphabet itself (bcrypt/base64 tables in bay_filters.py)
+
+# Extra allowances for the lowercase+digit tier (b2) only. These are values
+# that clear the entropy bar but are structurally not secrets.
+LOWER_ENTROPY_ALLOW='^[a-f0-9]{7,40}-'                      # short-sha-prefixed names
+LOWER_ENTROPY_ALLOW+='|^sha256$'
 
 ent=$(ggrep -IhoE '\b[A-Za-z0-9+/_-]{32,}={0,2}\b' -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null \
         | grep -E '[A-Z]' | grep -E '[a-z]' | grep -E '[0-9]' | sort -u \
@@ -260,6 +276,53 @@ if [ -n "$ent" ]; then
     fail "High-entropy string found — looks like a secret:"
     echo "$ent" >&2
     for blob in $ent; do
+        ggrep -In --fixed-strings "$blob" -- "${VENDOR_NO_LOCK[@]}" | strip_ref >&2
+    done
+fi
+
+# (b2) Lowercase-plus-digit blobs. (b) above requires an uppercase character,
+#      which is a character-class test, not an entropy measurement — a secret
+#      drawn from [a-z0-9] only never trips it. That is the shape of a great
+#      many API keys. Two filters, because neither works alone:
+#
+#      1. The alphabet is [a-z0-9] with NO separators. Entropy alone cannot
+#         separate a key from a path: `etc/crowdsec/parsers/s02-enrich/...`
+#         scores 3.97 and a real 32-char key scores 3.9-4.5, so the ranges
+#         overlap and any threshold that catches the key drowns in file paths,
+#         URLs and snake_case identifiers. Dropping `/ _ - +` from the class
+#         removes that entire family, and a lowercase API key has none of them.
+#      2. Shannon entropy over the candidate's own characters, so a long
+#         repetitive run (`aaaa...`) is not reported. A random 32-char
+#         lowercase+digit key sits between 3.9 and log2(36) = 5.17.
+#
+#      Pure-hex candidates are dropped here: uniform hex scores 4.0 and would
+#      flood this tier with the image digests and commit SHAs that section (c)
+#      below already handles with a context allowlist.
+LOWER_ENTROPY_MIN_BITS="${LOWER_ENTROPY_MIN_BITS:-3.6}"
+lower_cands=$(ggrep -IhoE '\b[a-z0-9]{32,}\b' -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null \
+        | grep -E '[a-z]' | grep -E '[0-9]' | sort -u \
+        | grep -vE '^[0-9a-f]+$' \
+        | grep -vE "($ENTROPY_ALLOW|$LOWER_ENTROPY_ALLOW)" || true)
+lower_hits=$(printf '%s\n' "$lower_cands" | awk -v min="$LOWER_ENTROPY_MIN_BITS" '
+    NF == 0 { next }
+    {
+        n = length($0)
+        delete freq
+        for (i = 1; i <= n; i++) {
+            c = substr($0, i, 1)
+            freq[c]++
+        }
+        h = 0
+        for (c in freq) {
+            pr = freq[c] / n
+            h -= pr * log(pr) / log(2)
+        }
+        if (h >= min) print
+    }')
+if [ -n "$lower_hits" ]; then
+    fail "High-entropy lowercase string found — looks like a secret:"
+    echo "$lower_hits" >&2
+    for blob in $lower_hits; do
         ggrep -In --fixed-strings "$blob" -- "${VENDOR_NO_LOCK[@]}" | strip_ref >&2
     done
 fi
@@ -279,11 +342,13 @@ fi
 #     so the digest case is allowlisted by re-checking each candidate's
 #     context (`sha256:<hex>` on the same line) instead of its bare value.
 #
-#     `PRIVATE_ROOTS="<sha>"` in .githooks/pre-push is the same shape: a git
-#     commit SHA, not a secret. It is allowlisted by context for the same
-#     reason — the value changes if the gate is ever re-pointed, so pinning
-#     the value here would rot.
-HEX_CONTEXT_ALLOW='(sha256:|PRIVATE_ROOTS=")'
+#     `PRIVATE_ROOTS="<sha>"` and `PUBLIC_ROOTS="<sha>"` in .githooks/pre-push
+#     are the same shape: git commit SHAs, not secrets. So is
+#     `backup_restic_checksum` — a published upstream release digest, pinned so
+#     the download fails closed. All three are allowlisted by context rather
+#     than by value: the values change when a pin is bumped, so pinning them
+#     here would rot.
+HEX_CONTEXT_ALLOW='(sha256:|(PRIVATE|PUBLIC)_ROOTS="|backup_restic_checksum: ")'
 hex_raw=$(ggrep -IihoE '\b[0-9a-f]{32,}\b' -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null \
              | tr 'A-Z' 'a-z' | sort -u || true)
 hex_hits=""

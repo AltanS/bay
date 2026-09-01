@@ -16,6 +16,10 @@
     pull_policy: never
     container_name: bay-webhook
     restart: unless-stopped
+    # Fixed UID + the host's shared build-control GID, so triggers/ and state/
+    # can be 2770 instead of 0777. Mirrors the reconciler spec in
+    # roles/container_lifecycle/tasks/build_specs.yml.
+    user: "{{ git_deploy_webhook_uid | default(10001) }}:{{ git_deploy_build_gid | default(2000) }}"
     networks:
       - {{ traefik_docker_network }}
     # WEBHOOK_SECRET and the Telegram pair are in the env file, not here.
@@ -46,7 +50,11 @@
       - "traefik.http.routers.bay-webhook.rule=Host(`{{ webhook.domain }}`)"
       - "traefik.http.routers.bay-webhook.entrypoints=websecure"
       - "traefik.http.routers.bay-webhook.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.bay-webhook.middlewares=public-chain"
+      - "traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.average={{ webhook_rate_limit_average | default(10) }}"
+      - "traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.burst={{ webhook_rate_limit_burst | default(30) }}"
+      - "traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.period={{ webhook_rate_limit_period | default('1s') }}"
+      - "traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.sourceCriterion.ipStrategy.depth=1"
+      - "traefik.http.routers.bay-webhook.middlewares=public-chain,bay-webhook-ratelimit"
       - "traefik.http.services.bay-webhook.loadbalancer.server.port=9000"
 {% if watchtower_enabled | default(false) %}
       - "com.centurylinklabs.watchtower.enable=false"

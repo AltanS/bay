@@ -1,6 +1,15 @@
 ---
 watchtower_enabled: true
-watchtower_image: "nickfedor/watchtower:latest"
+# Pinned by digest, not by tag. Watchtower holds the docker socket; a
+# mutable `:latest` means an upstream push silently replaces it on the next
+# pull. Bumping it is a framework release, which is the point.
+#
+# This is the multi-arch INDEX digest of `nickfedor/watchtower:latest` as of
+# 2026-09-02, resolved with:
+#   skopeo inspect --raw docker://docker.io/nickfedor/watchtower:latest | sha256sum
+# (`skopeo inspect --format {{.Digest}}` prints the per-platform manifest
+# digest, which would pin the image to amd64 — use the raw index hash.)
+watchtower_image: "nickfedor/watchtower@sha256:3b8d2e3f0f6ff9295a5d634e4fdb7062e5e6602f71d89baa15cd4d39d22b5743"
 watchtower_schedule: "0 0 4 * * *"
 watchtower_monitor_only: true
 watchtower_cleanup: true

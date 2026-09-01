@@ -130,3 +130,39 @@ git_deploy_stall_watchdog_repeat_sec: 1800
 # Set to false to skip deploying the watchdog entirely (e.g. a consumer
 # that has an external monitoring system covering the same signal).
 git_deploy_stall_watchdog_enabled: true
+
+# ── Pinned github.com host keys ─────────────────────────────────────────
+# Deploy-key clones used to run in trust-on-first-use mode, learning whatever
+# host key answered first: whoever answered the very first connection became
+# github.com for the life of the host. roles/git_deploy/files/github_known_hosts
+# is shipped with GitHub's published keys and every ssh call now uses
+# StrictHostKeyChecking=yes against it. If GitHub rotates a host key, builds
+# fail closed until the file is refreshed in a framework release.
+git_deploy_known_hosts: "{{ git_deploy_build_dir }}/github_known_hosts"
+
+# ── Build control directories (triggers/state) ──────────────────────────
+# These used to be 0777 so that both `app_user` (rebuild.sh, via the
+# bay-build@.path unit) and the webhook container could write them. Any local
+# user could therefore force a rebuild of any service, or rewrite the circuit
+# breaker state. They are now 2770 (setgid) owned by a shared group, and the
+# webhook container runs with that GID as its primary group.
+#
+# The GID is fixed, not looked up, because it has to be identical on the host
+# and inside the container image, and the container has no way to resolve a
+# host group name. Change it only if 2000 collides on your host.
+git_deploy_build_group: bay-build
+git_deploy_build_gid: 2000
+# UID the webhook image's unprivileged `webhook` account is created with
+# (see roles/git_deploy/files/webhook/Dockerfile). The container is started as
+# "<uid>:<git_deploy_build_gid>".
+git_deploy_webhook_uid: 10001
+
+# ── Webhook route rate limit ────────────────────────────────────────────
+# The webhook router is a public, unauthenticated front door: the HMAC check
+# happens after the request is accepted, so an attacker without the secret can
+# still spend the receiver's threads. Traefik bounds that before it reaches
+# the container. Defaults are generous for GitHub push traffic and cross-region
+# fan-out, and tight enough that a flood gets 429.
+webhook_rate_limit_average: 10
+webhook_rate_limit_burst: 30
+webhook_rate_limit_period: 1s

@@ -60,15 +60,37 @@
     update_cache: true
   when: crowdsec_enabled | bool
 
-- name: Add CrowdSec GPG key
-  ansible.builtin.apt_key:
-    url: https://packagecloud.io/crowdsec/crowdsec/gpgkey
-    state: present
+- name: Ensure APT keyring directory exists
+  ansible.builtin.file:
+    path: "{{ crowdsec_gpg_keyring | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
   when: crowdsec_enabled | bool
+
+# Replaces the deprecated global-keyring module this role used to call. That
+# module installs the key into the global trusted keyring, where it can sign
+# ANY repository the host reads; a `signed-by=` keyring can only sign the
+# CrowdSec source below.
+- name: Fetch CrowdSec repository signing key
+  ansible.builtin.get_url:
+    url: "{{ crowdsec_gpg_key_url }}"
+    dest: "{{ crowdsec_gpg_keyring }}"
+    checksum: "{{ crowdsec_gpg_key_checksum }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: crowdsec_enabled | bool
+
+# NOTE: a host provisioned before this change still carries the old key in the
+# global /etc/apt/trusted.gpg. Scoping the source is the fix that matters here;
+# purging that stale global entry is a one-off manual step, documented in the
+# changelog upgrade notes (delete it from trusted.gpg / trusted.gpg.d).
 
 - name: Add CrowdSec repository
   ansible.builtin.apt_repository:
-    repo: "deb https://packagecloud.io/crowdsec/crowdsec/{{ ansible_distribution | lower }}/ {{ ansible_distribution_release }} main"
+    repo: "deb [signed-by={{ crowdsec_gpg_keyring }}] https://packagecloud.io/crowdsec/crowdsec/{{ ansible_distribution | lower }}/ {{ ansible_distribution_release }} main"
     state: present
     filename: crowdsec
   when: crowdsec_enabled | bool

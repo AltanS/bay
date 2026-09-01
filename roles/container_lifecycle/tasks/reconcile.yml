@@ -51,6 +51,7 @@
         'network_mode': _spec.network_mode | default(None),
         'ports': _spec.ports | default([]),
         'command': _spec.command | default(None),
+        'user': _spec.user | default(None),
         'restart_policy': _spec.restart_policy | default('unless-stopped'),
         'mem_limit': _spec.mem_limit | default(None),
         'labels': _spec.labels | default({}),

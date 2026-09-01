@@ -57,7 +57,8 @@
   environment:
     GIT_SSH_COMMAND: >-
       ssh -i {{ git_deploy_build_dir }}/{{ _repo_group.auth_svc }}/.deploy_key
-      -o StrictHostKeyChecking=accept-new
+      -o StrictHostKeyChecking=yes
+      -o UserKnownHostsFile={{ git_deploy_known_hosts }}
   when:
     - not _shared_repo_stat.stat.exists
     - not _repo_group.has_token
@@ -95,7 +96,8 @@
   environment:
     GIT_SSH_COMMAND: >-
       ssh -i {{ git_deploy_build_dir }}/{{ _repo_group.auth_svc }}/.deploy_key
-      -o StrictHostKeyChecking=accept-new
+      -o StrictHostKeyChecking=yes
+      -o UserKnownHostsFile={{ git_deploy_known_hosts }}
   when:
     - _shared_repo_stat.stat.exists
     - not _repo_group.has_token

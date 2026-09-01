@@ -18,6 +18,9 @@
       ansible.builtin.get_url:
         url: "https://github.com/restic/restic/releases/download/v{{ backup_restic_version }}/restic_{{ backup_restic_version }}_linux_amd64.bz2"
         dest: "/tmp/restic_{{ backup_restic_version }}_linux_amd64.bz2"
+        # Fails closed on a tampered or mismatched artefact. Bumping
+        # backup_restic_version without backup_restic_checksum stops here.
+        checksum: "sha256:{{ backup_restic_checksum }}"
         mode: "0644"
 
     - name: Decompress and install restic binary

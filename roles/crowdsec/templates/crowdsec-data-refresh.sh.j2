@@ -33,7 +33,7 @@ DATA_DIR="/var/lib/crowdsec/data"
 
 PARSERS=(
 {% for parser in crowdsec_data_refresh_parsers %}
-  "{{ parser }}"
+  {{ parser | quote }}
 {% endfor %}
 )
 

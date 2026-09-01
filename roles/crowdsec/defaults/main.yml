@@ -6,6 +6,15 @@
 # Master switch - set to false to skip all CrowdSec tasks
 crowdsec_enabled: true
 
+# APT repository signing key. Fetched to a dedicated keyring and scoped to the
+# CrowdSec source with `signed-by=`, so this key can never sign any other
+# repository on the host (which is what the deprecated `apt_key` module did).
+# The checksum pins the exact key bytes served by packagecloud; a rotated key
+# fails the fetch closed and needs a framework release.
+crowdsec_gpg_key_url: "https://packagecloud.io/crowdsec/crowdsec/gpgkey"
+crowdsec_gpg_key_checksum: "sha256:cd5729fe6f95d29efc48f1cfe63e0d4a3088506cf99f3cf74b572c4b70429980"
+crowdsec_gpg_keyring: /etc/apt/keyrings/crowdsec.asc
+
 # =============================================================================
 # Legacy Migration (fail2ban + ferm)
 # =============================================================================

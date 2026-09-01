@@ -234,6 +234,16 @@
             # 0700: repo checkouts, deploy keys, GIT_ASKPASS helpers.
             mode: "0700"
 
+        # Pinned github.com host keys. Every git-over-ssh call in this role
+        # (clone_repos.yml and rebuild.sh) points UserKnownHostsFile here with
+        # StrictHostKeyChecking=yes, replacing trust-on-first-use.
+        - name: Install pinned github.com host keys
+          ansible.builtin.copy:
+            src: github_known_hosts
+            dest: "{{ git_deploy_known_hosts }}"
+            owner: "{{ app_user }}"
+            mode: "0644"
+
         - name: Ensure bin directory exists
           ansible.builtin.file:
             path: "{{ stack_dir }}/bin"

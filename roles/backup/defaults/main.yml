@@ -1,6 +1,12 @@
 ---
 backup_enabled: false
+# backup_restic_version and backup_restic_checksum MOVE TOGETHER. The
+# checksum is the sha256 of restic_<version>_linux_amd64.bz2 as published in
+# the upstream release SHA256SUMS file:
+#   https://github.com/restic/restic/releases/download/v0.17.3/SHA256SUMS
+# Overriding the version without the checksum fails the download on purpose.
 backup_restic_version: "0.17.3"
+backup_restic_checksum: "5097faeda6aa13167aae6e36efdba636637f8741fed89bbf015678334632d4d3"
 backup_restic_bin: /usr/local/bin/restic
 
 # S3 backend — reads from secrets dict, falls back to shared S3_* vars

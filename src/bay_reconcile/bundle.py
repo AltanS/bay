@@ -36,6 +36,7 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         ports=tuple(d.get("ports") or ()),
         command=d.get("command"),
         entrypoint=d.get("entrypoint"),
+        user=d.get("user"),
         restart_policy=d.get("restart_policy") or "unless-stopped",
         mem_limit=d.get("mem_limit"),
         labels=dict(d.get("labels") or {}),

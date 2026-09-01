@@ -92,6 +92,8 @@ class SdkDockerClient:
             kwargs["command"] = spec.command
         if spec.entrypoint is not None:
             kwargs["entrypoint"] = spec.entrypoint
+        if spec.user:
+            kwargs["user"] = spec.user
         if spec.mem_limit:
             kwargs["mem_limit"] = spec.mem_limit
         if spec.ports:

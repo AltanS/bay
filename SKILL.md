@@ -174,7 +174,7 @@ to reproduce it. The flags that change what a command *means*:
 - `bin/bay vault decrypt <env>` — Decrypt a secrets file in place — leaves PLAINTEXT on disk.
 - `bin/bay vault edit <env>` — Edit encrypted secrets in $EDITOR (decrypt, edit, re-encrypt).
 - `bin/bay vault encrypt <env>` — Encrypt a plaintext secrets file in place.
-- `bin/bay vault set <env> <key> <value>` — Set one secret key non-interactively (decrypt, modify, re-encrypt).
+- `bin/bay vault set <env> <key> [value]` — Set one secret key non-interactively (decrypt, modify, re-encrypt).
 - `bin/bay vault view <env>` — View encrypted secrets (read-only, no temp files).
 
 ### Backup

@@ -2,20 +2,70 @@
 # Deploy the webhook receiver container
 # Only runs when build services exist and webhook config is defined
 
+# ── Shared build-control group ──────────────────────────────────────────
+# triggers/ and state/ have two writers with different UIDs: app_user (via the
+# bay-build@.path unit, which runs rebuild.sh) and the webhook container. They
+# used to be 0777 to make that work, which meant ANY local user could drop a
+# .trigger file and force a rebuild and restart of any service, or rewrite the
+# circuit-breaker state to suppress or trip the breaker.
+#
+# The fix is a shared group, not a permissive mode. The GID is fixed rather
+# than allocated because the container cannot resolve a host group name — it
+# is started as "<uid>:{{ git_deploy_build_gid }}" so the GID is its primary
+# group inside the container too.
+- name: Ensure the shared build-control group exists
+  ansible.builtin.group:
+    name: "{{ git_deploy_build_group }}"
+    gid: "{{ git_deploy_build_gid }}"
+    state: present
+  become: true
+  become_user: root
+
+- name: Add app_user to the shared build-control group
+  ansible.builtin.user:
+    name: "{{ app_user }}"
+    groups: "{{ git_deploy_build_group }}"
+    append: true
+  become: true
+  become_user: root
+
+# 2770: owner + group write, setgid so every file the webhook container or
+# rebuild.sh creates inherits the shared group, and nothing for "other".
 - name: Ensure triggers directory exists
   ansible.builtin.file:
     path: "{{ stack_dir }}/triggers"
     state: directory
-    mode: "0777"
+    owner: "{{ app_user }}"
+    group: "{{ git_deploy_build_group }}"
+    mode: "2770"
+  become: true
+  become_user: root
 
 - name: Ensure state directory exists
   # Shared between rebuild.sh (writes CB state files) and the webhook
-  # container (writes telegram-failures.log). Permissive mode so both the
-  # app_user and the webhook container's webhook user can write.
+  # container (writes telegram-failures.log).
   ansible.builtin.file:
     path: "{{ stack_dir }}/state"
     state: directory
-    mode: "0777"
+    owner: "{{ app_user }}"
+    group: "{{ git_deploy_build_group }}"
+    mode: "2770"
+  become: true
+  become_user: root
+
+# One-off migration off 0777. setgid only governs NEW files, so anything
+# written under the old mode (circuit-breaker state, telegram-failures.log)
+# still carries its creator's group and no group write bit — which would leave
+# one of the two writers locked out of its own file.
+- name: Re-group pre-existing state files
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/state"
+    state: directory
+    group: "{{ git_deploy_build_group }}"
+    mode: "g+w"
+    recurse: true
+  become: true
+  become_user: root
 
 - name: Ensure webhook config directory exists
   ansible.builtin.file:

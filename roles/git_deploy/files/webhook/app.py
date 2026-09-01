@@ -6,8 +6,10 @@ import hmac
 import json
 import os
 import sys
+import threading
 import urllib.request
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +55,46 @@ ALERT_WEBHOOK_MAX_CHARS = int(os.environ.get("ALERT_WEBHOOK_MAX_CHARS", "3500"))
 TELEGRAM_FAILURES_LOG = Path(
     os.environ.get("TELEGRAM_FAILURES_LOG", "/state/telegram-failures.log")
 )
+
+# Hard cap on a request body, enforced by the SERVER, not by the client's own
+# Content-Length header. Without it the only bound on how much this process
+# will read into memory is a number the attacker supplies. GitHub push
+# payloads are orders of magnitude below 1 MiB; a fan-out peer sending more
+# than this needs investigating, not a bigger cap.
+MAX_BODY_BYTES = 1048576  # 1 MiB
+
+# Replay protection. A captured request is valid forever otherwise: the HMAC
+# covers the body, and the body never changes, so anyone who can record one
+# delivery can force rebuilds indefinitely. Remembering the delivery IDs we
+# have already acted on makes a replay a no-op — and makes GitHub's own
+# retries idempotent, which they were not before.
+#
+# In-memory on purpose: the receiver is a single container, a restart losing
+# the cache costs at most one duplicate build, and a persistent store would be
+# new state to back up. 256 entries is far more than the number of deliveries
+# in flight during any plausible replay window.
+DELIVERY_CACHE_SIZE = 256
+_delivery_seen: "OrderedDict[str, None]" = OrderedDict()
+_delivery_lock = threading.Lock()
+
+
+def _delivery_is_duplicate(delivery_id: str) -> bool:
+    """True when this X-GitHub-Delivery was already accepted (LRU, bounded).
+
+    An empty/absent ID is never a duplicate: peers and hand-rolled callers do
+    not always set the header, and refusing them would break fan-out.
+    """
+    if not delivery_id:
+        return False
+    with _delivery_lock:
+        if delivery_id in _delivery_seen:
+            _delivery_seen.move_to_end(delivery_id)
+            return True
+        _delivery_seen[delivery_id] = None
+        while len(_delivery_seen) > DELIVERY_CACHE_SIZE:
+            _delivery_seen.popitem(last=False)
+        return False
+
 
 # Service config: {service_name: {"branch": "main", "paths": {"exclude": [...]}}}
 SERVICE_CONFIG: dict[str, dict] = {}
@@ -300,9 +342,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
+            # A count, not the names. This endpoint is unauthenticated;
+            # the names are the consumer's app surface and there is no reason
+            # to publish them. The count keeps it useful as a probe.
             body = json.dumps({
                 "status": "ok",
-                "services": list(SERVICE_CONFIG.keys()),
+                "services": len(SERVICE_CONFIG),
             })
             self.wfile.write(body.encode())
             return
@@ -336,22 +381,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
         svc_config = SERVICE_CONFIG[service]
         expected_branch = svc_config.get("branch", "main")
 
-        # Read body
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
-
-        # Validate HMAC signature
-        signature_header = self.headers.get("X-Hub-Signature-256")
-        if not signature_header:
-            self.send_error(401, "Missing signature")
+        verified = self._read_verified_body()
+        if verified is None:
             return
-
-        expected = "sha256=" + hmac.new(
-            WEBHOOK_SECRET.encode(), body, hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected, signature_header):
-            self.send_error(403, "Invalid signature")
-            return
+        body, signature_header = verified
 
         # ── Per-service pull signal (legacy): build server notifying for one service ──
         # Skips branch matching, path filtering, and fan-out routing.
@@ -585,22 +618,10 @@ class WebhookHandler(BaseHTTPRequestHandler):
         """
         corr_id = str(uuid.uuid4())
 
-        # Read body
-        content_length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(content_length)
-
-        # Validate HMAC signature
-        signature_header = self.headers.get("X-Hub-Signature-256")
-        if not signature_header:
-            self.send_error(401, "Missing signature")
+        verified = self._read_verified_body()
+        if verified is None:
             return
-
-        expected = "sha256=" + hmac.new(
-            WEBHOOK_SECRET.encode(), body, hashlib.sha256
-        ).hexdigest()
-        if not hmac.compare_digest(expected, signature_header):
-            self.send_error(403, "Invalid signature")
-            return
+        body, _signature_header = verified
 
         # Parse JSON body for image ref
         try:
@@ -660,6 +681,65 @@ class WebhookHandler(BaseHTTPRequestHandler):
             "services": triggered,
             "corr_id": corr_id,
         })
+
+    def _read_verified_body(self):
+        """Bounded read + HMAC check + replay check. The single front door.
+
+        Returns ``(body, signature_header)`` when the request may proceed, or
+        ``None`` when a response has already been sent and the caller must
+        return immediately.
+
+        Every POST handler goes through here. The push handler and the
+        pull-image handler used to carry byte-for-byte copies of this preamble,
+        which is exactly how a cap added in one place silently misses the other.
+
+        Order is deliberate: the size cap runs BEFORE any read, and the replay
+        check runs AFTER the signature check, so an unauthenticated caller can
+        never poison the delivery cache.
+        """
+        raw_length = self.headers.get("Content-Length", "0")
+        try:
+            content_length = int(raw_length)
+        except (TypeError, ValueError):
+            self.send_error(400, "Invalid Content-Length")
+            return None
+        if content_length < 0:
+            self.send_error(400, "Invalid Content-Length")
+            return None
+        if content_length > MAX_BODY_BYTES:
+            # Refused on the header alone — nothing is read off the socket.
+            self.send_error(413, "Payload too large")
+            return None
+
+        body = self.rfile.read(content_length)
+
+        signature_header = self.headers.get("X-Hub-Signature-256")
+        if not signature_header:
+            self.send_error(401, "Missing signature")
+            return None
+
+        expected = "sha256=" + hmac.new(
+            WEBHOOK_SECRET.encode(), body, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature_header):
+            self.send_error(403, "Invalid signature")
+            return None
+
+        delivery_id = self.headers.get("X-GitHub-Delivery", "")
+        if _delivery_is_duplicate(delivery_id):
+            print(
+                f"[webhook] Duplicate delivery {delivery_id} ignored",
+                flush=True,
+            )
+            # 200, not 4xx: GitHub retries anything that is not a success, and
+            # a replay that gets a 200 and does nothing is the goal.
+            self._respond_json(200, {
+                "status": "duplicate",
+                "delivery": delivery_id,
+            })
+            return None
+
+        return body, signature_header
 
     def _respond_json(self, code: int, body: dict) -> None:
         """Send a JSON response."""

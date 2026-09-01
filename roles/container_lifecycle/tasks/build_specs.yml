@@ -327,6 +327,12 @@
       image: bay-webhook:latest
       build: true
       restart_policy: unless-stopped
+      # Fixed UID (the image's `webhook` account) with the host's shared
+      # build-control group as the primary GID. That is what lets
+      # {{ stack_dir }}/triggers and /state drop from 0777 to 2770 — see
+      # roles/git_deploy/tasks/webhook.yml. The GID must be a number: the
+      # container cannot resolve a host group name.
+      user: "{{ git_deploy_webhook_uid | default(10001) }}:{{ git_deploy_build_gid | default(2000) }}"
       networks:
         - "{{ traefik_docker_network | default('services') }}"
       # WEBHOOK_SECRET and the Telegram pair live in the env file deploy_stack
@@ -358,7 +364,15 @@
         traefik.http.routers.bay-webhook.rule: "Host(`{{ webhook.domain }}`)"
         traefik.http.routers.bay-webhook.entrypoints: websecure
         traefik.http.routers.bay-webhook.tls.certresolver: letsencrypt
-        traefik.http.routers.bay-webhook.middlewares: public-chain
+        # Public, unauthenticated front door: the HMAC check happens after the
+        # request is accepted, so an attacker without the secret can still
+        # spend the receiver's threads. Bound it at the edge. Same label shape
+        # as the per-service opt-in rate limit in _service.j2.
+        traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.average: "{{ webhook_rate_limit_average | default(10) }}"
+        traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.burst: "{{ webhook_rate_limit_burst | default(30) }}"
+        traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.period: "{{ webhook_rate_limit_period | default('1s') }}"
+        traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.sourceCriterion.ipStrategy.depth: "1"
+        traefik.http.routers.bay-webhook.middlewares: public-chain,bay-webhook-ratelimit
         traefik.http.services.bay-webhook.loadbalancer.server.port: "9000"
         com.centurylinklabs.watchtower.enable: "false"
 

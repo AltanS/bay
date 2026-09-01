@@ -524,7 +524,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
 {% endif %}
 {% set askpass_remote = git_deploy_remote_build_dir ~ '/.git-askpass-' ~ svc_name %}
 {% set askpass_local = git_deploy_build_dir ~ '/.git-askpass-' ~ slug %}
-{% if not _is_first.val %}el{% endif %}if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
+{% if not _is_first.val %}el{% endif %}if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
 {% if strategy == 'remote' %}
   REPO_DIR="${REMOTE_BUILD_DIR}/{{ svc_name }}/repo"
 {% else %}
@@ -565,7 +565,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   CLONE_REPO="{{ build.repo }}"
 {% else %}
   DEPLOY_KEY="${BUILD_DIR}/{{ svc_name }}/.deploy_key"
-  PULL_CMD="GIT_SSH_COMMAND='ssh -i ${DEPLOY_KEY} -o StrictHostKeyChecking=accept-new' git pull origin ${BRANCH}"
+  PULL_CMD="GIT_SSH_COMMAND='ssh -i ${DEPLOY_KEY} -o StrictHostKeyChecking=yes -o UserKnownHostsFile={{ git_deploy_known_hosts }}' git pull origin ${BRANCH}"
 {% endif %}
 {% if build.args is defined %}
   BUILD_ARGS=(
@@ -590,7 +590,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
 {% endfor %}
 {% for svc_name in _pull_only_services %}
 {% set svc = services[svc_name] %}
-{% if not _is_first.val %}el{% endif %}if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
+{% if not _is_first.val %}el{% endif %}if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
   # Pull-only service (no build: block, shares a remote-built image)
   IMAGE_REF="{{ svc.image }}"
   IMAGE_REPO="{{ svc.image | regex_replace(':.*$', '') }}"
@@ -735,7 +735,7 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
   'traefik_retry_attempts': traefik_retry_attempts | default(4),
   'stack_name': stack_name | default('bay'),
 } %}
-{% if not _pull_ns.first %}el{% endif %}if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
+{% if not _pull_ns.first %}el{% endif %}if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
   _run_container() {
     docker run -d \
       --name "{{ svc_name }}" \
@@ -1107,7 +1107,7 @@ docker rm "${SERVICE}"   2>/dev/null || true
   'traefik_retry_attempts': traefik_retry_attempts | default(4),
   'stack_name': stack_name | default('bay'),
 } %}
-{% if not loop.first %}el{% endif %}if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
+{% if not loop.first %}el{% endif %}if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
   _run_container() {
     docker run -d \
       --name "{{ svc_name }}" \
@@ -1168,7 +1168,7 @@ _reset_cb
 # bay-build@<alias>.service never observes a partial/empty trigger.
 {% for svc_name in git_deploy_services %}
 {% if _dedup[svc_name].primary and _dedup[svc_name].group_size > 1 %}
-if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
+if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
 {% for other_svc in git_deploy_services %}
 {% if not _dedup[other_svc].primary and _dedup[other_svc].primary_svc == svc_name %}
   _log "Fan-out: triggering alias {{ other_svc }}"

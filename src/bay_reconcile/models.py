@@ -34,6 +34,7 @@ class ContainerSpec:
     ports: Sequence[str] = ()
     command: str | Sequence[str] | None = None
     entrypoint: str | Sequence[str] | None = None
+    user: str | None = None  # "<uid>:<gid>" — see the webhook receiver spec
     restart_policy: str = "unless-stopped"
     mem_limit: str | None = None
     labels: Mapping[str, str] = field(default_factory=dict)
