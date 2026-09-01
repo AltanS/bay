@@ -9,6 +9,7 @@ import typer
 from bay_cli import runner
 from bay_cli.errors import BayError
 from bay_cli.utils.ephemeral import show_ephemeral
+from bay_cli.utils.secret_gen import generate_password
 
 
 def secret(
@@ -37,8 +38,8 @@ def secret(
 
 
 def _generate_secrets() -> None:
-    pw32 = secrets.token_urlsafe(48)[:32]
-    pw64 = secrets.token_urlsafe(96)[:64]
+    pw32 = generate_password(32)
+    pw64 = generate_password(64)
     hex_token = secrets.token_hex(32)
     b64_32 = base64.b64encode(secrets.token_bytes(32)).decode()
     b64_64 = base64.b64encode(secrets.token_bytes(64)).decode()

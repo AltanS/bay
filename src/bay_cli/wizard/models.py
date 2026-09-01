@@ -92,6 +92,90 @@ class SSHKey:
     source: Literal["github", "manual"]
 
 
+_SSH_KEY_PREFIXES = ("ssh-", "ecdsa-", "sk-ssh-", "sk-ecdsa-")
+
+
+def parse_ssh_public_key(text: str, *, fallback_username: str = "admin") -> SSHKey:
+    """Parse one OpenSSH public key line into an :class:`SSHKey`.
+
+    Raises BayError when the line is not a public key — a private key
+    pasted here would be both useless and a leak.
+    """
+    line = text.strip()
+    if not line or not line.startswith(_SSH_KEY_PREFIXES):
+        raise BayError(
+            f"Not an SSH public key: {line[:40]!r} — expected a line starting "
+            "with ssh-ed25519, ssh-rsa or ecdsa-… (the contents of a .pub file)"
+        )
+    parts = line.split()
+    comment = parts[2] if len(parts) > 2 else ""
+    username = comment.split("@", 1)[0] if comment else fallback_username
+    return SSHKey(username=username or fallback_username, public_key=line, source="manual")
+
+
+def read_ssh_key_file(path: Path) -> list[SSHKey]:
+    """Read every public key from *path* (a ``.pub`` file)."""
+    try:
+        text = path.read_text()
+    except OSError as e:
+        raise BayError(f"Cannot read SSH key file {path}: {e}") from e
+    keys = [
+        parse_ssh_public_key(line, fallback_username=path.stem)
+        for line in text.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if not keys:
+        raise BayError(f"No SSH public key found in {path}")
+    return keys
+
+
+def discover_local_ssh_keys() -> list[SSHKey]:
+    """Return the public keys found in ``~/.ssh/*.pub``, ignoring bad ones."""
+    ssh_dir = Path.home() / ".ssh"
+    if not ssh_dir.is_dir():
+        return []
+    found: list[SSHKey] = []
+    for pub in sorted(ssh_dir.glob("*.pub")):
+        try:
+            found.extend(read_ssh_key_file(pub))
+        except BayError:
+            continue
+    return found
+
+
+def resolve_ssh_keys(
+    inline_keys: list[str] | None = None,
+    key_files: list[str] | None = None,
+) -> list[SSHKey]:
+    """Resolve the admin account's SSH keys for a non-interactive setup.
+
+    Order: ``--ssh-key`` values, then ``--ssh-key-file`` files, then
+    ``~/.ssh/*.pub``. Refuses to return an empty list: provisioning
+    disables root login and password authentication, so an admin account
+    with no key locks you out of the server you just paid for.
+    """
+    keys: list[SSHKey] = []
+    for raw in inline_keys or []:
+        keys.append(parse_ssh_public_key(raw))
+    for raw_path in key_files or []:
+        keys.extend(read_ssh_key_file(Path(raw_path).expanduser()))
+    if keys:
+        return keys
+
+    keys = discover_local_ssh_keys()
+    if keys:
+        return keys
+
+    raise BayError(
+        "No SSH public key found for the admin account.\n"
+        "  Provisioning disables root login and password authentication, so a "
+        "keyless admin locks you out of your own server.\n"
+        "  Pass one with --ssh-key 'ssh-ed25519 AAAA…' or "
+        "--ssh-key-file ~/.ssh/id_ed25519.pub,\n"
+        "  or create a key first: ssh-keygen -t ed25519"
+    )
+
+
 @dataclass
 class RegionConfig:
     """A deployment region with name and server address."""

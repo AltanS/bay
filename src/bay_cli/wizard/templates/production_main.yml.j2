@@ -1,9 +1,10 @@
 ---
 # Production-specific configuration
 
-# Telegram alerts
-docker_monitor_telegram_bot_token: "{{ '{{ secrets.TELEGRAM_BOT_TOKEN }}' }}"
-docker_monitor_telegram_chat_id: ""
+# Telegram alerts — add TELEGRAM_BOT_TOKEN to group_vars/production/secrets.yml,
+# then uncomment both lines.
+# docker_monitor_telegram_bot_token: "{{ '{{ secrets.TELEGRAM_BOT_TOKEN }}' }}"
+# docker_monitor_telegram_chat_id: ""
 # Optional second alert sink, fired alongside Telegram (Campfire, Slack, ...).
 # The vault key must be LOWERCASE — it is an Ansible role var. See docs/alerting.md.
 # alert_webhook_url: "{{ '{{ secrets.alert_webhook_url }}' }}"

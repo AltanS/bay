@@ -1,3 +1,4 @@
 [production]
-# Replace with your server IP or hostname
-# Example: 203.0.113.10
+# Replace this documentation IP (RFC 5737) with your own server.
+# `bin/bay validate` warns for as long as it is still here.
+203.0.113.10

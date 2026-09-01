@@ -170,7 +170,6 @@ check_var() {
 check_var example/group_vars/all/main.yml stack_name
 check_var example/group_vars/all/main.yml stack_dir
 check_var example/group_vars/all/main.yml ansible_user
-check_var example/group_vars/all/main.yml docker_registry_org
 check_var example/group_vars/all/services.yml services
 check_var example/group_vars/all/services.yml accessories
 check_var example/group_vars/all/security.yml firewall_allowed_tcp_ports

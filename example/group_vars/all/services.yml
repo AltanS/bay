@@ -15,9 +15,7 @@ services:
       - status.example.com
     ports:
       internal: 8080
-    healthcheck:
-      path: /health
-      interval: 30s
+    healthcheck_path: /health
     env:
       clear:
         GATUS_CONFIG: /config/config.yaml
@@ -50,13 +48,11 @@ services:
       - /endpoints/secret
     image: twinproduction/gatus:latest
     domains:
-      - status.example.com
+      - uptime.example.com
     ports:
       internal: 8080
     replicas: 1
-    healthcheck:
-      path: /health
-      interval: 30s
+    healthcheck_path: /health
     env:
       clear:
         NODE_ENV: production
@@ -86,8 +82,7 @@ services:
     ports:
       internal: 3000
     mem_limit: 512m
-    healthcheck:
-      path: /health
+    healthcheck_path: /health
     env:
       clear:
         DATABASE_URL: "postgresql://app:{{ secrets.DB_PASSWORD }}@localhost:5432/app"
@@ -114,7 +109,7 @@ accessories:
         POSTGRES_DB: app
         POSTGRES_USER: app
       secret:
-        - POSTGRES_PASSWORD
+        POSTGRES_PASSWORD: POSTGRES_PASSWORD
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "app"]
       interval: 5s

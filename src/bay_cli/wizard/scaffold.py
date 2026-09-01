@@ -7,9 +7,11 @@ import shutil
 from pathlib import Path
 
 import jinja2
+from ruamel.yaml import YAML
 
 from bay_cli import console
-from bay_cli.wizard.models import WizardResult
+from bay_cli.utils.secret_gen import generate_password
+from bay_cli.wizard.models import SSHKey, WizardResult
 
 # ── Template → output path mapping ──────────────────────────────────────
 
@@ -42,6 +44,28 @@ _TEMPLATES: dict[str, str] = {
 }
 
 
+# Secret names the templates scaffold, per selected service. Every one of
+# them gets a generated value — an empty secret is a failed `bay validate`
+# and, for a database, a container that never comes up.
+_SERVICE_SECRETS: dict[str, dict[str, int]] = {
+    "postgres": {"POSTGRES_PASSWORD": 32},
+    "mariadb": {"MARIADB_ROOT_PASSWORD": 32, "MARIADB_PASSWORD": 32},
+    "vaultwarden": {"VAULTWARDEN_ADMIN_TOKEN": 48},
+    "n8n": {"N8N_DB_POSTGRESDB_PASSWORD": 32},
+    "plausible": {"PLAUSIBLE_SECRET_KEY_BASE": 64, "PLAUSIBLE_DB_PASSWORD": 32},
+    "umami": {"UMAMI_APP_SECRET": 64, "UMAMI_DB_PASSWORD": 32},
+}
+
+
+def generated_secrets_for(selected_services: list[str]) -> dict[str, str]:
+    """Mint one secret per scaffolded vault key for *selected_services*."""
+    values: dict[str, str] = {}
+    for service in selected_services:
+        for key, length in _SERVICE_SECRETS.get(service, {}).items():
+            values[key] = generate_password(length)
+    return values
+
+
 def _build_context(result: WizardResult) -> dict:
     """Build the Jinja2 template context from a WizardResult."""
     return {
@@ -57,6 +81,7 @@ def _build_context(result: WizardResult) -> dict:
         "vpn_enabled": result.vpn_enabled,
         "vpn_peer_ips": result.vpn_peer_ips,
         "selected_services": result.selected_services,
+        "generated_secrets": generated_secrets_for(result.selected_services),
     }
 
 
@@ -112,6 +137,8 @@ def scaffold(result: WizardResult, target_dir: Path, *, force: bool = False) -> 
             output_path = target_dir / f"group_vars/{region.name}/main.yml"
             _render_one(env, "region_main.yml.j2", region_ctx, output_path, created, skipped, backed_up, force=force)
 
+    created.extend(_copy_catalog_files(result.selected_services, target_dir))
+
     _log_skipped_summary(skipped)
     if backed_up:
         console.warning(f"Backed up {len(backed_up)} changed file(s):")
@@ -125,6 +152,101 @@ def scaffold(result: WizardResult, target_dir: Path, *, force: bool = False) -> 
         os.chmod(test_script, 0o755)
 
     return created
+
+
+def _copy_catalog_files(selected_services: list[str], target_dir: Path) -> list[Path]:
+    """Copy each selected service's catalog ``files/`` tree into the consumer.
+
+    A service that declares ``config_files`` cannot deploy without them —
+    the deploy_stack role copies every entry to the host and fails on a
+    missing one. ``bin/bay service add`` has always done this; scaffolding
+    did not, which is why the default (Gatus) project failed its first
+    deploy. Both paths share the one helper in commands/service.py.
+    """
+    from bay_cli.catalog import _package_framework_root, load_catalog
+    from bay_cli.commands.service import _copy_config_files
+
+    try:
+        catalog = load_catalog(_package_framework_root(), target_dir)
+    except Exception as e:  # a broken catalog must not abort scaffolding
+        console.warning(f"Could not read the service catalog: {e}")
+        return []
+
+    copied: list[Path] = []
+    for service_id in selected_services:
+        entry = catalog.get(service_id)
+        if entry is None:
+            continue
+        for rel in _copy_config_files(entry, target_dir):
+            path = target_dir / rel
+            copied.append(path)
+            console.success(f"created {path}")
+    return copied
+
+
+def fill_example_gaps(target_dir: Path, ssh_keys: list[SSHKey]) -> None:
+    """Finish the ``--no-interactive`` example copy so it can actually deploy.
+
+    ``example/`` is copied verbatim, so the two values that cannot be
+    shipped in a public repo — the operator's SSH key and real secrets —
+    arrive empty. Filling them here keeps the example tree free of fake
+    credentials while still producing a consumer that passes validate.
+    """
+    _write_admin_keys(target_dir / "group_vars" / "all" / "users.yml", ssh_keys)
+    for secrets_file in sorted((target_dir / "group_vars").glob("*/secrets.yml")):
+        _fill_empty_secrets(secrets_file)
+
+
+def _write_admin_keys(users_file: Path, ssh_keys: list[SSHKey]) -> None:
+    """Put *ssh_keys* on every user in the ``ssh-access`` group."""
+    if not users_file.is_file() or not ssh_keys:
+        return
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    data = yaml.load(users_file.read_text())
+    if not isinstance(data, dict) or not isinstance(data.get("users"), list):
+        return
+
+    changed = False
+    for user in data["users"]:
+        if not isinstance(user, dict):
+            continue
+        if "ssh-access" not in (user.get("groups") or []):
+            continue
+        if user.get("keys"):
+            continue
+        user["keys"] = [key.public_key for key in ssh_keys]
+        changed = True
+
+    if changed:
+        with users_file.open("w") as f:
+            yaml.dump(data, f)
+        console.success(f"added {len(ssh_keys)} SSH key(s) to {users_file}")
+
+
+def _fill_empty_secrets(secrets_file: Path) -> None:
+    """Replace every empty value under ``secrets:`` with a generated one."""
+    if not secrets_file.is_file():
+        return
+    if _is_vault_encrypted(secrets_file):
+        return
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    data = yaml.load(secrets_file.read_text())
+    if not isinstance(data, dict) or not isinstance(data.get("secrets"), dict):
+        return
+
+    filled = 0
+    for key, value in data["secrets"].items():
+        if value is None or (isinstance(value, str) and not value.strip()):
+            data["secrets"][key] = generate_password(32)
+            filled += 1
+
+    if filled:
+        with secrets_file.open("w") as f:
+            yaml.dump(data, f)
+        secrets_file.chmod(0o600)
+        console.success(f"generated {filled} secret(s) in {secrets_file}")
 
 
 def _render_one(

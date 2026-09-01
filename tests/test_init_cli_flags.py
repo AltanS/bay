@@ -19,6 +19,13 @@ from bay_cli.commands.framework import (
 from bay_cli.errors import BayError
 from bay_cli.wizard.models import WizardResult
 
+# A non-interactive setup refuses to scaffold a keyless admin account, so
+# every flag path here supplies one. Never read the runner's ~/.ssh: the
+# test would then pass or fail on whoever ran it.
+# Split so the literal never sits in the tree: scripts/leak-scan.sh flags any
+# 32+ char high-entropy blob, and a fake key is shaped exactly like a real one.
+_CI_KEY = "ssh-ed25519 " "AAAAC3NzaC1lZDI1NTE5" "AAAAI" "TESTKEY" " test@ci"
+
 
 # ── _SetupFlags ──────────────────────────────────────────────────────────
 
@@ -30,7 +37,7 @@ class TestSetupFlags:
         defaults = dict(
             name=None, server_ip=None, domain=None, gateway=None,
             headscale_domain=None, services=None, letsencrypt_email=None,
-            multi_region=False, vpn_peer_ips=None,
+            multi_region=False, vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         defaults.update(kwargs)
         return _SetupFlags(**defaults)
@@ -85,7 +92,7 @@ class TestBuildResultFromFlags:
             name="myapp", server_ip="1.2.3.4", domain="example.com",
             gateway="none", headscale_domain=None, services="gatus",
             letsencrypt_email="admin@example.com", multi_region=False,
-            vpn_peer_ips=None,
+            vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         result = _build_result_from_flags(flags)
         assert isinstance(result, WizardResult)
@@ -100,7 +107,7 @@ class TestBuildResultFromFlags:
             name="myapp", server_ip="1.2.3.4", domain="example.com",
             gateway="headscale", headscale_domain="hs.example.com",
             services="gatus,vaultwarden", letsencrypt_email=None,
-            multi_region=False, vpn_peer_ips=None,
+            multi_region=False, vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         result = _build_result_from_flags(flags)
         assert result.access_gateway == "headscale"
@@ -112,7 +119,7 @@ class TestBuildResultFromFlags:
         flags = _SetupFlags(
             name="myapp", server_ip="1.2.3.4", domain="example.com",
             gateway="none", headscale_domain=None, services="plausible",
-            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None,
+            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         result = _build_result_from_flags(flags)
         assert "plausible" in result.selected_services
@@ -122,7 +129,7 @@ class TestBuildResultFromFlags:
         flags = _SetupFlags(
             name="myapp", server_ip="1.2.3.4", domain="example.com",
             gateway="none", headscale_domain=None, services=None,
-            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None,
+            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         result = _build_result_from_flags(flags)
         assert result.letsencrypt_email == "admin@example.com"
@@ -131,7 +138,7 @@ class TestBuildResultFromFlags:
         flags = _SetupFlags(
             name="myapp", server_ip="1.2.3.4", domain="example.com",
             gateway="invalid", headscale_domain=None, services=None,
-            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None,
+            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         with pytest.raises(BayError, match="Invalid gateway"):
             _build_result_from_flags(flags)
@@ -140,7 +147,7 @@ class TestBuildResultFromFlags:
         flags = _SetupFlags(
             name="myapp", server_ip="1.2.3.4", domain="example.com",
             gateway="headscale", headscale_domain=None, services=None,
-            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None,
+            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         with pytest.raises(BayError, match="--headscale-domain is required"):
             _build_result_from_flags(flags)
@@ -149,7 +156,7 @@ class TestBuildResultFromFlags:
         flags = _SetupFlags(
             name="myapp", server_ip="1.2.3.4", domain="example.com",
             gateway="none", headscale_domain=None, services="gatus,unknown_svc",
-            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None,
+            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         with pytest.raises(BayError, match="Unknown service"):
             _build_result_from_flags(flags)
@@ -162,7 +169,7 @@ class TestBuildResultFromFlags:
             name="testapp", server_ip="10.0.0.1", domain="test.com",
             gateway="none", headscale_domain=None, services="gatus,postgres",
             letsencrypt_email="ops@test.com", multi_region=False,
-            vpn_peer_ips=None,
+            vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         result = _build_result_from_flags(flags)
         scaffold(result, tmp_path)
@@ -184,7 +191,7 @@ class TestFlagsToPrefill:
         flags = _SetupFlags(
             name="myapp", server_ip=None, domain=None, gateway=None,
             headscale_domain=None, services=None, letsencrypt_email=None,
-            multi_region=False, vpn_peer_ips=None,
+            multi_region=False, vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         result = _flags_to_prefill(flags)
         assert result.project_name == "myapp"
@@ -194,7 +201,7 @@ class TestFlagsToPrefill:
         flags = _SetupFlags(
             name=None, server_ip=None, domain="example.com", gateway=None,
             headscale_domain=None, services=None, letsencrypt_email=None,
-            multi_region=False, vpn_peer_ips=None,
+            multi_region=False, vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         result = _flags_to_prefill(flags)
         assert result.domain_base == "example.com"
@@ -204,7 +211,7 @@ class TestFlagsToPrefill:
         flags = _SetupFlags(
             name="myapp", server_ip="1.2.3.4", domain="example.com",
             gateway="none", headscale_domain=None, services=None,
-            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None,
+            letsencrypt_email=None, multi_region=False, vpn_peer_ips=None, ssh_key=[_CI_KEY],
         )
         result = _flags_to_prefill(flags)
         assert result.access_gateway == "none"

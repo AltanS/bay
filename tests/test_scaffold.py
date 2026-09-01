@@ -84,7 +84,8 @@ class TestSingleServerScaffold:
         self, tmp_path: Path, single_server_result: WizardResult
     ) -> None:
         created = scaffold(single_server_result, tmp_path)
-        assert len(created) == 20
+        # 20 rendered templates + gatus's catalog config file
+        assert len(created) == 21
         for rel in _COMMON_FILES:
             assert (tmp_path / rel).exists(), f"missing: {rel}"
 
@@ -151,12 +152,12 @@ class TestSingleServerScaffold:
 class TestMultiRegionScaffold:
     """Scaffold output for a multi-region configuration."""
 
-    def test_creates_19_files(
+    def test_creates_all_files(
         self, tmp_path: Path, multi_region_result: WizardResult
     ) -> None:
         created = scaffold(multi_region_result, tmp_path)
-        # 20 common + 2 per-region main.yml
-        assert len(created) == 22
+        # 20 common + 2 per-region main.yml + gatus's catalog config file
+        assert len(created) == 23
 
     def test_per_region_group_vars_created(
         self, tmp_path: Path, multi_region_result: WizardResult

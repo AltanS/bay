@@ -408,6 +408,14 @@ def _resolve_inventory(root: Path, env: str) -> Path | None:
     return None
 
 
+_DOCUMENTATION_NETS = ("192.0.2.", "198.51.100.", "203.0.113.")
+
+
+def _is_documentation_ip(host: str) -> bool:
+    """True for RFC 5737 documentation addresses (never routable)."""
+    return host.startswith(_DOCUMENTATION_NETS)
+
+
 def _validate_inventory(root: Path, env: str, result: ValidationResult) -> None:
     """Validate the hosts inventory file."""
     console.header("Inventory")
@@ -462,6 +470,21 @@ def _validate_inventory(root: Path, env: str, result: ValidationResult) -> None:
             f"{inv_label}  {len(hosts)} host{'s' if len(hosts) != 1 else ''} "
             f"in {len(groups)} group{'s' if len(groups) != 1 else ''}"
         )
+        # The scaffolded inventory ships an RFC 5737 documentation address
+        # so the file is structurally valid on day one. Deploying to it
+        # goes nowhere, so say so every run until it is replaced.
+        placeholders = sorted(
+            {
+                str(h.get("ip") or h.get("name") or "")
+                for h in hosts
+                if _is_documentation_ip(str(h.get("ip") or h.get("name") or ""))
+            }
+        )
+        if placeholders:
+            result.warn(
+                f"{inv_label}  still points at the example address "
+                f"{', '.join(placeholders)} -- replace it with your server"
+            )
 
 
 # ── Schema validation ───────────────────────────────────────────────────
@@ -1358,16 +1381,28 @@ def _check_vault_keys(
         )
         return
 
-    # Check each required key against vault contents
+    # Check each required key against vault contents. Presence is not
+    # enough: a scaffolded `KEY: ""` used to pass here and then hand the
+    # container an empty password, which reads as "auth is broken" days
+    # later instead of "you never filled this in".
     missing: list[str] = []
+    empty: list[str] = []
     for key_name in sorted(required_keys.keys()):
+        users = ", ".join(sorted(set(required_keys[key_name])))
         if key_name not in vault_data:
-            users = ", ".join(sorted(set(required_keys[key_name])))
             missing.append(f"'{key_name}' (used by {users})")
+            continue
+        value = vault_data[key_name]
+        if value is None or (isinstance(value, str) and not value.strip()):
+            empty.append(f"'{key_name}' (used by {users})")
 
-    if missing:
+    if missing or empty:
         for m in missing:
             result.fail(f"Vault keys         missing: {m}")
+        for e in empty:
+            result.fail(
+                f"Vault keys         empty: {e} -- generate one with 'bin/bay secret'"
+            )
     else:
         result.ok(f"Vault keys         all {len(required_keys)} referenced secret(s) present")
 
@@ -2318,6 +2353,103 @@ def _validate_identifier_safety(
         )
 
 
+def _validate_config_files(
+    root: Path,
+    services_data: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Every ``config_files`` entry must exist under the consumer's ``files/``.
+
+    deploy_stack copies each entry from ``files/<entry>`` to
+    ``<stack_dir>/config/<entry>``, and a service that mounts a config it
+    never received starts and immediately dies. This used to be found on
+    the server, mid-deploy; the default (Gatus) project shipped that way.
+    """
+    console.header("Config Files")
+
+    missing: list[str] = []
+    total = 0
+    for kind in ("services", "accessories"):
+        entries = services_data.get(kind) or {}
+        if not isinstance(entries, dict):
+            continue
+        for name, entry in entries.items():
+            if not isinstance(entry, dict):
+                continue
+            config_files = entry.get("config_files")
+            if not isinstance(config_files, list):
+                continue
+            for rel in config_files:
+                total += 1
+                expected = root / "files" / str(rel)
+                if not expected.is_file():
+                    missing.append(
+                        f"{kind}.{name}.config_files: '{rel}' has no file at "
+                        f"{expected.relative_to(root) if expected.is_relative_to(root) else expected}"
+                        f" -- create it, or drop the entry"
+                    )
+
+    if missing:
+        for m in missing:
+            result.fail(f"Config files       {m}")
+    elif total:
+        result.ok(f"Config files       all {total} declared file(s) present")
+    else:
+        result.ok("Config files       no config_files declared")
+
+
+def _validate_admin_ssh_keys(
+    parsed_files: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Refuse a user in the ``ssh-access`` group with no SSH key.
+
+    Provisioning runs the ``users`` role first, then hardening that sets
+    ``PermitRootLogin no`` and ``PasswordAuthentication no``. A user whose
+    ``keys`` list is empty is skipped silently by the role (it uses
+    ``subelements(..., skip_missing=True)``), so the run stays green and
+    the server ends up with no way in at all.
+    """
+    console.header("Admin Access")
+
+    users_data: list[Any] | None = None
+    users_rel = ""
+    for rel_path, data in parsed_files.items():
+        if isinstance(data, dict) and isinstance(data.get("users"), list):
+            users_data = data["users"]
+            users_rel = rel_path
+            break
+
+    if users_data is None:
+        result.warn("Admin SSH keys     no 'users' list found, skipping")
+        return
+
+    keyless: list[str] = []
+    checked = 0
+    for user in users_data:
+        if not isinstance(user, dict):
+            continue
+        groups = user.get("groups") or []
+        if not isinstance(groups, list) or "ssh-access" not in groups:
+            continue
+        checked += 1
+        keys = user.get("keys")
+        if not isinstance(keys, list) or not [k for k in keys if str(k).strip()]:
+            keyless.append(str(user.get("name", "<unnamed>")))
+
+    if keyless:
+        for name in keyless:
+            result.fail(
+                f"Admin SSH keys     {users_rel}: user '{name}' is in the "
+                f"ssh-access group with no keys -- provisioning disables root "
+                f"login and password auth, so this locks you out of the server"
+            )
+    elif checked:
+        result.ok(f"Admin SSH keys     {checked} ssh-access user(s) have keys")
+    else:
+        result.warn("Admin SSH keys     no user is in the ssh-access group")
+
+
 def run_validation(
     root: Path,
     env: str,
@@ -2370,6 +2502,13 @@ def run_validation(
     # 3b. Identifier safety (names that reach SQL and shells)
     if services_data is not None:
         _validate_identifier_safety(services_data, result)
+
+    # 3c. Declared config files exist in the consumer's files/
+    if services_data is not None:
+        _validate_config_files(root, services_data, result)
+
+    # 3d. The admin account can still get in after hardening
+    _validate_admin_ssh_keys(parsed, result)
 
     # 4. Backup configuration consistency
     if services_data is not None:

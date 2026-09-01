@@ -1,0 +1,17 @@
+---
+# Gatus status page configuration.
+#
+# This is the starter config Bay ships. It checks the status page's own
+# public URL, so a green dashboard proves DNS, Traefik and TLS all work.
+# Replace example.com with your own domain, then add one endpoint per
+# service you want to watch. Full reference: https://gatus.io/docs
+storage:
+  type: memory
+
+endpoints:
+  - name: status
+    group: bay
+    url: https://status.example.com/health
+    interval: 60s
+    conditions:
+      - "[STATUS] == 200"

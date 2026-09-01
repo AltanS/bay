@@ -33,9 +33,6 @@ stack_name: {{ project_name }}
 stack_dir: "/opt/{{ '{{ stack_name }}' }}"
 docker_compose_file: "{{ '{{ stack_dir }}' }}/docker-compose.yml"
 
-# Docker registry (override per-environment if needed)
-docker_registry_org: ""
-
 # Minimum framework version required by this consumer (optional)
 # Deploys will fail fast if .bay/ has an older version than this
 # bay_minimum_version: "0.1.0"

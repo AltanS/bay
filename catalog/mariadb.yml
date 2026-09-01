@@ -27,6 +27,6 @@ spec:
     interval: 5s
     retries: 5
   backup:
-    method: mysqldump
+    method: mysql
     schedule: "0 3 * * *"
     retain: 7

@@ -15,17 +15,20 @@ Reproduce any single case by hand with, e.g.:
 
     tmp=$(mktemp -d) && cd "$tmp" && git init -q . && mkdir scripts \\
       && cp ~/projects/bay-public/scripts/leak-scan.sh scripts/ \\
-      && printf 'key = "kaqs5jwr4rzaug5jlv5cvj9agu8olh4s05clrx5t"\\n' > planted.py \\
+      && printf 'key = "%s"\\n' "$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c40)" \\
+        > planted.py \\
       && git add -A && bash scripts/leak-scan.sh; echo "exit=$?"
 
-Every planted value in this file is ASSEMBLED FROM FRAGMENTS. A literal here
-would make this file fail the very scan it is testing — which is also why
-leak-scan.sh excludes itself.
+No planted value in this file is a literal: each is either ASSEMBLED FROM
+FRAGMENTS at import time or generated at random. A literal here would make this
+file fail the very scan it is testing.
 """
 
 from __future__ import annotations
 
+import random
 import shutil
+import string
 import subprocess
 from pathlib import Path
 
@@ -35,10 +38,13 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCAN = _REPO_ROOT / "scripts" / "leak-scan.sh"
 
 # ── planted shapes, all assembled from fragments ────────────────────────
-# 40 chars of [a-z0-9]. Shannon entropy ~4.26 bits/char. This is the shape
-# tier (b2) was added for: tier (b) requires an uppercase character, so this
-# used to walk straight through.
-LOWER_KEY = "kaqs5jwr4rzaug5jlv5" + "cvj9agu8olh4s05clrx5t"
+# 40 chars of [a-z0-9]. This is the shape tier (b2) was added for: tier (b)
+# requires an uppercase character, so this used to walk straight through.
+# Generated per run rather than written down. A literal here would be a real
+# high-entropy blob in the tree, and this repo's own scan would (correctly)
+# fail on it. 40 draws from a 36-symbol alphabet land near 4.7 bits/char, well
+# above the scan's 3.6 floor, so the shape is stable even though the value is not.
+LOWER_KEY = "".join(random.choices(string.ascii_lowercase + string.digits, k=40))
 # Mixed case + digits: the original tier (b).
 MIXED_KEY = "aB3xY9zQ7wE2rT5yU8iO" + "1pA4sD6fG0hJ"
 # 40 hex chars: tier (c).

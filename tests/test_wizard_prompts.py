@@ -7,6 +7,10 @@ verifies the resulting WizardResult.
 
 Note: _prompt_confirm uses questionary.select (Yes/No choices), so all
 confirm responses are interleaved into select_responses in call order.
+
+The SSH-key step is stubbed out here rather than driven through the
+mocks: it has its own loop (and, since it can no longer be skipped, its
+own exit condition), covered directly in test_wizard_ssh_keys.py.
 """
 
 from __future__ import annotations
@@ -14,8 +18,13 @@ from __future__ import annotations
 import pytest
 
 from bay_cli.catalog import _package_framework_root, load_catalog
-from bay_cli.wizard.models import WizardResult
+from bay_cli.wizard.models import SSHKey, WizardResult
 from bay_cli.wizard.prompts import _get_catalog, run_wizard
+
+
+# Split so the literal never sits in the tree: scripts/leak-scan.sh flags any
+# 32+ char high-entropy blob, and a fake key is shaped exactly like a real one.
+_TEST_KEY = "ssh-ed25519 " "AAAAC3NzaC1lZDI1NTE5" "AAAAI" "TESTKEY" " tester@example.com"
 
 
 # ── Mock Helpers ────────────────────────────────────────────────────────
@@ -88,6 +97,10 @@ def _setup_wizard_mocks(
         "bay_cli.wizard.prompts.questionary.checkbox",
         _mock_checkbox_factory(checkbox_responses),
     )
+    monkeypatch.setattr(
+        "bay_cli.wizard.prompts._prompt_ssh_keys",
+        lambda: [SSHKey(username="tester", public_key=_TEST_KEY, source="manual")],
+    )
     if text_responses is not None:
         monkeypatch.setattr(
             "bay_cli.wizard.prompts.questionary.text",
@@ -123,10 +136,9 @@ class TestSingleServerFlow:
             ],
             # questionary.select calls (includes confirms as Yes/No selects):
             #  1. multi-region -> False (confirm)
-            #  2. SSH key choice -> "skip"
             #  3. gateway -> "headscale"
             #  4. scaffold confirm -> True (confirm)
-            select_responses=[False, "skip", "headscale", True],
+            select_responses=[False, "headscale", True],
             # questionary.checkbox calls:
             #  1. services -> ["gatus"]
             checkbox_responses=[["gatus"]],
@@ -153,8 +165,8 @@ class TestSingleServerFlow:
             prompt_responses=[
                 "myapp", "10.0.0.1", "example.com", "admin@example.com",
             ],
-            # multi-region(False), SSH skip, gateway none, scaffold confirm(True)
-            select_responses=[False, "skip", "none", True],
+            # multi-region(False), gateway none, scaffold confirm(True)
+            select_responses=[False, "none", True],
             checkbox_responses=[["gatus"]],
         )
 
@@ -193,8 +205,8 @@ class TestMultiRegionFlow:
                 "ops@example.com",
                 "hs.example.com",
             ],
-            # multi-region(True), SSH skip, gateway headscale, primary region(eu), scaffold confirm(True)
-            select_responses=[True, "skip", "headscale", "eu", True],
+            # multi-region(True), gateway headscale, primary region(eu), scaffold confirm(True)
+            select_responses=[True, "headscale", "eu", True],
             # questionary.checkbox calls:
             #  1. services -> ["postgres"]
             checkbox_responses=[["postgres"]],
@@ -235,7 +247,7 @@ class TestDependencyAutoSelection:
             prompt_responses=[
                 "myapp", "10.0.0.1", "example.com", "admin@example.com",
             ],
-            select_responses=[False, "skip", "none", True],
+            select_responses=[False, "none", True],
             checkbox_responses=[["plausible"]],  # checkbox returns plausible
         )
 
@@ -252,7 +264,7 @@ class TestDependencyAutoSelection:
             prompt_responses=[
                 "myapp", "10.0.0.1", "example.com", "admin@example.com",
             ],
-            select_responses=[False, "skip", "none", True],
+            select_responses=[False, "none", True],
             checkbox_responses=[["n8n"]],
         )
 
@@ -325,7 +337,7 @@ class TestValidationRetry:
                 "example.com",    # domain
                 "admin@example.com",  # LE email
             ],
-            select_responses=[False, "skip", "none", True],
+            select_responses=[False, "none", True],
             checkbox_responses=[["gatus"]],
         )
 

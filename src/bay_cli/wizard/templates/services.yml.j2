@@ -25,9 +25,7 @@ services:
 {% endif %}
     ports:
       internal: 8080
-    healthcheck:
-      path: /health
-      interval: 30s
+    healthcheck_path: /health
     env:
       clear:
         GATUS_CONFIG: /config/config.yaml
@@ -198,7 +196,7 @@ accessories:
       interval: 5s
       retries: 5
     backup:
-      method: mysqldump
+      method: mysql
       schedule: "0 3 * * *"
       retain: 7
 {% endif %}

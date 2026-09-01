@@ -22,10 +22,13 @@ from bay_cli.catalog import (
 )
 from bay_cli.errors import BayError
 from bay_cli.paths import find_bay_dir, consumer_root
+from bay_cli.utils.secret_gen import generate_password
 from bay_cli.wizard.models import (
     RegionConfig,
     SSHKey,
     WizardResult,
+    discover_local_ssh_keys,
+    parse_ssh_public_key,
     validate_domain,
     validate_ip,
     validate_project_name,
@@ -195,22 +198,30 @@ def _fetch_github_keys(username: str) -> list[SSHKey]:
 
 
 def _prompt_ssh_keys() -> list[SSHKey]:
-    """Collect SSH keys via an interactive loop."""
+    """Collect SSH keys via an interactive loop.
+
+    There is no "skip" option, and the loop does not exit with an empty
+    list. Provisioning disables root login and password authentication,
+    so an admin account with no key locks the operator out of the server.
+    Ctrl-C still aborts the whole wizard.
+    """
     collected: list[SSHKey] = []
 
     while True:
         console.header("SSH Keys")
+        if not collected:
+            console.console.print(
+                "  [dim]At least one key is required — provisioning disables "
+                "root login and password auth.[/dim]"
+            )
         choice = _prompt_choice(
             "Add an SSH key",
             [
                 ("github", "Fetch from GitHub username"),
                 ("paste", "Paste a public key"),
-                ("skip", "Skip (add later)"),
+                ("local", "Use a local key from ~/.ssh/*.pub"),
             ],
         )
-
-        if choice == "skip":
-            break
 
         if choice == "github":
             username = Prompt.ask("  GitHub username")
@@ -221,11 +232,31 @@ def _prompt_ssh_keys() -> list[SSHKey]:
 
         elif choice == "paste":
             key_text = Prompt.ask("  Public key")
-            username = Prompt.ask("  Username label")
-            collected.append(SSHKey(username=username, public_key=key_text.strip(), source="manual"))
+            try:
+                key = parse_ssh_public_key(key_text)
+            except BayError as e:
+                console.warning(str(e))
+                continue
+            username = Prompt.ask("  Username label", default=key.username)
+            collected.append(SSHKey(username=username, public_key=key.public_key, source="manual"))
             console.success(f"Added key for {username}")
 
-        if not _prompt_confirm("  Add another SSH key?", default=False):
+        elif choice == "local":
+            local_keys = discover_local_ssh_keys()
+            if not local_keys:
+                console.warning("No public keys found in ~/.ssh/*.pub")
+                continue
+            picked = _prompt_choice(
+                "  Which key?",
+                [(k.public_key, f"{k.public_key[:28]}… ({k.username})") for k in local_keys],
+            )
+            for k in local_keys:
+                if k.public_key == picked:
+                    collected.append(k)
+                    console.success(f"Added key for {k.username}")
+                    break
+
+        if collected and not _prompt_confirm("  Add another SSH key?", default=False):
             break
 
     return collected
@@ -529,8 +560,7 @@ def run_wizard(existing: _ExistingConfig = None) -> WizardResult:
             ],
         )
         if choice == "generate":
-            import secrets as _secrets
-            vault_pass = _secrets.token_urlsafe(48)[:32]
+            vault_pass = generate_password(32)
             vault_pass_file.write_text(vault_pass + "\n")
             vault_pass_file.chmod(0o600)
             console.success("Created .vault_pass with generated password")

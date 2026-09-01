@@ -49,19 +49,29 @@ def setup(
     letsencrypt_email: str | None = typer.Option(None, "--letsencrypt-email", help="Let's Encrypt email."),
     multi_region: bool = typer.Option(False, "--multi-region", help="Enable multi-region mode."),
     vpn_peer_ips: str | None = typer.Option(None, "--vpn-peer-ips", help="Comma-separated WireGuard peer IPs."),
+    ssh_key: list[str] = typer.Option(
+        [], "--ssh-key",
+        help="Admin SSH public key, e.g. 'ssh-ed25519 AAAA…'. Repeatable.",
+    ),
+    ssh_key_file: list[str] = typer.Option(
+        [], "--ssh-key-file",
+        help="Path to a .pub file for the admin account. Repeatable.",
+    ),
 ) -> None:
     """Run the interactive setup wizard to configure your project.
 
     Re-running on an existing project enters edit mode: current values are
     shown as defaults, press Enter to keep them. With all required flags
     (--name, --domain, --gateway, plus --server-ip or --multi-region) the
-    wizard is skipped entirely — for scripts and CI. Non-TTY input falls
-    back to --no-interactive automatically.
+    wizard is skipped entirely — for scripts and CI. --defaults is honoured
+    with or without a TTY; --server-ip and --domain override the built-in
+    defaults. Any non-interactive path needs an admin SSH key: --ssh-key,
+    --ssh-key-file, or a key found in ~/.ssh/*.pub.
 
     Examples:
 
         bin/bay setup
-        bin/bay setup --defaults
+        bin/bay setup --defaults --server-ip 203.0.113.10 --domain example.com
         bin/bay setup --name myapp --server-ip 203.0.113.10 \\
             --domain example.com --gateway headscale \\
             --headscale-domain hs.example.com --services gatus,postgres
@@ -87,10 +97,16 @@ def setup(
         name=name, server_ip=server_ip, domain=domain, gateway=gateway,
         headscale_domain=headscale_domain, services=services,
         letsencrypt_email=letsencrypt_email, multi_region=multi_region,
-        vpn_peer_ips=vpn_peer_ips,
+        vpn_peer_ips=vpn_peer_ips, ssh_key=list(ssh_key), ssh_key_file=list(ssh_key_file),
     )
 
-    if flags.has_all_required():
+    if defaults:
+        # --defaults never falls back to the example copy, TTY or not.
+        from bay_cli.wizard.scaffold import scaffold
+
+        result = _build_result_from_defaults(flags, root)
+        scaffold(result, root, force=force)
+    elif flags.has_all_required():
         # All required flags → build result directly, skip wizard
         result = _build_result_from_flags(flags)
         from bay_cli.wizard.scaffold import scaffold
@@ -98,10 +114,10 @@ def setup(
     elif flags.has_any():
         # Partial flags → pre-fill wizard
         prefill = _flags_to_prefill(flags)
-        result = _scaffold_project(root, bay_dir, no_interactive=no_interactive, defaults=defaults, force=force, prefill=prefill)
+        result = _scaffold_project(root, bay_dir, flags, no_interactive=no_interactive, force=force, prefill=prefill)
     else:
         # No flags → existing flow
-        result = _scaffold_project(root, bay_dir, no_interactive=no_interactive, defaults=defaults, force=force)
+        result = _scaffold_project(root, bay_dir, flags, no_interactive=no_interactive, force=force)
 
     console.console.print()
     console.success("Setup complete")
@@ -123,6 +139,8 @@ class _SetupFlags:
         letsencrypt_email: str | None,
         multi_region: bool,
         vpn_peer_ips: str | None,
+        ssh_key: list[str] | None = None,
+        ssh_key_file: list[str] | None = None,
     ) -> None:
         self.name = name
         self.server_ip = server_ip
@@ -133,6 +151,8 @@ class _SetupFlags:
         self.letsencrypt_email = letsencrypt_email
         self.multi_region = multi_region
         self.vpn_peer_ips = vpn_peer_ips
+        self.ssh_key = ssh_key or []
+        self.ssh_key_file = ssh_key_file or []
 
     def has_any(self) -> bool:
         return any([self.name, self.server_ip, self.domain, self.gateway, self.services])
@@ -165,6 +185,7 @@ def _build_result_from_flags(flags: _SetupFlags) -> WizardResult:
     """Build a WizardResult directly from CLI flags (no wizard)."""
     from bay_cli.wizard.models import (
         WizardResult,
+        resolve_ssh_keys,
         validate_domain,
         validate_ip,
         validate_project_name,
@@ -212,12 +233,70 @@ def _build_result_from_flags(flags: _SetupFlags) -> WizardResult:
         server_ip=server_ip,
         domain_base=domain_base,
         letsencrypt_email=letsencrypt_email,
-        ssh_keys=[],
+        ssh_keys=resolve_ssh_keys(flags.ssh_key, flags.ssh_key_file),
         access_gateway=flags.gateway,  # type: ignore[arg-type]
         headscale_domain=headscale_domain,
         vpn_peer_ips=vpn_peer_ips,
         selected_services=service_ids,
     )
+
+
+def _build_result_from_defaults(flags: _SetupFlags, root: Path) -> WizardResult:
+    """Build the --defaults WizardResult, with CLI flags taking precedence.
+
+    ``--defaults`` used to be reachable only from a TTY: the non-TTY guard
+    in ``_scaffold_project`` ran first and quietly copied ``example/``
+    instead, so a scripted setup produced a different (and invalid) tree.
+    """
+    from bay_cli.catalog import resolve_dependencies
+    from bay_cli.wizard.models import (
+        defaults_result,
+        resolve_ssh_keys,
+        validate_domain,
+        validate_ip,
+        validate_project_name,
+    )
+    from bay_cli.wizard.prompts import _get_catalog
+
+    result = defaults_result(root.name)
+
+    if flags.name:
+        result.project_name = validate_project_name(flags.name)
+    if flags.server_ip:
+        result.server_ip = validate_ip(flags.server_ip)
+    if flags.domain:
+        result.domain_base = validate_domain(flags.domain)
+        # Keep the derived values on the same domain as the override.
+        result.letsencrypt_email = f"admin@{result.domain_base}"
+        result.headscale_domain = f"hs.{result.domain_base}"
+    if flags.gateway:
+        if flags.gateway not in _VALID_GATEWAYS:
+            raise BayError(
+                f"Invalid gateway '{flags.gateway}' — must be one of: {', '.join(_VALID_GATEWAYS)}"
+            )
+        result.access_gateway = flags.gateway  # type: ignore[assignment]
+    if flags.headscale_domain:
+        result.headscale_domain = validate_domain(flags.headscale_domain)
+    if flags.letsencrypt_email:
+        result.letsencrypt_email = flags.letsencrypt_email
+    if flags.services:
+        catalog = _get_catalog()
+        service_ids = flags.parse_services()
+        for s_id in service_ids:
+            if s_id not in catalog:
+                raise BayError(
+                    f"Unknown service '{s_id}' — valid services: {', '.join(sorted(catalog))}"
+                )
+        for dep_id in resolve_dependencies(service_ids, catalog, []):
+            if dep_id not in service_ids:
+                service_ids.append(dep_id)
+        result.selected_services = service_ids
+
+    result.ssh_keys = resolve_ssh_keys(flags.ssh_key, flags.ssh_key_file)
+    result.vpn_enabled = result.access_gateway != "none"
+    if result.access_gateway == "headscale" and not result.headscale_domain:
+        raise BayError("headscale_domain is required when access_gateway is headscale")
+    return result
 
 
 def _flags_to_prefill(flags: _SetupFlags) -> WizardResult:
@@ -243,27 +322,25 @@ def _flags_to_prefill(flags: _SetupFlags) -> WizardResult:
     )
 
 
+#: Single source of truth for the consumer's ``bin/bay`` wrapper. ``bootstrap.sh``
+#: copies the very same file, so the two writers cannot drift apart.
+WRAPPER_SOURCE = "scripts/bin-bay-wrapper.sh"
+
+
 def _ensure_bin_wrapper(root: Path, bay_dir: Path) -> None:
     """Create bin/bay wrapper script if it doesn't exist."""
     bin_dir = root / "bin"
     wrapper = bin_dir / "bay"
     if wrapper.exists():
         return
+    source = bay_dir / WRAPPER_SOURCE
+    if not source.is_file():
+        raise BayError(
+            f"wrapper template missing at {source} — the framework checkout is incomplete; "
+            "re-run '.bay/bootstrap.sh'"
+        )
     bin_dir.mkdir(exist_ok=True)
-    wrapper.write_text(
-        '#!/usr/bin/env bash\n'
-        '# Bay CLI wrapper — generated by bay setup\n'
-        'set -euo pipefail\n'
-        'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"\n'
-        '\n'
-        'if [ ! -d "${SCRIPT_DIR}/.bay" ]; then\n'
-        '    echo "Error: Bay framework not initialized." >&2\n'
-        '    echo "Run: make bay:setup" >&2\n'
-        '    exit 1\n'
-        'fi\n'
-        '\n'
-        'exec uv run --project "${SCRIPT_DIR}/.bay" bay "$@"\n'
-    )
+    wrapper.write_text(source.read_text())
     wrapper.chmod(0o755)
     console.success("Created bin/bay wrapper")
 
@@ -275,17 +352,16 @@ def _print_next_steps(result: WizardResult | None, root: Path) -> None:
 
     # ── Requirements ──────────────────────────────────────────────────
     if result is not None and result.access_gateway == "headscale":
-        domain = result.headscale_domain or f"hs.{result.domain_base}"
-        base = result.domain_base or ""
-        if base and domain.endswith(f".{base}"):
-            reqs.append(f"DNS covering [bold]{domain}[/bold] (a wildcard [bold]*.{base}[/bold] record works)")
-        else:
-            reqs.append(f"DNS A record for [bold]{domain}[/bold] \u2192 your server IP")
         reqs.append("Tailscale client on your device ([dim]https://tailscale.com/download[/dim])")
     elif result is not None and result.access_gateway == "none":
         console.warning("No access gateway configured. All services will be publicly accessible.")
 
     # ── Steps ─────────────────────────────────────────────────────────
+    # DNS comes first, for every gateway choice. Traefik asks Let's Encrypt
+    # for certificates on the first deploy; with no record the ACME challenge
+    # fails and the deploy looks broken for a reason that is not Bay's.
+    steps.extend(_dns_steps(result))
+
     # Vault
     vault_pass = root / ".vault_pass"
     secrets_file = root / "group_vars" / "production" / "secrets.yml"
@@ -298,7 +374,9 @@ def _print_next_steps(result: WizardResult | None, root: Path) -> None:
     else:
         steps.append("Set your secrets:        [dim]bin/bay vault edit production[/dim]")
 
-    # Deploy
+    # Pre-flight, then deploy
+    steps.append("Check your config:       [dim]bin/bay validate[/dim]")
+    steps.append("Check the environment:   [dim]bin/bay doctor[/dim]")
     steps.append("Provision the server:    [dim]bin/bay provision production[/dim]")
     if result is not None and result.multi_region and result.regions and result.access_gateway == "headscale":
         control_region = result.regions[0].name
@@ -341,12 +419,35 @@ def _print_next_steps(result: WizardResult | None, root: Path) -> None:
     console.console.print()
 
 
+def _dns_steps(result: WizardResult | None) -> list[str]:
+    """DNS records the operator must create before the first deploy.
+
+    Printed for every gateway choice, not only Headscale: Traefik requests a
+    certificate for every routed host on the first deploy, and the ACME
+    challenge cannot succeed until the name resolves to the server.
+    """
+    generic = ["Create DNS records:      [dim]point your domain at the server IP[/dim]"]
+    if result is None or not result.domain_base:
+        return generic
+    base = result.domain_base
+    if result.multi_region and result.regions:
+        target = "the region server"
+    else:
+        target = result.server_ip or "your server IP"
+    steps = [f"Create DNS record:       [dim]*.{base} \u2192 {target}[/dim]"]
+    if result.access_gateway == "headscale":
+        hs = result.headscale_domain or f"hs.{base}"
+        if not hs.endswith(f".{base}"):
+            steps.append(f"Create DNS record:       [dim]{hs} \u2192 {target}[/dim]")
+    return steps
+
+
 def _scaffold_project(
     root: Path,
     bay_dir: Path,
+    flags: _SetupFlags,
     *,
     no_interactive: bool,
-    defaults: bool,
     force: bool = False,
     prefill: WizardResult | None = None,
 ) -> WizardResult | None:
@@ -361,26 +462,14 @@ def _scaffold_project(
     console.header("Scaffolding project")
 
     if no_interactive:
-        from bay_cli.wizard.scaffold import copy_examples
-
-        copy_examples(bay_dir, root, force=force)
+        _copy_example_tree(bay_dir, root, flags, force=force)
         return None
 
     # Auto-detect non-TTY and fall back
     if not sys.stdin.isatty():
         console.warning("Non-interactive terminal detected, copying example files")
-        from bay_cli.wizard.scaffold import copy_examples
-
-        copy_examples(bay_dir, root, force=force)
+        _copy_example_tree(bay_dir, root, flags, force=force)
         return None
-
-    if defaults:
-        from bay_cli.wizard.models import defaults_result
-        from bay_cli.wizard.scaffold import scaffold
-
-        result = defaults_result(root.name)
-        scaffold(result, root, force=force)
-        return result
 
     # Interactive wizard
     try:
@@ -399,6 +488,16 @@ def _scaffold_project(
         console.warning("Wizard cancelled — no project files were created")
         console.info("Run 'bin/bay setup' to try again, or 'bin/bay setup --no-interactive' for defaults")
         raise typer.Exit(1)
+
+
+def _copy_example_tree(bay_dir: Path, root: Path, flags: _SetupFlags, *, force: bool) -> None:
+    """Copy ``example/`` and fill the two gaps it cannot ship: keys and secrets."""
+    from bay_cli.wizard.models import resolve_ssh_keys
+    from bay_cli.wizard.scaffold import copy_examples, fill_example_gaps
+
+    ssh_keys = resolve_ssh_keys(flags.ssh_key, flags.ssh_key_file)
+    copy_examples(bay_dir, root, force=force)
+    fill_example_gaps(root, ssh_keys)
 
 
 @app.command()
@@ -743,7 +842,7 @@ def dev_link(
     console.success("Dev link active")
 
 
-DEFAULT_BAY_REPO = "git@github.com:AltanS/bay.git"
+DEFAULT_BAY_REPO = "https://github.com/AltanS/bay.git"
 
 _BAY_REPO_RE = re.compile(r"^\s*BAY_REPO\s*[:?]?=\s*(\S+)", re.M)
 

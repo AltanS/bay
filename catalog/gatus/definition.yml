@@ -15,9 +15,7 @@ spec:
   image: twinproduction/gatus:latest
   ports:
     internal: 8080
-  healthcheck:
-    path: /health
-    interval: 30s
+  healthcheck_path: /health
   env:
     clear:
       GATUS_CONFIG: /config/config.yaml
