@@ -43,6 +43,25 @@ headscale_version: "0.29.2"
 headscale_oidc_issuer: ""
 headscale_oidc_client_id: ""
 headscale_oidc_client_secret: ""
+
+# ── OIDC enrolment allowlist ────────────────────────────────────────────────
+# Headscale applies NO allowlist of its own. With `headscale_oidc_issuer` set
+# and all three lists empty, ANY account the issuer will authenticate can
+# enrol a node — with a public issuer (Google, GitHub) that is the whole
+# internet. `bin/bay validate` therefore FAILS when the issuer is set and all
+# three lists are empty. Set at least one.
+#
+#   headscale_oidc_allowed_domains: ["example.com"]   # email domain suffix
+#   headscale_oidc_allowed_users: ["ops@example.com"] # exact email addresses
+#   headscale_oidc_allowed_groups: ["engineering"]    # IdP group claim values
+#
+# Each list renders into the `oidc:` block of config.yaml only when non-empty.
+# Pair this with `headscale_acl_policy` below: an allowlist decides WHO may
+# enrol, an ACL decides what an enrolled node may reach. `bin/bay validate`
+# warns when OIDC is on and no ACL policy is defined.
+headscale_oidc_allowed_domains: []
+headscale_oidc_allowed_users: []
+headscale_oidc_allowed_groups: []
 # Headscale user that owns VPS server nodes. Defaults to stack_name so each
 # Bay project gets its own isolated user when sharing a Headscale server.
 # Override in group_vars if you need a custom user name.

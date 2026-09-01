@@ -162,7 +162,10 @@
       Service '{{ item.key }}' sets ports.expose: host — the port will be
       publicly reachable on every interface, bypassing Traefik (no TLS, no
       IPAllowList, no middleware). This is almost always wrong for a
-      Traefik-fronted service; confirm the bind is intentional.
+      Traefik-fronted service; confirm the bind is intentional. The port
+      is DNAT'd in PREROUTING, so it never reaches the nftables input
+      chain and CrowdSec never sees it. `bin/bay validate` requires
+      `expose_host_ack: true` alongside it.
     verbosity: 0
   loop: "{{ active_services | dict2items }}"
   loop_control:
@@ -229,7 +232,10 @@
     msg: >-
       Accessory '{{ item.key }}' sets expose: host — the port will be
       publicly reachable on every interface. Confirm this is intentional
-      and that the accessory requires authentication.
+      and that the accessory requires authentication. The port is DNAT'd
+      in PREROUTING, so it never reaches the nftables input chain and
+      CrowdSec never sees it. `bin/bay validate` requires
+      `expose_host_ack: true` alongside it.
     verbosity: 0
   loop: "{{ active_accessories | dict2items }}"
   loop_control:
@@ -439,3 +445,23 @@
     - item.value.middleware.basic_auth is defined
     - item.value.middleware.basic_auth.users is defined
     - _ba_double_dollar_entries | length > 0
+
+# ── Traefik split entrypoints ────────────────────────────────────────
+# `traefik_public_bind_ip` defaults to `netplan_address | default('')`, a
+# host fact the control node cannot see, so this gate lives here rather
+# than in `bin/bay validate`. traefik_split_entrypoints must fail closed:
+
+- name: Validate split entrypoints have a resolvable public bind IP
+  ansible.builtin.fail:
+    msg: >-
+      traefik_split_entrypoints is true but traefik_public_bind_ip resolves
+      to an empty value (it defaults to netplan_address, which is unset on
+      this host). Traefik would render `address: ":80"` and `address: ":443"`
+      — wildcard binds on every interface, the exact opposite of the split
+      you asked for — and the websecure_tailnet entrypoint would then collide
+      with websecure on port 443. Set traefik_public_bind_ip explicitly in
+      group_vars, or set netplan_address (bay server inspect <env>), or turn
+      traefik_split_entrypoints off.
+  when:
+    - traefik_split_entrypoints | default(false)
+    - not (traefik_public_bind_ip | default('', true) | trim)

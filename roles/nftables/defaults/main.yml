@@ -8,3 +8,35 @@ nftables_config_path: /etc/nftables.conf
 # community blocklist decisions cannot lock out admin access.
 # Set in consumer group_vars — e.g., your company VPN exit IP.
 crowdsec_trusted_ips: []
+
+# ── Container-to-host input policy ──────────────────────────────────────────
+# Ports the host serves to containers over the docker/bridge/veth interfaces.
+#
+# EMPTY (the default) = accept everything from `docker*`, `br-*` and `veth*`
+# into the host input chain — today's behaviour, unchanged. The default is
+# permissive on purpose: what a host serves its containers is entirely
+# consumer-specific (DNS on 53, healthcheck endpoints, a host-side database, a
+# metrics scrape target …), and guessing that set wrong silently breaks
+# container networking in ways that look like an application bug.
+#
+# To lock it down, list the ports you actually serve. Anything not listed is
+# then dropped from container interfaces:
+#
+#   nftables_container_host_ports:
+#     - { port: 53, proto: udp }     # docker embedded DNS → host resolver
+#     - { port: 53, proto: tcp }
+#     - { port: 8082, proto: tcp }   # traefik metrics
+#
+# `proto` defaults to tcp. Established/related traffic is accepted earlier in
+# the chain regardless, so this only governs container-initiated connections.
+# Tighten this on a host you can still reach out-of-band.
+nftables_container_host_ports: []
+
+# ── Forward chain ───────────────────────────────────────────────────────────
+# The `forward` chain is `policy drop` followed by a bare `accept`, which makes
+# the drop policy decorative. It stays that way by default because Docker
+# manages its own forward rules and container-to-container / container-to-
+# internet traffic depends on it. Set to false to let the drop policy actually
+# apply — established/related traffic is still accepted, so do this only on a
+# host whose container networking you have verified, and out-of-band.
+nftables_forward_permissive: true

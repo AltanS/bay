@@ -101,6 +101,24 @@ oidc:
   issuer: "{{ headscale_oidc_issuer }}"
   client_id: "{{ headscale_oidc_client_id }}"
   client_secret: "{{ headscale_oidc_client_secret }}"
+{% if headscale_oidc_allowed_domains | default([]) | length > 0 %}
+  allowed_domains:
+{% for _domain in headscale_oidc_allowed_domains %}
+    - "{{ _domain }}"
+{% endfor %}
+{% endif %}
+{% if headscale_oidc_allowed_users | default([]) | length > 0 %}
+  allowed_users:
+{% for _user in headscale_oidc_allowed_users %}
+    - "{{ _user }}"
+{% endfor %}
+{% endif %}
+{% if headscale_oidc_allowed_groups | default([]) | length > 0 %}
+  allowed_groups:
+{% for _group in headscale_oidc_allowed_groups %}
+    - "{{ _group }}"
+{% endfor %}
+{% endif %}
 {% endif %}
 {% if headscale_acl_policy is defined %}
 # ACL policy (file mode). Rendered from headscale_acl_policy → policy.hujson.

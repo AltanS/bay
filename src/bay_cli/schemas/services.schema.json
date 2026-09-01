@@ -199,6 +199,10 @@
           "type": "string",
           "enum": ["loopback", "gateway", "tailnet", "host"]
         },
+        "expose_host_ack": {
+          "type": "boolean",
+          "description": "Required acknowledgement for `expose: host`. A host-published port is DNAT'd in PREROUTING and never reaches the nftables `input` chain, so it is never seen by the CrowdSec bouncer. `bin/bay validate` fails on `expose: host` unless this flag is true. Setting it changes nothing about the rendered port binding — it records a reviewed acceptance of the bypass."
+        },
         "env": {
           "$ref": "#/$defs/env_block"
         },
@@ -358,6 +362,10 @@
           "description": "Which host interface the service's internal port binds to. Optional — by default Traefik-fronted services have no host binding (reachable only inside the docker network). `loopback` = 127.0.0.1; `gateway` = the active access gateway's overlay IP (`gateway_bind_ip`; deploy fails if the backend provides none). `tailnet` is a permanently-supported synonym for `gateway`, kept so existing services.yml files never need editing; `host` = 0.0.0.0 (explicit external exposure — bypasses Traefik, expect reviewer friction). Required when another service in another region declares `links:` to this service.",
           "type": "string",
           "enum": ["loopback", "gateway", "tailnet", "host"]
+        },
+        "expose_host_ack": {
+          "type": "boolean",
+          "description": "Required acknowledgement for `ports.expose: host`. A host-published port is DNAT'd in PREROUTING and never reaches the nftables `input` chain, so it is never seen by the CrowdSec bouncer. `bin/bay validate` fails on `expose: host` unless this flag is true. Setting it changes nothing about the rendered port binding — it records a reviewed acceptance of the bypass."
         }
       },
       "additionalProperties": false

@@ -110,6 +110,67 @@ tailnet_proxies:
     # pass_host_header: false             # see "Host-routing backends" below
 ```
 
+### Who may enrol: the OIDC allowlist
+
+Headscale applies **no allowlist of its own**. If `headscale_oidc_issuer` is set and
+you configure nothing else, every account that issuer will authenticate can enrol a
+node on your tailnet. With a public issuer (Google, GitHub) that is the whole
+internet. Set at least one of these three lists:
+
+```yaml
+headscale_oidc_issuer: 'https://accounts.google.com'
+headscale_oidc_client_id: '...'
+headscale_oidc_client_secret: "{{ secrets.headscale_oidc_client_secret }}"
+
+headscale_oidc_allowed_domains: ['example.com']      # email domain suffix
+headscale_oidc_allowed_users: ['ops@example.com']    # exact email addresses
+headscale_oidc_allowed_groups: ['engineering']       # IdP group claim values
+```
+
+Each list renders into the `oidc:` block of `config.yaml` only when it is non-empty.
+`bin/bay validate` **fails** when the issuer is set and all three are empty, because a
+mis-set allowlist and an absent one look identical at runtime. Apply a change with
+`bin/bay deploy <env> --tags headscale`, and validate first — an invalid config
+crash-loops Headscale.
+
+An allowlist decides **who may enrol**. It does not decide what an enrolled node may
+reach: that is the ACL policy. Bay ships no default `headscale_acl_policy`, so a
+tailnet without one is in Headscale's default **allow-all** mode and any node that
+does enrol reaches every node and port, including every `access: vpn` service.
+`bin/bay validate` **warns** on that pairing (OIDC on, no ACL). Adopting a policy is a
+deliberate migration with real blast radius — see
+[Locking the upstream](#locking-the-upstream-headscale-acl-headscale_acl_policy).
+
+### `expose: host` and the missing DOCKER-USER chain
+
+Bay **deliberately does not manage a `DOCKER-USER` chain.** A Docker-published port is
+DNAT'd in `PREROUTING` and never reaches the nftables `input` chain, which is where the
+CrowdSec bouncer set lives. So a port published on `0.0.0.0` has no firewall in front
+of it at all — the only thing that ever protected it was Docker's own destination-IP
+scoping, and `expose: host` is the single switch that turns that off.
+
+Because that is a real choice and not a typo, it must be recorded:
+
+```yaml
+accessories:
+  postgres:
+    port: '5432:5432'
+    expose: host
+    expose_host_ack: true   # yes, this port bypasses nftables and CrowdSec
+
+services:
+  api:
+    ports:
+      internal: 8080
+      expose: host
+      expose_host_ack: true
+```
+
+`bin/bay validate` **fails** on any `expose: host` without `expose_host_ack: true`, on
+both the accessory and the service `ports` form. The flag changes nothing about the
+rendered binding. Prefer `expose: gateway` (tailnet-only) or letting Traefik front the
+service; reach for `host` only when the port genuinely must be public.
+
 ### Host-routing backends (e.g. `tailscale serve`)
 
 By default Traefik forwards the **client's** Host (`homelab-app.ts.example.com`) to the
@@ -208,6 +269,14 @@ and exists only on the machine that made it.
 | `vpn_entrypoints` / `public_entrypoints` | `websecure` | Per-router entrypoints (router labels) |
 | `tailnet_proxies` | (undefined) | Map of remote tailnet routes |
 | `headscale_acl_policy` | (undefined) | HuJSON ACL (file mode). Undefined = allow-all; defining it = default-deny |
+| `headscale_oidc_allowed_domains` | `[]` | Email domain suffixes allowed to enrol via OIDC |
+| `headscale_oidc_allowed_users` | `[]` | Exact email addresses allowed to enrol via OIDC |
+| `headscale_oidc_allowed_groups` | `[]` | IdP group claims allowed to enrol via OIDC (validate fails if all three are empty and an issuer is set) |
+| `traefik_metrics_bind_ip` | `127.0.0.1` | Interface the unauthenticated metrics entrypoint binds to |
+| `traefik_tls_min_version` | `VersionTLS12` | `tls.options.default.minVersion` |
+| `traefik_tls_sni_strict` | `false` | Refuse requests with no SNI (also refuses raw-IP access) |
+| `nftables_container_host_ports` | `[]` | Empty = accept all container→host traffic (as before); non-empty narrows to those ports |
+| `nftables_forward_permissive` | `true` | Keep the bare `accept` in the `forward` chain |
 | `tailnet_identity_enabled` | `false` | Run the identity ForwardAuth sidecar on the ingress host |
 | `tailnet_identity_source` | `api` | IP→device source: `api` (HTTP API, no mount — recommended) or `sqlite` (DB read, mounts state) |
 | `tailnet_identity_api_key` | `""` | Headscale API key (vault ref) — required when source is `api` |

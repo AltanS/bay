@@ -36,10 +36,19 @@ table inet filter {
         # Allow loopback
         iif lo accept
 
-        # Allow Docker container traffic to host (DNS, health checks)
-        iifname "docker*" accept
-        iifname "br-*" accept
-        iifname "veth*" accept
+        # Container traffic to the host (DNS, health checks).
+        # nftables_container_host_ports empty (the default) = accept everything
+        # from container interfaces, as before. Non-empty narrows the accept to
+        # exactly those ports. See roles/nftables/defaults/main.yml.
+{% for _iface in ['docker*', 'br-*', 'veth*'] %}
+{% if nftables_container_host_ports | default([]) | length > 0 %}
+{% for _chp in nftables_container_host_ports %}
+        iifname "{{ _iface }}" {{ _chp.proto | default('tcp') }} dport {{ _chp.port }} accept
+{% endfor %}
+{% else %}
+        iifname "{{ _iface }}" accept
+{% endif %}
+{% endfor %}
 
         # Allow ICMP (ping, path MTU discovery)
         ip protocol icmp accept
@@ -77,9 +86,13 @@ table inet filter {
         # Allow Docker container traffic (forwarded by Docker)
         ct state established,related accept
 
-        # Docker manages its own forward rules via iptables/nftables
-        # This chain is permissive for container networking
+        # Docker manages its own forward rules via iptables/nftables.
+        # This bare accept makes `policy drop` above decorative — it is kept
+        # by default because container networking depends on it. Set
+        # nftables_forward_permissive: false to let the drop policy apply.
+{% if nftables_forward_permissive | default(true) %}
         accept
+{% endif %}
     }
 
     chain output {

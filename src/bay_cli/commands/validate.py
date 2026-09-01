@@ -529,6 +529,7 @@ def _validate_services_schema(
     _validate_service_links(plain_data, services_rel or "", result)
     _validate_accessory_bindings(plain_data, services_rel or "", result)
     _validate_link_target_exposure(plain_data, services_rel or "", result)
+    _validate_expose_host_ack(plain_data, services_rel or "", result)
 
     return plain_data
 
@@ -621,6 +622,70 @@ def _validate_accessory_bindings(
                     f"expose: tailnet / loopback / host instead so the "
                     f"bind IP is resolved per host."
                 )
+
+
+def _validate_expose_host_ack(
+    data: dict[str, Any],
+    rel_path: str,
+    result: ValidationResult,
+) -> None:
+    """`expose: host` must carry an explicit `expose_host_ack: true`.
+
+    A host-published port (``0.0.0.0:<port>``) is DNAT'd by Docker in
+    PREROUTING and never reaches the nftables ``input`` chain — which is
+    where the CrowdSec bouncer set lives.  Bay deliberately does not
+    manage a DOCKER-USER chain, so such a port has no firewall in front
+    of it at all.  That is a legitimate choice for some workloads, but it
+    must be a deliberate, recorded one rather than a one-word default, so
+    the sibling boolean ``expose_host_ack`` is required alongside it.
+
+    Applies to both shapes: an accessory's top-level ``expose:`` and a
+    service's ``ports.expose:``.  Every other expose mode (loopback,
+    gateway, tailnet) needs no acknowledgement.
+    """
+    _why = (
+        "A host-published port is DNAT'd in PREROUTING and never reaches the "
+        "nftables input chain, so it is never seen by the CrowdSec bouncer and "
+        "no firewall rule applies to it (Bay deliberately manages no "
+        "DOCKER-USER chain). "
+    )
+
+    accessories = data.get("accessories") or {}
+    if isinstance(accessories, dict):
+        for name, acc in accessories.items():
+            if not isinstance(acc, dict):
+                continue
+            if acc.get("expose") != "host":
+                continue
+            if acc.get("expose_host_ack") is True:
+                continue
+            result.fail(
+                f"{rel_path}  accessory '{name}' sets expose: host without "
+                f"expose_host_ack: true. " + _why + "Add "
+                f"'expose_host_ack: true' next to 'expose: host' to record "
+                f"that you accept the bypass, or use expose: loopback / "
+                f"gateway instead."
+            )
+
+    services = data.get("services") or {}
+    if isinstance(services, dict):
+        for name, svc in services.items():
+            if not isinstance(svc, dict):
+                continue
+            ports = svc.get("ports")
+            if not isinstance(ports, dict):
+                continue
+            if ports.get("expose") != "host":
+                continue
+            if ports.get("expose_host_ack") is True:
+                continue
+            result.fail(
+                f"{rel_path}  service '{name}' sets ports.expose: host "
+                f"without ports.expose_host_ack: true. " + _why + "Add "
+                f"'expose_host_ack: true' under 'ports:' to record that you "
+                f"accept the bypass, or drop the host binding and let Traefik "
+                f"front the service."
+            )
 
 
 def _validate_link_target_exposure(
@@ -1798,6 +1863,77 @@ def _validate_netplan(
         result.ok("Netplan             configuration looks good")
 
 
+def _validate_headscale_oidc(
+    parsed_files: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Headscale OIDC must carry an enrolment allowlist.
+
+    Headscale applies no allowlist of its own.  With an issuer configured
+    and ``allowed_domains`` / ``allowed_users`` / ``allowed_groups`` all
+    empty, every account the issuer will authenticate can enrol a node —
+    with a public issuer that is the whole internet.  A mis-set allowlist
+    is indistinguishable from an absent one at runtime, so this is a hard
+    failure rather than a warning.
+
+    Separately, warns when OIDC is on and ``headscale_acl_policy`` is
+    undefined.  Bay ships no default ACL on purpose (a policy flips the
+    whole tailnet to default-deny), but open enrolment into an allow-all
+    tailnet is the combination worth naming out loud.
+    """
+    console.header("Headscale OIDC")
+
+    issuer = ""
+    allow: dict[str, list[Any]] = {
+        "headscale_oidc_allowed_domains": [],
+        "headscale_oidc_allowed_users": [],
+        "headscale_oidc_allowed_groups": [],
+    }
+    acl_defined = False
+
+    for _rel_path, data in parsed_files.items():
+        if not isinstance(data, dict):
+            continue
+        if "headscale_oidc_issuer" in data:
+            issuer = str(data.get("headscale_oidc_issuer") or "").strip()
+        for key in allow:
+            if key in data:
+                val = data.get(key)
+                allow[key] = list(val) if isinstance(val, (list, tuple)) else []
+        if "headscale_acl_policy" in data and data.get("headscale_acl_policy"):
+            acl_defined = True
+
+    if not issuer:
+        result.ok("Headscale OIDC      not enabled — skipped")
+        return
+
+    if not any(allow.values()):
+        result.fail(
+            "Headscale OIDC      headscale_oidc_issuer is set but no enrolment "
+            "allowlist is configured — ANY account the issuer will authenticate "
+            "can enrol a node onto your tailnet, and with a public issuer "
+            "(Google, GitHub, …) that is the whole internet. Set at least one of "
+            "headscale_oidc_allowed_domains, headscale_oidc_allowed_users, "
+            "headscale_oidc_allowed_groups, then re-render the config with "
+            "'bay deploy <env> --tags headscale'. Audit 'bay gateway nodes' for "
+            "unexpected entries before you do."
+        )
+    else:
+        _set = ", ".join(k.replace("headscale_oidc_", "") for k, v in allow.items() if v)
+        result.ok(f"Headscale OIDC      enrolment allowlist set ({_set})")
+
+    if not acl_defined:
+        result.warn(
+            "Headscale OIDC      headscale_oidc_issuer is set but "
+            "headscale_acl_policy is undefined — the tailnet stays in Headscale's "
+            "default ALLOW-ALL mode, so any node that does enrol reaches every "
+            "node and port, including every 'access: vpn' service. Bay ships no "
+            "default ACL on purpose (a policy flips the tailnet to default-deny "
+            "and every required flow must be enumerated first). See "
+            "docs/tailnet-ingress.md."
+        )
+
+
 # ── Core validation logic ────────────────────────────────────────────────
 
 def _probe_token_scope(
@@ -2118,6 +2254,9 @@ def run_validation(
 
     # 8. Netplan configuration
     _validate_netplan(root, env, parsed, result)
+
+    # 8b. Headscale OIDC enrolment allowlist
+    _validate_headscale_oidc(parsed, result)
 
     # 9. Token scope probe (opt-in, never runs automatically)
     if check_token_scope and services_data is not None:

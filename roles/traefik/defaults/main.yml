@@ -15,6 +15,12 @@ traefik_docker_network: services
 # Prometheus metrics
 traefik_metrics_enabled: true
 traefik_metrics_port: 8082
+# Interface the metrics entrypoint binds to. Loopback by default — the metrics
+# endpoint is unauthenticated and leaks the full router/service inventory, so it
+# must not be reachable from the internet. Set to the tailnet IP
+# (gateway_bind_ip) to scrape it from another node, or "" for the old
+# all-interfaces bind.
+traefik_metrics_bind_ip: "127.0.0.1"
 
 # Request headers to include in the access log. Traefik drops all request
 # headers by default, so the access log shows "-" for every User-Agent. Set
@@ -78,3 +84,17 @@ traefik_cloudflare_dns_api_token: ""
 # tailnet entrypoint via vpn_entrypoints. Requires netplan_address (public IP).
 traefik_split_entrypoints: false
 traefik_public_bind_ip: "{{ netplan_address | default('') }}"
+
+# ── TLS options (tls.options.default) ───────────────────────────────────
+# Applied to every router that does not name its own tls.options.
+#
+# minVersion floors TLS at 1.2. TLS 1.0/1.1 clients are refused. Traefik is
+# recreated once when this changes.
+traefik_tls_min_version: "VersionTLS12"
+#
+# sniStrict refuses any request that presents no SNI — which also refuses
+# access by raw IP and any use of the default certificate. That breaks
+# IP-based uptime probes, health checks and `curl https://<ip>`, so it is OFF
+# by default; turn it on once you have confirmed nothing reaches this host
+# without SNI.
+traefik_tls_sni_strict: false
