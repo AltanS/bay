@@ -210,12 +210,18 @@ def test_rebuild_sh_also_prunes_after_push() -> None:
     webhook auto-builds execute rebuild.sh directly and never reach it.
     Without an equivalent pruning block in the generated bash script, the
     disk bloat that this cleanup logic is meant to fix returns on the auto-build path.
-    This test guards against someone removing or reverting that block."""
+    This test guards against someone removing or reverting that block.
+
+    The remote strategy now pushes from BuildKit (`buildx --push`), so there
+    is no separate `docker push` to anchor on and — for images built after
+    that change — nothing left in the local store to prune. The block stays
+    because build servers upgraded in place still hold the tags every
+    `--load` build before it left behind."""
     sh_text = _REBUILD_SH.read_text()
-    # The remote-strategy push block must invoke docker rmi somewhere after
-    # `docker push "${IMAGE_REF}"`.
-    push_idx = sh_text.find('docker push "${IMAGE_REF}"')
-    assert push_idx != -1, "rebuild.sh.j2 missing the latest-tag push"
+    # The remote-strategy build block must invoke docker rmi somewhere after
+    # the push-completion marker.
+    push_idx = sh_text.find('_log "Pushed ${IMAGE_REPO}:${SHA}')
+    assert push_idx != -1, "rebuild.sh.j2 missing the push-completion marker"
     # Search for the pruning markers only in the region AFTER the push.
     tail = sh_text[push_idx:]
     markers = [
@@ -236,4 +242,18 @@ def test_rebuild_sh_cleanup_keeps_latest() -> None:
     assert "grep -v '^latest|'" in sh_text, (
         "rebuild.sh.j2 cleanup must filter out `latest|` lines so the "
         "always-present latest tag is never removed."
+    )
+
+
+def test_rebuild_sh_cleanup_tolerates_an_empty_local_store() -> None:
+    """With `buildx --push` the build server holds no local image at all.
+
+    `docker images` then prints nothing, the first `grep -v` in the candidate
+    pipeline exits 1, and under `set -euo pipefail` that aborts the script via
+    the ERR trap — turning a successful build into a "Webhook deploy failed"
+    alert. The pipeline must swallow the empty case."""
+    sh_text = _REBUILD_SH.read_text()
+    assert "| cut -d'|' -f1 || true)" in sh_text, (
+        "the content-hash tag candidate pipeline must tolerate an empty "
+        "`docker images` result (no local image after a --push build)"
     )

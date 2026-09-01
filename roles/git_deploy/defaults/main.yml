@@ -65,6 +65,27 @@ git_deploy_build_lock_timeout: 3600
 # content-hash tags on the build server.
 git_deploy_build_keep_tags: 3
 
+# ── Registry-backed BuildKit layer cache (remote strategy only) ─────────
+# When true, remote builds add
+#   --cache-to   type=registry,ref=<image repo>:buildcache,mode=max
+#   --cache-from type=registry,ref=<image repo>:buildcache
+# so BuildKit exports every intermediate layer to the registry and imports
+# it on the next build. This survives `docker builder prune`, which the
+# build server runs every 6 hours (roles/cronjobs) — without it, the first
+# build after a prune rebuilds from layer zero.
+#
+# Prerequisites: a reachable registry that accepts OCI cache manifests. The
+# self-hosted Zot rig role qualifies; some hosted registries do not. The
+# build server must already be logged in (it is, for the push).
+#
+# Cost: an extra `:buildcache` tag next to your image tags, roughly one full
+# layer set. A cold cache is normal — BuildKit tolerates a missing
+# `:buildcache` ref and just builds from scratch.
+#
+# Turn it on when the build server is pruned aggressively, or when builds
+# are layer-heavy and slow. Default off: it is a registry-storage trade.
+git_deploy_registry_cache: false
+
 # Telegram notifications (reuse docker_monitor vars)
 docker_monitor_telegram_bot_token: ""
 docker_monitor_telegram_chat_id: ""

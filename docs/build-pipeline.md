@@ -205,11 +205,26 @@ rollback poll down can never make the probe stricter than baseline. See
   pushes to registry, then posts a pull signal to each deployment server
   in `svc.regions`. Deployment servers receive the pull signal, skip the
   build, and pull+restart the container. Full pipeline: GitHub push →
-  build server webhook → `docker buildx build` + push to Zot registry →
+  build server webhook → `docker buildx build --push` straight to the Zot
+  registry (both `:sha` and `:latest` in one call) →
   `X-Bay-Pull-Signal` HTTP call to each region's webhook → deployment
   server writes `pull` trigger → `bay-build@.path` fires `rebuild.sh` →
   `docker pull` + `docker compose up -d` + health check. See "Webhook
   Auto-Build Troubleshooting" above.
+- **Remote builds push from BuildKit, not from the local daemon** — the
+  build uses `--push`, so the image is exported once, straight to the
+  registry. Two consequences. First, a remotely built image is *not* in the
+  build server's local image store afterwards; `docker images` there will not
+  list it and the local content-hash tag pruning has nothing left to prune.
+  Second, **registry credentials now matter at build time, not at push time**.
+  A build server that can build but cannot authenticate to the registry used
+  to fail at a separate `docker push` with a clear message; it now fails
+  inside `buildx build`, and the auth error appears at the tail of the build
+  log. If a build fails with a `401`/`denied` near the end of the output,
+  check `docker login` on the build server before suspecting the Dockerfile.
+- **Registry layer cache is opt-in** — `git_deploy_registry_cache: true` adds
+  `--cache-to`/`--cache-from type=registry,ref=<repo>:buildcache`. Default is
+  off. See `docs/build-strategies.md` → "Registry layer cache (opt-in)".
 - **`build_server` must be in the inventory** — The host must be
   SSH-reachable from the controller and have `app_user` in the docker
   group. For demo, this is the infra host (203.0.113.14) which

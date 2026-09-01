@@ -172,13 +172,21 @@
         label: "{{ item.key }}"
       no_log: true
 
-    - name: "{{ _svc_name }} — Build Docker image on build server"
+    - name: "{{ _svc_name }} — Build and push Docker image on build server"
+      # buildx exports both tags straight to the registry in one pass. The
+      # image is deliberately NOT loaded into the build server's local daemon
+      # — the registry is the source of truth and a local export doubles the
+      # cost of every build.
       ansible.builtin.command:
         cmd: >-
           docker buildx build
           --builder {{ bay_buildx_builder }}
           --provenance=false
-          --load
+          --push
+          {% if git_deploy_registry_cache | default(false) %}
+          --cache-from type=registry,ref={{ _image_repo }}:buildcache
+          --cache-to type=registry,ref={{ _image_repo }}:buildcache,mode=max
+          {% endif %}
           -t {{ _image_repo }}:{{ _remote_sha.stdout }}
           -t {{ _image_ref }}
           -f {{ _dockerfile }}
@@ -190,14 +198,6 @@
           {% endfor %}
           {{ _context }}
         chdir: "{{ _remote_clone_dir }}/repo"
-
-    - name: "{{ _svc_name }} — Push image to registry (SHA tag)"
-      ansible.builtin.command:
-        cmd: "docker push {{ _image_repo }}:{{ _remote_sha.stdout }}"
-
-    - name: "{{ _svc_name }} — Push image to registry (latest tag)"
-      ansible.builtin.command:
-        cmd: "docker push {{ _image_ref }}"
 
   always:
     - name: "{{ _svc_name }} — Clean up build secret temp files"

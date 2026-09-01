@@ -143,10 +143,59 @@ GitHub Push
 +-------------+   +-------------+
 ```
 
+- `docker buildx build --push` exports both `:sha` and `:latest` to the
+  registry in one pass. The image is **not** loaded into the build server's
+  local Docker daemon, so do not expect `docker images` there to show it.
 - Image built once on build server, shared across regions
 - One pull signal per unique image per region (not per service)
 - Deployment servers expand image ref to container restarts via `image-map.json`
 - `bin/bay deploy` also pulls remote-built images (manual recovery path)
+
+### Registry layer cache (opt-in)
+
+`git_deploy_registry_cache` (default `false`) makes remote builds keep their
+BuildKit layer cache in the registry instead of only on the build server:
+
+```yaml
+# group_vars/all/main.yml
+git_deploy_registry_cache: true
+```
+
+When enabled, the remote build gains two flags:
+
+```
+--cache-to   type=registry,ref=<image repo>:buildcache,mode=max
+--cache-from type=registry,ref=<image repo>:buildcache
+```
+
+The cache ref is derived from the image repo (the `image:` value with its tag
+stripped), so `registry.example.com/acme/storefront:latest` caches to
+`registry.example.com/acme/storefront:buildcache`.
+
+**Why you would turn it on.** The build server prunes its local BuildKit cache
+every 6 hours (`roles/cronjobs`, `docker_prune_builder_*`). That cadence is
+deliberate — an unpruned cache grows without bound. The cost is that the first
+build after each prune starts from layer zero. A registry-side cache survives
+the prune, so only the layers that actually changed are rebuilt. Worth enabling
+when builds are layer-heavy and slow, or when the build server is disk-tight
+and pruned hard.
+
+**Prerequisites.**
+
+- A reachable registry that accepts OCI cache manifests. The self-hosted Zot
+  rig role qualifies. Some hosted registries do not — check before enabling.
+- The build server must already authenticate to the registry. It does, because
+  it pushes there; no extra credentials are involved.
+
+**Cost and behaviour.**
+
+- An extra `:buildcache` tag appears next to your image tags, roughly the size
+  of one full layer set. Operators watching registry storage should expect it.
+- A cold cache is the normal first run. BuildKit tolerates a missing
+  `:buildcache` ref and simply builds from scratch — `--cache-from` never fails
+  the build.
+- The flag applies to the remote strategy only, on both the `bin/bay deploy`
+  path and the webhook auto-build path. The local strategy is unaffected.
 
 ### Shared images across services
 

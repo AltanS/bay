@@ -870,7 +870,11 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
     if ! docker buildx build \
       --builder {{ bay_buildx_builder }} \
       --provenance=false \
-      --load \
+      --push \
+{% if git_deploy_registry_cache | default(false) %}
+      --cache-from "type=registry,ref=${IMAGE_REPO}:buildcache" \
+      --cache-to "type=registry,ref=${IMAGE_REPO}:buildcache,mode=max" \
+{% endif %}
       -t "${IMAGE_REPO}:${SHA}" \
       -t "${IMAGE_REF}" \
       -f "${DOCKERFILE}" \
@@ -889,13 +893,12 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
     fi
     rm -f "${BUILD_OUTPUT}"
 
-    # Push to registry (SHA tag + :latest)
-    _log "Pushing ${IMAGE_REPO}:${SHA} to registry"
-    docker push "${IMAGE_REPO}:${SHA}"
-    _log "Pushing ${IMAGE_REF} to registry"
-    docker push "${IMAGE_REF}"
+    # buildx exported both tags straight to the registry above, so there is
+    # no separate push step and no image left in the local daemon store.
+    _log "Pushed ${IMAGE_REPO}:${SHA} and ${IMAGE_REF} to registry"
 
-    # Trim old local content-hash tags after a successful push so
+    # Trim old local content-hash tags left behind by earlier releases
+    # (which exported the image into the local daemon) so
     # the build server doesn't accumulate ~1 GB per push indefinitely. The
     # Ansible-side cleanup in remote_build.yml only fires on `bay deploy`
     # — webhook auto-builds (this path) never hit it, which is how the
@@ -920,7 +923,7 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
         | grep -v '^latest|' \
         | grep -v '^<none>|' \
         | sort -t'|' -k2 -r \
-        | cut -d'|' -f1)
+        | cut -d'|' -f1 || true)
       # Filter out tags used by running containers (defensive; docker rmi
       # itself also refuses such images).
       if [[ -n "${RUNNING_TAGS}" ]]; then
