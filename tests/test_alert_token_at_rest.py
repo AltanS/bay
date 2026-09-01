@@ -328,7 +328,11 @@ def test_recipient_credentials_are_read_by_index_at_run_time():
     assert 'local token="${BAY_RC_1_TOKEN:-}"' in out
     assert 'local url="${BAY_RC_2_URL:-}"' in out
     # token_env / url_env keep working: they were already run-time lookups.
-    assert 'local url="${BAY_TEST_HOOK_URL:-}"' in out
+    # Since the M109 config-to-shell hardening the NAME is validated at render
+    # time and then dereferenced indirectly, instead of being pasted into the
+    # parameter expansion (where a name of `X:-$(id)` executed at every alert).
+    assert "local _url_name='BAY_TEST_HOOK_URL'" in out
+    assert 'local url="${!_url_name:-}"' in out
 
 
 def _render_env_file(**ctx) -> str:

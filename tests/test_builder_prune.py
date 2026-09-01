@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import shlex
+
 import jinja2
 import yaml
 
@@ -124,26 +126,29 @@ def _render(**overrides) -> str:
         lstrip_blocks=True,
         keep_trailing_newline=True,
     )
+    # Ansible ships `quote`; a bare Environment does not. The template runs
+    # from root cron, so every value in it is shlex-quoted.
+    env.filters["quote"] = shlex.quote
     return env.get_template(_PRUNE_TEMPLATE.name).render(**ctx)
 
 
 def test_rendered_script_sweeps_both_builders() -> None:
     rendered = _render()
-    assert "for builder in default argo-builder;" in rendered, rendered  # legacy-argo: live buildx builder default, migrate separately
+    assert "PRUNE_BUILDERS=(default argo-builder )" in rendered, rendered  # legacy-argo: live buildx builder default, migrate separately
     assert "docker buildx prune -af --builder" in rendered
-    assert 'KEEP="2G"' in rendered
+    assert 'KEEP=2G' in rendered
 
 
 def test_rendered_script_honours_a_renamed_builder() -> None:
     """A consumer overriding bay_buildx_builder in group_vars overrides both
     roles at once — that is the whole point of the shared name."""
     rendered = _render(bay_buildx_builder="custom-builder")
-    assert "for builder in default custom-builder;" in rendered
+    assert "PRUNE_BUILDERS=(default custom-builder )" in rendered
 
 
 def test_rendered_script_deduplicates_builders() -> None:
     rendered = _render(docker_prune_builders=["default", "default", "argo-builder"])  # legacy-argo: live buildx builder default, migrate separately
-    assert "for builder in default argo-builder;" in rendered  # legacy-argo: live buildx builder default, migrate separately
+    assert "PRUNE_BUILDERS=(default argo-builder )" in rendered  # legacy-argo: live buildx builder default, migrate separately
 
 
 # --- buildx registrations are per-user --------------------------------------
@@ -166,7 +171,7 @@ def test_prune_looks_in_the_app_users_buildx_registry() -> None:
 
 def test_rendered_script_switches_user_to_reach_the_builder() -> None:
     rendered = _render()
-    assert 'PRUNE_AS_USERS="bay"' in rendered
+    assert "PRUNE_AS_USERS=(bay )" in rendered
     assert "runuser -u" in rendered, (
         "root cannot inspect or prune a builder registered to another user"
     )

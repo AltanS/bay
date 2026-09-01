@@ -90,6 +90,47 @@ def bay_alert_ids_for(recipient, disabled=None, enabled=None):
     return bay_recipient_alert_ids(_ALERT_REGISTRY, recipient, disabled, enabled)
 
 
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def bay_env_name(name):
+    """Validate a shell environment-variable NAME before it is rendered.
+
+    `_notify.sh.j2` looks recipient credentials up by name at run time. The
+    name comes from consumer config (`token_env`, `chat_id_env`, `url_env`),
+    and the emitters that include the snippet run from root cron and root
+    systemd units, so a name is as good as code if it reaches a parameter
+    expansion unchecked. Fail the render, not the host.
+    """
+    text = str(name)
+    if not _ENV_NAME_RE.match(text):
+        raise ValueError(
+            f"invalid environment variable name {text!r}: must match "
+            "^[A-Za-z_][A-Za-z0-9_]*$ (alert recipient token_env / chat_id_env "
+            "/ url_env)"
+        )
+    return text
+
+
+def bay_env_value(value):
+    """Escape a value for a docker `env_file` line, refusing what cannot be.
+
+    env.j2 doubles `$` so Docker Compose does not interpolate it. A NEWLINE
+    has no escape in the env-file format at all: the parser reads one
+    KEY=VALUE per line, so a secret containing a newline used to inject a
+    second, attacker-chosen environment assignment into the container.
+    There is nothing to escape it to, so it is refused at render time.
+    """
+    text = str(value)
+    if "\n" in text or "\r" in text:
+        raise ValueError(
+            "environment value contains a newline: docker env files are one "
+            "KEY=VALUE per line, so this would inject a second assignment. "
+            "Re-encode the value (base64) or drop the newline."
+        )
+    return text.replace("$", "$$")
+
+
 class FilterModule:
     """Bay filter plugins."""
 
@@ -121,6 +162,8 @@ class FilterModule:
             "bay_recipient_target": bay_recipient_target,
             "bay_transform_body": bay_transform_body,
             "bay_gateway_bind_ip": bay_gateway_bind_ip,
+            "bay_env_name": bay_env_name,
+            "bay_env_value": bay_env_value,
         }
 
 
@@ -419,6 +462,30 @@ def _add_router_labels(labels, name, svc, public_mw, vpn_mw, config=None):
             )
 
 
+def _rule_literal(value):
+    """Validate a value that is about to sit inside a Traefik backquoted string.
+
+    Traefik's rule syntax has no escape sequence for a backtick inside a
+    backquoted string: a domain or route containing one closes the matcher
+    early and everything after it is parsed as further rule syntax. So the
+    only correct treatment is to refuse the value rather than to "escape" it
+    into something Traefik would still mis-parse. Newlines are refused for the
+    same reason (a label value is single-line).
+
+    Schema validation (services.schema.json) rejects these at the door; this
+    is the second layer, for roles run straight from ansible-playbook.
+    """
+    text = str(value)
+    for bad, label in (("`", "a backtick"), ("\n", "a newline"), ("\r", "a carriage return")):
+        if bad in text:
+            raise ValueError(
+                f"cannot build a Traefik router rule: {label} in {text!r}. "
+                "Traefik backquoted strings have no escape sequence, so such a "
+                "value would break out of the matcher."
+            )
+    return text
+
+
 def _host_rule(domains):
     """Build the Host() match expression for a router.
 
@@ -428,7 +495,7 @@ def _host_rule(domains):
         raise ValueError(
             "cannot build a Traefik router rule: service has no domains"
         )
-    return " || ".join(f"Host(`{d}`)" for d in domains)
+    return " || ".join(f"Host(`{_rule_literal(d)}`)" for d in domains)
 
 
 def _add_single_router_labels(
@@ -472,7 +539,9 @@ def _add_dual_router_labels(
 
     # Secondary router (higher priority, path-matched)
     sec = f"{name}{secondary_suffix}"
-    path_rules = " || ".join(f"PathPrefix(`{r}`)" for r in secondary_routes)
+    path_rules = " || ".join(
+        f"PathPrefix(`{_rule_literal(r)}`)" for r in secondary_routes
+    )
     labels[f"traefik.http.routers.{sec}.rule"] = (
         f"{sec_host} && ({path_rules})"
     )

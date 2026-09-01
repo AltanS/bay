@@ -51,8 +51,11 @@ def _extract_service_block(rendered: str, svc_name: str) -> str:
     Finds the if/elif block for the given service name in the per-service
     config section (the first if/elif chain in the script).
     """
+    # The service key is compared against a SINGLE-quoted literal since the
+    # M109 config-to-shell hardening — a double-quoted right operand would
+    # expand a `$` in the key.
     match = re.search(
-        rf'if \[\[ "\${{SERVICE}}" == "{re.escape(svc_name)}" \]\]; then(.*?)^(?:else|elif|fi)',
+        rf"if \[\[ \"\${{SERVICE}}\" == '{re.escape(svc_name)}' \]\]; then(.*?)^(?:else|elif|fi)",
         rendered,
         re.DOTALL | re.MULTILINE,
     )
@@ -109,6 +112,7 @@ def _render_rebuild_sh(
         git_deploy_services=git_deploy_services or [],
         git_deploy_build_strategy=git_deploy_build_strategy,
         git_deploy_build_dir=f"/opt/{stack_name}/builds",
+        git_deploy_known_hosts=f"/opt/{stack_name}/builds/github_known_hosts",
         git_deploy_image_prefix=f"bay-{stack_name}",
         git_deploy_remote_build_dir=f"/opt/{stack_name}/push-builds",
         git_deploy_cb_max_failures=3,
@@ -706,7 +710,7 @@ class TestPullOnlyServiceRendering:
         rendered = _render_rebuild_sh(services, rebuild_svcs)
         # Find the storefront-es block (pull-only)
         match = re.search(
-            r'if \[\[ "\$\{SERVICE\}" == "storefront-es" \]\]; then(.*?)(?:elif|else|fi)',
+            r"""if \[\[ "\$\{SERVICE\}" == 'storefront-es' \]\]; then(.*?)(?:elif|else|fi)""",
             rendered,
             re.DOTALL,
         )
@@ -720,7 +724,7 @@ class TestPullOnlyServiceRendering:
         rebuild_svcs = ["storefront-de", "storefront-es", "storefront-com"]
         rendered = _render_rebuild_sh(services, rebuild_svcs)
         match = re.search(
-            r'if \[\[ "\$\{SERVICE\}" == "storefront-es" \]\]; then(.*?)(?:elif|else|fi)',
+            r"""if \[\[ "\$\{SERVICE\}" == 'storefront-es' \]\]; then(.*?)(?:elif|else|fi)""",
             rendered,
             re.DOTALL,
         )

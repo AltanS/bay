@@ -53,8 +53,8 @@ compress="true"
 
 case "$mode" in
   normal)
-    FILE_OWNER="{{ app_user }}"
-    FILE_GROUP="{{ log_archive_group }}"
+    FILE_OWNER={{ app_user | quote }}
+    FILE_GROUP={{ log_archive_group | quote }}
     FILE_MODE="0640"
     ;;
   sensitive)

@@ -27,8 +27,13 @@
 # quietly does nothing is the whole bug.
 set -u
 
-KEEP="{{ docker_prune_builder_keep_storage }}"
-PRUNE_AS_USERS="{{ docker_prune_builder_users | reject('equalto', '') | join(' ') }}"
+KEEP={{ docker_prune_builder_keep_storage | quote }}
+
+# Both lists are rendered as quoted bash arrays rather than joined into one
+# unquoted word. This runs from ROOT cron, so a builder or user name carrying
+# `$(...)` in group_vars was root code execution once a month.
+PRUNE_AS_USERS=({% for _u in docker_prune_builder_users | reject('equalto', '') %}{{ _u | quote }} {% endfor %})
+PRUNE_BUILDERS=({% for _b in docker_prune_builders | unique %}{{ _b | quote }} {% endfor %})
 
 # buildx renamed --keep-storage to --reserved-space; the old spelling still
 # parses but warns (buildx v0.31+) and will eventually be removed. Probe once
@@ -54,7 +59,7 @@ run_as() {
 # Echo the first user (possibly "") whose buildx registry knows this builder.
 owner_of() {
     local builder="$1" user
-    for user in "" ${PRUNE_AS_USERS}; do
+    for user in "" ${PRUNE_AS_USERS[@]+"${PRUNE_AS_USERS[@]}"}; do
         if [ -n "${user}" ] && ! id "${user}" >/dev/null 2>&1; then
             continue
         fi
@@ -66,12 +71,12 @@ owner_of() {
     return 1
 }
 
-for builder in {{ docker_prune_builders | unique | join(' ') }}; do
+for builder in ${PRUNE_BUILDERS[@]+"${PRUNE_BUILDERS[@]}"}; do
     if ! owner="$(owner_of "${builder}")"; then
         # A registered builder nobody can reach is different from one that was
         # never created — the first means cache is growing unpruned.
         if docker inspect "buildx_buildkit_${builder}0" >/dev/null 2>&1; then
-            echo "$(date -Is) WARNING builder=${builder} has a running buildkit container but is not registered for root or [${PRUNE_AS_USERS}] — its cache is NOT being pruned"
+            echo "$(date -Is) WARNING builder=${builder} has a running buildkit container but is not registered for root or [${PRUNE_AS_USERS[*]-}] — its cache is NOT being pruned"
         else
             echo "$(date -Is) skip builder=${builder} (not present)"
         fi

@@ -2185,6 +2185,139 @@ def _probe_webhook_health(
                 )
 
 
+# ── Identifier safety ────────────────────────────────────────────────────
+
+_SERVICE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_SQL_IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
+_ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ROUTE_RE = re.compile(r"^/[A-Za-z0-9._~%+/*-]*$")
+
+
+def _validate_identifier_safety(
+    services_data: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Every consumer-supplied name that Bay interpolates into SQL or a shell.
+
+    The schema (services.schema.json) already rejects these shapes, but it
+    reports them as a JSON-pointer path with a raw regex, which is unhelpful
+    at 2 a.m. This restates the same contract in words, names the offender,
+    and adds the one rule a regex cannot express: a bare ``/`` in
+    ``public_routes`` is syntactically fine and semantically catastrophic —
+    it makes the entire ``access: vpn`` service public.
+
+    Where these values land:
+
+      * service / accessory key -> container name, Traefik router name,
+        the default database and role name, and a shell word in rebuild.sh
+      * database.name / database.user -> psql identifiers
+      * env.clear / env.secret keys -> env-file lines and, historically,
+        shell parameter expansions
+      * public_routes / vpn_routes -> inside a Traefik backquoted string,
+        which has no escape sequence for a backtick
+    """
+    console.header("Identifier Safety")
+
+    issues = 0
+
+    def _fail(msg: str) -> None:
+        nonlocal issues
+        issues += 1
+        result.fail(msg)
+
+    def _check_env(kind: str, name: str, block: Any) -> None:
+        if not isinstance(block, dict):
+            return
+        clear = block.get("clear")
+        if isinstance(clear, dict):
+            for key in clear:
+                if not _ENV_KEY_RE.match(str(key)):
+                    _fail(
+                        f"{kind}.{name}.env.clear: environment variable name "
+                        f"'{key}' is not a POSIX name "
+                        f"(^[A-Za-z_][A-Za-z0-9_]*$)"
+                    )
+        secret = block.get("secret")
+        secret_keys: list[Any] = []
+        if isinstance(secret, dict):
+            secret_keys = list(secret.keys())
+        elif isinstance(secret, list):
+            secret_keys = list(secret)
+        for key in secret_keys:
+            if not _ENV_KEY_RE.match(str(key)):
+                _fail(
+                    f"{kind}.{name}.env.secret: environment variable name "
+                    f"'{key}' is not a POSIX name "
+                    f"(^[A-Za-z_][A-Za-z0-9_]*$)"
+                )
+
+    def _check_database(kind: str, name: str, db: Any) -> None:
+        if not isinstance(db, dict):
+            return
+        for field, pattern, label in (
+            ("name", _SQL_IDENT_RE, "database name"),
+            ("user", _SQL_IDENT_RE, "database user"),
+            ("accessory", _SERVICE_NAME_RE, "accessory reference"),
+        ):
+            value = db.get(field)
+            if value is None:
+                continue
+            if not pattern.match(str(value)):
+                _fail(
+                    f"{kind}.{name}.database.{field}: {label} '{value}' is "
+                    f"not a safe identifier — it is interpolated into SQL run "
+                    f"as the postgres superuser"
+                )
+
+    def _check_routes(kind: str, name: str, svc: dict[str, Any]) -> None:
+        for field in ("public_routes", "vpn_routes"):
+            routes = svc.get(field)
+            if not isinstance(routes, list):
+                continue
+            for route in routes:
+                text = str(route)
+                if not _ROUTE_RE.match(text):
+                    _fail(
+                        f"{kind}.{name}.{field}: route '{text}' contains a "
+                        f"character Traefik cannot escape inside a rule "
+                        f"(allowed: ^/[A-Za-z0-9._~%+/*-]*$)"
+                    )
+                elif field == "public_routes" and text == "/":
+                    _fail(
+                        f"services.{name}.public_routes: a bare '/' exempts "
+                        f"every path from the VPN restriction, which makes "
+                        f"the whole service public. If that is what you want, "
+                        f"set access: public deliberately; otherwise list the "
+                        f"specific paths."
+                    )
+
+    for kind, key in (("services", "services"), ("accessories", "accessories")):
+        entries = services_data.get(key) or {}
+        if not isinstance(entries, dict):
+            continue
+        for name, entry in entries.items():
+            if str(name).startswith("_"):
+                continue
+            if not _SERVICE_NAME_RE.match(str(name)):
+                _fail(
+                    f"{kind}: name '{name}' is not a safe identifier "
+                    f"(^[a-z0-9][a-z0-9_-]{{0,62}}$) — it becomes a container "
+                    f"name, a Traefik router name and a shell word"
+                )
+            if not isinstance(entry, dict):
+                continue
+            _check_env(kind, str(name), entry.get("env"))
+            _check_database(kind, str(name), entry.get("database"))
+            if kind == "services":
+                _check_routes(kind, str(name), entry)
+
+    if issues == 0:
+        result.ok(
+            "Identifier safety  all names, env keys and routes are safe to "
+            "interpolate"
+        )
+
+
 def run_validation(
     root: Path,
     env: str,
@@ -2233,6 +2366,10 @@ def run_validation(
 
     # 3. Schema validation (only if YAML parsed OK)
     services_data = _validate_services_schema(root, parsed, result)
+
+    # 3b. Identifier safety (names that reach SQL and shells)
+    if services_data is not None:
+        _validate_identifier_safety(services_data, result)
 
     # 4. Backup configuration consistency
     if services_data is not None:

@@ -1907,6 +1907,11 @@ def migrate_namespace(
         else:
             node_region = resolved_region or ""
         target_name = f"{new_user}-{node_region}" if node_region else new_user
+        # Same gate as `nodes rename`: a name we are about to SET is
+        # interpolated into a root shell by gateway_backend.rename_node. The
+        # region half comes from an existing node's given_name, so it is not
+        # operator-typed at this point. Consistency, not a known hole.
+        _validate_node_name(target_name)
         if current_name != target_name:
             node_actions.append((node, "rename", target_name))
         else:

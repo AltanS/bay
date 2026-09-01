@@ -8,6 +8,11 @@
     "services": {
       "type": "object",
       "description": "Service definitions — containers with Traefik routing and SSL.",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+        "description": "A service name becomes a container name, a Traefik router name, a default database name and a shell word in rebuild.sh. Constrain it once, here."
+      },
       "additionalProperties": {
         "$ref": "#/$defs/service"
       }
@@ -15,6 +20,11 @@
     "accessories": {
       "type": "object",
       "description": "Accessory definitions — infrastructure containers (databases, agents).",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+        "description": "An accessory name reaches `docker exec` in the generated backup script. Same constraint as a service name."
+      },
       "additionalProperties": {
         "$ref": "#/$defs/accessory"
       }
@@ -109,13 +119,13 @@
         },
         "public_routes": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Routes exempt from VPN restriction (for vpn-access services)."
+          "items": { "type": "string", "pattern": "^/[A-Za-z0-9._~%+/*-]*$" },
+          "description": "Routes exempt from VPN restriction (for vpn-access services). Traefik matches a route inside a backquoted string, which has no escape sequence, so backtick / quote / dollar / semicolon / backslash / newline are rejected here. A bare \"/\" matches this pattern but is rejected by `bay validate` — it makes the whole vpn service public."
         },
         "vpn_routes": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "Routes protected by VPN on an otherwise public service."
+          "items": { "type": "string", "pattern": "^/[A-Za-z0-9._~%+/*-]*$" },
+          "description": "Routes protected by VPN on an otherwise public service. Same charset as public_routes."
         },
         "network_mode": {
           "type": "string",
@@ -375,18 +385,20 @@
       "properties": {
         "clear": {
           "type": "object",
+          "propertyNames": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
           "additionalProperties": { "type": "string" },
-          "description": "Plain-text environment variables."
+          "description": "Plain-text environment variables. Keys are POSIX environment variable names."
         },
         "secret": {
           "description": "Secret environment variables — list of key names or key-to-vault mapping.",
           "oneOf": [
             {
               "type": "array",
-              "items": { "type": "string" }
+              "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
             },
             {
               "type": "object",
+              "propertyNames": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
               "additionalProperties": { "type": "string" }
             }
           ]
@@ -484,15 +496,18 @@
       "properties": {
         "accessory": {
           "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
           "description": "Name of the database accessory to bind to."
         },
         "name": {
           "type": "string",
-          "description": "Database name (defaults to service name)."
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$",
+          "description": "Database name (defaults to service name). PostgreSQL identifier charset: roles/deploy_stack/tasks/database_provision.yml interpolates it into SQL."
         },
         "user": {
           "type": "string",
-          "description": "Database user (defaults to service name)."
+          "pattern": "^[a-z_][a-z0-9_]{0,62}$",
+          "description": "Database user (defaults to service name). PostgreSQL identifier charset — see database.name."
         }
       },
       "additionalProperties": false

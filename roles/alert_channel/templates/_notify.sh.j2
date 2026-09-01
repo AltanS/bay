@@ -53,7 +53,7 @@
 #}
 # ── Alert fan-out (bay alert_channel; do not edit — generated from
 #    roles/alert_channel/templates/_notify.sh.j2) ────────────────────────────
-BAY_ALERT_ENV_FILE='{{ alert_env_path | default('/etc/bay/alert.env') }}'
+BAY_ALERT_ENV_FILE={{ alert_env_path | default('/etc/bay/alert.env') | quote }}
 if [[ -r "${BAY_ALERT_ENV_FILE}" ]]; then . "${BAY_ALERT_ENV_FILE}"; fi
 BAY_TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 BAY_TG_CHAT="${TELEGRAM_CHAT_ID:-}"
@@ -69,9 +69,9 @@ BAY_ALERT_URL="${ALERT_WEBHOOK_URL:-}"
   BAY_HOST is the display form and the one call sites use.
 #}
 BAY_HOST='{% include '_host_label.j2' %}'
-BAY_ALERT_FORMAT='{{ alert_webhook_format | default('campfire') }}'
-BAY_ALERT_MAX_CHARS={{ alert_webhook_max_chars | default(3500) }}
-BAY_ALERT_TIMEOUT={{ alert_webhook_timeout | default(10) }}
+BAY_ALERT_FORMAT={{ alert_webhook_format | default('campfire') | quote }}
+BAY_ALERT_MAX_CHARS={{ alert_webhook_max_chars | default(3500) | int }}
+BAY_ALERT_TIMEOUT={{ alert_webhook_timeout | default(10) | int }}
 
 # Escape untrusted text (build output, error strings, container logs) before
 # embedding it in a message. Telegram rejects malformed HTML with a 400 and
@@ -219,25 +219,30 @@ _bay_send_webhook() {
   `alert_recipients` list in the same order, so the indices cannot diverge
   without both changing. token_env / url_env are unaffected — they were
   already run-time lookups, and remain the way to source a value from a unit's
-  own environment instead.
+  own environment instead — but the NAME is validated at render time
+  (`| bay_env_name`) and then looked up INDIRECTLY (`${!name:-}`) rather than
+  pasted into the expansion. Pasting it made a `token_env` of `X:-$(id)` run
+  at every alert, from root cron in several of the including roles.
 #}
 {% set _bay_recipients = alert_recipients | default([]) %}
 {% for _r in _bay_recipients %}
 {% set _rn = _r | bay_alert_recipient %}
 {% set _rc = _rn.config %}
-# Recipient: {{ _rn.name | default('unnamed') }} ({{ _rn.adapter }}, min_level {{ _rn.min_level }})
+# Recipient: {{ _rn.name | default('unnamed') | to_json }} ({{ _rn.adapter | to_json }}, min_level {{ _rn.min_level | to_json }})
 _bay_send_r{{ loop.index }}() {
   local message="$1"
 {% if _rn.adapter == 'telegram' %}
 {% if _rc.token_env is defined %}
-  local token="${% raw %}{{% endraw %}{{ _rc.token_env }}:-}"
+  local _tok_name='{{ _rc.token_env | bay_env_name }}'
+  local token="${!_tok_name:-}"
 {% else %}
   local token="${BAY_RC_{{ loop.index }}_TOKEN:-}"
 {% endif %}
 {% if _rc.chat_id_env is defined %}
-  local chat="${% raw %}{{% endraw %}{{ _rc.chat_id_env }}:-}"
+  local _chat_name='{{ _rc.chat_id_env | bay_env_name }}'
+  local chat="${!_chat_name:-}"
 {% else %}
-  local chat='{{ _rc.chat_id | default('') }}'
+  local chat={{ _rc.chat_id | default('') | quote }}
 {% endif %}
   [[ -z "${token}" || -z "${chat}" ]] && return 0
   local http_code
@@ -250,11 +255,12 @@ _bay_send_r{{ loop.index }}() {
     --data-urlencode "disable_web_page_preview=true" \
     2>/dev/null) || http_code="000"
   [[ "${http_code}" == "200" ]] && return 0
-  _bay_log_send_failure '{{ _rn.name | default('unnamed') }}' "${http_code}"
+  _bay_log_send_failure {{ _rn.name | default('unnamed') | quote }} "${http_code}"
   return 0
 {% else %}
 {% if _rc.url_env is defined %}
-  local url="${% raw %}{{% endraw %}{{ _rc.url_env }}:-}"
+  local _url_name='{{ _rc.url_env | bay_env_name }}'
+  local url="${!_url_name:-}"
 {% else %}
   local url="${BAY_RC_{{ loop.index }}_URL:-}"
 {% endif %}
@@ -277,14 +283,14 @@ _bay_send_r{{ loop.index }}() {
 {% endif %}
   http_code=$(printf '%s' "${payload}" | curl -s -o /dev/null \
     -w '%{http_code}' --max-time "${BAY_ALERT_TIMEOUT}" \
-    -X {{ _rc.method | default('POST') }} "${url}" \
-    -H 'Content-Type: {{ _rc.content_type | default('text/plain') }}' \
+    -X {{ _rc.method | default('POST') | quote }} "${url}" \
+    -H {{ ('Content-Type: ' ~ (_rc.content_type | default('text/plain'))) | quote }} \
 {% for _hk, _hv in (_rc.headers | default({})).items() %}
-    -H '{{ _hk }}: {{ _hv }}' \
+    -H {{ (_hk ~ ': ' ~ _hv) | quote }} \
 {% endfor %}
     --data-binary @- 2>/dev/null) || http_code="000"
   [[ "${http_code}" == 2* ]] && return 0
-  _bay_log_send_failure '{{ _rn.name | default('unnamed') }}' "${http_code}"
+  _bay_log_send_failure {{ _rn.name | default('unnamed') | quote }} "${http_code}"
   return 0
 {% endif %}
 }

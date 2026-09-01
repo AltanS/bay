@@ -10,10 +10,10 @@
 
 set -uo pipefail
 
-STATE_DIR="{{ outbound_check_state_dir }}"
+STATE_DIR={{ outbound_check_state_dir | quote }}
 STATE_FILE="${STATE_DIR}/disk-alert.state"
-WARN_PCT="{{ disk_alert_warn_pct }}"
-PAGE_PCT="{{ disk_alert_page_pct }}"
+WARN_PCT={{ disk_alert_warn_pct | int }}
+PAGE_PCT={{ disk_alert_page_pct | int }}
 
 {# The deprecated telegram_* fallback now lives in alert_channel's
    alert.env.j2 — nothing here reads an Ansible var for a credential. #}

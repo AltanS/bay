@@ -27,15 +27,22 @@
 # ID map. We iterate post results (keyed by item.item = service name)
 # so each entry can independently compute old/new short IDs.
 
+# The service key reaches a REAL shell here (one of the few
+# ansible.builtin.shell tasks in the repo), so it is passed through the
+# environment and referenced as "$SVC" rather than pasted into the command
+# string. Pasted, a key containing a single quote closed the printf literal
+# and the rest of the key ran as a command.
 - name: Write container-recreated boundary sentinel to live.log
+  environment:
+    SVC: "{{ item.item }}"
   ansible.builtin.shell:
     cmd: >-
       printf '%s\n'
-      '--- bay: container {{ item.item }} recreated at
+      "--- bay: container ${SVC} recreated at
       {{ ansible_facts["date_time"]["iso8601"] }}, old-id
       {{ (_log_retention_pre_ids | default({}))[item.item] | default("(none)") | truncate(12, true, "") }},
-      new-id {{ item.stdout | truncate(12, true, "") }} ---'
-      >> '{{ stack_dir }}/logs/services/{{ item.item }}/live.log'
+      new-id {{ item.stdout | truncate(12, true, "") }} ---"
+      >> "{{ stack_dir }}/logs/services/${SVC}/live.log"
   loop: "{{ _log_retention_post_ids_raw.results | default([]) }}"
   loop_control:
     label: "{{ item.item }}"

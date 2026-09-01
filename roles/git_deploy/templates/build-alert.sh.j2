@@ -6,9 +6,9 @@
 set -euo pipefail
 
 SERVICE="$1"
-STACK_DIR="{{ stack_dir }}"
+STACK_DIR={{ stack_dir | quote }}
 BAY_ALERT_HEADER={{ docker_monitor_alert_header | to_json }}
-BUILD_TIMEOUT={{ git_deploy_build_timeout }}
+BUILD_TIMEOUT={{ git_deploy_build_timeout | int }}
 
 # Read the result of the failed unit
 RESULT=$(systemctl show "bay-build@${SERVICE}.service" --property=Result --value 2>/dev/null || echo "unknown")

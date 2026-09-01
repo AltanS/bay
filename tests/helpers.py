@@ -6,6 +6,8 @@ whitespace-sensitive rendering bugs that production Ansible would hit.
 See the v0.76.0 trim_blocks regression for a concrete example.
 """
 
+import json
+import shlex
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
@@ -37,6 +39,7 @@ def _alert_filters() -> dict:
             "bay_transform_body",
             "bay_alert_body",
             "bay_alert_content_type",
+            "bay_env_name",
         )
     }
 
@@ -53,4 +56,9 @@ def make_ansible_env(
         keep_trailing_newline=keep_trailing_newline,
     )
     env.filters.update(_alert_filters())
+    # Ansible ships these two; a bare Jinja Environment does not. Without them
+    # every `| quote` in a template raises TemplateAssertionError at render
+    # time and a test that only asserts "no unsafe payload" passes vacuously.
+    env.filters["quote"] = shlex.quote
+    env.filters["to_json"] = json.dumps
     return env

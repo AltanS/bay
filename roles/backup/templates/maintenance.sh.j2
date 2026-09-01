@@ -1,29 +1,30 @@
 #!/usr/bin/env bash
 # {{ ansible_managed }}
-# Maintenance script for {{ accessory_name }}
+# Maintenance script for {{ accessory_name | to_json }}
 set -euo pipefail
 
 # Restic environment (baked at template time)
-export RESTIC_REPOSITORY="{{ repo }}"
-export RESTIC_PASSWORD="{{ backup_restic_password }}"
-export AWS_ACCESS_KEY_ID="{{ backup_s3_access_key_id }}"
-export AWS_SECRET_ACCESS_KEY="{{ backup_s3_secret_access_key }}"
-export RESTIC_CACHE_DIR="{{ backup_scripts_dir }}/cache/{{ accessory_name }}"
+export RESTIC_REPOSITORY={{ repo | quote }}
+export RESTIC_PASSWORD={{ backup_restic_password | quote }}
+export AWS_ACCESS_KEY_ID={{ backup_s3_access_key_id | quote }}
+export AWS_SECRET_ACCESS_KEY={{ backup_s3_secret_access_key | quote }}
+ACCESSORY={{ accessory_name | quote }}
+export RESTIC_CACHE_DIR={{ backup_scripts_dir | quote }}/cache/"${ACCESSORY}"
 
-RESTIC="{{ backup_restic_bin }}"
+RESTIC={{ backup_restic_bin | quote }}
 
-BAY_ALERT_HEADER='{{ docker_monitor_alert_header }}'
-BAY_ALERT_FOOTER='{{ docker_monitor_alert_footer }}'
+BAY_ALERT_HEADER={{ docker_monitor_alert_header | quote }}
+BAY_ALERT_FOOTER={{ docker_monitor_alert_footer | quote }}
 
 {% include '_notify.sh.j2' %}
 
-echo "[$(date -Iseconds)] Running integrity check for {{ accessory_name }}..."
+echo "[$(date -Iseconds)] Running integrity check for ${ACCESSORY}..."
 if ! "$RESTIC" check --retry-lock 15m 2>&1; then
   bay_notify backup.integrity_check_failed "<b>Integrity check FAILED</b>
-Accessory: <code>{{ accessory_name }}</code>
+Accessory: <code>${ACCESSORY}</code>
 Host: <code>${BAY_HOST}</code>"
   exit 1
 fi
 
 "$RESTIC" cache --cleanup 2>&1 || true
-echo "[$(date -Iseconds)] Maintenance complete for {{ accessory_name }}"
+echo "[$(date -Iseconds)] Maintenance complete for ${ACCESSORY}"

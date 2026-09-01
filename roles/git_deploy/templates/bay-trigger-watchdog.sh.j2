@@ -17,15 +17,15 @@
 # NOTE: no `set -euo pipefail` — we want to survive unexpected failures
 # in awk/jq/find rather than exit 1 and fire a false systemd alert.
 
-STACK_DIR="{{ stack_dir }}"
+STACK_DIR={{ stack_dir | quote }}
 TRIGGER_DIR="${STACK_DIR}/triggers"
 STATE_DIR="${STACK_DIR}/state"
 AUDIT_LOG="${STATE_DIR}/stall-watchdog.log"
 LAST_ALERT_FILE="${STATE_DIR}/watchdog-last-alert.json"
 
-STALE_AGE_SEC={{ git_deploy_stall_watchdog_threshold | default(600) }}
+STALE_AGE_SEC={{ git_deploy_stall_watchdog_threshold | default(600) | int }}
 # Re-alert cadence when the same set of stale services stays stale.
-WATCHDOG_REPEAT_SEC={{ git_deploy_stall_watchdog_repeat_sec | default(1800) }}
+WATCHDOG_REPEAT_SEC={{ git_deploy_stall_watchdog_repeat_sec | default(1800) | int }}
 
 BAY_ALERT_HEADER={{ docker_monitor_alert_header | to_json }}
 

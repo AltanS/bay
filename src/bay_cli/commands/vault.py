@@ -1,6 +1,7 @@
 """Vault management commands."""
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -99,18 +100,51 @@ def _uv_run_cmd(bay_dir: Path) -> list[str]:
 def set_key(
     env: str = typer.Argument(..., help="Target environment."),
     key: str = typer.Argument(..., help="Secret key name."),
-    value: str = typer.Argument(..., help="Secret value."),
+    value: Optional[str] = typer.Argument(
+        None,
+        help="Secret value. OMIT IT and pipe the value on stdin instead.",
+    ),
 ) -> None:
     """Set one secret key non-interactively (decrypt, modify, re-encrypt).
 
     Writes under the `secrets:` dict, creating it if missing. Mind the
     casing convention (see `bin/bay vault edit --help`).
 
+    Prefer stdin. A value passed as an argument lands in the operator's shell
+    history and is readable in /proc/<pid>/cmdline by any local user for as
+    long as the command runs. Omitting it reads the value from stdin, with a
+    single trailing newline stripped so `echo` and a heredoc both work. The
+    positional form still works for one transition release.
+
     Examples:
 
-        bin/bay vault set production POSTGRES_PASSWORD 's3cret'
-        bin/bay vault set production GITHUB_TOKEN ghp_xxxxx
+        printf %s 's3cret' | bin/bay vault set production POSTGRES_PASSWORD
+        bin/bay vault set production GITHUB_TOKEN < token.txt
+        bin/bay vault set production POSTGRES_PASSWORD 's3cret'   # deprecated
     """
+    if value is None:
+        if sys.stdin.isatty():
+            raise BayError.config(
+                "No value given and stdin is a terminal.",
+                hint=(
+                    f"Pipe the secret in: printf %s '<value>' | "
+                    f"bay vault set {env} {key}"
+                ),
+            )
+        value = sys.stdin.read()
+        if value.endswith("\n"):
+            value = value[:-1]
+        if not value:
+            raise BayError.config(
+                "Empty value on stdin.",
+                hint="Pipe the secret value in, or pass it as an argument.",
+            )
+    else:
+        console.warning(
+            "Passing the secret as an argument puts it in your shell history "
+            "and in /proc/<pid>/cmdline. Pipe it on stdin instead."
+        )
+
     bay_dir = paths.find_bay_dir()
     vault_file = Path(_vault_file(env, None))
 

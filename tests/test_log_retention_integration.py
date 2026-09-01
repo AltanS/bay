@@ -24,6 +24,7 @@ Requirements:
 from __future__ import annotations
 
 import os
+import shlex
 import re
 import shutil
 import subprocess
@@ -74,6 +75,7 @@ def _render_archive_script(tmp_path: Path) -> Path:
         trim_blocks=True,
         lstrip_blocks=False,
     )
+    env.filters["quote"] = shlex.quote
     current_user = os.environ.get("USER", "root")
     rendered = env.get_template("archive-logs.sh.j2").render(
         app_user=current_user,

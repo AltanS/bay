@@ -16,8 +16,8 @@
 
 set -euo pipefail
 
-COMPOSE_FILE="{{ boot_safety_compose_file }}"
-TRAEFIK_CONTAINER="{{ traefik_container_name | default('traefik') }}"
+COMPOSE_FILE={{ boot_safety_compose_file | quote }}
+TRAEFIK_CONTAINER={{ traefik_container_name | default('traefik') | quote }}
 
 {% raw %}
 echo "bay-infra-ensure: checking infra containers from $COMPOSE_FILE"

@@ -1,23 +1,36 @@
 #!/usr/bin/env bash
 # {{ ansible_managed }}
-# Backup script for {{ accessory_name }} ({{ method }})
+# Backup script for {{ accessory_name | to_json }} ({{ method | to_json }})
 set -euo pipefail
 
-# Restic environment (baked at template time)
-export RESTIC_REPOSITORY="{{ repo }}"
-export RESTIC_PASSWORD="{{ backup_restic_password }}"
-export AWS_ACCESS_KEY_ID="{{ backup_s3_access_key_id }}"
-export AWS_SECRET_ACCESS_KEY="{{ backup_s3_secret_access_key }}"
-export RESTIC_CACHE_DIR="{{ backup_scripts_dir }}/cache/{{ accessory_name }}"
+# Restic environment (baked at template time).
+#
+# Every value below is single-quoted by `| quote`, not wrapped in double
+# quotes. Double quotes do not stop `$(...)` or backtick substitution at
+# script-run time, so a vault secret containing `$(` used to execute as the
+# script's user (app_user, in the docker group) on every backup run.
+export RESTIC_REPOSITORY={{ repo | quote }}
+export RESTIC_PASSWORD={{ backup_restic_password | quote }}
+export AWS_ACCESS_KEY_ID={{ backup_s3_access_key_id | quote }}
+export AWS_SECRET_ACCESS_KEY={{ backup_s3_secret_access_key | quote }}
 
-LOCK_FILE="{{ backup_lock_dir }}/{{ accessory_name }}.lock"
+# Consumer-supplied identifiers, resolved once here and referenced as shell
+# variables everywhere below, so no config value is ever a bare word in a
+# command line or inside a double-quoted string.
+ACCESSORY={{ accessory_name | quote }}
+METHOD={{ method | quote }}
+HOST_TAG={{ inventory_hostname | quote }}
+
+export RESTIC_CACHE_DIR={{ backup_scripts_dir | quote }}/cache/"${ACCESSORY}"
+
+LOCK_FILE={{ backup_lock_dir | quote }}/"${ACCESSORY}".lock
 MIN_SNAPSHOT_SIZE=100
-RESTIC="{{ backup_restic_bin }}"
+RESTIC={{ backup_restic_bin | quote }}
 
 # ── Telegram Alert ──────────────────────────────────────────────────────
 
-BAY_ALERT_HEADER='{{ docker_monitor_alert_header }}'
-BAY_ALERT_FOOTER='{{ docker_monitor_alert_footer }}'
+BAY_ALERT_HEADER={{ docker_monitor_alert_header | quote }}
+BAY_ALERT_FOOTER={{ docker_monitor_alert_footer | quote }}
 
 {% include '_notify.sh.j2' %}
 
@@ -39,16 +52,18 @@ mkdir -p "$RESTIC_CACHE_DIR"
 {% set _explicit_dbs = accessory_config.backup.databases | default([accessory_config.env['clear'].POSTGRES_DB | default('app')]) if accessory_config.backup is mapping else [accessory_config.env['clear'].POSTGRES_DB | default('app')] %}
 {% set databases = (_explicit_dbs + (bound_databases | default([]))) | unique | list %}
 {% for db in databases %}
-echo "[$(date -Iseconds)] Starting pg_dump backup for {{ accessory_name }} (database: {{ db }})..."
+PG_USER={{ pg_user | quote }}
+PG_DB={{ db | quote }}
+echo "[$(date -Iseconds)] Starting pg_dump backup for ${ACCESSORY} (database: ${PG_DB})..."
 set +e
-docker exec {{ accessory_name }} \
-  pg_dump -U {{ pg_user }} {{ db }} | \
+docker exec "${ACCESSORY}" \
+  pg_dump -U "${PG_USER}" "${PG_DB}" | \
   "$RESTIC" backup \
     --stdin \
-    --stdin-filename "{{ accessory_name }}{% if databases | length > 1 %}-{{ db }}{% endif %}.sql" \
-    --tag "{{ inventory_hostname }}" \
-    --tag "{{ accessory_name }}" \
-    --tag "{{ method }}" \
+    --stdin-filename "${ACCESSORY}{% if databases | length > 1 %}-${PG_DB}{% endif %}.sql" \
+    --tag "${HOST_TAG}" \
+    --tag "${ACCESSORY}" \
+    --tag "${METHOD}" \
     ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
     --retry-lock 15m
 
@@ -58,18 +73,21 @@ RESTIC_EXIT=${_pipestatus[1]}
 set -e
 {% endfor %}
 {% elif method == 'mysql' %}
-echo "[$(date -Iseconds)] Starting mysqldump backup for {{ accessory_name }}..."
+MYSQL_PWD_VALUE={{ accessory_config.env['clear'].MYSQL_ROOT_PASSWORD | default(accessory_config.env['clear'].MYSQL_PASSWORD | default('')) | quote }}
+MYSQL_USER_VALUE={{ accessory_config.env['clear'].MYSQL_USER | default('root') | quote }}
+MYSQL_DB_VALUE={{ accessory_config.env['clear'].MYSQL_DATABASE | default('app') | quote }}
+echo "[$(date -Iseconds)] Starting mysqldump backup for ${ACCESSORY}..."
 set +e
 docker exec \
-  -e MYSQL_PWD="{{ accessory_config.env['clear'].MYSQL_ROOT_PASSWORD | default(accessory_config.env['clear'].MYSQL_PASSWORD | default('')) }}" \
-  {{ accessory_name }} \
-  mysqldump -u {{ accessory_config.env['clear'].MYSQL_USER | default('root') }} {{ accessory_config.env['clear'].MYSQL_DATABASE | default('app') }} | \
+  -e MYSQL_PWD="${MYSQL_PWD_VALUE}" \
+  "${ACCESSORY}" \
+  mysqldump -u "${MYSQL_USER_VALUE}" "${MYSQL_DB_VALUE}" | \
   "$RESTIC" backup \
     --stdin \
-    --stdin-filename "{{ accessory_name }}.sql" \
-    --tag "{{ inventory_hostname }}" \
-    --tag "{{ accessory_name }}" \
-    --tag "{{ method }}" \
+    --stdin-filename "${ACCESSORY}.sql" \
+    --tag "${HOST_TAG}" \
+    --tag "${ACCESSORY}" \
+    --tag "${METHOD}" \
     ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
     --retry-lock 15m
 
@@ -78,14 +96,14 @@ DUMP_EXIT=${_pipestatus[0]}
 RESTIC_EXIT=${_pipestatus[1]}
 set -e
 {% elif method == 'redis' %}
-echo "[$(date -Iseconds)] Starting redis backup for {{ accessory_name }}..."
+echo "[$(date -Iseconds)] Starting redis backup for ${ACCESSORY}..."
 
 # Trigger BGSAVE and poll for completion
-BEFORE=$(docker exec {{ accessory_name }} redis-cli LASTSAVE)
-docker exec {{ accessory_name }} redis-cli BGSAVE > /dev/null
+BEFORE=$(docker exec "${ACCESSORY}" redis-cli LASTSAVE)
+docker exec "${ACCESSORY}" redis-cli BGSAVE > /dev/null
 
 for i in $(seq 1 60); do
-  AFTER=$(docker exec {{ accessory_name }} redis-cli LASTSAVE)
+  AFTER=$(docker exec "${ACCESSORY}" redis-cli LASTSAVE)
   if [ "$AFTER" != "$BEFORE" ]; then break; fi
   sleep 2
 done
@@ -94,7 +112,7 @@ if [ "$AFTER" = "$BEFORE" ]; then
   ERROR_MSG="BGSAVE did not complete within 120 seconds"
   echo "ERROR: $ERROR_MSG"
   bay_notify backup.failed "<b>Backup failed</b>
-Accessory: <code>{{ accessory_name }}</code>
+Accessory: <code>${ACCESSORY}</code>
 Host: <code>${BAY_HOST}</code>
 Error: <code>${ERROR_MSG}</code>"
   exit 1
@@ -102,13 +120,13 @@ fi
 
 # Copy RDB out and pipe to restic
 set +e
-docker cp {{ accessory_name }}:/data/dump.rdb - | \
+docker cp "${ACCESSORY}:/data/dump.rdb" - | \
   "$RESTIC" backup \
     --stdin \
-    --stdin-filename "{{ accessory_name }}.rdb" \
-    --tag "{{ inventory_hostname }}" \
-    --tag "{{ accessory_name }}" \
-    --tag "{{ method }}" \
+    --stdin-filename "${ACCESSORY}.rdb" \
+    --tag "${HOST_TAG}" \
+    --tag "${ACCESSORY}" \
+    --tag "${METHOD}" \
     ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
     --retry-lock 15m
 
@@ -117,15 +135,16 @@ DUMP_EXIT=${_pipestatus[0]}
 RESTIC_EXIT=${_pipestatus[1]}
 set -e
 {% elif method == 'file' %}
-echo "[$(date -Iseconds)] Starting file backup for {{ accessory_name }}..."
+SOURCE_PATH={{ accessory_config.backup.source_path | default('/data') | quote }}
+echo "[$(date -Iseconds)] Starting file backup for ${ACCESSORY}..."
 set +e
-docker cp {{ accessory_name }}:{{ accessory_config.backup.source_path | default('/data') }} - | \
+docker cp "${ACCESSORY}:${SOURCE_PATH}" - | \
   "$RESTIC" backup \
     --stdin \
-    --stdin-filename "{{ accessory_name }}.tar" \
-    --tag "{{ inventory_hostname }}" \
-    --tag "{{ accessory_name }}" \
-    --tag "{{ method }}" \
+    --stdin-filename "${ACCESSORY}.tar" \
+    --tag "${HOST_TAG}" \
+    --tag "${ACCESSORY}" \
+    --tag "${METHOD}" \
     ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
     --retry-lock 15m
 
@@ -142,7 +161,7 @@ if [ "${DUMP_EXIT:-0}" -ne 0 ]; then
   ERROR_MSG="Dump command failed with exit code $DUMP_EXIT"
   echo "ERROR: $ERROR_MSG"
   bay_notify backup.failed "<b>Backup failed</b>
-Accessory: <code>{{ accessory_name }}</code>
+Accessory: <code>${ACCESSORY}</code>
 Host: <code>${BAY_HOST}</code>
 Error: <code>${ERROR_MSG}</code>"
   exit 1
@@ -152,7 +171,7 @@ if [ "${RESTIC_EXIT:-0}" -ne 0 ]; then
   ERROR_MSG="Restic backup failed with exit code $RESTIC_EXIT"
   echo "ERROR: $ERROR_MSG"
   bay_notify backup.failed "<b>Backup failed</b>
-Accessory: <code>{{ accessory_name }}</code>
+Accessory: <code>${ACCESSORY}</code>
 Host: <code>${BAY_HOST}</code>
 Error: <code>${ERROR_MSG}</code>"
   exit 1
@@ -167,40 +186,40 @@ if [ "$SNAP_SIZE" -lt "$MIN_SNAPSHOT_SIZE" ]; then
   ERROR_MSG="Snapshot suspiciously small ($SNAP_SIZE bytes)"
   echo "ERROR: $ERROR_MSG"
   bay_notify backup.warning "<b>Backup warning</b>
-Accessory: <code>{{ accessory_name }}</code>
+Accessory: <code>${ACCESSORY}</code>
 Host: <code>${BAY_HOST}</code>
 Warning: <code>${ERROR_MSG}</code>"
   exit 1
 fi
 
-echo "[$(date -Iseconds)] Backup complete for {{ accessory_name }} ($SNAP_SIZE bytes)"
+echo "[$(date -Iseconds)] Backup complete for ${ACCESSORY} ($SNAP_SIZE bytes)"
 
 # ── Retention ─────────────────────────────────────────────────────────
 
 echo "[$(date -Iseconds)] Running retention policy..."
 {% if retain is mapping %}
 "$RESTIC" forget \
-{% if retain.daily is defined %}  --keep-daily {{ retain.daily }} \
+{% if retain.daily is defined %}  --keep-daily {{ retain.daily | int }} \
 {% endif %}
-{% if retain.weekly is defined %}  --keep-weekly {{ retain.weekly }} \
+{% if retain.weekly is defined %}  --keep-weekly {{ retain.weekly | int }} \
 {% endif %}
-{% if retain.monthly is defined %}  --keep-monthly {{ retain.monthly }} \
+{% if retain.monthly is defined %}  --keep-monthly {{ retain.monthly | int }} \
 {% endif %}
   --prune --retry-lock 15m 2>&1 || {
   echo "WARNING: retention prune failed (will retry next run)"
   bay_notify backup.prune_warning "<b>Prune warning</b>
-Accessory: <code>{{ accessory_name }}</code>
+Accessory: <code>${ACCESSORY}</code>
 Host: <code>${BAY_HOST}</code>
 Warning: <code>Retention prune failed</code>"
 }
 {% else %}
-"$RESTIC" forget --keep-within {{ retain }}d --prune --retry-lock 15m 2>&1 || {
+"$RESTIC" forget --keep-within {{ retain | int }}d --prune --retry-lock 15m 2>&1 || {
   echo "WARNING: retention prune failed (will retry next run)"
   bay_notify backup.prune_warning "<b>Prune warning</b>
-Accessory: <code>{{ accessory_name }}</code>
+Accessory: <code>${ACCESSORY}</code>
 Host: <code>${BAY_HOST}</code>
 Warning: <code>Retention prune failed</code>"
 }
 {% endif %}
 
-echo "[$(date -Iseconds)] Retention complete for {{ accessory_name }}"
+echo "[$(date -Iseconds)] Retention complete for ${ACCESSORY}"
