@@ -32,35 +32,45 @@
         | unique
       }}
 
-- name: Pull service images
-  ansible.builtin.command:
-    cmd: "docker pull {{ item.value.image }}"
-  # Skip remote-strategy services AND any service whose image is produced by a
-  # remote build (e.g. locale services sharing a single remotely-built image).
-  # git_deploy's remote_build.yml builds, pushes, then pulls these post-push.
-  loop: >-
-    {{
-      active_services | dict2items
-      | selectattr('value.image', 'defined')
-      | rejectattr('value.image', 'in', _remote_built_images)
-      | list
-    }}
-  loop_control:
-    label: "{{ item.key }}"
+# One task, one SSH round trip, four pulls at a time. The image list is built
+# controller-side from exactly the expressions the two former loops used, so
+# selection is unchanged:
+#   - services with an image:, minus any image produced by a remote build
+#     (e.g. locale services sharing one remotely-built image) — git_deploy's
+#     remote_build.yml builds, pushes, then pulls those post-push;
+#   - every accessory image.
+# Names are `quote`d and fed through printf, so they never hit the shell
+# unquoted. `set -o pipefail` is the house pattern and is safe HERE only
+# because xargs is the last stage and reads its input to the end: the rc is
+# the pull result either way. Never pair pipefail with a short-circuiting
+# reader such as `grep -q` — the reader exits early, the writer takes SIGPIPE,
+# and pipefail turns a successful command into rc 141 (shipped once already).
+- name: Pull images
+  vars:
+    _pull_images: >-
+      {{
+        (
+          (
+            active_services | dict2items
+            | selectattr('value.image', 'defined')
+            | rejectattr('value.image', 'in', _remote_built_images)
+            | map(attribute='value.image') | list
+          )
+          + (
+            active_accessories | dict2items
+            | map(attribute='value.image') | list
+          )
+        ) | unique
+      }}
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail;
+      printf '%s\n' {{ _pull_images | map('quote') | join(' ') }}
+      | xargs -P 4 -n 1 docker pull
+    executable: /bin/bash
   register: _pull_result
-  changed_when: true
+  changed_when: "'Downloaded newer image' in (_pull_result.stdout | default(''))"
   retries: 3
   delay: 10
   until: _pull_result.rc == 0
-
-- name: Pull accessory images
-  ansible.builtin.command:
-    cmd: "docker pull {{ item.value.image }}"
-  loop: "{{ active_accessories | dict2items }}"
-  loop_control:
-    label: "{{ item.key }}: {{ item.value.image }}"
-  register: _acc_pull_result
-  changed_when: true
-  retries: 3
-  delay: 10
-  until: _acc_pull_result.rc == 0
+  when: _pull_images | length > 0

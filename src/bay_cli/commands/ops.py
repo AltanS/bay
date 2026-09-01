@@ -128,6 +128,7 @@ def _run_playbook(
     extra_args: list[str],
     *,
     skip_git_health: bool = False,
+    profile: bool = False,
 ) -> None:
     bay_dir = paths.find_bay_dir()
     root = paths.consumer_root(bay_dir)
@@ -145,6 +146,7 @@ def _run_playbook(
         bay_dir=bay_dir,
         tags=tag_list,
         extra_args=extra_args or None,
+        profile=profile,
     )
 
     guards.show_update_notice(bay_dir, root)
@@ -433,6 +435,11 @@ def deploy(
             "Opt-in only — makes outbound HTTPS calls to api.github.com."
         ),
     ),
+    profile: bool = typer.Option(
+        False,
+        "--profile",
+        help="Print per-task timings and a total runtime (ansible.posix profile_tasks + timer).",
+    ),
 ) -> None:
     """Deploy services to the target environment.
 
@@ -478,6 +485,8 @@ def deploy(
         skip_healthcheck = True
     if "--check-token-scope" in (ctx.args or []):
         check_token_scope = True
+    if "--profile" in (ctx.args or []):
+        profile = True
 
     _validate_env(env, root)
 
@@ -514,7 +523,7 @@ def deploy(
     #   (only on full rig deploys — tag-filtered runs are partial)
     rig_mode = rig or bool(tags)
     rig_write = rig and not bool(tags)
-    extra_args = [a for a in (ctx.args or []) if a not in ("--", "--rig", "--skip-validate", "--skip-healthcheck", "--check-token-scope")]
+    extra_args = [a for a in (ctx.args or []) if a not in ("--", "--rig", "--skip-validate", "--skip-healthcheck", "--check-token-scope", "--profile")]
     extra_args = [
         "-e", f"_rig_mode={'true' if rig_mode else 'false'}",
         "-e", f"_rig_write={'true' if rig_write else 'false'}",
@@ -526,7 +535,7 @@ def deploy(
             raise BayError(f"Unknown region '{region}' for env '{env}'")
         extra_args = ["-l", host] + extra_args
 
-    _run_playbook("deploy", env, tags, extra_args)
+    _run_playbook("deploy", env, tags, extra_args, profile=profile)
     _show_headscale_onboarding(root, bay_dir)
 
     # ── Post-deploy reachability audit ────────────────────────────────
@@ -647,6 +656,11 @@ def provision(
     region: Optional[str] = typer.Option(
         None, "--region", "-r", help="Target a specific region (maps to ansible --limit <host>)."
     ),
+    profile: bool = typer.Option(
+        False,
+        "--profile",
+        help="Print per-task timings and a total runtime (ansible.posix profile_tasks + timer).",
+    ),
 ) -> None:
     """Provision and harden a server (base OS, users, firewall, Docker).
 
@@ -666,8 +680,13 @@ def provision(
     console.show_banner(subtitle=f"Provision \u2192 {env}")
     _, tags, _, region = _rescue_interspersed_args(ctx, tags=tags, region=region)
     bay_dir = paths.find_bay_dir()
-    extra_args = _region_extra_args(bay_dir, region, env, ctx.args)
-    _run_playbook("provision", env, tags, extra_args)
+    # `--profile` after the positional env lands in ctx.args: promote it, and
+    # strip it either way so it is never forwarded to ansible-playbook.
+    if "--profile" in (ctx.args or []):
+        profile = True
+    passthrough = [a for a in (ctx.args or []) if a != "--profile"]
+    extra_args = _region_extra_args(bay_dir, region, env, passthrough)
+    _run_playbook("provision", env, tags, extra_args, profile=profile)
 
 
 def restore(

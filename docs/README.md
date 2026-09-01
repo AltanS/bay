@@ -49,6 +49,7 @@ the topic you need below.
 | [multi-region.md](multi-region.md) | Deploying one stack to multiple regional servers from a single consumer repo. |
 | [alerting.md](alerting.md) | Where alerts go — Telegram plus an optional generic webhook sink (Campfire/Slack/raw), and the fail-open guarantees. |
 | [debug-agent.md](debug-agent.md) | The `debugbot` limited-permission SSH user for AI-assisted read-only debugging. |
+| [performance.md](performance.md) | How fast a deploy is and why — Mitogen, SSH pipelining, and the `--profile` flag. |
 
 ## Architecture & decisions
 

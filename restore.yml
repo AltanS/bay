@@ -12,6 +12,9 @@
   hosts: "{{ target_host | default('all') }}"
   become: true
   become_user: "{{ app_user }}"
+  # `min` only — no role here reads hardware, network or virtualisation facts.
+  gather_subset:
+    - "!all"
 
   vars_files:
     - "{{ playbook_dir }}/version.yml"

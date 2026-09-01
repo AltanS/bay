@@ -15,6 +15,20 @@ def _collections_env(bay_dir: Path) -> dict[str, str]:
     return {"ANSIBLE_COLLECTIONS_PATH": str(bay_dir / "vendor" / "collections")}
 
 
+PROFILE_CALLBACKS = "ansible.posix.profile_tasks,ansible.posix.timer"
+
+
+def _profile_env(profile: bool) -> dict[str, str]:
+    """Enable the vendored ansible.posix timing callbacks when asked.
+
+    Absent (not empty) without `--profile`, so an operator's own
+    ANSIBLE_CALLBACKS_ENABLED is never overwritten by a no-op value.
+    """
+    if not profile:
+        return {}
+    return {"ANSIBLE_CALLBACKS_ENABLED": PROFILE_CALLBACKS}
+
+
 def _mitogen_env(bay_dir: Path) -> dict[str, str]:
     """Enable Mitogen strategy plugin when installed in the bay venv.
 
@@ -192,6 +206,7 @@ def run_playbook(
     bay_dir: Path,
     tags: list[str] | None = None,
     extra_args: list[str] | None = None,
+    profile: bool = False,
 ) -> None:
     """Run an ansible-playbook with live output streaming."""
     cmd = [
@@ -204,10 +219,26 @@ def run_playbook(
     if extra_args:
         cmd.extend(extra_args)
 
+    mitogen = _mitogen_env(bay_dir)
+
+    # One line, before the playbook starts: which connection strategy is live.
+    # Mitogen prints nothing itself, so a purged venv or BAY_NO_MITOGEN=1
+    # silently costs ~3 SSH execs per task with no way to notice.
+    if not console.is_json_mode():
+        strategy = mitogen.get("ANSIBLE_STRATEGY")
+        console.info(
+            f"strategy: {strategy}" if strategy
+            else "strategy: linear (mitogen unavailable)"
+        )
+
     runner.run(
         cmd,
         capture=False,
-        env={**_collections_env(bay_dir), **_mitogen_env(bay_dir)},
+        env={
+            **_collections_env(bay_dir),
+            **mitogen,
+            **_profile_env(profile),
+        },
     )
 
 
