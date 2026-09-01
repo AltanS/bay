@@ -1,7 +1,6 @@
 """Custom Ansible filters for the Bay framework."""
 
 import hashlib
-import subprocess
 
 
 class FilterModule:
@@ -206,13 +205,13 @@ def bay_traefik_labels(svc, name, config):
         if "credentials" in ba:
             entries = []
             for cred in ba["credentials"]:
-                salt_seed = f"{config.get('stack_name', 'bay')}{name}{cred['username']}"
-                salt = hashlib.md5(salt_seed.encode()).hexdigest()[:8]
-                result = subprocess.run(
-                    ["openssl", "passwd", "-apr1", "-salt", salt, cred["password"]],
-                    capture_output=True, text=True, check=True,
+                hashed = bay_basic_auth_hash(
+                    config.get("stack_name", "bay"),
+                    name,
+                    cred["username"],
+                    cred["password"],
                 )
-                entries.append(f"{cred['username']}:{result.stdout.strip()}")
+                entries.append(f"{cred['username']}:{hashed}")
             users_str = ",".join(entries)
             labels[f"{pfx}.users"] = users_str
         elif "users" in ba:
@@ -523,3 +522,45 @@ def bay_healthcheck(hc, port=80):
         result["start_period"] = hc["start_period"]
 
     return result
+
+
+# ── Basic-auth hashing ───────────────────────────────────────────────────
+#
+# bcrypt, with a salt derived from the credentials themselves.
+#
+# It used to shell out to `openssl passwd -apr1 -salt <salt> <password>`, which
+# put the password on the argument list of a child process — visible in `ps` on
+# the control machine — and produced an MD5-crypt hash.
+#
+# The salt stays DETERMINISTIC, and that is load-bearing rather than lazy: the
+# hash ends up in a Traefik container label, so a random salt would change the
+# label on every render and the reconciler would recreate every basic-auth
+# protected container on every deploy. Seeding it from sha256 of
+# (stack, service, username, password) means the same credentials always
+# produce the same hash, and two services sharing a username still get
+# different salts. Unlike the old seed, the password is part of it, so a
+# password change also changes the salt.
+_BCRYPT_B64 = b"./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+_STD_B64 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+_BCRYPT_COST = 10
+
+
+def bay_basic_auth_hash(stack_name, service_name, username, password):
+    """Return a deterministic bcrypt hash for one basic-auth credential."""
+    import base64
+
+    import bcrypt
+
+    seed = f"{stack_name}|{service_name}|{username}|{password}".encode("utf-8")
+    raw = hashlib.sha256(seed).digest()[:16]
+    salt_chars = base64.b64encode(raw)[:22].translate(
+        bytes.maketrans(_STD_B64, _BCRYPT_B64)
+    )
+    salt = b"$2b$%02d$" % _BCRYPT_COST + salt_chars
+    secret = password.encode("utf-8")
+    if len(secret) > 72:
+        raise ValueError(
+            f"basic-auth password for {username!r} is longer than bcrypt's "
+            f"72-byte limit ({len(secret)} bytes); shorten it"
+        )
+    return bcrypt.hashpw(secret, salt).decode("ascii")

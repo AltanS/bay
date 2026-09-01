@@ -187,15 +187,33 @@ def docker_ro(tmp_path):
     ["system", "prune"],
     ["compose", "up"],
     ["compose", "exec", "web", "sh"],
+    # `docker inspect` prints Config.Env — every bearer token in the container.
+    # A read-only surface that hands those out is not read-only.
+    ["inspect", "web"],
+    ["inspect", "--format", "{{.Config.Env}}", "web"],
+    ["inspect", "--format={{json .Config}}", "web"],
+    ["inspect", "--format", "{{range .Config.Env}}{{.}}{{end}}", "web"],
 ])
 def test_docker_ro_refuses_write_paths(docker_ro, args):
     assert _run(docker_ro, *args).returncode != 0
 
 
+def test_docker_ro_inspect_format_allowlist_is_declared():
+    """The allowlist is the guard; an empty one would silently permit nothing.
+
+    Pinned by name so the check in bay-docker-ro.j2 cannot be renamed away.
+    """
+    src = (Path(__file__).resolve().parent.parent / "roles" / "debug_agent"
+           / "templates" / "bay-docker-ro.j2").read_text()
+    assert "BAY_INSPECT_FORMAT_ALLOW" in src
+    assert ".Config.Env" not in src.split("BAY_INSPECT_FORMAT_ALLOW")[1].split(")")[0]
+
+
 @pytest.mark.parametrize("args", [
     ["ps", "-a"],
     ["logs", "--tail", "50", "web"],
-    ["inspect", "web"],
+    ["inspect", "--format", "{{.State.Status}}", "web"],
+    ["inspect", "--format={{json .State}}", "web"],
     ["stats", "--no-stream"],
     ["images"],
     ["system", "df"],

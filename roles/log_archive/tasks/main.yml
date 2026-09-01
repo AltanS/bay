@@ -50,7 +50,7 @@
     state: directory
     owner: "{{ app_user }}"
     group: "{{ app_user_group }}"
-    mode: "0755"
+    mode: "0750"
   when: _log_archive_containers | length > 0
 
 - name: Install archive-logs.sh
@@ -59,7 +59,7 @@
     dest: "{{ log_archive_bin_dir }}/archive-logs.sh"
     owner: "{{ app_user }}"
     group: "{{ app_user_group }}"
-    mode: "0755"
+    mode: "0750"
   when: _log_archive_containers | length > 0
 
 - name: Install rotate-logs.sh
@@ -68,7 +68,7 @@
     dest: "{{ log_archive_bin_dir }}/rotate-logs.sh"
     owner: "{{ app_user }}"
     group: "{{ app_user_group }}"
-    mode: "0755"
+    mode: "0750"
   when: _log_archive_containers | length > 0
 
 - name: Install scrub-logs.sh
@@ -77,7 +77,7 @@
     dest: "{{ log_archive_bin_dir }}/scrub-logs.sh"
     owner: "{{ app_user }}"
     group: "{{ app_user_group }}"
-    mode: "0755"
+    mode: "0750"
   when: _log_archive_containers | length > 0
 
 - name: Install bay-logarchive@.service unit
@@ -390,5 +390,5 @@
       printf '\n'
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
   when: _log_archive_containers | length > 0

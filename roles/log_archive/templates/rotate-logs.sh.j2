@@ -97,8 +97,8 @@ sha256_of() {
   sha256sum "$1" | awk '{print $1}'
 }
 
-{# Credentials arrive as env from bay-logrotate@.service, not as Ansible vars. #}
-{% set alert_telegram_env = true %}
+{# Credentials arrive as env from bay-logrotate@.service's EnvironmentFile=,
+   never as Ansible vars — the snippet no longer bakes any in. #}
 {% include '_notify.sh.j2' %}
 HOST="${BAY_HOST}"
 

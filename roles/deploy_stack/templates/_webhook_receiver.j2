@@ -18,14 +18,14 @@
     restart: unless-stopped
     networks:
       - {{ traefik_docker_network }}
+    # WEBHOOK_SECRET and the Telegram pair are in the env file, not here.
+    env_file:
+      - {{ stack_dir }}/env/bay-webhook.env
     environment:
-      - WEBHOOK_SECRET={{ webhook.secret }}
       - TRIGGER_DIR=/triggers
       - TELEGRAM_FAILURES_LOG=/state/telegram-failures.log
       - SERVICE_BRANCHES={% for svc_name in active_services | dict2items | selectattr('value.build', 'defined') | map(attribute='key') %}{{ svc_name }}:{{ active_services[svc_name].build.branch | default('main') }}{% if not loop.last %},{% endif %}{% endfor %}
 
-      - TELEGRAM_BOT_TOKEN={{ docker_monitor_telegram_bot_token | default('') }}
-      - TELEGRAM_CHAT_ID={{ docker_monitor_telegram_chat_id | default('') }}
       - TELEGRAM_HEADER={{ docker_monitor_alert_header | default('') }}
       - HOSTNAME={% include '_host_label.j2' +%}
       - LOCAL_REGION={{ region | default('') }}

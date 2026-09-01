@@ -26,6 +26,13 @@
 # Empty URL = feature off, and off is the default. See docs/alerting.md.
 alert_webhook_url: ""
 
+# Where the alert credentials live on the host. Root-owned, mode 0600, and
+# outside anything a container or app_user can read — the same reasoning as
+# alert_policy_path. systemd units point `EnvironmentFile=` at it; scripts run
+# from cron source it. Nothing bakes a credential into a rendered script any
+# more.
+alert_env_path: /etc/bay/alert.env
+
 # How to render the message for the sink. Bay composes alerts in Telegram
 # HTML (a closed vocabulary of <b>, <code>, <pre> — see docs/alerting.md);
 # the adapter translates that to whatever the sink wants.

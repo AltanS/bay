@@ -1,0 +1,41 @@
+---
+# Render the alert credential file.
+#
+# Every emitter bay ships used to carry the Telegram token and the alert
+# webhook URL as a literal, baked in by `_notify.sh.j2` — into scripts
+# installed 0755, into a Python monitor, and into systemd `Environment=`
+# lines that `systemctl show` prints to any local user. One root-owned file,
+# /etc/bay/alert.env (0600 root:root), replaces all of that; the emitters read
+# it from the environment.
+#
+# become_user: root is explicit on every task, exactly as alert_policy does
+# it. deploy.yml's play runs with `become: true` + `become_user: app_user`,
+# and a task-level `become: true` does NOT reset the user — it stays app_user,
+# which cannot write /etc.
+#
+# Included by BOTH provision.yml and deploy.yml, for the same reason
+# alert_policy is: outbound_monitor and docker_monitor live in provision only,
+# so a deploy-only host would never get the file their scripts read.
+
+- name: Ensure bay config directory exists
+  ansible.builtin.file:
+    path: "{{ alert_env_path | dirname }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  become_user: root
+  tags: [alert_channel, alerts]
+
+- name: Render alert credentials env file
+  ansible.builtin.template:
+    src: alert.env.j2
+    dest: "{{ alert_env_path }}"
+    owner: root
+    group: root
+    mode: "0600"
+  become: true
+  become_user: root
+  no_log: true
+  tags: [alert_channel, alerts]

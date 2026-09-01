@@ -45,6 +45,9 @@ IMAGE_PREFIX="{{ git_deploy_image_prefix }}"
 REMOTE_BUILD_DIR="{{ git_deploy_remote_build_dir }}"
 
 STATE_DIR="${STACK_DIR}/state"
+# Webhook HMAC key, hex-encoded, mode 0600 owner app_user. Written by
+# roles/git_deploy/tasks/webhook.yml.
+WEBHOOK_HMAC_KEY_FILE="{{ stack_dir }}/webhook/hmac.key"
 STATE_FILE="${STATE_DIR}/${SERVICE}.json"
 CB_MAX_FAILURES={{ git_deploy_cb_max_failures }}
 HEALTH_CHECK_TIMEOUT={{ git_deploy_health_check_timeout }}
@@ -491,22 +494,36 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
 {% set strategy = 'remote' if raw_strategy == 'push' else raw_strategy %}
 {% set slug = build.repo | bay_repo_slug(branch) %}
 {% set has_token = build.token is defined %}
+{#
+  The clone URL carries NO credential. It used to embed the PAT as the URL
+  password, rendered into this script and then
+  run through `eval`, which made the PAT an argv element of every git child
+  process — readable in /proc/*/cmdline by any local user — and wrote it
+  permanently into .git/config on the first fetch.
+
+  The PAT now reaches git through a GIT_ASKPASS helper that Ansible renders
+  separately (roles/git_deploy/templates/git-askpass.sh.j2, mode 0700, owner
+  app_user): clone_repos.yml writes one per repo group, remote_build.yml one
+  per remote-built service. The paths below must match those two tasks.
+#}
 {% if has_token %}
 {% set repo_url = build.repo %}
 {% if repo_url.startswith('git@') %}
 {% set parts = repo_url.split(':') %}
 {% set host = parts[0] | replace('git@', '') %}
 {% set path = parts[1] %}
-{% set clone_url = 'https://x-access-token:' ~ build.token ~ '@' ~ host ~ '/' ~ path %}
+{% set clone_url = 'https://' ~ host ~ '/' ~ path %}
 {% elif '://' in repo_url %}
 {% set proto_rest = repo_url.split('://') %}
-{% set clone_url = 'https://x-access-token:' ~ build.token ~ '@' ~ proto_rest[1] %}
+{% set clone_url = 'https://' ~ proto_rest[1] %}
 {% else %}
 {% set clone_url = repo_url %}
 {% endif %}
 {% else %}
 {% set clone_url = build.repo %}
 {% endif %}
+{% set askpass_remote = git_deploy_remote_build_dir ~ '/.git-askpass-' ~ svc_name %}
+{% set askpass_local = git_deploy_build_dir ~ '/.git-askpass-' ~ slug %}
 {% if not _is_first.val %}el{% endif %}if [[ "${SERVICE}" == "{{ svc_name }}" ]]; then
 {% if strategy == 'remote' %}
   REPO_DIR="${REMOTE_BUILD_DIR}/{{ svc_name }}/repo"
@@ -532,15 +549,16 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   BUILD_STRATEGY="{{ strategy }}"
 {% if strategy == 'remote' %}
   CLONE_URL="{{ clone_url }}"
-  CLONE_CMD="git clone --branch {{ branch }} --single-branch {{ clone_url }} ${REPO_DIR}"
-  FETCH_CMD="git -c url.{{ clone_url }}.insteadOf={{ build.repo }} fetch origin {{ branch }}"
+  GIT_AUTH_ENV="GIT_ASKPASS={{ askpass_remote }} GIT_TERMINAL_PROMPT=0"
+  CLONE_CMD="${GIT_AUTH_ENV} git clone --branch {{ branch }} --single-branch {{ clone_url }} ${REPO_DIR}"
+  FETCH_CMD="${GIT_AUTH_ENV} git -c url.{{ clone_url }}.insteadOf={{ build.repo }} fetch origin {{ branch }}"
 {% set _token_key = namespace(val='unknown') %}
 {% if has_token and secrets is defined %}{% for _k, _v in secrets.items() %}{% if _v == build.token %}{% set _token_key.val = _k %}{% endif %}{% endfor %}{% endif %}
   CLONE_TOKEN_KEY="{{ _token_key.val }}"
   CLONE_REPO="{{ build.repo }}"
 {% elif has_token %}
   CLONE_URL="{{ clone_url }}"
-  PULL_CMD="git -c url.${CLONE_URL}.insteadOf={{ build.repo }} pull origin ${BRANCH}"
+  PULL_CMD="GIT_ASKPASS={{ askpass_local }} GIT_TERMINAL_PROMPT=0 git -c url.${CLONE_URL}.insteadOf={{ build.repo }} pull origin ${BRANCH}"
 {% set _token_key = namespace(val='unknown') %}
 {% if secrets is defined %}{% for _k, _v in secrets.items() %}{% if _v == build.token %}{% set _token_key.val = _k %}{% endif %}{% endfor %}{% endif %}
   CLONE_TOKEN_KEY="{{ _token_key.val }}"
@@ -965,7 +983,10 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
         PULL_URL="${PEER_URLS[${region}]}/webhook/pull-image"
         PULL_BODY='{"image":"'"${IMAGE_REF}"'"}'
         _log "Sending image-level pull signal to ${region} for ${IMAGE_REF}"
-        HMAC_SIG=$(printf '%s' "${PULL_BODY}" | openssl dgst -sha256 -hmac '{{ webhook.secret }}' -binary | xxd -p -c 256)
+        # The MAC key comes out of a 0600 file, hex-encoded. The raw webhook
+        # secret used to be rendered into this script as an openssl argument.
+        HMAC_KEY_HEX=$(cat "${WEBHOOK_HMAC_KEY_FILE}")
+        HMAC_SIG=$(printf '%s' "${PULL_BODY}" | openssl dgst -sha256 -mac HMAC -macopt hexkey:"${HMAC_KEY_HEX}" -binary | xxd -p -c 256)
         if curl -sf -X POST \
           --connect-timeout 10 \
           --max-time 30 \

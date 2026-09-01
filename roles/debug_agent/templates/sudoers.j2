@@ -4,6 +4,11 @@
 # restrict the ARGUMENT of a command, so a bare `/usr/bin/cat` entry is a
 # grant to read /etc/shadow, and any entry that opens a pager is a root
 # shell (`!sh` inside less).
+#
+# !use_pty is DELIBERATE and must not be "fixed". sudo's pty allocation is what
+# lets a pager keep a terminal it can shell out of; without a pty the `!sh`
+# escape has nothing to attach to. It pairs with the wrapper allowlists (see
+# bay-docker-ro.j2) — neither is sufficient alone.
 Defaults:{{ debug_agent_user }} !use_pty
 Defaults:{{ debug_agent_user }} env_reset
 Defaults:{{ debug_agent_user }} secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

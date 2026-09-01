@@ -55,15 +55,32 @@ def sink():
 
 
 def _render(policy_path, url):
-    return make_ansible_env(_CANONICAL.parent).get_template("_notify.sh.j2").render(
-        docker_monitor_telegram_bot_token="",
-        docker_monitor_telegram_chat_id="",
+    """Render the snippet plus the recipient credential it reads at run time.
+
+    A recipient's literal `url` is no longer baked into the script: it comes
+    from BAY_RC_<n>_URL in /etc/bay/alert.env. The prelude below is rendered
+    from that same template, so the index cannot drift from the one the
+    snippet expects.
+    """
+    env = make_ansible_env(_CANONICAL.parent)
+    recipients = [{
+        "name": "r", "adapter": "webhook", "min_level": "debug",
+        "config": {"url": url, "format": "raw"},
+    }]
+    snippet = env.get_template("_notify.sh.j2").render(
         alert_policy_path=str(policy_path),
-        alert_recipients=[{
-            "name": "r", "adapter": "webhook", "min_level": "debug",
-            "config": {"url": url, "format": "raw"},
-        }],
+        alert_env_path="/nonexistent/bay-tests/alert.env",
+        alert_recipients=recipients,
     )
+    env_file = env.get_template("alert.env.j2").render(
+        ansible_managed="test",
+        alert_env_path="/etc/bay/alert.env",
+        alert_recipients=recipients,
+    )
+    prelude = "".join(
+        line + "\n" for line in env_file.splitlines() if line.startswith("BAY_RC_")
+    )
+    return prelude + snippet
 
 
 def _fire(snippet, alert_id="alerts.test"):

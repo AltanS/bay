@@ -19,8 +19,8 @@ TIMEOUT="{{ outbound_check_timeout }}"
 
 # ── Alert helper ─────────────────────────────────────────────────────────────
 # Fire-and-forget. Failure is expected when internet is down (down-alert case).
-{% set docker_monitor_telegram_bot_token = docker_monitor_telegram_bot_token | default('') or telegram_bot_token | default('') %}
-{% set docker_monitor_telegram_chat_id = docker_monitor_telegram_chat_id | default('') or telegram_chat_id | default('') %}
+{# The deprecated telegram_* fallback now lives in alert_channel's
+   alert.env.j2 — nothing here reads an Ansible var for a credential. #}
 {% include '_notify.sh.j2' %}
 
 # ── Connectivity probe ───────────────────────────────────────────────────────

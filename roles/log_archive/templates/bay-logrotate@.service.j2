@@ -11,9 +11,9 @@ StandardOutput=journal
 StandardError=journal
 TimeoutStartSec=600
 
-# Environment for Telegram alerts — script skips alerting when unset.
-Environment=TELEGRAM_BOT_TOKEN={{ docker_monitor_telegram_bot_token | default('') }}
-Environment=TELEGRAM_CHAT_ID={{ docker_monitor_telegram_chat_id | default('') }}
+# Alert credentials come from a root-owned 0600 file, never from an inline
+# Environment= line: `systemctl show` prints those to any local user.
+EnvironmentFile=-{{ alert_env_path | default('/etc/bay/alert.env') }}
 Environment=TELEGRAM_HEADER={{ docker_monitor_alert_header | default('') }}
 Environment=BAY_STACK={{ stack_name }}
 Environment=BAY_LOG_CHATTR={{ (log_retention_chattr | default(false)) | string | lower }}

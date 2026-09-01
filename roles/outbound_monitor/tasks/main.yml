@@ -11,7 +11,7 @@
     state: directory
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
   become: true
 
 - name: Initialize state file to up (first-run default)
@@ -32,7 +32,7 @@
     dest: /usr/local/bin/bay-outbound-check
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
   become: true
 
 # ── systemd units ────────────────────────────────────────────────────────────
@@ -88,7 +88,7 @@
     dest: /usr/local/bin/bay-disk-alert
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
   become: true
 
 - name: Deploy disk alert systemd service unit

@@ -10,7 +10,7 @@
     dest: "{{ docker_monitor_script_path }}"
     owner: root
     group: root
-    mode: "0755"
+    mode: "0750"
   notify: Restart docker-monitor
   when: docker_monitor_enabled
   become: true

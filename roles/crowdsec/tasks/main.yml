@@ -113,6 +113,9 @@
   register: console_enroll
   changed_when: "'already enrolled' not in console_enroll.stderr"
   failed_when: false
+  # The token is an argument. Without this, any -v run prints it and it lands
+  # in whatever captures the deploy log.
+  no_log: true
 
 # =============================================================================
 # Local Scenarios (rendered BEFORE `cscli hub update`)

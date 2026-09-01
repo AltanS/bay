@@ -92,6 +92,19 @@ def _render(template: str, **ctx) -> str:
     return env.from_string(template).render(**ctx)
 
 
+def _stdin(task: dict, **ctx) -> str | None:
+    """Render a task's `stdin:`, the way Ansible feeds it to the command.
+
+    `htpasswd -i` reads the password from stdin, so a behavioural test that
+    forgets this hangs rather than fails. Ansible appends a newline by default
+    (stdin_add_newline), and htpasswd strips it.
+    """
+    raw = task["ansible.builtin.command"].get("stdin")
+    if raw is None:
+        return None
+    return _render(raw, **ctx) + "\n"
+
+
 def _when_holds(expression: str, rc: int) -> bool:
     """Evaluate a task's `when:` the way Ansible would, for a given rc."""
     rendered = _render(
@@ -110,8 +123,9 @@ def _when_holds(expression: str, rc: int) -> bool:
 
 class TestHtpasswdVerifyTask:
     def test_verify_task_probes_the_deployed_file(self) -> None:
-        cmd = _cmd(_task(_VERIFY))
-        assert " -bvB " in f" {cmd} " or "-bv" in cmd, (
+        task = _task(_VERIFY)
+        cmd = _cmd(task)
+        assert " -ivB " in f" {cmd} " or "-iv" in cmd, (
             "the verify task must use htpasswd's verify mode (-v); without it "
             "there is nothing to compare the stored hash against"
         )
@@ -119,7 +133,10 @@ class TestHtpasswdVerifyTask:
             "verify must run against the deployed htpasswd file"
         )
         assert "{{ _zot_creds.username }}" in cmd
-        assert "{{ _zot_creds.password }}" in cmd
+        # The password goes in on stdin (-i), not on the argument list, where
+        # `ps` showed it to every local user for the life of the call.
+        assert "{{ _zot_creds.password }}" not in cmd
+        assert task["ansible.builtin.command"]["stdin"] == "{{ _zot_creds.password }}"
 
     def test_verify_task_never_reports_changed_or_fails(self) -> None:
         """A non-zero rc is the *signal*, not an error: htpasswd exits 3 on a
@@ -192,8 +209,11 @@ class TestHtpasswdWriteIsGated:
     def test_generate_task_still_uses_bcrypt(self) -> None:
         """Idempotency must not be bought by downgrading the hash to an
         unsalted/weak algorithm — bcrypt (-B) stays, gating is what changed."""
-        cmd = _cmd(_task(_GENERATE))
-        assert "-bBn" in cmd or ("-B" in cmd and "-n" in cmd)
+        task = _task(_GENERATE)
+        cmd = _cmd(task)
+        assert "-iBn" in cmd or ("-B" in cmd and "-n" in cmd)
+        assert "{{ _zot_creds.password }}" not in cmd
+        assert task["ansible.builtin.command"]["stdin"] == "{{ _zot_creds.password }}"
 
     def test_restart_handler_still_exists(self) -> None:
         """The gate is only meaningful if the handler it protects is real."""
@@ -237,6 +257,7 @@ class TestHtpasswdBehaviour:
         if verify_task is not None:
             rc = subprocess.run(
                 shlex.split(_render(_cmd(verify_task), **ctx)),
+                input=_stdin(verify_task, **ctx),
                 capture_output=True,
                 text=True,
                 check=False,
@@ -246,6 +267,7 @@ class TestHtpasswdBehaviour:
             return False
         generated = subprocess.run(
             shlex.split(_render(_cmd(_task(_GENERATE)), **ctx)),
+            input=_stdin(_task(_GENERATE), **ctx),
             capture_output=True,
             text=True,
             check=True,
@@ -260,16 +282,17 @@ class TestHtpasswdBehaviour:
     def test_bcrypt_regenerates_a_different_hash_every_time(self) -> None:
         """The root cause, pinned: this is why content comparison can never
         settle and why a verify step is required."""
-        cmd = shlex.split(
-            _render(
-                _cmd(_task(_GENERATE)),
-                _zot_creds={"username": "bay", "password": "hunter2"},
-            )
+        ctx = {"_zot_creds": {"username": "bay", "password": "hunter2"}}
+        cmd = shlex.split(_render(_cmd(_task(_GENERATE)), **ctx))
+        stdin = _stdin(_task(_GENERATE), **ctx)
+        first = subprocess.run(
+            cmd, input=stdin, capture_output=True, text=True, check=True
         )
-        first = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        second = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        second = subprocess.run(
+            cmd, input=stdin, capture_output=True, text=True, check=True
+        )
         assert first.stdout != second.stdout, (
-            "htpasswd -bB is expected to emit a fresh random salt per run; "
+            "htpasswd -iB is expected to emit a fresh random salt per run; "
             "if this ever stops being true the gate is still correct, but the "
             "premise of this test file has changed"
         )

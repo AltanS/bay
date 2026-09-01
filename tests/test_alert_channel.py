@@ -19,6 +19,7 @@ import http.server
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -115,7 +116,6 @@ def test_defaults_match_snippet_fallbacks():
     declared = yaml.safe_load(_DEFAULTS.read_text())
     snippet = _CANONICAL.read_text()
     expected = {
-        "alert_webhook_url": "''",
         "alert_webhook_format": "'campfire'",
         "alert_webhook_max_chars": "3500",
         "alert_webhook_timeout": "10",
@@ -125,6 +125,10 @@ def test_defaults_match_snippet_fallbacks():
             f"{var} fallback missing or changed in the snippet"
         )
     assert declared["alert_webhook_url"] == ""
+    # The URL is not a snippet fallback any more: it is a credential, so it
+    # arrives from /etc/bay/alert.env at run time rather than being rendered
+    # into eight shell scripts. See tests/test_alert_token_at_rest.py.
+    assert 'BAY_ALERT_URL="${ALERT_WEBHOOK_URL:-}"' in snippet
     assert declared["alert_webhook_format"] == "campfire"
     assert declared["alert_webhook_max_chars"] == 3500
     assert declared["alert_webhook_timeout"] == 10
@@ -134,13 +138,44 @@ def test_defaults_match_snippet_fallbacks():
 
 
 def _render(**ctx) -> str:
-    base = {
-        "docker_monitor_telegram_bot_token": "",
-        "docker_monitor_telegram_chat_id": "",
-    }
+    """Render the snippet, then prepend the credentials it now reads from env.
+
+    Credentials are no longer Jinja vars — `_notify.sh.j2` sources them from
+    /etc/bay/alert.env, or takes them from the environment when a systemd unit
+    supplied them via EnvironmentFile=. These tests are about the adapters, so
+    they take the shortest path to the same state: set the variables in the
+    shell before the snippet runs, and point the snippet at a path that cannot
+    exist so a real /etc/bay/alert.env on the dev machine cannot influence it.
+    """
+    base = {"alert_env_path": "/nonexistent/bay-tests/alert.env"}
+    url = ctx.pop("alert_webhook_url", "")
+    token = ctx.pop("docker_monitor_telegram_bot_token", "")
+    chat = ctx.pop("docker_monitor_telegram_chat_id", "")
     base.update(ctx)
     env = make_ansible_env(_CANONICAL.parent)
-    return env.get_template("_notify.sh.j2").render(**base)
+    snippet = env.get_template("_notify.sh.j2").render(**base)
+    prelude = ""
+    for name, value in (
+        ("ALERT_WEBHOOK_URL", url),
+        ("TELEGRAM_BOT_TOKEN", token),
+        ("TELEGRAM_CHAT_ID", chat),
+    ):
+        if value:
+            prelude += f"{name}={shlex.quote(str(value))}\n"
+    # A recipient with a literal bot_token/url reads it at run time from
+    # BAY_RC_<n>_TOKEN / BAY_RC_<n>_URL. Those lines come from the same
+    # template the role installs, so the indices here cannot drift from the
+    # ones the snippet was rendered with.
+    if base.get("alert_recipients"):
+        env_file = env.get_template("alert.env.j2").render(
+            ansible_managed="test",
+            alert_env_path="/etc/bay/alert.env",
+            alert_recipients=base["alert_recipients"],
+        )
+        for line in env_file.splitlines():
+            if line.startswith("BAY_RC_"):
+                prelude += line + "\n"
+    return prelude + snippet
 
 
 def test_explicit_defaults_render_identically_to_omitted_defaults():
@@ -174,47 +209,49 @@ def test_snippet_renders_through_each_symlink(role):
     assert "bay_notify()" in out
 
 
-def test_env_mode_reads_credentials_from_environment():
-    """log_archive's systemd unit supplies the credentials as env vars."""
+def test_credentials_always_come_from_the_environment():
+    """There is no baked-in mode left — every emitter reads them at run time.
+
+    log_archive's systemd unit supplies them via EnvironmentFile=; cron and
+    manual runs get them from the source line in the snippet.
+    """
     env = make_ansible_env(_CANONICAL.parent)
     out = env.get_template("_notify.sh.j2").render(
-        alert_telegram_env=True,
         docker_monitor_telegram_bot_token="SHOULD-NOT-APPEAR",
         docker_monitor_telegram_chat_id="SHOULD-NOT-APPEAR",
+        alert_webhook_url="SHOULD-NOT-APPEAR",
     )
     assert 'BAY_TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"' in out
+    assert 'BAY_ALERT_URL="${ALERT_WEBHOOK_URL:-}"' in out
     assert "SHOULD-NOT-APPEAR" not in out
 
 
-def test_outbound_monitor_falls_back_to_its_legacy_var_names():
+def test_legacy_var_names_still_reach_the_env_file():
     """outbound_monitor read a bare telegram_bot_token no consumer ever set.
 
-    Its alerts were rendered with an empty token and silently discarded. The
-    templates now prefer docker_monitor_* but must still honour an existing
-    override of the old names.
+    The fallback used to live in that role's two templates. Now that no
+    template renders a credential, it lives in alert_channel's alert.env.j2 —
+    and it has to, or an existing override silently stops working.
     """
-    env = make_ansible_env(_ROLES / "outbound_monitor" / "templates")
-    out = env.get_template("bay-disk-alert.sh.j2").render(
-        outbound_check_state_dir="/var/lib/x",
-        disk_alert_warn_pct=80,
-        disk_alert_page_pct=90,
-        inventory_hostname="h1",
+    env = make_ansible_env(_CANONICAL.parent)
+    out = env.get_template("alert.env.j2").render(
+        ansible_managed="test",
+        alert_env_path="/etc/bay/alert.env",
         telegram_bot_token="LEGACY",
         telegram_chat_id="LEGACY-CHAT",
     )
-    assert "BAY_TG_TOKEN='LEGACY'" in out
+    assert "TELEGRAM_BOT_TOKEN='LEGACY'" in out
+    assert "TELEGRAM_CHAT_ID='LEGACY-CHAT'" in out
 
-    out2 = env.get_template("bay-disk-alert.sh.j2").render(
-        outbound_check_state_dir="/var/lib/x",
-        disk_alert_warn_pct=80,
-        disk_alert_page_pct=90,
-        inventory_hostname="h1",
+    out2 = env.get_template("alert.env.j2").render(
+        ansible_managed="test",
+        alert_env_path="/etc/bay/alert.env",
         telegram_bot_token="LEGACY",
         telegram_chat_id="LEGACY-CHAT",
         docker_monitor_telegram_bot_token="PREFERRED",
         docker_monitor_telegram_chat_id="PREFERRED-CHAT",
     )
-    assert "BAY_TG_TOKEN='PREFERRED'" in out2
+    assert "TELEGRAM_BOT_TOKEN='PREFERRED'" in out2
 
 
 # ── Behaviour, against a real HTTP sink ──────────────────────────────────
@@ -572,7 +609,7 @@ def test_webhook_receiver_env_omits_alert_keys_when_unset():
     tasks = yaml.safe_load(_BUILD_SPECS.read_text())
     # Assert per key. Checking a blob that contains several env entries lets
     # one key's `else omit` mask another key that lost it.
-    for key in ("ALERT_WEBHOOK_URL", "ALERT_WEBHOOK_FORMAT"):
+    for key in ("ALERT_WEBHOOK_FORMAT",):
         expr = _find_key(key, tasks)
         assert expr is not None, f"{key} not found in build_specs.yml"
         assert "else omit" in expr, (
@@ -580,6 +617,24 @@ def test_webhook_receiver_env_omits_alert_keys_when_unset():
             f"every consumer's webhook receiver is recreated on the next deploy. "
             f"Found: {expr}"
         )
+
+    # ALERT_WEBHOOK_URL is a credential, so it moved out of the spec's `env`
+    # (which lands in Config.Env) and into the rendered env file. The same
+    # invariant still has to hold there: the line is absent when the feature is
+    # off, so the resolved env is unchanged and nothing is recreated.
+    assert _find_key("ALERT_WEBHOOK_URL", tasks) is None, (
+        "ALERT_WEBHOOK_URL is back in build_specs.yml; a docker inspect reads it"
+    )
+    env_template = (
+        _ROLES / "deploy_stack" / "templates" / "webhook.env.j2"
+    ).read_text()
+    assert "ALERT_WEBHOOK_URL=" in env_template
+    rendered_off = make_ansible_env(
+        _ROLES / "deploy_stack" / "templates"
+    ).get_template("webhook.env.j2").render(ansible_managed="test", webhook={})
+    assert "ALERT_WEBHOOK_URL" not in rendered_off
+    assert "WEBHOOK_SECRET" not in rendered_off
+    assert "TELEGRAM_BOT_TOKEN" not in rendered_off
 
 
 # ── The two implementations must not drift ───────────────────────────────
@@ -648,13 +703,7 @@ def test_bash_and_python_escape_identically(sink, raw):
 
 
 def _render_with(recipients, **ctx):
-    base = {
-        "docker_monitor_telegram_bot_token": "",
-        "docker_monitor_telegram_chat_id": "",
-        "alert_recipients": recipients,
-    }
-    base.update(ctx)
-    return make_ansible_env(_CANONICAL.parent).get_template("_notify.sh.j2").render(**base)
+    return _render(alert_recipients=recipients, **ctx)
 
 
 def test_recipient_receives_an_alert_at_its_min_level(sink):

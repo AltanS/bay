@@ -45,7 +45,9 @@
     src: config.yaml.j2
     dest: /opt/headscale/config/config.yaml
     owner: "{{ app_user }}"
-    mode: "0644"
+    # 0640, not 0644: this file carries headscale_oidc_client_secret. The
+    # container runs as app_user, which owns the file, so nothing is lost.
+    mode: "0640"
   notify: Restart headscale
   tags: [headscale]
 

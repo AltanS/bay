@@ -6,6 +6,9 @@ Requires=docker.service
 
 [Service]
 Type=simple
+# Alert credentials. `-` means "tolerate a missing file": the monitor then
+# renders with empty credentials and skips alerting, exactly as before.
+EnvironmentFile=-{{ alert_env_path | default('/etc/bay/alert.env') }}
 ExecStart=/usr/bin/python3 {{ docker_monitor_script_path }}
 Restart=always
 RestartSec=10

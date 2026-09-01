@@ -35,13 +35,10 @@
       BAY_ALERT_FOOTER           appended to every message    (default: empty)
       BAY_ALERT_FAILURE_LOG      append delivery failures here (default: off)
 
-  Jinja context flags — set with {% set %} BEFORE the include:
-
-      alert_telegram_env          read the Telegram credentials from the
-                                  environment (TELEGRAM_BOT_TOKEN /
-                                  TELEGRAM_CHAT_ID) instead of baking them in.
-                                  log_archive's systemd unit supplies them
-                                  that way.
+  Credentials are NOT baked in. They live in one root-owned env file
+  (/etc/bay/alert.env, 0600 root:root, rendered by roles/alert_channel).
+  systemd units set EnvironmentFile=; cron and manual runs fall back to the
+  source below. See the block after this comment.
 
   Message format: Telegram HTML is the canonical internal representation.
   Call sites compose in it and never learn about sinks; each sink's
@@ -56,14 +53,11 @@
 #}
 # ── Alert fan-out (bay alert_channel; do not edit — generated from
 #    roles/alert_channel/templates/_notify.sh.j2) ────────────────────────────
-{% if alert_telegram_env | default(false) %}
+BAY_ALERT_ENV_FILE='{{ alert_env_path | default('/etc/bay/alert.env') }}'
+if [[ -r "${BAY_ALERT_ENV_FILE}" ]]; then . "${BAY_ALERT_ENV_FILE}"; fi
 BAY_TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 BAY_TG_CHAT="${TELEGRAM_CHAT_ID:-}"
-{% else %}
-BAY_TG_TOKEN='{{ docker_monitor_telegram_bot_token | default('') }}'
-BAY_TG_CHAT='{{ docker_monitor_telegram_chat_id | default('') }}'
-{% endif %}
-BAY_ALERT_URL='{{ alert_webhook_url | default('') }}'
+BAY_ALERT_URL="${ALERT_WEBHOOK_URL:-}"
 
 {#
   Host identity. One definition for every emitter, shell and Python alike —
@@ -217,6 +211,15 @@ _bay_send_webhook() {
   registry's id->level against this recipient's min_level and returns a literal
   list of IDs, so the host does one `case` glob match per recipient — no list
   parsing, no level arithmetic, no jq (which no framework task installs).
+
+  ROUTING is baked in; CREDENTIALS are not. A recipient configured with a
+  literal `bot_token` or `url` reads it at run time from
+  BAY_RC_<n>_TOKEN / BAY_RC_<n>_URL, which alert.env.j2 emits under the same
+  1-based index this loop uses. The two templates iterate the same
+  `alert_recipients` list in the same order, so the indices cannot diverge
+  without both changing. token_env / url_env are unaffected — they were
+  already run-time lookups, and remain the way to source a value from a unit's
+  own environment instead.
 #}
 {% set _bay_recipients = alert_recipients | default([]) %}
 {% for _r in _bay_recipients %}
@@ -229,7 +232,7 @@ _bay_send_r{{ loop.index }}() {
 {% if _rc.token_env is defined %}
   local token="${% raw %}{{% endraw %}{{ _rc.token_env }}:-}"
 {% else %}
-  local token='{{ _rc.bot_token | default('') }}'
+  local token="${BAY_RC_{{ loop.index }}_TOKEN:-}"
 {% endif %}
 {% if _rc.chat_id_env is defined %}
   local chat="${% raw %}{{% endraw %}{{ _rc.chat_id_env }}:-}"
@@ -253,7 +256,7 @@ _bay_send_r{{ loop.index }}() {
 {% if _rc.url_env is defined %}
   local url="${% raw %}{{% endraw %}{{ _rc.url_env }}:-}"
 {% else %}
-  local url='{{ _rc.url | default('') }}'
+  local url="${BAY_RC_{{ loop.index }}_URL:-}"
 {% endif %}
   [[ -z "${url}" ]] && return 0
   local payload http_code

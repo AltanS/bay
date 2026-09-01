@@ -150,18 +150,22 @@
 # pull images FROM mid-rollout. So verify the stored hash FIRST and only
 # regenerate when it does not match the configured credentials.
 #
-# `htpasswd -bv` exits 0 only on a match. Every failure mode we care about is
+# `htpasswd -iv` exits 0 only on a match. Every failure mode we care about is
 # non-zero and must regenerate (verified against apache2-utils):
 #   rc 1  file missing / unreadable      rc 3  password changed
 #   rc 6  username changed, or empty file (user not found)
 #   rc 7  malformed file / empty hash
 # so `rc != 0` is the correct regenerate condition — no rc allow-list.
 
+# `-i` reads the password from stdin. It used to be `-b`, which takes it as an
+# argument: no_log hides it from Ansible, but `ps` on the target host showed it
+# to any local user for the life of the call.
 - name: Verify existing htpasswd file matches configured credentials
   ansible.builtin.command:
     cmd: >-
-      htpasswd -bvB {{ zot_config_dir }}/htpasswd
-      {{ _zot_creds.username }} {{ _zot_creds.password }}
+      htpasswd -ivB {{ zot_config_dir }}/htpasswd
+      {{ _zot_creds.username }}
+    stdin: "{{ _zot_creds.password }}"
   register: _zot_htpasswd_check
   changed_when: false
   failed_when: false
@@ -175,7 +179,8 @@
 - name: Generate htpasswd file
   ansible.builtin.command:
     cmd: >-
-      htpasswd -bBn {{ _zot_creds.username }} {{ _zot_creds.password }}
+      htpasswd -iBn {{ _zot_creds.username }}
+    stdin: "{{ _zot_creds.password }}"
   register: _zot_htpasswd
   changed_when: false
   # Writes to stdout only, never to disk — safe to run under --check so the

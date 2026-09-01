@@ -63,6 +63,8 @@
   loop_control:
     label: "{{ item.name | default('unnamed') }}"
   ignore_errors: true
+  # The bot token is in the URL. The loop label keeps the play readable.
+  no_log: true
   # token_env/chat_id_env are resolved from the HOST's systemd environment and
   # mean nothing on the control node, so those recipients are skipped here
   # rather than POSTed to a bot id of "".
@@ -90,6 +92,8 @@
   loop_control:
     label: "{{ item.name | default('unnamed') }}"
   ignore_errors: true
+  # A webhook URL usually embeds a bot key — see alert_channel/defaults.
+  no_log: true
   when:
     - (item.config.url | default('')) | length > 0
     - _bay_alert_id in (item | bay_alert_ids_for(alerts_disabled | default([]),

@@ -95,6 +95,7 @@
 
     # Phase 1: System baseline
     - { role: netplan, tags: [netplan], when: netplan_enabled | default(false) }
+    - { role: alert_channel, tags: [alert_channel, alerts] }
     - { role: alert_policy, tags: [alert_policy, alerts] }
     - { role: outbound_monitor, tags: [outbound_monitor] }
     - { role: common, tags: [common] }

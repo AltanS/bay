@@ -7,6 +7,10 @@ Description=Bay build pipeline stall watchdog
 [Service]
 Type=oneshot
 User={{ app_user }}
+# Alert credentials (roles/alert_channel). systemd reads this as PID 1, before
+# it drops to User=, so a 0600 root:root file still reaches an unprivileged
+# unit. `-` tolerates a host that has not been re-provisioned yet.
+EnvironmentFile=-{{ alert_env_path | default('/etc/bay/alert.env') }}
 ExecStart={{ stack_dir }}/bin/bay-trigger-watchdog.sh
 # Best-effort: even if the script is buggy, never mark the unit failed.
 # The script itself is designed to always `exit 0`.

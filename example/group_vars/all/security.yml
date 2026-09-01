@@ -67,8 +67,11 @@ ip_whitelist: "{{ vpn_allowed_ips + ['127.0.0.0/8'] }}"
 # Crawl exclusion paths (no /wp-json/ needed for non-WordPress)
 crowdsec_crawl_exclude_paths: []
 
-# CrowdSec console enrollment (optional)
-crowdsec_console_token: ""
+# CrowdSec console enrollment (optional).
+# The token is a credential, so it belongs in the vault, not here. Leave this
+# line commented out when the feature is off; uncomment it and add
+# `crowdsec_console_token` to group_vars/<env>/secrets.yml to enrol.
+# crowdsec_console_token: "{{ secrets.crowdsec_console_token }}"
 
 # IP blocklist (manual bans, imported as CrowdSec decisions)
 ip_blocklist: []

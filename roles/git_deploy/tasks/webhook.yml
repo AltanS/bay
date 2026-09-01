@@ -23,6 +23,18 @@
     state: directory
     mode: "0755"
 
+# rebuild.sh signs cross-region pull signals with this key. It reads it via
+# `openssl dgst -macopt hexkey:` so the secret is never an argv element — it
+# used to be passed as `-hmac '<secret>'`, visible in `ps` on every rebuild.
+# Hex-encoded because that is the only form -macopt accepts.
+- name: Render webhook HMAC key file
+  ansible.builtin.copy:
+    content: "{{ webhook.secret | bay_hexkey }}"
+    dest: "{{ stack_dir }}/webhook/hmac.key"
+    owner: "{{ app_user }}"
+    mode: "0600"
+  no_log: true
+
 - name: Render webhook service config
   ansible.builtin.template:
     src: webhook-config.json.j2

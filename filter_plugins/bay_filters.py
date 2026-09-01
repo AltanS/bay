@@ -3,7 +3,6 @@
 import hashlib
 import importlib.util
 import re
-import subprocess
 from pathlib import Path
 
 # The alert adapters are loaded from their canonical location rather than
@@ -107,6 +106,7 @@ class FilterModule:
             "bay_repo_groups": bay_repo_groups,
             "bay_build_dedup_map": bay_build_dedup_map,
             "bay_token_url": bay_token_url,
+            "bay_hexkey": bay_hexkey,
             "bay_image_consumers": bay_image_consumers,
             "bay_image_region_map": bay_image_region_map,
             "bay_spec_hash": bay_spec_hash,
@@ -326,13 +326,13 @@ def _add_middleware_labels(labels, name, mw, config):
         if "credentials" in ba:
             entries = []
             for cred in ba["credentials"]:
-                salt_seed = f"{config.get('stack_name', 'bay')}{name}{cred['username']}"
-                salt = hashlib.md5(salt_seed.encode()).hexdigest()[:8]
-                result = subprocess.run(
-                    ["openssl", "passwd", "-apr1", "-salt", salt, cred["password"]],
-                    capture_output=True, text=True, check=True,
+                hashed = bay_basic_auth_hash(
+                    config.get("stack_name", "bay"),
+                    name,
+                    cred["username"],
+                    cred["password"],
                 )
-                entries.append(f"{cred['username']}:{result.stdout.strip()}")
+                entries.append(f"{cred['username']}:{hashed}")
             users_str = ",".join(entries)
             labels[f"{pfx}.users"] = users_str
         elif "users" in ba:
@@ -648,6 +648,48 @@ def bay_healthcheck(hc, port=80):
 # ── Repo deduplication ─────────────────────────────────────────────────
 
 
+# ── Basic-auth hashing ───────────────────────────────────────────────────
+#
+# bcrypt, with a salt derived from the credentials themselves.
+#
+# It used to shell out to `openssl passwd -apr1 -salt <salt> <password>`, which
+# put the password on the argument list of a child process — visible in `ps` on
+# the control machine — and produced an MD5-crypt hash.
+#
+# The salt stays DETERMINISTIC, and that is load-bearing rather than lazy: the
+# hash ends up in a Traefik container label, so a random salt would change the
+# label on every render and the reconciler would recreate every basic-auth
+# protected container on every deploy. Seeding it from sha256 of
+# (stack, service, username, password) means the same credentials always
+# produce the same hash, and two services sharing a username still get
+# different salts. Unlike the old seed, the password is part of it, so a
+# password change also changes the salt.
+_BCRYPT_B64 = b"./ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+_STD_B64 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+_BCRYPT_COST = 10
+
+
+def bay_basic_auth_hash(stack_name, service_name, username, password):
+    """Return a deterministic bcrypt hash for one basic-auth credential."""
+    import base64
+
+    import bcrypt
+
+    seed = f"{stack_name}|{service_name}|{username}|{password}".encode("utf-8")
+    raw = hashlib.sha256(seed).digest()[:16]
+    salt_chars = base64.b64encode(raw)[:22].translate(
+        bytes.maketrans(_STD_B64, _BCRYPT_B64)
+    )
+    salt = b"$2b$%02d$" % _BCRYPT_COST + salt_chars
+    secret = password.encode("utf-8")
+    if len(secret) > 72:
+        raise ValueError(
+            f"basic-auth password for {username!r} is longer than bcrypt's "
+            f"72-byte limit ({len(secret)} bytes); shorten it"
+        )
+    return bcrypt.hashpw(secret, salt).decode("ascii")
+
+
 def _repo_slug(repo, branch="main"):
     """Compute a deterministic, filesystem-safe slug for a (repo, branch) tuple.
 
@@ -662,9 +704,19 @@ def _repo_slug(repo, branch="main"):
 
 
 def _compute_clone_url(repo, token=None):
-    """Convert repo URL to token-authenticated HTTPS URL.
+    """Convert a repo URL to the plain HTTPS URL git should be pointed at.
 
-    Mirrors the URL transformation in build.yml and rebuild.sh.j2.
+    The token is deliberately NOT embedded. It used to be
+    `https://x-access-token:<PAT>@host/path`, which put the PAT in
+    /proc/<pid>/cmdline for the life of every clone and fetch, and wrote it
+    permanently into .git/config the first time `git remote set-url` ran.
+    Authentication now goes through a GIT_ASKPASS helper
+    (roles/git_deploy/templates/git-askpass.sh.j2) instead.
+
+    `token` is kept in the signature because it still selects the transport:
+    a repo with a token is cloned over HTTPS, one without over SSH with a
+    deploy key. Mirrors the URL transformation in remote_build.yml and
+    rebuild.sh.j2.
     """
     if not token:
         return repo
@@ -672,15 +724,32 @@ def _compute_clone_url(repo, token=None):
         parts = repo.split(":")
         host = parts[0].replace("git@", "")
         path = parts[1]
-        return f"https://x-access-token:{token}@{host}/{path}"
+        return f"https://{host}/{path}"
     elif "://" in repo:
         rest = repo.split("://")[1]
-        return f"https://x-access-token:{token}@{rest}"
+        return f"https://{rest}"
     return repo
 
 
+def bay_hexkey(value):
+    """Jinja2 filter: hex-encode a secret for `openssl dgst -macopt hexkey:`.
+
+    openssl's only way to take a MAC key off the command line without putting
+    it on the argument list is `-macopt hexkey:<hex>` read from a file. The
+    hex is of the secret's UTF-8 bytes, which is what the webhook receiver
+    signs with (hmac.new(secret.encode(), ...) in files/webhook/app.py).
+    """
+    if isinstance(value, bytes):
+        return value.hex()
+    return str(value).encode("utf-8").hex()
+
+
 def bay_token_url(repo, token):
-    """Jinja2 filter: convert a repo URL to token-authenticated HTTPS URL."""
+    """Jinja2 filter: the HTTPS clone URL for a token-authenticated repo.
+
+    Historic name. It no longer produces a token-bearing URL — see
+    _compute_clone_url.
+    """
     return _compute_clone_url(repo, token)
 
 
@@ -693,7 +762,7 @@ def bay_repo_groups(services, service_names):
     """Group services by (build.repo, build.branch) for clone deduplication.
 
     Returns a list of dicts, each with:
-      slug, repo, branch, services, has_token, clone_url, auth_svc
+      slug, repo, branch, services, has_token, token, clone_url, auth_svc
     """
     groups = {}
     for svc_name in service_names:
@@ -712,6 +781,9 @@ def bay_repo_groups(services, service_names):
                 "branch": branch,
                 "services": [svc_name],
                 "has_token": has_token,
+                # Consumed only by the GIT_ASKPASS helper task, which renders
+                # with no_log. It is deliberately NOT part of clone_url.
+                "token": token,
                 "clone_url": clone_url,
                 "auth_svc": svc_name,
             }

@@ -129,6 +129,21 @@ class TestBayTokenUrlFilterOutputFormat:
     def test_bay_token_url_filter_output_format(self) -> None:
         """bay_token_url produces a usable HTTPS URL, not SSH-form or empty string."""
         result = bay_token_url("git@github.com:Org/repo.git", "ghp_testtoken")
-        assert result == "https://x-access-token:ghp_testtoken@github.com/Org/repo.git", (
+        assert result == "https://github.com/Org/repo.git", (
             f"Unexpected token URL: {result!r}"
         )
+
+    def test_bay_token_url_never_embeds_the_token(self) -> None:
+        """The PAT goes through GIT_ASKPASS, never through the URL.
+
+        A URL-embedded token is an argv element of every git child process and
+        is written verbatim into .git/config by `git remote set-url`.
+        """
+        for repo in (
+            "git@github.com:Org/repo.git",
+            "https://github.com/Org/repo.git",
+            "ssh://git@github.com/Org/repo.git",
+        ):
+            result = bay_token_url(repo, "ghp_testtoken")
+            assert "ghp_testtoken" not in result, result
+            assert "x-access-token" not in result, result

@@ -381,15 +381,13 @@ class TestTraefikLabelsMiddleware:
         # The single-$ APR1 hash must be preserved intact
         assert "$apr1$xyz$hash" in users_value
 
-    @patch("bay_filters.subprocess.run")
-    def test_basic_auth_with_credentials(self, mock_run: MagicMock) -> None:
-        """Credential-based basic_auth must emit single $ in APR1 hash.
+    def test_basic_auth_with_credentials(self) -> None:
+        """Credential-based basic_auth must emit single $ in the bcrypt hash.
 
-        The Python filter calls openssl passwd -apr1 which returns a hash with
-        single-$ separators (e.g. $apr1$salt$hash). The label must store this
-        as-is — no $->$$ escaping — because Docker API does not interpolate.
+        The label must store the hash as-is — no $->$$ escaping — because the
+        Docker API does not interpolate. Hashing itself is bcrypt now; see
+        tests/test_basic_auth_bcrypt.py for the properties of the hash.
         """
-        mock_run.return_value = MagicMock(stdout="$apr1$salt$hashed\n")
         svc = {
             "access": "public",
             "domains": ["app.example.com"],
@@ -399,13 +397,11 @@ class TestTraefikLabelsMiddleware:
         labels = bay_traefik_labels(svc, "app", {**_BASE_CONFIG, "stack_name": "myapp"})
         pfx = "traefik.http.middlewares.app-basicauth.basicauth"
         users_value = labels[f"{pfx}.users"]
-        assert "admin:" in users_value
-        mock_run.assert_called_once()
-        # Critical: no $$ in label — openssl returns single-$ APR1, must stay single-$
+        assert users_value.startswith("admin:$2b$10$")
+        # Critical: no $$ in label — the hash must keep single-$ separators
         assert "$$" not in users_value, (
             f"basicauth label contains $$ (should be single $): {users_value!r}"
         )
-        assert "admin:$apr1$salt$hashed" == users_value
 
     def test_circuit_breaker(self) -> None:
         svc = {
@@ -591,7 +587,11 @@ class TestRepoGroups:
         }
         groups = bay_repo_groups(services, ["api"])
         assert groups[0]["has_token"] is True
-        assert "x-access-token" in groups[0]["clone_url"]
+        # The token is carried beside the URL, never inside it: it reaches git
+        # through GIT_ASKPASS.
+        assert groups[0]["token"] == "ghp_xxx"
+        assert "ghp_xxx" not in groups[0]["clone_url"]
+        assert "x-access-token" not in groups[0]["clone_url"]
 
 
 # ── bay_build_dedup_map ──────────────────────────────────────────────

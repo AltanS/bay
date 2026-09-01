@@ -4,5 +4,9 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+# Alert credentials (roles/alert_channel). systemd reads this as PID 1, before
+# it drops to User=, so a 0600 root:root file still reaches an unprivileged
+# unit. `-` tolerates a host that has not been re-provisioned yet.
+EnvironmentFile=-{{ alert_env_path | default('/etc/bay/alert.env') }}
 ExecStart=/usr/local/bin/bay-disk-alert
 User=root

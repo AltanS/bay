@@ -16,5 +16,9 @@ MemoryMax={{ git_deploy_build_mem_limit }}
 {% endif %}
 # Kill hung builds after this timeout (override: git_deploy_build_timeout)
 TimeoutStartSec={{ git_deploy_build_timeout }}
+# Alert credentials (roles/alert_channel). systemd reads this as PID 1, before
+# it drops to User=, so a 0600 root:root file still reaches an unprivileged
+# unit. `-` tolerates a host that has not been re-provisioned yet.
+EnvironmentFile=-{{ alert_env_path | default('/etc/bay/alert.env') }}
 ExecStart={{ stack_dir }}/bin/rebuild.sh %i
 ExecStartPost=/usr/bin/rm -f {{ stack_dir }}/triggers/%i.trigger

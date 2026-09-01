@@ -30,6 +30,7 @@ dependencies = [
     "docker>=7",
     "requests>=2.31",
     "mitogen>=0.3.47",
+    "bcrypt>=5.0.0",
 ]
 
 [project.urls]

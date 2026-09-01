@@ -230,7 +230,9 @@
           ansible.builtin.file:
             path: "{{ git_deploy_build_dir }}"
             state: directory
-            mode: "0755"
+            owner: "{{ app_user }}"
+            # 0700: repo checkouts, deploy keys, GIT_ASKPASS helpers.
+            mode: "0700"
 
         - name: Ensure bin directory exists
           ansible.builtin.file:

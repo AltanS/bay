@@ -288,6 +288,7 @@
     # systemd timers BEFORE deploy_stack, so the boundary sentinel
     # task inside deploy_stack has live.log to append to on an already-
     # provisioned host. No-op when no container has log_retention.
+    - { role: alert_channel, tags: [alert_channel, alerts] }
     - { role: alert_policy, tags: [alert_policy, alerts] }
     - { role: log_archive, tags: [deploy_stack, log_archive], become_user: root }
     - { role: deploy_stack, tags: [deploy_stack] }

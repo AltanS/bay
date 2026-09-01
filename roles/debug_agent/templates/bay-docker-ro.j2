@@ -20,8 +20,12 @@ verb=$1
 shift
 
 case "$verb" in
-  ps|logs|inspect|images)
+  ps|logs|images)
     cmd=( "$verb" )
+    ;;
+  inspect)
+    cmd=( inspect )
+    inspect_format_seen=1
     ;;
   stats)
     cmd=( stats --no-stream )
@@ -43,6 +47,74 @@ case "$verb" in
     die "subcommand not permitted: $verb"
     ;;
 esac
+
+{% raw %}
+# ── inspect --format allowlist ───────────────────────────────────────────────
+# A bare `docker inspect` prints the container's whole config, Config.Env
+# included — bearer tokens, webhook secrets, database URLs. This surface is
+# advertised as read-only, and reading every secret on the box is not what an
+# operator means by that.
+#
+# So inspect REQUIRES a --format, and only these are accepted. None of them can
+# reach .Config.Env, .Config.Cmd or .Config.Entrypoint. Anything else exits
+# non-zero. Bay also moved the rig's own secrets out of Config.Env and into
+# env_file, but a guard must not depend on a container being well behaved.
+BAY_INSPECT_FORMAT_ALLOW=(
+  '{{.Name}}'
+  '{{.Id}}'
+  '{{.Image}}'
+  '{{.Config.Image}}'
+  '{{.Created}}'
+  '{{.RestartCount}}'
+  '{{.State.Status}}'
+  '{{.State.Running}}'
+  '{{.State.Restarting}}'
+  '{{.State.Paused}}'
+  '{{.State.OOMKilled}}'
+  '{{.State.Dead}}'
+  '{{.State.ExitCode}}'
+  '{{.State.Error}}'
+  '{{.State.StartedAt}}'
+  '{{.State.FinishedAt}}'
+  '{{.State.Health.Status}}'
+  '{{.State.Health.FailingStreak}}'
+  '{{.HostConfig.RestartPolicy.Name}}'
+  '{{.HostConfig.Memory}}'
+  '{{.HostConfig.NanoCpus}}'
+  '{{.NetworkSettings.IPAddress}}'
+  '{{json .State}}'
+  '{{json .State.Health}}'
+  '{{json .NetworkSettings.Ports}}'
+  '{{json .HostConfig.RestartPolicy}}'
+)
+{% endraw %}
+
+_inspect_format_allowed() {
+  local candidate=$1 allowed
+  for allowed in "${BAY_INSPECT_FORMAT_ALLOW[@]}"; do
+    [ "$candidate" = "$allowed" ] && return 0
+  done
+  return 1
+}
+
+if [ "${inspect_format_seen:-0}" = 1 ]; then
+  _fmt=""
+  _want_value=0
+  for arg in "$@"; do
+    if [ "$_want_value" = 1 ]; then
+      _fmt=$arg
+      _want_value=0
+      continue
+    fi
+    case "$arg" in
+      --format=*) _fmt=${arg#--format=} ;;
+      --format) _want_value=1 ;;
+    esac
+  done
+  [ "$_want_value" = 0 ] || die "--format needs a value"
+  [ -n "$_fmt" ] || die "inspect requires a --format from the allowlist; a bare inspect would print Config.Env"
+  _inspect_format_allowed "$_fmt" || die "inspect --format not permitted: $_fmt"
+fi
 
 for arg in "$@"; do
   case "$arg" in

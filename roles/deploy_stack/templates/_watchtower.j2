@@ -11,9 +11,9 @@
       - WATCHTOWER_CLEANUP={{ watchtower_cleanup | string | lower }}
       - WATCHTOWER_MONITOR_ONLY={{ watchtower_monitor_only | string | lower }}
       - WATCHTOWER_LABEL_ENABLE=true
-{% if watchtower_telegram_bot_token | default('') | length > 0 and watchtower_telegram_chat_id | default('') | length > 0 %}
-      - WATCHTOWER_NOTIFICATION_URL=telegram://{{ watchtower_telegram_bot_token }}@telegram?chats={{ watchtower_telegram_chat_id }}
-{% endif %}
+    # The notification URL embeds the bot token — env_file, not environment.
+    env_file:
+      - {{ stack_dir }}/env/watchtower.env
     networks:
       - {{ traefik_docker_network }}
 {{ macros.logging_block({}) }}

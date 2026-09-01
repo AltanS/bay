@@ -60,6 +60,10 @@
     _svc_ports: "{{ _svc.get('ports', {}) }}"
     _svc_expose: "{{ _svc_ports.get('expose', '') }}"
     _svc_internal: "{{ _svc_ports.get('internal', 0) }}"
+    # `expose: host` renders 0.0.0.0 — a bypass of nftables/CrowdSec that
+    # requires `expose_host_ack: true` in services.yml. The ack is enforced
+    # by `bin/bay validate`; it does not change the rendered binding, so
+    # nothing is read here. Second line of defence: deploy_stack/tasks/validate.yml.
     _svc_port_rendered: >-
       {%- if _svc_expose == 'loopback' -%}127.0.0.1:{{ _svc_internal }}:{{ _svc_internal }}{%- elif _svc_expose in ['gateway', 'tailnet'] -%}{{ gateway_bind_ip }}:{{ _svc_internal }}:{{ _svc_internal }}{%- elif _svc_expose == 'host' -%}0.0.0.0:{{ _svc_internal }}:{{ _svc_internal }}{%- endif -%}
     _base:
@@ -124,6 +128,8 @@
     # change severed the `links:`-driven rewrite that pre-empted this path.
     _acc_port_pair: "{{ _acc.port | default('') | regex_replace('^\\d+\\.\\d+\\.\\d+\\.\\d+:', '') }}"
     _acc_expose: "{{ _acc.expose | default('loopback') }}"
+    # As above: `expose: host` (0.0.0.0) requires `expose_host_ack: true`,
+    # enforced by `bin/bay validate`, not by this render.
     _acc_port_rendered: >-
       {%- if _acc_expose == 'loopback' -%}127.0.0.1:{{ _acc_port_pair }}{%- elif _acc_expose in ['gateway', 'tailnet'] -%}{{ gateway_bind_ip }}:{{ _acc_port_pair }}{%- elif _acc_expose == 'host' -%}0.0.0.0:{{ _acc_port_pair }}{%- endif -%}
     _base:
@@ -223,12 +229,17 @@
         - "{{ traefik_docker_network | default('services') }}"
       volumes:
         - /var/run/docker.sock:/var/run/docker.sock:ro
+      # WATCHTOWER_NOTIFICATION_URL embeds the Telegram bot token, so it lives
+      # in the env file deploy_stack renders (watchtower.env.j2), not here:
+      # anything in `env` lands in Config.Env and comes back out of
+      # `docker inspect`. The file is empty when no token is configured, which
+      # keeps the resolved env identical to the old `| default(omit)`.
+      env_file: "{{ stack_dir }}/env/watchtower.env"
       env:
         WATCHTOWER_LABEL_ENABLE: "true"
         WATCHTOWER_CLEANUP: "true"
         WATCHTOWER_SCHEDULE: "{{ watchtower_schedule | default('0 0 4 * * *') }}"
         WATCHTOWER_MONITOR_ONLY: "{{ watchtower_monitor_only | default(true) | string | lower }}"
-        WATCHTOWER_NOTIFICATION_URL: "{{ 'telegram://' ~ watchtower_telegram_bot_token ~ '@telegram?chats=' ~ watchtower_telegram_chat_id if ((watchtower_telegram_bot_token | default('')) | length > 0 and (watchtower_telegram_chat_id | default('')) | length > 0) else omit }}"
       labels:
         com.centurylinklabs.watchtower.enable: "false"
 
@@ -318,12 +329,14 @@
       restart_policy: unless-stopped
       networks:
         - "{{ traefik_docker_network | default('services') }}"
+      # WEBHOOK_SECRET and the Telegram pair live in the env file deploy_stack
+      # renders (webhook.env.j2). Anything under `env` below lands in
+      # Config.Env, which `docker inspect` — including the read-only
+      # debug_agent surface — hands out verbatim.
+      env_file: "{{ stack_dir }}/env/bay-webhook.env"
       env:
-        WEBHOOK_SECRET: "{{ webhook.secret }}"
         TRIGGER_DIR: /triggers
         SERVICE_BRANCHES: "{{ _service_branches }}"
-        TELEGRAM_BOT_TOKEN: "{{ docker_monitor_telegram_bot_token | default('') }}"
-        TELEGRAM_CHAT_ID: "{{ docker_monitor_telegram_chat_id | default('') }}"
         TELEGRAM_HEADER: "{{ docker_monitor_alert_header | default('') }}"
         HOSTNAME: "{{ bay_alert_host }}"
         LOCAL_REGION: "{{ region | default('') }}"
@@ -334,7 +347,6 @@
         # recreate the webhook receiver on the next deploy for everyone —
         # including those who never enable the feature. Same pattern as
         # WATCHTOWER_NOTIFICATION_URL above.
-        ALERT_WEBHOOK_URL: "{{ alert_webhook_url if (alert_webhook_url | default('')) | length > 0 else omit }}"
         ALERT_WEBHOOK_FORMAT: "{{ alert_webhook_format | default('campfire') if (alert_webhook_url | default('')) | length > 0 else omit }}"
       volumes:
         - "{{ stack_dir }}/triggers:/triggers"

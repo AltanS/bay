@@ -112,6 +112,31 @@
       when: item.value.env is defined
       register: _deploy_stack_accessory_env_result
 
+    # ── Rig credential env files ───────────────────────────────────────
+    # The webhook receiver and watchtower carry bearer credentials. They go
+    # into env files rather than inline `environment:` so they stay out of
+    # `docker inspect`. Rendered unconditionally and BEFORE container_lifecycle
+    # runs: reconcile.yml slurps every spec's env_file, so a spec that names
+    # one and finds it missing fails the play.
+
+    - name: Generate webhook receiver env file
+      ansible.builtin.template:
+        src: webhook.env.j2
+        dest: "{{ stack_dir }}/env/bay-webhook.env"
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0640"
+      no_log: true
+
+    - name: Generate watchtower env file
+      ansible.builtin.template:
+        src: watchtower.env.j2
+        dest: "{{ stack_dir }}/env/watchtower.env"
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0640"
+      no_log: true
+
     # ── Config Files ─────────────────────────────────────────────────
 
     - name: Collect config files from all definitions

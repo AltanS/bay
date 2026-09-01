@@ -76,14 +76,25 @@
           --load
           -t {{ _image_name }}:{{ _git_sha.stdout }}
           -f {{ _dockerfile }}
-          {% for key, value in (_build.args | default({})).items() %}
-          --build-arg {{ key }}={{ value }}
+          {% for key in (_build.args | default({})).keys() %}
+          --build-arg {{ key }}
           {% endfor %}
           {% for key in (_build.secrets | default({})).keys() %}
           --secret id={{ key }},src=/tmp/build-secret-{{ _svc_name }}-{{ key }}
           {% endfor %}
           {{ _context }}
         chdir: "{{ _repo_dir }}"
+      # `--build-arg KEY` with no `=value` tells buildx to take the value from
+      # its own environment, so a vault-sourced build arg is never an argv
+      # element and never printed by a -v run. Ansible does not echo
+      # `environment:` either.
+      #
+      # Deliberately NOT no_log: this is the task whose output an operator
+      # needs when a build breaks. Hiding a Dockerfile error to protect a build
+      # arg trades a real debugging surface for a leak that the environment
+      # already closes. Build SECRETS keep using --secret, which never touches
+      # the command line at all.
+      environment: "{{ _build.args | default({}) }}"
       register: _docker_build
 
     - name: "{{ _svc_name }} — Tag as :latest"

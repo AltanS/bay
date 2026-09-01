@@ -17,8 +17,12 @@ import urllib.request
 from collections import defaultdict
 from datetime import datetime
 
-TELEGRAM_BOT_TOKEN = "{{ docker_monitor_telegram_bot_token }}"
-TELEGRAM_CHAT_ID = "{{ docker_monitor_telegram_chat_id }}"
+# Credentials come from the environment, never from a rendered literal: this
+# file is installed under /usr/local/bin and was world-readable for its whole
+# life. systemd supplies them via EnvironmentFile=/etc/bay/alert.env (0600
+# root:root) — see roles/alert_channel.
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 HOSTNAME = "{% include '_host_label.j2' %}"
 
 ALERT_CONTAINER_CRASH = {{ docker_monitor_alert_container_crash | bool | string }}
@@ -34,7 +38,7 @@ STATE_FILE = "{{ stack_dir | default('/opt/bay') }}/.container-crashes.json"
 MSG_HEADER = {{ docker_monitor_alert_header | to_json }}
 MSG_FOOTER = {{ docker_monitor_alert_footer | to_json }}
 
-ALERT_WEBHOOK_URL = {{ alert_webhook_url | default('') | to_json }}
+ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")
 ALERT_WEBHOOK_FORMAT = {{ alert_webhook_format | default('campfire') | to_json }}
 ALERT_WEBHOOK_TIMEOUT = {{ alert_webhook_timeout | default(10) }}
 ALERT_WEBHOOK_MAX_CHARS = {{ alert_webhook_max_chars | default(3500) }}

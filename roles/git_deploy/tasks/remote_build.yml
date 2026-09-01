@@ -12,15 +12,34 @@
     _dockerfile: "{{ services[_svc_name].build.dockerfile | default('Dockerfile') }}"
     _context: "{{ services[_svc_name].build.context | default('.') }}"
     _remote_clone_dir: "{{ git_deploy_remote_build_dir }}/{{ _svc_name }}"
+    _remote_askpass: "{{ git_deploy_remote_build_dir }}/.git-askpass-{{ _svc_name }}"
 
 - name: "{{ _svc_name }} — Ensure remote clone directory exists"
   ansible.builtin.file:
     path: "{{ _remote_clone_dir }}"
     state: directory
-    mode: "0755"
+    # 0700: the checkout holds application source and, historically, a PAT in
+    # .git/config.
+    mode: "0700"
   delegate_to: "{{ build_server }}"
   become: true
   become_user: "{{ app_user }}"
+
+# The PAT reaches git through GIT_ASKPASS, never through the URL — see
+# templates/git-askpass.sh.j2.
+- name: "{{ _svc_name }} — Install git credential helper on build server"
+  ansible.builtin.template:
+    src: git-askpass.sh.j2
+    dest: "{{ _remote_askpass }}"
+    owner: "{{ app_user }}"
+    mode: "0700"
+  vars:
+    _askpass_token: "{{ _build.token }}"
+  when: _build.token is defined
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+  no_log: true
 
 - name: "{{ _svc_name }} — Check if repo already cloned on build server"
   ansible.builtin.stat:
@@ -36,6 +55,9 @@
       git clone --branch {{ _branch }} --single-branch
       {{ _build.repo | bay_token_url(_build.token) }}
       {{ _remote_clone_dir }}/repo
+  environment:
+    GIT_ASKPASS: "{{ _remote_askpass }}"
+    GIT_TERMINAL_PROMPT: "0"
   when:
     - not _remote_repo_stat.stat.exists
     - _build.token is defined
@@ -76,6 +98,9 @@
       git -c url.{{ _build.repo | bay_token_url(_build.token) }}.insteadOf={{ _build.repo }}
       fetch origin {{ _branch }}
     chdir: "{{ _remote_clone_dir }}/repo"
+  environment:
+    GIT_ASKPASS: "{{ _remote_askpass }}"
+    GIT_TERMINAL_PROMPT: "0"
   when:
     - _remote_repo_stat.stat.exists
     - _build.token is defined

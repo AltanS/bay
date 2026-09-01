@@ -1,0 +1,16 @@
+#!/bin/sh
+# {{ ansible_managed }}
+#
+# GIT_ASKPASS helper for one token-authenticated repo.
+#
+# git runs this with the prompt text as $1 and reads the answer from stdout.
+# That keeps the PAT out of three places it used to live:
+#   * the clone URL, and therefore /proc/<pid>/cmdline for the whole clone
+#   * .git/config, permanently, after the first remote-url rewrite
+#   * the build directory tree, which was created world-readable
+#
+# Mode 0700, owner {{ app_user }}. Rendered with no_log.
+case "$1" in
+  Username*|username*) printf '%s\n' 'x-access-token' ;;
+  *) printf '%s\n' '{{ _askpass_token }}' ;;
+esac

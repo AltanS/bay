@@ -240,17 +240,19 @@ class TestRemoteStrategyRendering:
         rendered = _render_rebuild_sh(services, ["animals"])
         assert 'IMAGE_REPO="zot.infra.example.com/demo/animals"' in rendered
 
-    def test_clone_url_with_embedded_token_git_at(self):
-        """Git token embedded in CLONE_URL for git@ repo URL format."""
+    def test_clone_url_is_token_free_git_at(self):
+        """A git@ repo becomes a plain HTTPS URL — auth goes via GIT_ASKPASS."""
         services = _remote_service_with_token()
         rendered = _render_rebuild_sh(services, ["animals"])
-        assert 'CLONE_URL="https://x-access-token:ghp_FAKE_TOKEN_12345@github.com/acmecorp/animals.git"' in rendered
+        assert 'CLONE_URL="https://github.com/acmecorp/animals.git"' in rendered
+        assert "ghp_FAKE_TOKEN_12345" not in rendered
 
-    def test_clone_url_with_embedded_token_https(self):
-        """Git token embedded in CLONE_URL for https:// repo URL format."""
+    def test_clone_url_is_token_free_https(self):
+        """An https:// repo keeps its URL, with no credential spliced in."""
         services = _remote_service_with_secrets()
         rendered = _render_rebuild_sh(services, ["blog"])
-        assert 'CLONE_URL="https://x-access-token:ghp_BLOG_TOKEN_67890@github.com/acmecorp/blog.git"' in rendered
+        assert 'CLONE_URL="https://github.com/acmecorp/blog.git"' in rendered
+        assert "ghp_BLOG_TOKEN_67890" not in rendered
 
     def test_persistent_clone_dir_push_builds(self):
         """Remote service uses push-builds persistent clone directory."""
