@@ -44,7 +44,7 @@ Full reference lives in **[docs/](docs/README.md)** — the docs index links eve
 | Reporting a vulnerability | [SECURITY.md](SECURITY.md) |
 | Community expectations | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) |
 
-See the **[full index →](docs/README.md)** for everything, including build observability, the server-side reconciler, rollout playbook, production access, and ADRs.
+See the **[full index →](docs/README.md)** for everything, including build observability, the server-side reconciler, the rollout playbook, and ADRs.
 
 ## Prerequisites
 
@@ -62,17 +62,14 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ```bash
 mkdir my-infra && cd my-infra
-git clone git@github.com:AltanS/bay.git .bay
+git clone https://github.com/AltanS/bay.git .bay
 .bay/bootstrap.sh
-```
-
-This scaffolds the project structure, pins the framework version, and installs all dependencies.
-
-Then run the interactive setup wizard:
-
-```bash
 bin/bay setup
 ```
+
+`bootstrap.sh` pins the framework version, installs all dependencies, and creates the `bin/bay` wrapper. `bin/bay setup` then runs the interactive wizard and generates the project scaffold.
+
+If you already have a scaffold's `Makefile`, `make bay:setup` is equivalent — it clones the framework and calls `.bay/bootstrap.sh`. Override its `BAY_REPO` variable to clone from somewhere else, over SSH or from a fork.
 
 The wizard walks you through:
 
@@ -147,17 +144,6 @@ alias bay 'bin/bay'
 ```
 
 After reloading your shell, you can use `bay deploy production` directly.
-
-### Using HTTPS instead of SSH
-
-The Makefile defaults to SSH (`git@github.com:...`) for cloning the framework. If you prefer HTTPS, override `BAY_REPO`:
-
-```bash
-make bay:setup BAY_REPO=https://github.com/AltanS/bay.git
-```
-
-Or edit `BAY_REPO` in your `Makefile` directly.
-
 
 ## Project structure
 
@@ -306,7 +292,7 @@ Bay is designed to be used as a framework included by a site-specific consumer r
 
 ```
 my-infra/
-├── .bay/                   # Framework (cloned by make bay:setup, gitignored)
+├── .bay/                   # Framework (cloned by git, set up by .bay/bootstrap.sh, gitignored)
 ├── bin/bay                 # CLI wrapper (calls uv run --project .bay bay)
 ├── Makefile                 # Bootstrap target + backwards-compat aliases
 ├── ansible.cfg              # Points roles_path to .bay/
@@ -604,16 +590,18 @@ Every bootstrapped consumer ships with `tests/test_infra.sh` (from `example/test
 
 ```bash
 # Edit roles, templates, playbooks...
-make test              # Verify nothing is broken
-make lint              # Check style
-git commit             # Commit framework changes
-git tag v0.5.1         # Tag a new release
+make test                    # Verify nothing is broken
+make lint                    # Check style
+git commit                   # Commit framework changes
+make release VERSION=0.5.1   # Maintainers only: bump version.yml, tag, push
 
 # In a consumer repo:
 bin/bay update           # Bump to latest release (updates .bay-version)
 bin/bay test             # Verify consumer still works
 git add .bay-version && git commit -m "chore: bump bay to v0.5.1"
 ```
+
+Never tag or push a release by hand — `make release` bumps `version.yml`, commits, tags and pushes in one step, and a hand-written tag leaves `version.yml` behind. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the checks a change must pass, and the release process.
 
 ## License
 

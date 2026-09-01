@@ -100,7 +100,7 @@
         fail_msg: >-
           Framework version {{ bay_version }} is older than the minimum
           required version {{ bay_minimum_version }}.
-          Run 'make bay:install' to update the framework.
+          Run 'bin/bay install' to update the framework.
         success_msg: "Framework version {{ bay_version }} meets minimum requirement (>= {{ bay_minimum_version }})"
       when: bay_minimum_version is defined
       tags: [always]

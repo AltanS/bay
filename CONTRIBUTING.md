@@ -120,3 +120,25 @@ pass before merge:
 
 A failing job in any of these blocks merge — please fix the underlying issue
 rather than skip or silence the check.
+
+## Cutting a release (maintainers only)
+
+Consumers pin to git tags via `.bay-version`, so an untagged commit is
+invisible to them. Releases go out through one command:
+
+1. Land your change on `main`.
+2. Add a `## [X.Y.Z] — <date>` section to `CHANGELOG.md` and commit it.
+   `make release` refuses to tag a version that has no entry — the changelog
+   is how a consumer learns what a version bump brings. Add an **Upgrade
+   notes** subsection for anything manual.
+3. Run:
+
+   ```bash
+   make release VERSION=X.Y.Z
+   ```
+
+   Patch for fixes and docs, minor for features, major for breaking changes.
+
+`make release` bumps `version.yml`, commits, tags and pushes in one step.
+Never run `git tag` or `git push` by hand for a release: `version.yml` would
+drift from the tags, which breaks the framework's minimum-version checks.

@@ -7,6 +7,51 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [Unreleased]
+
+### Changed
+
+- One documented entry path: clone over **HTTPS** into `.bay/`, run
+  `.bay/bootstrap.sh`, then `bin/bay setup`. `README.md`, `SKILL.md`,
+  `docs/onboarding.md` and `example/README.md` now say the same thing, and a
+  test fails the build if they drift apart again.
+- The generated `Makefile`'s `bay:setup` target clones the framework and then
+  calls `.bay/bootstrap.sh`. It no longer carries its own copy of the pin /
+  symlink / `uv sync` / Galaxy-install logic, which had already drifted from
+  the script — it never created `bin/bay`.
+- `BAY_REPO` now defaults to the HTTPS clone URL, in the generated `Makefile`
+  and in `bin/bay dev-unlink`'s fallback. Override it for SSH:
+  `make bay:setup BAY_REPO=<ssh url>`.
+- `bin/bay setup` and `bootstrap.sh` now write an identical `bin/bay` wrapper,
+  copied from `scripts/bin-bay-wrapper.sh`. Previously whichever ran first won,
+  and only the bootstrap version unset `VIRTUAL_ENV`.
+
+### Fixed
+
+- `make bay:setup` on its own left no `bin/bay` wrapper, so the documented next
+  command could not run. The delegated target creates it.
+- The post-setup next-steps panel omitted the DNS record, `bin/bay validate`
+  and `bin/bay doctor`. All three are now listed, and DNS guidance is printed
+  for every gateway choice rather than only for Headscale — with no gateway,
+  the operator was told to deploy with no record in place and Traefik's first
+  ACME challenge failed.
+- `docs/features.md` documented an `admin` access mode that does not exist (the
+  schema allows `public` and `vpn`), and described `bay validate` as performing
+  `bay doctor`'s SSH/DNS/vault probes. Both corrected.
+- `README.md` linked to a production-access document that is not part of this
+  repo, and instructed a hand-written `git tag` instead of `make release`.
+  `CONTRIBUTING.md` now documents the release process.
+- "bay not found" no longer tells you to run `bin/bay setup`, which cannot run
+  without `.bay/`. It names the clone and `.bay/bootstrap.sh` instead.
+- The framework-version-drift message in `provision.yml` and `deploy.yml` names
+  `bin/bay install` instead of the `make bay:install` alias.
+
+### Upgrade notes
+
+- Existing consumers: your `Makefile` is a generated file. Re-run
+  `bin/bay setup --force` to pick up the new `bay:setup` target (it backs the
+  old one up to `Makefile.bak`), or leave it — the old target still works.
+
 ## [0.2.4] — 2026-08-25
 
 ### Fixed

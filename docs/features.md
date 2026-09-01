@@ -24,13 +24,12 @@ See [services.md](services.md) for the full schema reference.
 
 ## VPN-Aware Access Control
 
-Three access modes control who can reach each service:
+Two access modes control who can reach each service:
 
 | Mode | Behavior |
 |------|----------|
 | `public` | Open to all traffic |
-| `vpn` | Restricted to VPN clients only |
-| `admin` | Restricted to VPN clients, no public route exceptions |
+| `vpn` | Restricted to VPN clients only, with optional `public_routes` exceptions |
 
 Protection is enforced at multiple layers:
 
@@ -107,7 +106,8 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 ## Developer Experience
 
 - **`bin/bay` CLI** -- single entry point wrapping deploy, provision, validate, gateway, vault, backup, test, and framework management
-- **`bay validate`** -- pre-deploy checks: YAML syntax, schema validation, SSH connectivity, vault password, DNS resolution
+- **`bay validate`** -- pre-deploy config checks: YAML syntax, `services.yml` schema, inventory, vault keys (also runs automatically before every deploy)
+- **`bay doctor`** -- environment probes: SSH reachability, vault password, DNS resolution
 - **`bay setup`** -- interactive wizard for project scaffolding (also supports `--defaults` and fully non-interactive flag-driven mode)
 - **`bay guide`** -- context-aware setup guide for the current project state
 - **Framework versioning** -- consumers pin to semver tags via `.bay-version`; `install`/`update`/`status` commands manage the lifecycle

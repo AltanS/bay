@@ -59,14 +59,17 @@ def test_falls_back_to_the_public_default(tmp_path, makefile):
 
 
 def test_default_points_at_the_public_repo():
-    """Guard the sweep: the shipped default must be the public clone URL.
+    """Guard the sweep: the shipped default must be the public HTTPS clone URL.
+
+    HTTPS, not SSH: Bay is a public MIT repo, and a reader without a GitHub
+    SSH key is the default case — an SSH clone fails at the first command.
 
     Asserted positively rather than by denying the private org name. Spelling
     that name here would itself be a finding for scripts/leak-scan.sh -- which
     is exactly what happened on this test's first release run. A guard test is
     not exempt from the guard.
     """
-    assert DEFAULT_BAY_REPO == "git@github.com:AltanS/bay.git"
+    assert DEFAULT_BAY_REPO == "https://github.com/AltanS/bay.git"
 
 
 def test_example_makefile_matches_the_default(tmp_path):

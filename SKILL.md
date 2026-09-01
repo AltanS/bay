@@ -74,7 +74,7 @@ in the framework repo rebuilds the generated sections.
 
 | Goal | Command |
 |---|---|
-| First-time setup | `make bay:setup` then `bin/bay install` |
+| First-time setup | `git clone https://github.com/AltanS/bay.git .bay`, then `.bay/bootstrap.sh`, then `bin/bay setup` |
 | Deploy services | `bin/bay deploy production` |
 | Deploy including infra roles | `bin/bay deploy --rig production` |
 | Recreate containers | `bin/bay deploy production --tags deploy_stack` |
@@ -233,6 +233,7 @@ Paths are relative to the framework root (`.bay/` in a consumer).
 - `docs/multi-region.md` — Deploying one stack to multiple regional servers from a single consumer repo.
 - `docs/alerting.md` — Where alerts go — Telegram plus an optional generic webhook sink (Campfire/Slack/raw), and the fail-open guarantees.
 - `docs/debug-agent.md` — The `debugbot` limited-permission SSH user for AI-assisted read-only debugging.
+- `docs/performance.md` — How fast a deploy is and why — Mitogen, SSH pipelining, and the `--profile` flag.
 
 **Architecture & decisions**
 

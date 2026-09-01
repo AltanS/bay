@@ -15,12 +15,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ## Setup
 
 ```bash
-# Clone the framework and pin the version (equivalent to make bay:setup below)
-git clone git@github.com:AltanS/bay.git .bay
+# Clone the framework, then bootstrap it (pins the version, installs
+# dependencies, creates bin/bay)
+git clone https://github.com/AltanS/bay.git .bay
 .bay/bootstrap.sh
-
-# OR, equivalent, if you're starting from this scaffold's Makefile:
-make bay:setup
 
 # Run the interactive setup wizard — walks through project name, server
 # address, domain, SSH keys, access gateway, services, and the vault
@@ -37,13 +35,14 @@ project root — including the vault password if you chose "generate" in the
 wizard. See [docs/onboarding.md](.bay/docs/onboarding.md) for the full
 wizard walkthrough and the file list it produces.
 
+`make bay:setup` is equivalent to the first two commands — it clones the
+framework and then calls `.bay/bootstrap.sh`.
+
 #### Without the wizard
 
 If you'd rather skip the wizard and edit the scaffold by hand:
 
 ```bash
-make bay:setup
-
 # Create vault password (used to encrypt secrets) manually
 echo '<your-vault-password>' > .vault_pass
 ```

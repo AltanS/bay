@@ -116,7 +116,17 @@ def find_bay_dir(start: Path | None = None) -> Path:
         current = parent
     if broken is not None:
         raise BayError(_describe_broken_framework(broken))
-    raise BayError("bay not found — run 'bin/bay setup' first")
+    # Do not point at 'bin/bay setup' here: setup() itself resolves the
+    # framework through this function, and the bin/bay wrapper refuses to exec
+    # without .bay/. The only command that works in this state is the clone.
+    raise BayError(
+        "bay not found — no .bay/ framework checkout here or in any parent "
+        "directory.\n"
+        "Bootstrap it from your project root:\n"
+        "  git clone https://github.com/AltanS/bay.git .bay\n"
+        "  .bay/bootstrap.sh\n"
+        "then run 'bin/bay setup'."
+    )
 
 
 def consumer_root(bay_dir: Path | None = None) -> Path:

@@ -1,5 +1,5 @@
 BAY_DIR := .bay
-BAY_REPO := git@github.com:AltanS/bay.git
+BAY_REPO := https://github.com/AltanS/bay.git
 ARGS ?=
 
 # Load framework targets (available after bay:setup)
@@ -18,38 +18,18 @@ _help: bay\:help
 endif
 
 # ── Bootstrap ────────────────────────────────────────────────────────────
-# Must live in consumer — the framework isn't available yet when this runs
+# Only the clone lives here — the framework isn't on disk yet when this runs.
+# Everything after it is $(BAY_DIR)/bootstrap.sh, which is the one entry path.
+# Override the source with: make bay:setup BAY_REPO=git@github.com:AltanS/bay.git
 
 bay\:setup:
 	@if [ -d "$(BAY_DIR)" ]; then \
-		echo "Already initialized. Use 'make bay:install' to sync or 'make bay:update' to bump version."; \
+		echo "Already initialized. Use 'bin/bay install' to sync or 'bin/bay update' to bump version."; \
 		exit 0; \
 	fi; \
-	command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/getting-started/installation/"; exit 1; }; \
+	command -v git >/dev/null 2>&1 || { echo "git not found"; exit 1; }; \
 	echo "Cloning bay framework into $(BAY_DIR)/..."; \
-	git clone $(BAY_REPO) $(BAY_DIR); \
-	if [ -f .bay-version ]; then \
-		_ver=$$(cat .bay-version | tr -d '[:space:]'); \
-	else \
-		_ver=$$(git -C $(BAY_DIR) tag --sort=-v:refname | head -1); \
-		if [ -n "$${_ver}" ]; then \
-			echo "No .bay-version found, using latest release: $${_ver}"; \
-			echo "$${_ver}" > .bay-version; \
-			echo "Created .bay-version: $${_ver}"; \
-		fi; \
-	fi; \
-	if [ -n "$${_ver}" ]; then \
-		echo "Pinning framework to $${_ver}..."; \
-		git -C $(BAY_DIR) -c advice.detachedHead=false checkout "$${_ver}"; \
-	fi; \
-	ln -sfn ../group_vars $(BAY_DIR)/group_vars; \
-	echo "Installing Python + Ansible dependencies..."; \
-	uv sync --project $(BAY_DIR); \
-	echo "Installing Galaxy roles..."; \
-	uv run --project $(BAY_DIR) ansible-galaxy install -r $(BAY_DIR)/requirements.yml -p $(BAY_DIR)/vendor/roles --force; \
-	echo "Installing Galaxy collections..."; \
-	uv run --project $(BAY_DIR) ansible-galaxy collection install -r $(BAY_DIR)/requirements.yml -p $(BAY_DIR)/vendor/collections --force; \
-	echo ""; \
-	echo "Setup complete. Run 'make' to see available commands."
+	git clone $(BAY_REPO) $(BAY_DIR) || exit 1; \
+	exec $(BAY_DIR)/bootstrap.sh
 
 .PHONY: _help bay\:setup

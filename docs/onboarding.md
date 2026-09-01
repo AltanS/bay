@@ -1,12 +1,31 @@
 # Onboarding Guide
 
+## Quick start
+
+There is one entry path. From an empty project directory:
+
+```bash
+mkdir my-infra && cd my-infra
+git clone https://github.com/AltanS/bay.git .bay
+.bay/bootstrap.sh
+bin/bay setup
+```
+
+`.bay/bootstrap.sh` pins the framework version, installs the Python and Ansible
+dependencies, and creates the `bin/bay` wrapper. `bin/bay setup` runs the
+wizard and writes the scaffold.
+
+`make bay:setup` is equivalent, if you already have a scaffold's `Makefile` —
+it clones the framework and then calls `.bay/bootstrap.sh`. Override
+`BAY_REPO` to clone over SSH instead of HTTPS.
+
 ## Interactive Setup Wizard
 
 The `bin/bay setup` command includes an interactive wizard that walks you through project configuration and generates a tailored scaffold.
 
 ### Running the wizard
 
-After bootstrapping a project with `.bay/bootstrap.sh`, run the wizard:
+After `.bay/bootstrap.sh` has run, start the wizard:
 
 ```bash
 bin/bay setup
@@ -257,22 +276,9 @@ secrets:
 
 Encrypt with: `bin/bay vault encrypt production`
 
-## Using HTTPS Instead of SSH
-
-The generated Makefile defaults to SSH for cloning the framework. To use HTTPS instead, override `BAY_REPO`:
-
-```bash
-make bay:setup BAY_REPO=https://github.com/AltanS/bay.git
-```
-
 ## Bootstrap Script
 
-The bootstrap script scaffolds the project and installs dependencies:
-
-```bash
-mkdir my-infra && cd my-infra
-git clone git@github.com:AltanS/bay.git .bay
-.bay/bootstrap.sh
-```
-
-After it completes, run `bin/bay setup` for the interactive wizard.
+`.bay/bootstrap.sh` is the only bootstrap implementation. It pins the framework
+to `.bay-version` (or the newest tag), symlinks `group_vars/` into `.bay/`,
+installs the Python and Galaxy dependencies, and writes the `bin/bay` wrapper.
+See [Quick start](#quick-start) above for the commands.
