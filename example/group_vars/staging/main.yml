@@ -6,13 +6,6 @@
 git_deploy_build_strategy: local
 git_deploy_build_mem_limit: "2g"
 
-# Telegram alerts (optional for staging)
-docker_monitor_telegram_bot_token: ""
-docker_monitor_telegram_chat_id: ""
-# Optional second alert sink, fired alongside Telegram. Point it at Campfire,
-# Slack, or anything that accepts an HTTP POST. Empty = disabled.
-# The vault key must be LOWERCASE — it is an Ansible role var, and UPPERCASE
-# keys in `secrets:` are container env vars. See docs/alerting.md.
-# alert_webhook_url: "{{ secrets.alert_webhook_url }}"
-# alert_webhook_format: campfire   # campfire | slack | raw
-
+# Alerts are configured in group_vars/all/alerts.yml — see `bin/bay alerts`
+# and docs/alerting.md. Do not add alert sinks here: env-level group_vars
+# outrank group_vars/all, so they would silently override that file.

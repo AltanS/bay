@@ -23,6 +23,7 @@ _TEMPLATES: dict[str, str] = {
     "security.yml.j2": "group_vars/all/security.yml",
     "registry.yml.j2": "group_vars/all/registry.yml",
     "vpn_access.yml.j2": "group_vars/all/vpn_access.yml",
+    "alerts.yml.j2": "group_vars/all/alerts.yml",
     "access_gateway.yml.j2": "group_vars/all/access_gateway.yml",
     # group_vars/production/
     "production_main.yml.j2": "group_vars/production/main.yml",
@@ -184,17 +185,46 @@ def _copy_catalog_files(selected_services: list[str], target_dir: Path) -> list[
     return copied
 
 
-def fill_example_gaps(target_dir: Path, ssh_keys: list[SSHKey]) -> None:
+def fill_example_gaps(
+    target_dir: Path,
+    ssh_keys: list[SSHKey],
+    letsencrypt_email: str | None = None,
+) -> None:
     """Finish the ``--no-interactive`` example copy so it can actually deploy.
 
-    ``example/`` is copied verbatim, so the two values that cannot be
-    shipped in a public repo — the operator's SSH key and real secrets —
-    arrive empty. Filling them here keeps the example tree free of fake
-    credentials while still producing a consumer that passes validate.
+    ``example/`` is copied verbatim, so the three values that cannot be
+    shipped in a public repo — the operator's SSH key, real secrets, and an
+    ACME contact address — arrive empty or as a placeholder. Filling them
+    here keeps the example tree free of fake credentials while still
+    producing a consumer that passes validate.
     """
     _write_admin_keys(target_dir / "group_vars" / "all" / "users.yml", ssh_keys)
     for secrets_file in sorted((target_dir / "group_vars").glob("*/secrets.yml")):
         _fill_empty_secrets(secrets_file)
+    if letsencrypt_email:
+        for domains_file in sorted((target_dir / "group_vars").glob("*/domains.yml")):
+            _write_letsencrypt_email(domains_file, letsencrypt_email)
+
+
+def _write_letsencrypt_email(domains_file: Path, email: str) -> None:
+    """Replace the shipped ``letsencrypt_email`` placeholder with *email*.
+
+    Traefik has no ACME opt-out, so the placeholder is a hard `bay validate`
+    failure — the example copy must not leave one behind.
+    """
+    if not domains_file.is_file() or _is_vault_encrypted(domains_file):
+        return
+    yaml = YAML()
+    yaml.preserve_quotes = True
+    data = yaml.load(domains_file.read_text())
+    if not isinstance(data, dict) or "letsencrypt_email" not in data:
+        return
+    if str(data["letsencrypt_email"] or "").strip() == email:
+        return
+    data["letsencrypt_email"] = email
+    with domains_file.open("w") as f:
+        yaml.dump(data, f)
+    console.success(f"set letsencrypt_email to {email} in {domains_file}")
 
 
 def _write_admin_keys(users_file: Path, ssh_keys: list[SSHKey]) -> None:

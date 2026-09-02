@@ -190,8 +190,10 @@ class TestDefaultsResult:
         assert result.letsencrypt_email == "admin@example.com"
         assert result.ssh_keys == []
         assert result.selected_services == ["gatus"]
-        assert result.access_gateway == "headscale"
-        assert result.headscale_domain == "hs.example.com"
+        # `none` by default: the shortest path to a working first deploy.
+        # Add a gateway later with `bin/bay setup --gateway headscale`.
+        assert result.access_gateway == "none"
+        assert result.headscale_domain is None
 
     def test_sanitizes_special_chars(self) -> None:
         result = defaults_result("My_Cool.Project!")

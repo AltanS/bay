@@ -361,8 +361,10 @@ def defaults_result(directory_name: str) -> WizardResult:
         domain_base="example.com",
         letsencrypt_email="admin@example.com",
         ssh_keys=[],
-        access_gateway="headscale",
-        headscale_domain="hs.example.com",
+        # `none` keeps the first deploy to one DNS record and no client
+        # install. Add a gateway later: bin/bay setup --gateway headscale
+        access_gateway="none",
+        headscale_domain=None,
         vpn_peer_ips=[],
         selected_services=["gatus"],
     )

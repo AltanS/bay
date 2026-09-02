@@ -2450,6 +2450,59 @@ def _validate_admin_ssh_keys(
         result.warn("Admin SSH keys     no user is in the ssh-access group")
 
 
+#: Values that parse as a string but are not an address anyone owns. The
+#: example tree ships the first one so a copied config fails loudly here
+#: instead of silently at the ACME challenge.
+_LETSENCRYPT_PLACEHOLDERS = ("change-me@example.com", "changeme@example.com", "you@example.com")
+
+
+def _validate_letsencrypt_email(
+    parsed_files: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Refuse an empty or placeholder ``letsencrypt_email``.
+
+    Traefik uses it unconditionally for the ACME resolver -- there is no
+    ``acme_enabled`` opt-out in the framework, so every routed service asks
+    Let's Encrypt for a certificate on the first deploy. An empty value is
+    always a broken SSL config, never a deliberate choice.
+    """
+    console.header("SSL Certificate")
+
+    value: Any = None
+    origin = ""
+    for rel, data in (parsed_files or {}).items():
+        if isinstance(data, dict) and "letsencrypt_email" in data:
+            value = data["letsencrypt_email"]
+            origin = rel
+
+    if not origin:
+        result.fail(
+            "letsencrypt_email   not set in any group_vars file -- Traefik needs "
+            "it for the ACME resolver, so SSL certificates will fail"
+        )
+        return
+
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        result.fail(
+            f"letsencrypt_email   {origin}: empty -- Traefik needs it for the "
+            f"ACME resolver, so SSL certificates will fail"
+        )
+        return
+    if text.lower() in _LETSENCRYPT_PLACEHOLDERS:
+        result.fail(
+            f"letsencrypt_email   {origin}: still the placeholder {text!r} -- "
+            f"replace it with an address you can receive mail on"
+        )
+        return
+    if "@" not in text:
+        result.fail(f"letsencrypt_email   {origin}: {text!r} is not an email address")
+        return
+
+    result.ok(f"letsencrypt_email   {text} ({origin})")
+
+
 def run_validation(
     root: Path,
     env: str,
@@ -2520,6 +2573,9 @@ def run_validation(
 
     # 5b. Alert recipients
     _validate_alert_recipients(parsed, result)
+
+    # 5c. Let's Encrypt email (Traefik has no ACME opt-out)
+    _validate_letsencrypt_email(parsed, result)
 
     # 6. Connectivity and reference checks (only if schema passed)
     if services_data is not None:

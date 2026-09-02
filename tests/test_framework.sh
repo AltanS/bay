@@ -230,6 +230,7 @@ check_j2_sync direct example/provision.yml       src/bay_cli/wizard/templates/pr
 check_j2_sync direct example/restore.yml         src/bay_cli/wizard/templates/restore.yml.j2
 check_j2_sync direct example/webhook.yml         src/bay_cli/wizard/templates/webhook.yml.j2
 check_j2_sync direct example/Makefile            src/bay_cli/wizard/templates/makefile.j2
+check_j2_sync direct example/group_vars/all/alerts.yml src/bay_cli/wizard/templates/alerts.yml.j2
 
 # ── Summary ──────────────────────────────────────────────────────────────
 section "Results"

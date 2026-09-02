@@ -23,7 +23,6 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 def test_bay_not_found_hint_is_not_circular(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("BAY_DIR", raising=False)
-    monkeypatch.delenv("ARGO_DIR", raising=False)
     with pytest.raises(BayError) as excinfo:
         paths.find_bay_dir(start=tmp_path)
     message = str(excinfo.value)

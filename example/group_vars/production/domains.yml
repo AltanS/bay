@@ -5,5 +5,6 @@
 # By default, domains come from services.yml.
 # This file provides the Let's Encrypt email and optional domain overrides.
 
-# Let's Encrypt ACME email (required for SSL certificates)
-letsencrypt_email: ""
+# Let's Encrypt ACME email (required for SSL certificates).
+# CHANGE this: `bin/bay validate` fails until you replace the placeholder.
+letsencrypt_email: "CHANGE-ME@example.com"

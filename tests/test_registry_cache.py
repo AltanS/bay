@@ -51,7 +51,7 @@ def _ansible_build_cmd(*, registry_cache: bool) -> str:
     assert len(cmds) == 1, f"expected exactly one buildx task, found {len(cmds)}"
     env = Environment(trim_blocks=True, lstrip_blocks=True)
     rendered = env.from_string(cmds[0]).render(
-        bay_buildx_builder="argo-builder",
+        bay_buildx_builder="argo-builder",  # legacy-argo: live buildx builder name on hosts, migrate separately
         git_deploy_registry_cache=registry_cache,
         git_deploy_remote_build_dir="/opt/test/push-builds",
         _image_repo="registry.example.com/acme/storefront",

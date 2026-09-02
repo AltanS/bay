@@ -45,8 +45,10 @@ def test_flags_override_the_built_in_defaults(tmp_path: Path) -> None:
     assert result.server_ip == "203.0.113.10"
     assert result.domain_base == "example.test"
     # Derived values follow the override — not the built-in example.com.
-    assert result.headscale_domain == "hs.example.test"
     assert result.letsencrypt_email == "admin@example.test"
+    # The default gateway is `none`, so no headscale domain is emitted.
+    assert result.access_gateway == "none"
+    assert result.headscale_domain is None
     assert result.project_name == "myproj"
     assert [k.public_key for k in result.ssh_keys] == [KEY]
 
@@ -63,6 +65,13 @@ def test_explicit_services_and_gateway(tmp_path: Path) -> None:
     )
     assert result.access_gateway == "none"
     assert "postgres" in result.selected_services  # dependency auto-added
+
+
+def test_headscale_domain_is_derived_only_when_headscale_is_chosen(tmp_path: Path) -> None:
+    result = _build_result_from_defaults(
+        _flags(domain="example.test", gateway="headscale"), tmp_path / "p"
+    )
+    assert result.headscale_domain == "hs.example.test"
 
 
 def test_unknown_service_is_refused(tmp_path: Path) -> None:

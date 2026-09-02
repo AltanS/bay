@@ -7,7 +7,7 @@ from bay_cli.errors import BayError
 
 
 def check_bay_version(bay_dir: Path, root: Path | None = None) -> None:
-    """Fail if .argo-version doesn't match the installed framework version.  # legacy-argo: .argo-version pin file, rename lands in S03
+    """Fail if .bay-version doesn't match the installed framework version.
 
     This is a hard guard — it raises :class:`BayError` on mismatch.
     In dev-link mode the check is silently skipped (version pinning is
@@ -24,16 +24,16 @@ def check_bay_version(bay_dir: Path, root: Path | None = None) -> None:
     if installed is None:
         raise BayError(
             "Framework version unknown\n"
-            "  .argo/version.yml is missing or unreadable.\n\n"  # legacy-argo: .argo/ convention, rename lands in S03
-            "Run 'bin/bay install' to sync."  # legacy-argo: bin/bay alias, rename lands in S03
+            "  .bay/version.yml is missing or unreadable.\n\n"
+            "Run 'bin/bay install' to sync."
         )
 
     if installed.lstrip("v") != pinned.lstrip("v"):
         raise BayError(
             f"Framework version mismatch\n"
-            f"  .argo-version: {pinned}\n"  # legacy-argo: .argo-version pin file, rename lands in S03
+            f"  .bay-version: {pinned}\n"
             f"  installed:     {installed}\n\n"
-            f"Run 'bin/bay install' to sync."  # legacy-argo: bin/bay alias, rename lands in S03
+            f"Run 'bin/bay install' to sync."
         )
 
 
@@ -50,4 +50,4 @@ def show_update_notice(bay_dir: Path, root: Path | None = None) -> None:
     latest = git.latest_tag(bay_dir)
     if latest and pinned != latest:
         console.console.print()
-        console.warning(f"Update available: {pinned} -> {latest} — run 'bin/bay update'")  # legacy-argo: bin/bay alias, rename lands in S03
+        console.warning(f"Update available: {pinned} -> {latest} — run 'bin/bay update'")

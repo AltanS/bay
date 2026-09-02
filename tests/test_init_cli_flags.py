@@ -195,7 +195,7 @@ class TestFlagsToPrefill:
         )
         result = _flags_to_prefill(flags)
         assert result.project_name == "myapp"
-        assert result.access_gateway == "headscale"  # default
+        assert result.access_gateway == "none"  # default
 
     def test_domain_flag_sets_headscale_domain(self) -> None:
         flags = _SetupFlags(

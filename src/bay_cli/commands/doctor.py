@@ -18,9 +18,10 @@ def doctor(
 ) -> None:
     """Run pre-flight checks on your project before deploying.
 
-    Checks .vault_pass, the inventory, SSH connectivity, DNS resolution of
-    the base and headscale domains, gateway configuration, and (when
-    configured) GitHub webhook health. Exits 1 when issues are found.
+    Checks .vault_pass, the inventory, SSH connectivity (as root, then as
+    admin_user), DNS resolution of your first service domain and the
+    headscale domain, gateway configuration, and (when configured) GitHub
+    webhook health. Exits 1 when issues are found.
     Complements `bin/bay validate`, which checks config files rather than
     the environment.
 
@@ -60,31 +61,13 @@ def doctor(
     # ── SSH connectivity ─────────────────────────────────────────────
     if hosts:
         host = hosts[0]
-        try:
-            result = subprocess.run(
-                [
-                    "ssh",
-                    "-o", "BatchMode=yes",
-                    "-o", "ConnectTimeout=5",
-                    "-o", "StrictHostKeyChecking=accept-new",
-                    host,
-                    "true",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                console.success(f"SSH connectivity   connected to {host}")
-            else:
-                stderr = result.stderr.strip().split("\n")[0] if result.stderr else "connection failed"
-                console.error(f"SSH connectivity   cannot reach {host} — {stderr}")
-                issues += 1
-        except subprocess.TimeoutExpired:
-            console.error(f"SSH connectivity   timeout connecting to {host}")
-            issues += 1
-        except FileNotFoundError:
-            console.error("SSH connectivity   ssh command not found")
+        candidates = _ssh_users(root)
+        connected_as, reason = _probe_ssh(host, candidates)
+        if connected_as:
+            console.success(f"SSH connectivity   connected to {connected_as}@{host}")
+        else:
+            attempted = ", ".join(f"{u}@{host}" for u in candidates)
+            console.error(f"SSH connectivity   cannot reach {attempted} — {reason}")
             issues += 1
     else:
         console.warning("SSH connectivity   skipped (no hosts in inventory)")
@@ -99,17 +82,27 @@ def doctor(
     headscale_control_region = access_gw_cfg.get("headscale_control_region") if access_gw_cfg else None
     domain_base = domains_cfg.get("domain_base") if domains_cfg else None
 
-    # ── DNS: main domain ─────────────────────────────────────────────
-    if domain_base:
-        resolved = _resolve_domain(domain_base)
-        if resolved:
-            console.success(f"DNS: {domain_base:<14s} resolves to {resolved}")
-        else:
-            hint = ""
-            if hosts:
-                hint = f" — create A record pointing to {hosts[0]}"
-            console.error(f"DNS: {domain_base:<14s} NXDOMAIN{hint}")
+    # ── DNS: a name the wildcard record actually covers ──────────────
+    # Never the bare apex: the wizard tells the operator to create
+    # `*.<domain_base>`, and a wildcard does not cover the apex, so a
+    # correctly configured zone used to report NXDOMAIN here.
+    services_file = _services_file(root, env)
+    probe_domain, probe_source = _dns_probe_target(services_file, domain_base)
+    if probe_domain:
+        try:
+            resolved = _resolve_domain(probe_domain)
+        except Exception as exc:  # a crashed probe is an error, never a skip
+            console.error(f"DNS: {probe_domain:<14s} check failed to run ({exc})")
             issues += 1
+        else:
+            if resolved:
+                console.success(f"DNS: {probe_domain:<14s} resolves to {resolved} ({probe_source})")
+            else:
+                hint = ""
+                if hosts:
+                    hint = f" — create a wildcard A record: *.{domain_base} -> {hosts[0]}"
+                console.error(f"DNS: {probe_domain:<14s} NXDOMAIN{hint}")
+                issues += 1
     else:
         console.info("DNS: main domain   skipped (no domain_base in config)")
 
@@ -142,8 +135,7 @@ def doctor(
             console.success("Gateway config     no access gateway (all services public)")
 
     # ── Webhook health ───────────────────────────────────────────────
-    services_file = root / "group_vars" / env / "services.yml"
-    if services_file.exists():
+    if services_file is not None:
         try:
             import yaml as _yaml
             from bay_cli.commands.validate import (
@@ -157,8 +149,11 @@ def doctor(
             parsed_files = _validate_yaml_files(root, env, wh_result)
             _probe_webhook_health(root, env, services_data, parsed_files, wh_result)
             issues += wh_result.total_issues
-        except Exception as _exc:  # pragma: no cover
-            console.warning(f"Webhook health     check skipped ({_exc})")
+        except Exception as _exc:
+            # A probe that cannot run is an unknown, not a pass. Counting it
+            # keeps `doctor` from printing "All checks passed" after a crash.
+            console.error(f"Webhook health     check failed to run ({_exc})")
+            issues += 1
     else:
         console.info("Webhook health     skipped (no services.yml)")
 
@@ -172,6 +167,114 @@ def doctor(
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
+
+
+#: Fallback when group_vars/all/main.yml does not set admin_user. Matches the
+#: value the wizard scaffolds (wizard/templates/main.yml.j2).
+DEFAULT_ADMIN_USER = "bay-admin"
+
+
+def _ssh_users(root: Path) -> list[str]:
+    """Return the SSH users to try, in order: root, then the admin account.
+
+    A fresh server only accepts ``root``; after ``bin/bay provision`` root
+    login is disabled and only ``admin_user`` works. Probing with no user at
+    all (the old behaviour) authenticates as the local account name, which
+    fails on both sides of that transition.
+    """
+    main_cfg = _load_yaml(root / "group_vars" / "all" / "main.yml") or {}
+    admin_user = main_cfg.get("admin_user") or DEFAULT_ADMIN_USER
+    users = ["root"]
+    if isinstance(admin_user, str) and admin_user.strip() and admin_user.strip() != "root":
+        users.append(admin_user.strip())
+    return users
+
+
+def _probe_ssh(host: str, users: list[str]) -> tuple[str | None, str]:
+    """Try each user in turn. Returns (user that connected, failure reason)."""
+    reason = "connection failed"
+    for user in users:
+        try:
+            proc = subprocess.run(
+                [
+                    "ssh",
+                    "-o", "BatchMode=yes",
+                    "-o", "ConnectTimeout=5",
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    f"{user}@{host}",
+                    "true",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            reason = "timeout"
+            continue
+        except FileNotFoundError:
+            return None, "ssh command not found"
+        if proc.returncode == 0:
+            return user, ""
+        if proc.stderr:
+            reason = proc.stderr.strip().split("\n")[0]
+    return None, reason
+
+
+def _services_file(root: Path, env: str) -> Path | None:
+    """Locate services.yml — the wizard writes ``group_vars/all/services.yml``.
+
+    A per-environment file is honoured only when the ``all`` one is absent.
+    """
+    candidates = [
+        root / "group_vars" / "all" / "services.yml",
+        root / "group_vars" / env / "services.yml",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _first_service_domain(services_file: Path | None) -> str | None:
+    """Return the first literal domain declared in services.yml, if any.
+
+    Jinja-templated entries (``{{ domain_base }}``) are skipped — they cannot
+    be resolved without running Ansible.
+    """
+    if services_file is None:
+        return None
+    data = _load_yaml(services_file)
+    if not data:
+        return None
+    for section in ("services", "accessories"):
+        entries = data.get(section)
+        if not isinstance(entries, dict):
+            continue
+        for entry in entries.values():
+            if not isinstance(entry, dict):
+                continue
+            domains = entry.get("domains")
+            if isinstance(domains, str):
+                domains = [domains]
+            if not isinstance(domains, list):
+                continue
+            for domain in domains:
+                if not isinstance(domain, str):
+                    continue
+                domain = domain.strip()
+                if domain and "{{" not in domain:
+                    return domain
+    return None
+
+
+def _dns_probe_target(services_file: Path | None, domain_base: str | None) -> tuple[str | None, str]:
+    """Pick the name to resolve, plus a short label saying where it came from."""
+    domain = _first_service_domain(services_file)
+    if domain:
+        return domain, "first service domain"
+    if domain_base:
+        return f"status.{domain_base}", "status subdomain"
+    return None, ""
 
 
 def _get_control_host_ip(inventory_file: Path, control_region: str | None = None) -> str | None:

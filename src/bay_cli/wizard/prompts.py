@@ -460,11 +460,19 @@ def run_wizard(existing: _ExistingConfig = None) -> WizardResult:
     console.console.print("  [dim]Choose how VPN clients connect to your server:[/dim]")
     console.console.print()
     gw_choices = [
-        ("headscale", "Headscale (Recommended) -- self-hosted Tailscale, auto device enrollment"),
+        ("none", "None (Recommended to start) -- no VPN, all services public"),
+        ("headscale", "Headscale -- self-hosted Tailscale, auto device enrollment"),
         ("wireguard", "WireGuard -- manual peer configuration"),
-        ("none", "None -- no VPN, all services public"),
     ]
-    gw_default = "headscale"
+    console.console.print(
+        "  [dim]Headscale adds a DNS record, a Tailscale client and four "
+        "post-deploy steps.[/dim]"
+    )
+    console.console.print(
+        "  [dim]You can add it later by re-running: bin/bay setup --gateway headscale[/dim]"
+    )
+    console.console.print()
+    gw_default = "none"
     if existing:
         gw_default = existing.access_gateway
     access_gateway = _prompt_choice("  Access gateway", gw_choices, default=gw_default)

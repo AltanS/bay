@@ -45,10 +45,12 @@ The wizard uses arrow-key selection for choices and checkbox pickers for service
 
 6. **SSH keys** — fetch from GitHub (by username) or paste a public key. You can add multiple keys. Skip if you prefer to add them later.
 
-7. **Access gateway** — how VPN-protected services are secured:
-   - **Headscale** (recommended) — self-hosted Tailscale, automatic device enrollment
+7. **Access gateway** — how VPN-protected services are secured. The default is **None**, which keeps the first deploy to one DNS record and no client install:
+   - **None** (default) — no VPN, all services are publicly accessible
+   - **Headscale** — self-hosted Tailscale, automatic device enrollment. Adds a DNS record, a Tailscale client install, and four post-deploy steps.
    - **WireGuard** — manual peer configuration with static IPs
-   - **None** — no VPN, all services are publicly accessible
+
+   You can add a gateway later by re-running `bin/bay setup --gateway headscale`. That re-opens the wizard pre-filled, so you confirm the other answers as you go.
 
 8. **Services** — pick from the catalog using checkbox selection (space to toggle):
    - **Services**: Gatus, Vaultwarden, n8n, Plausible, Umami
@@ -104,7 +106,7 @@ Subsequent provisions/deploys use `bay-admin` as normal.
 
 ## Gateway Paths
 
-### Headscale (Recommended)
+### Headscale
 
 Headscale is a self-hosted Tailscale coordination server. Devices join your private tailnet and get automatic, encrypted tunnels to your VPN-protected services.
 
@@ -143,11 +145,11 @@ Manual VPN with static peer configuration. You manage peer keys and IPs yourself
 - `group_vars/all/access_gateway.yml` — `access_gateway: wireguard`
 - `group_vars/all/vpn_access.yml` — your peer IPs in `vpn_allowed_ips`
 
-### None (No Gateway)
+### None (No Gateway, the default)
 
 All services are publicly accessible. No VPN.
 
-**When to choose**: All your services are public, or you'll add VPN later.
+**When to choose**: All your services are public, or you'll add VPN later. This is the default because it is the shortest path to a working first deploy.
 
 **Note**: Services with `access: vpn` in `services.yml` will still be tagged for VPN access, but without a gateway they'll be unreachable. Use `access: public` for all services, or add a gateway later by re-running `bin/bay setup`.
 

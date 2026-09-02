@@ -11,6 +11,25 @@ before upgrading — anything needing manual action is called out under
 
 ### Changed
 
+- The setup wizard now defaults the access gateway to **none**. Headscale is
+  still offered; add it later with `bin/bay setup --gateway headscale`.
+  Headscale adds a DNS record, a Tailscale client install and four post-deploy
+  steps to a first run, which is a lot to carry before anything works.
+- `bin/bay setup --defaults` now requires `--server-ip` and `--domain`. It
+  previously scaffolded `0.0.0.0` and `example.com`, which can never deploy.
+- The wizard scaffolds `group_vars/all/alerts.yml` with an empty
+  `alert_recipients` list. The legacy `docker_monitor_telegram_*` keys are no
+  longer generated — they sit at env level, outrank `group_vars/all/alerts.yml`
+  by Ansible precedence, and cause duplicate delivery once a real recipient is
+  added. Configure alerts with `bin/bay alerts`. See `docs/alerting.md`.
+- `bin/bay setup` takes `--email` (alias of `--letsencrypt-email`), honoured on
+  every path including `--no-interactive`. Without it, `admin@<domain>` is
+  derived and announced. The example copy previously left the shipped
+  placeholder in place, so a `--no-interactive` scaffold failed validate.
+- `bin/bay validate` now hard-fails on an empty `letsencrypt_email`. There is
+  no ACME opt-out in the framework, so an empty value always means broken SSL.
+  `example/group_vars/production/domains.yml` shipped it empty; it now carries
+  a placeholder that validate rejects until you replace it.
 - One documented entry path: clone over **HTTPS** into `.bay/`, run
   `.bay/bootstrap.sh`, then `bin/bay setup`. `README.md`, `SKILL.md`,
   `docs/onboarding.md` and `example/README.md` now say the same thing, and a
@@ -28,6 +47,21 @@ before upgrading — anything needing manual action is called out under
 
 ### Fixed
 
+- `bin/bay doctor`'s SSH check connected as your local username. It now tries
+  `root` (fresh server) and then `admin_user` (provisioned server), and names
+  the one that worked.
+- `bin/bay doctor`'s DNS check probed the bare apex domain, which a wildcard
+  `*.example.com` record does not cover — so a correct DNS zone reported
+  NXDOMAIN. It now resolves the first service domain, or
+  `status.<domain_base>`.
+- `bin/bay doctor`'s webhook check read `group_vars/<env>/services.yml`, which
+  the wizard never writes, so it always skipped. It now reads
+  `group_vars/all/services.yml`, falling back to the per-environment file.
+- `bin/bay doctor` could print "All checks passed" after a probe raised. A
+  failed probe is now counted as an issue.
+- The framework-version guard's error messages named the pre-1.0 paths
+  `.argo/version.yml` and `.argo-version`. They now name `.bay/version.yml`
+  and `.bay-version`, matching the layout every consumer actually has.
 - `make bay:setup` on its own left no `bin/bay` wrapper, so the documented next
   command could not run. The delegated target creates it.
 - The post-setup next-steps panel omitted the DNS record, `bin/bay validate`
@@ -48,6 +82,10 @@ before upgrading — anything needing manual action is called out under
 
 ### Upgrade notes
 
+- No host-side action for the alert change. Existing consumers that set
+  `docker_monitor_telegram_*` keep working; migrate to `alert_recipients` when
+  convenient and delete the legacy keys in the same change, or alerts arrive
+  twice.
 - Existing consumers: your `Makefile` is a generated file. Re-run
   `bin/bay setup --force` to pick up the new `bay:setup` target (it backs the
   old one up to `Makefile.bak`), or leave it — the old target still works.

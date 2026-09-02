@@ -633,7 +633,9 @@ def test_run_validation_returns_result(tmp_path):
         "    access: public\n    domains:\n      - app.example.com\n"
         "    ports:\n      internal: 8080\naccessories: {}\n"
     )
-    (gv / "main.yml").write_text("---\ndomain_base: example.com\n")
+    (gv / "main.yml").write_text(
+            "---\ndomain_base: example.com\nletsencrypt_email: ops@example.com\n"
+        )
     hosts_dir = tmp_path / "hosts"
     hosts_dir.mkdir()
     (hosts_dir / "production").write_text("[production]\n10.0.0.1\n")

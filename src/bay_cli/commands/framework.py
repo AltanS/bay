@@ -46,7 +46,10 @@ def setup(
     gateway: str | None = typer.Option(None, "--gateway", help="Access gateway: headscale, wireguard, or none."),
     headscale_domain: str | None = typer.Option(None, "--headscale-domain", help="Headscale domain."),
     services: str | None = typer.Option(None, "--services", help="Comma-separated service IDs."),
-    letsencrypt_email: str | None = typer.Option(None, "--letsencrypt-email", help="Let's Encrypt email."),
+    letsencrypt_email: str | None = typer.Option(
+        None, "--email", "--letsencrypt-email",
+        help="Let's Encrypt contact address. Defaults to admin@<domain>.",
+    ),
     multi_region: bool = typer.Option(False, "--multi-region", help="Enable multi-region mode."),
     vpn_peer_ips: str | None = typer.Option(None, "--vpn-peer-ips", help="Comma-separated WireGuard peer IPs."),
     ssh_key: list[str] = typer.Option(
@@ -64,9 +67,11 @@ def setup(
     shown as defaults, press Enter to keep them. With all required flags
     (--name, --domain, --gateway, plus --server-ip or --multi-region) the
     wizard is skipped entirely — for scripts and CI. --defaults is honoured
-    with or without a TTY; --server-ip and --domain override the built-in
-    defaults. Any non-interactive path needs an admin SSH key: --ssh-key,
-    --ssh-key-file, or a key found in ~/.ssh/*.pub.
+    with or without a TTY and requires --server-ip and --domain. Any
+    non-interactive path needs an admin SSH key: --ssh-key, --ssh-key-file,
+    or a key found in ~/.ssh/*.pub. The access gateway defaults to none; add
+    Headscale later with --gateway headscale. --email sets the Let's Encrypt
+    contact address on every path; without it, admin@<domain> is used.
 
     Examples:
 
@@ -80,6 +85,16 @@ def setup(
     root = paths.consumer_root(bay_dir)
 
     console.show_banner(subtitle="Setup Wizard")
+
+    # Guard first, before a single file is written: the built-in defaults were
+    # 0.0.0.0 and example.com, which scaffold a project that can never deploy.
+    if defaults and not (server_ip and domain):
+        raise BayError(
+            "--defaults needs both --server-ip and --domain\n"
+            "  Without them the scaffold gets 0.0.0.0 and example.com, "
+            "which can never deploy.\n\n"
+            "  bin/bay setup --defaults --server-ip 203.0.113.10 --domain example.com"
+        )
 
     # Detect already-initialized project → enter edit mode
     is_existing = (root / "ansible.cfg").exists()
@@ -268,7 +283,6 @@ def _build_result_from_defaults(flags: _SetupFlags, root: Path) -> WizardResult:
         result.domain_base = validate_domain(flags.domain)
         # Keep the derived values on the same domain as the override.
         result.letsencrypt_email = f"admin@{result.domain_base}"
-        result.headscale_domain = f"hs.{result.domain_base}"
     if flags.gateway:
         if flags.gateway not in _VALID_GATEWAYS:
             raise BayError(
@@ -277,6 +291,10 @@ def _build_result_from_defaults(flags: _SetupFlags, root: Path) -> WizardResult:
         result.access_gateway = flags.gateway  # type: ignore[assignment]
     if flags.headscale_domain:
         result.headscale_domain = validate_domain(flags.headscale_domain)
+    elif result.access_gateway == "headscale" and not result.headscale_domain:
+        # Only derived when headscale is actually selected — the default
+        # gateway is `none`, and that scaffold carries no headscale_domain.
+        result.headscale_domain = f"hs.{result.domain_base}"
     if flags.letsencrypt_email:
         result.letsencrypt_email = flags.letsencrypt_email
     if flags.services:
@@ -303,7 +321,7 @@ def _flags_to_prefill(flags: _SetupFlags) -> WizardResult:
     """Build a partial WizardResult from CLI flags to pre-fill the wizard."""
     from bay_cli.wizard.models import WizardResult
 
-    gateway = flags.gateway if flags.gateway in _VALID_GATEWAYS else "headscale"
+    gateway = flags.gateway if flags.gateway in _VALID_GATEWAYS else "none"
     headscale_domain = flags.headscale_domain
     if gateway == "headscale" and not headscale_domain and flags.domain:
         headscale_domain = f"hs.{flags.domain}"
@@ -491,13 +509,32 @@ def _scaffold_project(
 
 
 def _copy_example_tree(bay_dir: Path, root: Path, flags: _SetupFlags, *, force: bool) -> None:
-    """Copy ``example/`` and fill the two gaps it cannot ship: keys and secrets."""
+    """Copy ``example/`` and fill the gaps it cannot ship: keys, secrets, email."""
     from bay_cli.wizard.models import resolve_ssh_keys
     from bay_cli.wizard.scaffold import copy_examples, fill_example_gaps
 
     ssh_keys = resolve_ssh_keys(flags.ssh_key, flags.ssh_key_file)
     copy_examples(bay_dir, root, force=force)
-    fill_example_gaps(root, ssh_keys)
+    fill_example_gaps(root, ssh_keys, letsencrypt_email=_resolve_letsencrypt_email(flags))
+
+
+def _resolve_letsencrypt_email(flags: _SetupFlags) -> str | None:
+    """Return the ACME contact address, deriving ``admin@<domain>`` if needed.
+
+    The example tree ships a placeholder that `bay validate` rejects, so a
+    scaffold that leaves it in place produces a failing project.
+    """
+    if flags.letsencrypt_email:
+        return flags.letsencrypt_email
+    if flags.domain:
+        derived = f"admin@{flags.domain.strip().lower()}"
+        console.info(f"No --email given, using {derived} for Let's Encrypt")
+        return derived
+    console.warning(
+        "No --email or --domain given — letsencrypt_email keeps its placeholder "
+        "and 'bin/bay validate' will fail until you set it"
+    )
+    return None
 
 
 @app.command()

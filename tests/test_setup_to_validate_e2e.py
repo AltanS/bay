@@ -108,3 +108,62 @@ def test_validate_catches_a_stripped_admin_key(project: Path) -> None:
     result = _run(["validate"])
     assert result.exit_code != 0
     assert "ssh-access" in result.output
+
+
+# ── The --no-interactive (example copy) path ─────────────────────────────
+#
+# The other half of the same promise: `--no-interactive` copies example/
+# verbatim, and example/ ships a letsencrypt_email placeholder that validate
+# rejects. The scaffold has to fill it, exactly like it fills SSH keys and
+# secrets, or the documented non-interactive setup produces a failing tree.
+
+
+def _setup_no_interactive(tmp_path: Path, extra: list[str] | None = None):
+    key_file = tmp_path / "id_test.pub"
+    key_file.write_text(KEY + "\n")
+    args = [
+        "setup", "--no-interactive",
+        "--server-ip", "203.0.113.10",
+        "--domain", "example.test",
+        "--ssh-key-file", str(key_file),
+        *(extra or []),
+    ]
+    result = _run(args)
+    assert result.exit_code == 0, result.output
+    return result
+
+
+def test_no_interactive_project_validates_clean(project: Path, tmp_path: Path) -> None:
+    _setup_no_interactive(tmp_path)
+    result = _run(["validate"])
+    assert result.exit_code == 0, result.output
+    assert "All validation checks passed" in result.output
+
+
+def test_no_interactive_derives_the_acme_email_from_the_domain(
+    project: Path, tmp_path: Path
+) -> None:
+    setup = _setup_no_interactive(tmp_path)
+    assert "admin@example.test" in setup.output  # the notice
+    domains = yaml.safe_load((project / "group_vars/production/domains.yml").read_text())
+    assert domains["letsencrypt_email"] == "admin@example.test"
+
+
+def test_explicit_email_flag_wins(project: Path, tmp_path: Path) -> None:
+    _setup_no_interactive(tmp_path, ["--email", "ops@example.test"])
+    domains = yaml.safe_load((project / "group_vars/production/domains.yml").read_text())
+    assert domains["letsencrypt_email"] == "ops@example.test"
+    assert _run(["validate"]).exit_code == 0
+
+
+def test_defaults_path_also_honours_the_email_flag(project: Path) -> None:
+    result = _run([
+        "setup", "--defaults",
+        "--server-ip", "203.0.113.10",
+        "--domain", "example.test",
+        "--email", "ops@example.test",
+        "--ssh-key", KEY,
+    ])
+    assert result.exit_code == 0, result.output
+    domains = yaml.safe_load((project / "group_vars/production/domains.yml").read_text())
+    assert domains["letsencrypt_email"] == "ops@example.test"

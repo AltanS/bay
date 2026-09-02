@@ -51,13 +51,14 @@ def multi_region_result() -> WizardResult:
 
 # ── Expected files ───────────────────────────────────────────────────────
 
-# The 18 files rendered from _TEMPLATES for every scaffold run
+# The 19 files rendered from _TEMPLATES for every scaffold run
 _COMMON_FILES = [
     "group_vars/all/main.yml",
     "group_vars/all/services.yml",
     "group_vars/all/users.yml",
     "group_vars/all/security.yml",
     "group_vars/all/vpn_access.yml",
+    "group_vars/all/alerts.yml",
     "group_vars/all/access_gateway.yml",
     "group_vars/production/main.yml",
     "group_vars/production/domains.yml",
@@ -84,8 +85,8 @@ class TestSingleServerScaffold:
         self, tmp_path: Path, single_server_result: WizardResult
     ) -> None:
         created = scaffold(single_server_result, tmp_path)
-        # 20 rendered templates + gatus's catalog config file
-        assert len(created) == 21
+        # 21 rendered templates + gatus's catalog config file
+        assert len(created) == 22
         for rel in _COMMON_FILES:
             assert (tmp_path / rel).exists(), f"missing: {rel}"
 
@@ -157,7 +158,7 @@ class TestMultiRegionScaffold:
     ) -> None:
         created = scaffold(multi_region_result, tmp_path)
         # 20 common + 2 per-region main.yml + gatus's catalog config file
-        assert len(created) == 23
+        assert len(created) == 24
 
     def test_per_region_group_vars_created(
         self, tmp_path: Path, multi_region_result: WizardResult
