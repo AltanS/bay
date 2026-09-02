@@ -70,7 +70,7 @@ def _render(containers=None) -> str:
         ansible_managed="test",
         app_user="appuser",
         app_user_group="appuser",
-        log_archive_group="argo-logreaders",
+        log_archive_group="argo-logreaders",  # legacy-argo: unix group on hosts
         log_archive_log_root=_ROOT,
         log_archive_default_mode="normal",
         log_archive_default_compress=True,
@@ -112,10 +112,10 @@ def test_every_artefact_appears_exactly_once_per_service():
 
 def test_normal_and_sensitive_permission_split_is_preserved():
     calls = {(c[0], c[1]): c[2:] for c in _calls(_render())}
-    assert calls[("ensure_dir", f"{_ROOT}/api")] == ["appuser", "argo-logreaders", "750"]
+    assert calls[("ensure_dir", f"{_ROOT}/api")] == ["appuser", "argo-logreaders", "750"]  # legacy-argo: unix group on hosts
     assert calls[("ensure_file", f"{_ROOT}/api/live.log")] == [
         "appuser",
-        "argo-logreaders",
+        "argo-logreaders",  # legacy-argo: unix group on hosts
         "640",
     ]
     assert calls[("ensure_dir", f"{_ROOT}/billing")] == ["root", "root", "700"]
