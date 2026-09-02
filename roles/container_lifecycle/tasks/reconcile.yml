@@ -15,14 +15,34 @@
 # bundle holds resolved env (secrets) at mode 0600 on
 # the host — same posture as the env files — and is removed after the run.
 
-- name: Slurp rendered env files for the bundle
-  ansible.builtin.slurp:
-    src: "{{ item.env_file }}"
-  loop: "{{ container_specs | selectattr('env_file', 'defined') | list }}"
-  loop_control:
-    loop_var: item
-    label: "{{ item.name }}"
-  register: _reconcile_env_slurps
+# One read for every env file, instead of one slurp per container. The digest
+# formula is unchanged (sha256 over the file's bytes), so an unchanged fleet
+# keeps its config_hash and nothing recreates on upgrade.
+#
+# `check_mode: false` because this is a pure read that the bundle build below
+# cannot proceed without — and because a check-mode-skipped command registers
+# rc 0 with an empty stdout, which would make `from_json` blow up the play.
+# argv (not cmd) so no path is ever shell-split; the path list travels as one
+# JSON argument.
+- name: Read the rendered env files in one pass
+  ansible.builtin.command:
+    argv:
+      - python3
+      - -c
+      - |
+        import base64, json, sys
+        paths = json.loads(sys.argv[1])
+        out = {}
+        for path in paths:
+            with open(path, "rb") as handle:
+                out[path] = base64.b64encode(handle.read()).decode("ascii")
+        print(json.dumps(out))
+      - >-
+        {{ container_specs | selectattr('env_file', 'defined')
+           | map(attribute='env_file') | list | to_json }}
+  register: _reconcile_env_read
+  changed_when: false
+  check_mode: false
   no_log: true
 
 - name: Build reconcile bundle entries
@@ -33,10 +53,10 @@
     loop_var: _spec
     label: "{{ _spec.name }}"
   vars:
-    _slurp_match: >-
-      {{ (_reconcile_env_slurps.results | default([]))
-         | selectattr('item.name', 'equalto', _spec.name) | list }}
-    _env_b64: "{{ (_slurp_match[0].content) if (_slurp_match | length > 0) else '' }}"
+    _env_map: "{{ _reconcile_env_read.stdout | default('{}') | from_json }}"
+    _env_b64: >-
+      {{ _env_map[_spec.env_file] if (_spec.env_file is defined
+         and _spec.env_file in _env_map) else '' }}
     _env_file_dict: "{{ (_env_b64 | b64decode | parse_env_file) if _env_b64 else {} }}"
     _env_digest: "{{ (_env_b64 | b64decode | hash('sha256')) if _env_b64 else '' }}"
     _entry: >-
@@ -78,13 +98,99 @@
     mode: "0600"
   no_log: true
 
+# ── shipping the package ────────────────────────────────────────────────
+# This used to be a recursive `copy` of src/bay_reconcile on every deploy —
+# every file re-transferred every run, `__pycache__` included. Now the package
+# is packed once into a tar (pycache excluded) and shipped only when the
+# marker on the host disagrees with the framework version + a digest of the
+# package contents. A matching marker skips the transfer entirely.
+#
+# Consequence worth knowing: a hand-edited .reconcile/ tree is NOT repaired
+# until the marker moves. `rm <stack_dir>/.reconcile/.version` forces a reship.
+
+- name: Compute the reconciler package marker
+  vars:
+    # fileglob returns files only, so __pycache__/ never enters the digest.
+    _pkg_files: >-
+      {{ query('ansible.builtin.fileglob', playbook_dir ~ '/src/bay_reconcile/*')
+         | sort }}
+  ansible.builtin.set_fact:
+    _reconcile_pkg_marker: >-
+      {{ (bay_version | default('dev')) ~ ' ' ~
+         (((_pkg_files | map('basename') | list)
+           ~ query('ansible.builtin.file', *_pkg_files))
+          | string | hash('sha256')) }}
+
+- name: Read the reconciler marker on the host
+  ansible.builtin.command:
+    argv:
+      - cat
+      - "{{ stack_dir }}/.reconcile/.version"
+  register: _reconcile_marker_on_host
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
 - name: Ship the bay_reconcile package
-  ansible.builtin.copy:
-    src: "{{ playbook_dir }}/src/bay_reconcile"
-    dest: "{{ stack_dir }}/.reconcile/"
-    owner: "{{ app_user }}"
-    group: docker
-    mode: "0644"
+  when: >-
+    (_reconcile_marker_on_host.stdout | default('') | trim)
+    != (_reconcile_pkg_marker | trim)
+  vars:
+    _pkg_cache: >-
+      {{ lookup('ansible.builtin.env', 'XDG_CACHE_HOME')
+         | default(lookup('ansible.builtin.env', 'HOME') ~ '/.cache', true) }}/bay
+    _pkg_tar: >-
+      {{ _pkg_cache }}/bay_reconcile-{{ _reconcile_pkg_marker | hash('sha1') }}.tar.gz
+  block:
+    - name: Ensure the controller-side package cache exists
+      ansible.builtin.file:
+        path: "{{ _pkg_cache }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    # `creates:` makes this a no-op once the tar for this exact marker exists,
+    # so a multi-host deploy packs once and ships N times.
+    - name: Pack bay_reconcile without __pycache__
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --exclude=__pycache__
+          - --exclude=*.pyc
+          - -czf
+          - "{{ _pkg_tar }}"
+          - -C
+          - "{{ playbook_dir }}/src"
+          - bay_reconcile
+        creates: "{{ _pkg_tar }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Ensure the reconciler directory exists
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/.reconcile"
+        state: directory
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0750"
+
+    - name: Unpack bay_reconcile on the host
+      ansible.builtin.unarchive:
+        src: "{{ _pkg_tar }}"
+        dest: "{{ stack_dir }}/.reconcile/"
+        owner: "{{ app_user }}"
+        group: docker
+
+    # Written LAST: if anything above fails the marker keeps its old value and
+    # the next deploy retries the ship.
+    - name: Record the shipped reconciler marker
+      ansible.builtin.copy:
+        content: "{{ _reconcile_pkg_marker | trim }}\n"
+        dest: "{{ stack_dir }}/.reconcile/.version"
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0640"
 
 - name: Run server-side reconciler
   ansible.builtin.command:

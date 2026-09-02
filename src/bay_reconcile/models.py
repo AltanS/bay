@@ -191,5 +191,9 @@ class ReconcilerConfig:
 
     canary_suffix: str = "-new"
     healthcheck_timeout: float = 120.0
-    healthcheck_poll: float = 5.0
+    # 1s, not 5s: the timeout is the safety budget, the poll is only the
+    # granularity of noticing. A canary that goes healthy at t=0.3s used to be
+    # waited on for a full 5s per swap. The attempt count rises to match; the
+    # worst case is unchanged.
+    healthcheck_poll: float = 1.0
     stop_timeout: int = 30

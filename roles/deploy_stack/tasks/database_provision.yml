@@ -1,31 +1,25 @@
 ---
-# Provision databases for services with database: binding
-# Called after container_lifecycle deploys, runs idempotent SQL via docker exec
+# Provision databases for services with a `database:` binding.
 #
-# Quoting contract — read before editing any SQL below.
+# One idempotent SQL script per accessory, piped into one psql. This used to
+# be six looped tasks per binding (exists-check, create, exists-check, create
+# role, grant, schema grant), so a fleet with N bindings paid 6N round trips
+# every deploy. Idempotence now lives in the SQL (`pg_database` / `pg_roles`
+# guards), which is where it belongs — the server already knows.
 #
-# Every task here is ansible.builtin.command, which does NOT invoke a shell.
-# The exposure is therefore SQL injection, not shell injection: `psql -c`
-# accepts semicolon-separated statements, so a database name of
-# `x; DROP DATABASE prod` used to execute as the postgres superuser.
+# Quoting contract: see the header of templates/provision-db.sql.j2. In short,
+# no identifier is ever interpolated as an identifier; names cross as SQL
+# string literals and `format('%I', ...)` makes them identifiers server-side.
+# The schema pattern (^[a-z_][a-z0-9_]{0,62}$) and validate.py's identifier
+# check are the earlier gates; this is the last one, and it does not depend on
+# them, because roles get run straight from ansible-playbook in recovery.
 #
-#   * IDENTIFIERS (database and role names) are wrapped in double quotes with
-#     any embedded `"` doubled:  "{{ x | replace('"', '""') }}"
-#   * STRING LITERALS are wrapped in single quotes with any embedded `'`
-#     doubled:  '{{ x | replace("'", "''") }}'  — the escaping the password
-#     already had, now applied to every literal.
+# `argv:` (not `cmd:`) so the accessory name is never shlex-split, and the SQL
+# travels on stdin rather than in argv, so it never reaches `ps`.
 #
-# `argv:` is used instead of `cmd:` so nothing is shlex-split on the way in:
-# a SQL fragment carrying quotes stays exactly one argv element. The SQL
-# strings themselves are YAML folded scalars (`>-`), which have no escape
-# processing, so what you read is what psql receives.
-#
-# Layer one is src/bay_cli/schemas/services.schema.json, which constrains
-# database.name / database.user to ^[a-z_][a-z0-9_]{0,62}$. This file does not
-# rely on it — roles are run straight from ansible-playbook in recovery.
-#
-# Scope: M111 spec 02 collapses this into one SQL script. Keep the per-task
-# structure until then.
+# `no_log: true` covers the whole task now: the script carries every bound
+# role's password. To debug a failure, re-run with `-e provision_db_debug=true`
+# — that flips no_log off and the SQL (passwords included) prints.
 
 - name: Collect services with database bindings
   ansible.builtin.set_fact:
@@ -39,75 +33,24 @@
 - name: Provision databases
   when: _db_bindings | length > 0
   block:
-    - name: Check if database exists
-      vars:
-        _acc: "{{ item.value.database.accessory }}"
-        _db: "{{ item.value.database.name | default(item.key) }}"
-      ansible.builtin.command:
-        argv:
-          - docker
-          - exec
-          - "{{ _acc }}"
-          - psql
-          - -U
-          - "{{ (active_accessories[_acc].env['clear'].POSTGRES_USER) | default('postgres') }}"
-          - -tc
-          - >-
-            SELECT 1 FROM pg_database WHERE datname =
-            '{{ _db | replace("'", "''") }}'
-      register: _db_exists
-      changed_when: false
-      loop: "{{ _db_bindings }}"
-      loop_control:
-        label: "{{ item.key }}"
+    - name: Collect the accessories those bindings target
+      ansible.builtin.set_fact:
+        _db_accessories: >-
+          {{ _db_bindings
+             | map(attribute='value.database.accessory')
+             | unique | list }}
 
-    - name: "Create databases that don't exist"
+    # One `docker exec` per accessory. `-q` plus the script's
+    # `\pset tuples_only` means the only thing on stdout is the script's own
+    # "CHANGED:" lines, so `changed` is derived from real work rather than
+    # asserted with `changed_when: true`.
+    - name: Provision databases, roles and grants
       vars:
-        _acc: "{{ item.item.value.database.accessory }}"
-        _db: "{{ item.item.value.database.name | default(item.item.key) }}"
-      ansible.builtin.command:
-        argv:
-          - docker
-          - exec
-          - "{{ _acc }}"
-          - psql
-          - -U
-          - "{{ (active_accessories[_acc].env['clear'].POSTGRES_USER) | default('postgres') }}"
-          - -c
-          - >-
-            CREATE DATABASE "{{ _db | replace('"', '""') }}"
-      loop: "{{ _db_exists.results }}"
-      loop_control:
-        label: "{{ item.item.key }}"
-      when: item.stdout is defined and item.stdout.strip() != '1'
-      changed_when: true
-
-    - name: "Check if database users exist"
-      vars:
-        _acc: "{{ item.value.database.accessory }}"
-        _user: "{{ item.value.database.user | default(item.key) }}"
-      ansible.builtin.command:
-        argv:
-          - docker
-          - exec
-          - "{{ _acc }}"
-          - psql
-          - -U
-          - "{{ (active_accessories[_acc].env['clear'].POSTGRES_USER) | default('postgres') }}"
-          - -tc
-          - >-
-            SELECT 1 FROM pg_roles WHERE rolname =
-            '{{ _user | replace("'", "''") }}'
-      register: _user_exists
-      changed_when: false
-      loop: "{{ _db_bindings }}"
-      loop_control:
-        label: "{{ item.key }}"
-
-    - name: "Create or update database users"
-      vars:
-        _acc: "{{ item.item.value.database.accessory }}"
-        _user: "{{ item.item.value.database.user | default(item.item.key) }}"
+        _acc: "{{ item }}"
+        _acc_bindings: >-
+          {{ _db_bindings
+             | selectattr('value.database.accessory', 'equalto', item)
+             | list }}
       ansible.builtin.command:
         argv:
           - docker
@@ -115,63 +58,13 @@
           - -i
           - "{{ _acc }}"
           - psql
+          - -q
           - -U
           - "{{ (active_accessories[_acc].env['clear'].POSTGRES_USER) | default('postgres') }}"
-        stdin: |
-          {% if item.stdout is defined and item.stdout.strip() == '1' %}
-          ALTER ROLE "{{ _user | replace('"', '""') }}" WITH PASSWORD '{{ secrets[(_user | upper | replace('-', '_')) + '_POSTGRES_PASSWORD'] | replace("'", "''") }}';
-          {% else %}
-          CREATE ROLE "{{ _user | replace('"', '""') }}" WITH LOGIN PASSWORD '{{ secrets[(_user | upper | replace('-', '_')) + '_POSTGRES_PASSWORD'] | replace("'", "''") }}';
-          {% endif %}
-      loop: "{{ _user_exists.results }}"
-      loop_control:
-        label: "{{ item.item.key }}"
-      no_log: true
-      changed_when: true
-
-    - name: "Grant privileges"
-      vars:
-        _acc: "{{ item.value.database.accessory }}"
-        _db: "{{ item.value.database.name | default(item.key) }}"
-        _user: "{{ item.value.database.user | default(item.key) }}"
-      ansible.builtin.command:
-        argv:
-          - docker
-          - exec
-          - "{{ _acc }}"
-          - psql
-          - -U
-          - "{{ (active_accessories[_acc].env['clear'].POSTGRES_USER) | default('postgres') }}"
-          - -c
-          - >-
-            GRANT ALL PRIVILEGES ON DATABASE "{{ _db | replace('"', '""') }}"
-            TO "{{ _user | replace('"', '""') }}"
-      loop: "{{ _db_bindings }}"
-      loop_control:
-        label: "{{ item.key }}"
-      changed_when: false
-
-    - name: "Grant schema permissions (PG15+)"
-      vars:
-        _acc: "{{ item.value.database.accessory }}"
-        _db: "{{ item.value.database.name | default(item.key) }}"
-        _user: "{{ item.value.database.user | default(item.key) }}"
-      ansible.builtin.command:
-        argv:
-          - docker
-          - exec
-          - -i
-          - "{{ _acc }}"
-          - psql
-          - -U
-          - "{{ (active_accessories[_acc].env['clear'].POSTGRES_USER) | default('postgres') }}"
-          - -d
-          - "{{ _db }}"
-        stdin: |
-          GRANT ALL ON SCHEMA public TO "{{ _user | replace('"', '""') }}";
-          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO "{{ _user | replace('"', '""') }}";
-          ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO "{{ _user | replace('"', '""') }}";
-      loop: "{{ _db_bindings }}"
-      loop_control:
-        label: "{{ item.key }}"
-      changed_when: false
+        stdin: >-
+          {{ lookup('ansible.builtin.template', 'provision-db.sql.j2',
+                    template_vars={'_acc_bindings': _acc_bindings}) }}
+      loop: "{{ _db_accessories }}"
+      register: _db_provision
+      changed_when: "'CHANGED:' in (_db_provision.stdout | default(''))"
+      no_log: "{{ not (provision_db_debug | default(false) | bool) }}"

@@ -14,9 +14,13 @@ across plays that re-establish connections — yet the actual container work is
 cheap and *local on the server*. Profiling a no-op deploy showed container
 reconciliation is **not** the wall-clock bottleneck, but it scales linearly with
 service count (~10 Ansible tasks per container). The reconciler collapses that
-whole layer into **one server-side pass** (observe in one batched `docker list`,
-diff, execute), measured at **0.47s for a 6-container fleet** vs container_
-lifecycle's ~60 tasks — a win that stays ~constant as the fleet grows.
+whole layer into **one server-side pass** (observe, diff, execute), measured at
+**0.47s for a 6-container fleet** vs container_lifecycle's ~60 tasks — a win
+that stays ~constant as the fleet grows. Observe is one `docker list` **plus
+one inspect per container** — docker-py's `containers.list()` defaults to
+`sparse=False`, which re-fetches each container in full. All of it is local
+unix-socket traffic inside that single server-side pass, so it costs
+milliseconds; it is not, however, a single call.
 
 ## Architecture — functional core / imperative shell
 

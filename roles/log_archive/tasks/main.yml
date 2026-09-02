@@ -3,9 +3,9 @@
 #
 # Runs during deploy when any service/accessory has `log_retention:`
 # configured on this host. Idempotent; safe to re-run. When no
-# container opts in, every task block below gates on
-# `_log_archive_containers | length > 0` so the role is a true no-op
-# (no group creation, no systemd files) until a consumer enables it.
+# container opts in, the single gated block below is skipped whole, so the
+# role is a true no-op (no group creation, no systemd files) until a
+# consumer enables it.
 
 - name: Collect containers with log_retention on this host
   ansible.builtin.set_fact:
@@ -16,379 +16,191 @@
          | selectattr('value.log_retention', 'mapping')
          | list }}
 
-# Everything below is gated — role is a no-op if nothing opted in.
-
-# ── argo-logreaders group ────────────────────────────────────────────  # legacy-argo: unix group on hosts
-# Group membership is explicit. Operators who want `debugbot` to read
-# archives add it manually — we never add it automatically because the
-# archive can contain PII once log_retention is enabled on any
-# user-facing service.
-
-- name: Create log_archive reader group
-  ansible.builtin.group:
-    name: "{{ log_archive_group }}"
-    state: present
-    system: true
+# Two gated blocks from here, split only by the handler flush between them.
+# The gate is each block's single `when:`; it used to be repeated on every one
+# of the twenty-odd tasks, which made the container fact hard to grep for and
+# easy to forget on a new task.
+- name: Provision log archival
   when: _log_archive_containers | length > 0
+  block:
 
-- name: Add app_user to log_archive reader group
-  ansible.builtin.user:
-    name: "{{ app_user }}"
-    groups: "{{ log_archive_group }}"
-    append: true
-  when: _log_archive_containers | length > 0
+    # ── argo-logreaders group ────────────────────────────────────────  # legacy-argo: unix group on hosts
+    # Group membership is explicit. Operators who want `debugbot` to read
+    # archives add it manually — we never add it automatically because the
+    # archive can contain PII once log_retention is enabled on any
+    # user-facing service.
 
-# ── archiver script + systemd units ─────────────────────────────────
-# Script lives under the stack's bin/ so it inherits the stack_dir
-# permission model (owned by app_user). Systemd units are installed
-# system-wide with an instance template so each service gets its own
-# independent timer.
+    - name: Create log_archive reader group
+      ansible.builtin.group:
+        name: "{{ log_archive_group }}"
+        state: present
+        system: true
 
-- name: Ensure stack bin directory exists
-  ansible.builtin.file:
-    path: "{{ log_archive_bin_dir }}"
-    state: directory
-    owner: "{{ app_user }}"
-    group: "{{ app_user_group }}"
-    mode: "0750"
-  when: _log_archive_containers | length > 0
+    - name: Add app_user to log_archive reader group
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        groups: "{{ log_archive_group }}"
+        append: true
 
-- name: Install archive-logs.sh
-  ansible.builtin.template:
-    src: archive-logs.sh.j2
-    dest: "{{ log_archive_bin_dir }}/archive-logs.sh"
-    owner: "{{ app_user }}"
-    group: "{{ app_user_group }}"
-    mode: "0750"
-  when: _log_archive_containers | length > 0
+    # ── archiver script + systemd units ─────────────────────────────
+    # Scripts live under the stack's bin/ so they inherit the stack_dir
+    # permission model. Systemd units are installed system-wide with an
+    # instance template so each service gets its own independent timer.
 
-- name: Install rotate-logs.sh
-  ansible.builtin.template:
-    src: rotate-logs.sh.j2
-    dest: "{{ log_archive_bin_dir }}/rotate-logs.sh"
-    owner: "{{ app_user }}"
-    group: "{{ app_user_group }}"
-    mode: "0750"
-  when: _log_archive_containers | length > 0
+    - name: Ensure stack bin directory exists
+      ansible.builtin.file:
+        path: "{{ log_archive_bin_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        mode: "0750"
 
-- name: Install scrub-logs.sh
-  ansible.builtin.template:
-    src: scrub-logs.sh.j2
-    dest: "{{ log_archive_bin_dir }}/scrub-logs.sh"
-    owner: "{{ app_user }}"
-    group: "{{ app_user_group }}"
-    mode: "0750"
-  when: _log_archive_containers | length > 0
+    - name: Install archive-logs.sh
+      ansible.builtin.template:
+        src: archive-logs.sh.j2
+        dest: "{{ log_archive_bin_dir }}/archive-logs.sh"
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        mode: "0750"
 
-- name: Install bay-logarchive@.service unit
-  ansible.builtin.template:
-    src: "{{ log_archive_unit_name }}@.service.j2"
-    dest: "/etc/systemd/system/{{ log_archive_unit_name }}@.service"
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Reload systemd
-  when: _log_archive_containers | length > 0
+    - name: Install rotate-logs.sh
+      ansible.builtin.template:
+        src: rotate-logs.sh.j2
+        dest: "{{ log_archive_bin_dir }}/rotate-logs.sh"
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        mode: "0750"
 
-- name: Install bay-logarchive@.timer unit
-  ansible.builtin.template:
-    src: "{{ log_archive_unit_name }}@.timer.j2"
-    dest: "/etc/systemd/system/{{ log_archive_unit_name }}@.timer"
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Reload systemd
-  when: _log_archive_containers | length > 0
+    - name: Install scrub-logs.sh
+      ansible.builtin.template:
+        src: scrub-logs.sh.j2
+        dest: "{{ log_archive_bin_dir }}/scrub-logs.sh"
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        mode: "0750"
 
-- name: Install bay-logrotate@.service unit
-  ansible.builtin.template:
-    src: bay-logrotate@.service.j2
-    dest: "/etc/systemd/system/bay-logrotate@.service"
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Reload systemd
-  when: _log_archive_containers | length > 0
+    - name: Install bay-logarchive@.service unit
+      ansible.builtin.template:
+        src: "{{ log_archive_unit_name }}@.service.j2"
+        dest: "/etc/systemd/system/{{ log_archive_unit_name }}@.service"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
 
-- name: Install bay-logrotate@.timer unit
-  ansible.builtin.template:
-    src: bay-logrotate@.timer.j2
-    dest: "/etc/systemd/system/bay-logrotate@.timer"
-    owner: root
-    group: root
-    mode: "0644"
-  notify: Reload systemd
-  when: _log_archive_containers | length > 0
+    - name: Install bay-logarchive@.timer unit
+      ansible.builtin.template:
+        src: "{{ log_archive_unit_name }}@.timer.j2"
+        dest: "/etc/systemd/system/{{ log_archive_unit_name }}@.timer"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
 
+    - name: Install bay-logrotate@.service unit
+      ansible.builtin.template:
+        src: bay-logrotate@.service.j2
+        dest: "/etc/systemd/system/bay-logrotate@.service"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
+
+    - name: Install bay-logrotate@.timer unit
+      ansible.builtin.template:
+        src: bay-logrotate@.timer.j2
+        dest: "/etc/systemd/system/bay-logrotate@.timer"
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Reload systemd
+
+# `meta:` does not honour a `when:`, so the handler flush lives outside the
+# gated block rather than pretending to be gated. It is a no-op when no unit
+# changed, which is the only way it can be reached with nothing opted in.
 - name: Reload systemd (flush handler if units changed)
   ansible.builtin.meta: flush_handlers
 
-# ── per-service directory tree ──────────────────────────────────────
-# `normal` mode → 0750 app_user:argo-logreaders on dirs, 0640 on files.  # legacy-argo: unix group on hosts
-# `sensitive` mode → 0700 root:root on dirs, 0600 on files — the
-# argo-logreaders group is locked out by design.  # legacy-argo: unix group on hosts
-
-- name: Create per-service log directory (normal mode)
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}"
-    state: directory
-    owner: "{{ app_user }}"
-    group: "{{ log_archive_group }}"
-    mode: "0750"
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'normal'
-
-- name: Create per-service log directory (sensitive mode)
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}"
-    state: directory
-    owner: root
-    group: root
-    mode: "0700"
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'sensitive'
-
-- name: Create .malformed subdir (normal mode)
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}/.malformed"
-    state: directory
-    owner: "{{ app_user }}"
-    group: "{{ log_archive_group }}"
-    mode: "0750"
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'normal'
-
-- name: Create .malformed subdir (sensitive mode)
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}/.malformed"
-    state: directory
-    owner: root
-    group: root
-    mode: "0700"
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'sensitive'
-
-- name: Touch live.log (normal mode)
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}/live.log"
-    state: touch
-    owner: "{{ app_user }}"
-    group: "{{ log_archive_group }}"
-    mode: "0640"
-    modification_time: preserve
-    access_time: preserve
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'normal'
-
-- name: Touch live.log (sensitive mode)
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}/live.log"
-    state: touch
-    owner: root
-    group: root
-    mode: "0600"
-    modification_time: preserve
-    access_time: preserve
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'sensitive'
-
-- name: Touch .cursor (normal mode)
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}/.cursor"
-    state: touch
-    owner: "{{ app_user }}"
-    group: "{{ log_archive_group }}"
-    mode: "0640"
-    modification_time: preserve
-    access_time: preserve
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'normal'
-
-- name: Touch .cursor (sensitive mode)
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}/.cursor"
-    state: touch
-    owner: root
-    group: root
-    mode: "0600"
-    modification_time: preserve
-    access_time: preserve
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'sensitive'
-
-- name: Touch .prune-log (normal mode)
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}/.prune-log"
-    state: touch
-    owner: "{{ app_user }}"
-    group: "{{ log_archive_group }}"
-    mode: "0640"
-    modification_time: preserve
-    access_time: preserve
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'normal'
-
-- name: Touch .prune-log (sensitive mode)
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}/.prune-log"
-    state: touch
-    owner: root
-    group: root
-    mode: "0600"
-    modification_time: preserve
-    access_time: preserve
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'sensitive'
-
-- name: Ensure today.log symlink points at live.log
-  ansible.builtin.file:
-    path: "{{ log_archive_log_root }}/{{ item.key }}/today.log"
-    state: link
-    src: live.log
-    force: true
-    follow: false
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-
-# ── .retention sidecar ──────────────────────────────────────────────
-# Both archive-logs.sh and rotate-logs.sh read per-service retention
-# config from this file (key=value, shell-safe). Keeps the systemd
-# unit templates instance-pure — each per-service tick just looks up
-# its .retention to get mode/days/max_total_size/compress.
-
-- name: Write .retention config (normal mode)
-  ansible.builtin.template:
-    src: retention.conf.j2
-    dest: "{{ log_archive_log_root }}/{{ item.key }}/.retention"
-    owner: "{{ app_user }}"
-    group: "{{ log_archive_group }}"
-    mode: "0640"
-  vars:
-    _svc: "{{ item.key }}"
-    _retention: "{{ item.value.log_retention }}"
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'normal'
-
-- name: Write .retention config (sensitive mode)
-  ansible.builtin.template:
-    src: retention.conf.j2
-    dest: "{{ log_archive_log_root }}/{{ item.key }}/.retention"
-    owner: root
-    group: root
-    mode: "0600"
-  vars:
-    _svc: "{{ item.key }}"
-    _retention: "{{ item.value.log_retention }}"
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'sensitive'
-
-# ── sensitive-mode assertion ────────────────────────────────────────
-# Defense in depth — prior tasks set 0700 root:root explicitly, but if
-# an operator ran a lingering file(mode=0750) by hand or a past
-# permission drift survived, fail fast before the archiver runs.
-
-- name: Stat sensitive log directories
-  ansible.builtin.stat:
-    path: "{{ log_archive_log_root }}/{{ item.key }}"
-  register: _log_archive_sensitive_stats
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-  when: (item.value.log_retention.mode | default(log_archive_default_mode)) == 'sensitive'
-
-- name: Assert sensitive log dir is 0700 root:root
-  ansible.builtin.fail:
-    msg: >-
-      Sensitive log_retention directory
-      {{ log_archive_log_root }}/{{ item.item.key }} has mode
-      {{ item.stat.mode }} owner {{ item.stat.pw_name }}:{{ item.stat.gr_name }}
-      (expected 0700 root:root). Refusing to start archiver — resolve
-      permission drift before continuing.
-  loop: "{{ _log_archive_sensitive_stats.results | default([]) }}"
-  loop_control:
-    label: "{{ item.item.key | default('n/a') }}"
-  when:
-    - item is defined
-    - item.stat is defined
-    - item.stat.exists | default(false)
-    - item.stat.mode != '0700' or item.stat.pw_name != 'root' or item.stat.gr_name != 'root'
-
-# ── enable per-service timers ───────────────────────────────────────
-
-- name: Enable + start bay-logarchive@<svc>.timer
-  ansible.builtin.systemd_service:
-    name: "{{ log_archive_unit_name }}@{{ item.key }}.timer"
-    enabled: true
-    state: started
-    daemon_reload: true
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-
-- name: Enable + start bay-logrotate@<svc>.timer
-  ansible.builtin.systemd_service:
-    name: "bay-logrotate@{{ item.key }}.timer"
-    enabled: true
-    state: started
-    daemon_reload: true
-  loop: "{{ _log_archive_containers }}"
-  loop_control:
-    label: "{{ item.key }}"
-
-# ── debugbot / SSH MOTD banner ──────────────────────────────────────
-# Remind operators where archived logs live on this host. A small
-# update-motd.d script reads the service list from the per-service
-# config and prints one "Archived logs: <path>" line per service at
-# every SSH login. No-op on hosts with no log_retention-enabled
-# containers (the script early-returns when the archive root is empty).
-
-- name: Install /etc/update-motd.d/99-bay-logs
-  ansible.builtin.copy:
-    dest: /etc/update-motd.d/99-bay-logs
-    content: |
-      #!/usr/bin/env bash
-      # Managed by bay log_archive role.
-      # Print archive paths on SSH login so operators remember
-      # where durable logs live. See docs/services.md#log-retention.
-      ROOT="{{ log_archive_log_root }}"
-      [[ -d "$ROOT" ]] || exit 0
-      # shopt -s nullglob so an empty dir yields no output.
-      shopt -s nullglob
-      dirs=("$ROOT"/*/)
-      (( {{ '${' }}#dirs[@]} == 0 )) && exit 0
-      printf '\n'
-      printf 'Archived logs (log_retention):\n'
-      for d in "${dirs[@]}"; do
-        svc="$(basename "$d")"
-        printf '  %s -> %s\n' "$svc" "$d"
-      done
-      printf '\n'
-    owner: root
-    group: root
-    mode: "0750"
+- name: Provision per-service log artefacts
   when: _log_archive_containers | length > 0
+  block:
+
+    # ── per-service artefacts, one server-side pass ─────────────────
+    # `normal` mode → 0750 app_user:argo-logreaders on dirs, 0640 on files.  # legacy-argo: unix group on hosts
+    # `sensitive` mode → 0700 root:root on dirs, 0600 on files — the
+    # argo-logreaders group is locked out by design.  # legacy-argo: unix group on hosts
+    #
+    # This used to be sixteen looped tasks (dir, .malformed, live.log,
+    # .cursor, .prune-log, today.log, .retention — each doubled for the
+    # normal/sensitive split) plus a stat+assert pair. Cost scaled with the
+    # fleet. The template below bakes the whole container list into one
+    # script, so it is one round trip regardless of fleet size. The script
+    # prints one CHANGED: line per artefact it actually touches and the task
+    # derives `changed` from that, so a no-op deploy still reports `ok`.
+
+    - name: Install setup-log-dirs.sh
+      ansible.builtin.template:
+        src: setup-log-dirs.sh.j2
+        dest: "{{ log_archive_bin_dir }}/setup-log-dirs.sh"
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Create per-service log artefacts
+      ansible.builtin.command:
+        cmd: "{{ log_archive_bin_dir }}/setup-log-dirs.sh"
+      register: _log_archive_setup
+      changed_when: _log_archive_setup.stdout | default('') | length > 0
+
+    # ── enable per-service timers ───────────────────────────────────
+    # One systemctl call listing every unit. `enable --now` prints
+    # "Created symlink ..." only when it actually links something, which is
+    # what `changed` keys off; a unit that was already enabled prints
+    # nothing. argv (not cmd) so no service key is ever shell-split.
+
+    - name: Enable + start per-service log timers
+      vars:
+        _log_archive_timers: >-
+          {{ [log_archive_unit_name, 'bay-logrotate']
+             | product(_log_archive_containers | map(attribute='key') | list)
+             | map('join', '@')
+             | map('regex_replace', '$', '.timer')
+             | list }}
+      ansible.builtin.command:
+        argv: "{{ ['systemctl', 'enable', '--now'] + _log_archive_timers }}"
+      register: _log_archive_timer_enable
+      changed_when: >-
+        'Created symlink' in ((_log_archive_timer_enable.stdout | default(''))
+                              ~ (_log_archive_timer_enable.stderr | default('')))
+
+    # ── debugbot / SSH MOTD banner ──────────────────────────────────────
+    # Remind operators where archived logs live on this host. A small
+    # update-motd.d script reads the service list from the per-service
+    # config and prints one "Archived logs: <path>" line per service at
+    # every SSH login. No-op on hosts with no log_retention-enabled
+    # containers (the script early-returns when the archive root is empty).
+
+    - name: Install /etc/update-motd.d/99-bay-logs
+      ansible.builtin.copy:
+        dest: /etc/update-motd.d/99-bay-logs
+        content: |
+          #!/usr/bin/env bash
+          # Managed by bay log_archive role.
+          # Print archive paths on SSH login so operators remember
+          # where durable logs live. See docs/services.md#log-retention.
+          ROOT="{{ log_archive_log_root }}"
+          [[ -d "$ROOT" ]] || exit 0
+          # shopt -s nullglob so an empty dir yields no output.
+          shopt -s nullglob
+          dirs=("$ROOT"/*/)
+          (( {{ '${' }}#dirs[@]} == 0 )) && exit 0
+          printf '\n'
+          printf 'Archived logs (log_retention):\n'
+          for d in "${dirs[@]}"; do
+            svc="$(basename "$d")"
+            printf '  %s -> %s\n' "$svc" "$d"
+          done
+          printf '\n'
+        owner: root
+        group: root
+        mode: "0750"

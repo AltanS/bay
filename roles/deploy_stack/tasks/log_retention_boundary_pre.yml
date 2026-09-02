@@ -6,6 +6,13 @@
 # lifetimes in the archive.
 #
 # Only runs when at least one service/accessory has log_retention.
+#
+# One inspect for the whole fleet (M111 P7). It used to be one call per
+# container per side, which scaled with the fleet for a read Docker answers in
+# a single call. The inspect exits non-zero when ANY argument is missing but
+# still prints the ones it found, so rc is ignored and stdout is parsed — a
+# container that does not exist yet simply has no line, which is exactly the
+# "first deploy, no sentinel" case the post task already handles.
 
 - name: Identify log_retention containers for boundary capture
   ansible.builtin.set_fact:
@@ -19,23 +26,26 @@
 
 - name: Capture pre-recreate container IDs
   ansible.builtin.command:
-    cmd: "docker inspect --format {% raw %}'{{.Id}}'{% endraw %} {{ item }}"
+    cmd: >-
+      docker inspect --format {% raw %}'{{.Name}} {{.Id}}'{% endraw %}
+      {{ _log_retention_boundary_containers | map('quote') | join(' ') }}
   register: _log_retention_pre_ids_raw
   changed_when: false
   failed_when: false
-  loop: "{{ _log_retention_boundary_containers }}"
-  loop_control:
-    label: "{{ item }}"
   when: _log_retention_boundary_containers | length > 0
 
+# The inspect prints the name with a leading `/`; strip it. Lines that
+# are not exactly "<name> <id>" (a stray warning, an empty line) are dropped
+# rather than guessed at.
 - name: Build pre-recreate ID map
   ansible.builtin.set_fact:
     _log_retention_pre_ids: >-
-      {{ dict(_log_retention_pre_ids_raw.results
-              | default([])
-              | map(attribute='item')
-              | zip(_log_retention_pre_ids_raw.results
-                    | default([])
-                    | map(attribute='stdout')
-                    | map('default', ''))) }}
+      {{ dict(((_log_retention_pre_ids_raw.stdout_lines | default([]))
+               | select('match', '^/?[^ ]+ [^ ]+$')
+               | map('regex_replace', '^/?([^ ]+) [^ ]+$', '\\1')
+               | list)
+              | zip((_log_retention_pre_ids_raw.stdout_lines | default([]))
+                    | select('match', '^/?[^ ]+ [^ ]+$')
+                    | map('regex_replace', '^/?[^ ]+ ([^ ]+)$', '\\1')
+                    | list)) }}
   when: _log_retention_boundary_containers | length > 0

@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+#
+# setup-log-dirs.sh — one server-side pass that creates every per-service
+# log_retention artefact.
+#
+# This replaces sixteen looped Ansible tasks (one per artefact kind, split
+# normal/sensitive). The container list is baked in at render time, so the
+# whole fan costs one SSH round trip instead of one per container per
+# artefact kind.
+#
+# Contract:
+#   * Every artefact it actually creates or corrects prints one
+#     "CHANGED: ..." line on stdout. Silence means nothing changed, and the
+#     calling task derives `changed` from that — never `changed_when: true`.
+#   * A sensitive-mode directory that is not 0700 root:root is a hard failure
+#     (exit 1). This is the defence-in-depth check the old stat+fail pair did:
+#     the script has just set the mode itself, so a mismatch here means
+#     something outside Bay is fighting us and the archiver must not start.
+#   * Every consumer-supplied value below is `| quote`d at render time, so a
+#     service key or a retention value can never leave its argument.
+
+set -euo pipefail
+
+# The only stdout this script produces. An empty stdout means nothing changed,
+# which is exactly what the calling task's `changed_when` tests.
+note() {
+  printf 'CHANGED: %s\n' "$1"
+}
+
+# path owner group mode(numeric, no leading zero — `stat -c %a` form)
+fix_meta() {
+  local path="$1" owner="$2" group="$3" mode="$4"
+  local cur_owner cur_group cur_mode
+  cur_owner="$(stat -c '%U' -- "$path")"
+  cur_group="$(stat -c '%G' -- "$path")"
+  cur_mode="$(stat -c '%a' -- "$path")"
+  if [[ "$cur_owner" != "$owner" || "$cur_group" != "$group" ]]; then
+    chown -- "$owner:$group" "$path"
+    note "owner $path -> $owner:$group"
+  fi
+  if [[ "$cur_mode" != "$mode" ]]; then
+    chmod -- "$mode" "$path"
+    note "mode $path -> $mode"
+  fi
+}
+
+ensure_dir() {
+  local path="$1"
+  if [[ ! -d "$path" ]]; then
+    mkdir -p -- "$path"
+    note "dir $path"
+  fi
+  fix_meta "$@"
+}
+
+# Never truncates: an existing live.log keeps its content and its mtime.
+ensure_file() {
+  local path="$1"
+  if [[ ! -e "$path" ]]; then
+    : > "$path"
+    note "file $path"
+  fi
+  fix_meta "$@"
+}
+
+ensure_link() {
+  local path="$1" target="$2"
+  if [[ -L "$path" ]] && [[ "$(readlink -- "$path")" == "$target" ]]; then
+    return 0
+  fi
+  ln -sfn -- "$target" "$path"
+  note "symlink $path -> $target"
+}
+
+# path owner group mode content
+ensure_content() {
+  local path="$1" owner="$2" group="$3" mode="$4" content="$5"
+  local current=""
+  if [[ -f "$path" ]]; then
+    current="$(cat -- "$path")"
+  fi
+  if [[ ! -f "$path" ]] || [[ "$current" != "$content" ]]; then
+    printf '%s\n' "$content" > "$path"
+    note "content $path"
+  fi
+  fix_meta "$path" "$owner" "$group" "$mode"
+}
+
+# Defence in depth. Runs AFTER the artefacts above, so a failure means the
+# mode we just applied did not stick.
+assert_sensitive() {
+  local path="$1"
+  local m o g
+  m="$(stat -c '%a' -- "$path")"
+  o="$(stat -c '%U' -- "$path")"
+  g="$(stat -c '%G' -- "$path")"
+  if [[ "$m" != "700" || "$o" != "root" || "$g" != "root" ]]; then
+    printf 'ERROR: sensitive log_retention directory %s has mode %s owner %s:%s (expected 0700 root:root). Refusing to start archiver — resolve permission drift before continuing.\n' \
+      "$path" "$m" "$o" "$g" >&2
+    exit 1
+  fi
+}
+
+# ── per-service artefacts (generated, one block per container) ──────
+{% for _c in _log_archive_containers %}
+{% set _mode = _c.value.log_retention.mode | default(log_archive_default_mode) %}
+{% if _mode == 'sensitive' %}
+{% set _owner = 'root' %}
+{% set _group = 'root' %}
+{% set _dir_mode = '700' %}
+{% set _file_mode = '600' %}
+{% else %}
+{% set _owner = app_user %}
+{% set _group = log_archive_group %}
+{% set _dir_mode = '750' %}
+{% set _file_mode = '640' %}
+{% endif %}
+{% set _d = log_archive_log_root ~ '/' ~ _c.key %}
+{% set _ret = _c.value.log_retention %}
+{% set _r_mode = (_ret.mode | default(log_archive_default_mode)) | string | quote %}
+{% set _r_days = (_ret.days | default('')) | string | quote %}
+{% set _r_size = (_ret.max_total_size | default('')) | string | quote %}
+{% set _r_compress = ((_ret.compress | default(log_archive_default_compress)) | string | lower) | quote %}
+{% set _retention_body = 'mode=' ~ _r_mode ~ '\ndays=' ~ _r_days ~ '\nmax_total_size=' ~ _r_size ~ '\ncompress=' ~ _r_compress %}
+ensure_dir {{ _d | quote }} {{ _owner | quote }} {{ _group | quote }} {{ _dir_mode | quote }}
+ensure_dir {{ (_d ~ '/.malformed') | quote }} {{ _owner | quote }} {{ _group | quote }} {{ _dir_mode | quote }}
+ensure_file {{ (_d ~ '/live.log') | quote }} {{ _owner | quote }} {{ _group | quote }} {{ _file_mode | quote }}
+ensure_file {{ (_d ~ '/.cursor') | quote }} {{ _owner | quote }} {{ _group | quote }} {{ _file_mode | quote }}
+ensure_file {{ (_d ~ '/.prune-log') | quote }} {{ _owner | quote }} {{ _group | quote }} {{ _file_mode | quote }}
+ensure_link {{ (_d ~ '/today.log') | quote }} 'live.log'
+ensure_content {{ (_d ~ '/.retention') | quote }} {{ _owner | quote }} {{ _group | quote }} {{ _file_mode | quote }} {{ _retention_body | quote }}
+{% if _mode == 'sensitive' %}
+assert_sensitive {{ _d | quote }}
+{% endif %}
+{% endfor %}
+
+exit 0

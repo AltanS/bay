@@ -1,0 +1,90 @@
+-- {{ ansible_managed }}
+--
+-- Idempotent provisioning script for every service bound to one accessory.
+-- Piped into ONE `psql` per accessory, replacing the six looped `docker exec`
+-- tasks the calling task file used to run per binding.
+--
+-- The accessory name is deliberately NOT interpolated into this comment: a
+-- name containing a newline would end the comment and the rest would be SQL.
+--
+-- Quoting contract — read before editing.
+--
+--   * IDENTIFIERS are never interpolated as identifiers. Every name reaches
+--     the server as a SQL *string literal* (with `'` doubled at render time)
+--     and is turned into an identifier by `format('%I', ...)` — one call per
+--     name, concatenated into the statement — or by psql's own `:"var"`
+--     interpolation for `\connect`.
+--     That is server-side quoting: the last gate, after the schema's
+--     `^[a-z_][a-z0-9_]{0,62}$` pattern and validate.py's identifier check.
+--   * PASSWORDS use `format('%L', ...)`, so the value is quoted by the
+--     server too. The render-time `'`-doubling stays as belt and braces.
+--   * `CREATE DATABASE` cannot run inside a transaction block, and therefore
+--     not inside `DO`. It is emitted by a guarded `SELECT ... \gexec`: the
+--     SELECT returns zero rows when the database already exists, so `\gexec`
+--     executes nothing. That is why this one statement uses `\gexec` and
+--     every other uses `DO`.
+--
+-- Change reporting: every branch that will actually mutate something first
+-- SELECTs a `CHANGED: ...` line. `\pset tuples_only` + `psql -q` means
+-- nothing else reaches stdout, so the calling task's `changed_when` is
+-- simply "did the script say CHANGED".
+
+\set ON_ERROR_STOP on
+\pset tuples_only on
+\pset format unaligned
+
+{% macro lit(value) %}'{{ value | string | replace("'", "''") }}'{% endmacro %}
+{% macro pw(user) %}{{ lit(secrets[(user | upper | replace('-', '_')) ~ '_POSTGRES_PASSWORD']) }}{% endmacro %}
+{% for _b in _acc_bindings %}
+{% set _db = _b.value.database.name | default(_b.key) %}
+{% set _user = _b.value.database.user | default(_b.key) %}
+
+-- ── database ─────────────────────────────────────────────────────────
+SELECT 'CHANGED: create database ' || {{ lit(_db) }}
+ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = {{ lit(_db) }});
+
+SELECT 'CREATE DATABASE ' || format('%I', {{ lit(_db) }})
+ WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = {{ lit(_db) }})
+\gexec
+
+-- ── role ─────────────────────────────────────────────────────────────
+SELECT 'CHANGED: create role ' || {{ lit(_user) }}
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }});
+
+DO $bay$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }}) THEN
+    EXECUTE 'ALTER ROLE ' || format('%I', {{ lit(_user) }})
+         || ' WITH PASSWORD ' || format('%L', {{ pw(_user) }});
+  ELSE
+    EXECUTE 'CREATE ROLE ' || format('%I', {{ lit(_user) }})
+         || ' WITH LOGIN PASSWORD ' || format('%L', {{ pw(_user) }});
+  END IF;
+  EXECUTE 'GRANT ALL PRIVILEGES ON DATABASE ' || format('%I', {{ lit(_db) }})
+       || ' TO ' || format('%I', {{ lit(_user) }});
+END
+$bay$;
+{% endfor %}
+
+-- ── per-database schema grants (PG15+) ───────────────────────────────
+-- These are database-local, so each one needs its own connection. psql's
+-- `:"var"` interpolation quotes the value as an identifier, which is the same
+-- guarantee `format('%I', ...)` gives inside SQL — `\connect` is a psql
+-- meta-command, so `format()` cannot be used there.
+{% for _b in _acc_bindings %}
+{% set _db = _b.value.database.name | default(_b.key) %}
+{% set _user = _b.value.database.user | default(_b.key) %}
+
+SELECT {{ lit(_db) }} AS bay_db \gset
+\connect :"bay_db"
+
+DO $bay$
+BEGIN
+  EXECUTE 'GRANT ALL ON SCHEMA public TO ' || format('%I', {{ lit(_user) }});
+  EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO '
+       || format('%I', {{ lit(_user) }});
+  EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO '
+       || format('%I', {{ lit(_user) }});
+END
+$bay$;
+{% endfor %}

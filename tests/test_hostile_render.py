@@ -432,6 +432,35 @@ def _log_archive(name: str):
     return _inner
 
 
+def _log_archive_setup(payload: str) -> str:
+    """The batched artefact script (M111 P5): service KEYS reach a shell here."""
+    return _render(
+        "roles/log_archive/templates/setup-log-dirs.sh.j2",
+        ansible_managed="test",
+        app_user=payload,
+        log_archive_group=payload,
+        log_archive_log_root="/opt/stack/logs/services",
+        log_archive_default_mode="normal",
+        log_archive_default_compress=True,
+        _log_archive_containers=[
+            {
+                "key": payload,
+                "value": {
+                    "log_retention": {
+                        "mode": "normal",
+                        "days": payload,
+                        "max_total_size": payload,
+                    }
+                },
+            },
+            {
+                "key": f"sensitive-{payload}",
+                "value": {"log_retention": {"mode": "sensitive", "days": 7}},
+            },
+        ],
+    )
+
+
 def _disk_alert(payload: str) -> str:
     return _render(
         "roles/outbound_monitor/templates/bay-disk-alert.sh.j2",
@@ -491,6 +520,10 @@ _CASES: list[Case] = [
     Case(
         "roles/log_archive/templates/scrub-logs.sh.j2",
         _log_archive("scrub-logs.sh.j2"),
+    ),
+    Case(
+        "roles/log_archive/templates/setup-log-dirs.sh.j2",
+        _log_archive_setup,
     ),
     Case("roles/outbound_monitor/templates/bay-disk-alert.sh.j2", _disk_alert),
     Case(
@@ -571,37 +604,60 @@ def _sql_strings(task: dict) -> list[str]:
 
 
 def test_database_provision_sql_is_quoted():
-    """Identifiers double-quoted with `"` doubled; literals `'` doubled.
+    """No consumer name reaches SQL as anything but an escaped literal.
 
-    Asserted on the parsed task file rather than by rendering: every task is
-    `ansible.builtin.command` with an `argv:` list, so there is no shell at
-    all. What matters is that no name reaches a SQL statement unescaped —
-    `psql -c` accepts `;`-separated statements, so a bare identifier was
-    arbitrary SQL as the postgres superuser.
+    M111 collapsed the six looped `docker exec` tasks into one templated
+    script per accessory, so the SQL now lives in
+    `templates/provision-db.sql.j2` and is rendered here rather than read out
+    of the task file. The guarantee is unchanged and stronger: names cross as
+    SQL string literals with `'` doubled, and `format('%I', ...)` turns them
+    into identifiers server-side. Full coverage is in
+    tests/test_database_provision_sql.py; this keeps the check inside the
+    hostile-input suite so it is not forgotten.
     """
-    path = _ROLES / "deploy_stack" / "tasks" / "database_provision.yml"
-    text = path.read_text()
-    tasks = yaml.safe_load(text)
-    assert isinstance(tasks, list)
+    task_path = _ROLES / "deploy_stack" / "tasks" / "database_provision.yml"
+    task_text = task_path.read_text()
+    tasks = yaml.safe_load(task_text)
+    block = next(t["block"] for t in tasks if "block" in t)
+    execs = [
+        t for t in block
+        if "ansible.builtin.command" in t
+        and t["ansible.builtin.command"].get("argv", [])[:2] == ["docker", "exec"]
+    ]
+    assert len(execs) == 1, "one docker exec per accessory, not a fan"
+    # `cmd:` would shlex-split the accessory name; argv does not.
+    assert "argv" in execs[0]["ansible.builtin.command"]
+    assert "cmd" not in execs[0]["ansible.builtin.command"]
+    # No SQL text left in the task file at all.
+    assert not any(kw in task_text for kw in _SQL_KEYWORDS)
 
-    block = tasks[1]["block"]
-    assert len(block) == 6, "M111 scope guard: keep the per-task structure"
+    sql_path = _ROLES / "deploy_stack" / "templates" / "provision-db.sql.j2"
+    env = make_ansible_env(sql_path.parent)
+    template = env.get_template(sql_path.name)
 
-    checked = 0
-    for task in block:
-        # `cmd:` would be shlex-split on the way in; argv is not.
-        assert "argv" in task["ansible.builtin.command"], task["name"]
-        for sql in _sql_strings(task):
-            for expr in re.findall(r"\{\{.*?\}\}", sql):
-                checked += 1
-                assert "replace(" in expr, (
-                    f"{task['name']}: unescaped interpolation in SQL: {expr}"
-                )
-
-    assert checked >= 8, f"only found {checked} interpolations — did the file move?"
-    assert "CREATE DATABASE {{" not in text
-    assert "CREATE ROLE {{" not in text
-    assert "ALTER ROLE {{" not in text
+    for payload in _PAYLOADS.values():
+        vault_key = payload.upper().replace("-", "_") + "_POSTGRES_PASSWORD"
+        sql = template.render(
+            ansible_managed="test",
+            _acc="postgres",
+            _acc_bindings=[
+                {
+                    "key": payload,
+                    "value": {"database": {"accessory": "postgres"}},
+                }
+            ],
+            secrets={vault_key: payload},
+        )
+        body = "\n".join(
+            line for line in sql.splitlines() if not line.lstrip().startswith("--")
+        )
+        escaped = payload.replace("'", "''")
+        assert escaped in body, "fixture broken: payload never reached the SQL"
+        for stmt in ("CREATE DATABASE ", "CREATE ROLE ", "ALTER ROLE ",
+                     "GRANT ALL PRIVILEGES ON DATABASE "):
+            assert f"{stmt}{payload}" not in body
+        # Never spliced in as a double-quoted identifier either.
+        assert f'"{payload}"' not in body
 
 
 def test_log_retention_boundary_passes_the_service_key_via_environment():
@@ -612,10 +668,11 @@ def test_log_retention_boundary_passes_the_service_key_via_environment():
                 or "ansible.builtin.shell" in t]
     assert sentinel, "expected the sentinel-writing shell task"
     task = sentinel[0]
-    assert task.get("environment", {}).get("SVC") == "{{ item.item }}"
+    # M111 batched the inspects, so the loop var is now a dict2items entry.
+    assert task.get("environment", {}).get("SVC") == "{{ item.key }}"
     body = task["ansible.builtin.shell"]["cmd"]
     assert "${SVC}" in body
-    assert "{{ item.item }}" not in body, (
+    assert "{{ item.key }}" not in body, (
         "the service key is back inside the shell string"
     )
 

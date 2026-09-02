@@ -272,11 +272,22 @@ _EMITTER_SCRIPTS = [
 ]
 
 
+def _flatten(tasks):
+    """Tasks in this repo live inside `block:` as often as at the top level."""
+    for task in tasks:
+        yield task
+        for key in ("block", "rescue", "always"):
+            if key in task:
+                yield from _flatten(task[key])
+
+
 @pytest.mark.parametrize("task_file,dest", _EMITTER_SCRIPTS)
 def test_no_emitter_is_installed_world_readable(task_file, dest):
     tasks = yaml.safe_load((_ROLES / task_file).read_text())
     task = next(
-        t for t in tasks if t.get("ansible.builtin.template", {}).get("dest") == dest
+        t
+        for t in _flatten(tasks)
+        if t.get("ansible.builtin.template", {}).get("dest") == dest
     )
     assert task["ansible.builtin.template"]["mode"] == "0750", (
         f"{dest} is world-readable; it is one of the scripts the alert "
