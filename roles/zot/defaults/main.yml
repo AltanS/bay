@@ -84,9 +84,28 @@ zot_gc_delay: "4h"
 zot_gc_interval: "24h"
 zot_untagged_retention_delay: "72h"
 
-# Tag retention — keep N most recent tags per repo
+# ── Tag retention ─────────────────────────────────────────────────
+# keepTags rules are OR'd — a tag survives if it matches ANY rule below.
+# `latest` is always kept via zot_retention_always_keep. Retention only
+# runs at the GC interval (zot_gc_interval, default 24h); after changing
+# these vars zot applies the new policy on its NEXT GC pass, not
+# immediately.
+#
+# zot_retention_keep_count: most recently PUSHED tags kept per repo.
+# zot_retention_keep_pulled_count: most recently PULLED tags kept per
+# repo, so the image a host is currently running survives even if it's
+# older than the last N pushes.
+# zot_retention_keep_within: OPTIONAL time window (e.g. "168h"). Empty
+# string disables it. WARNING: a window is unbounded in count — a busy
+# repo pushing 90 times in a month keeps all 90 tags if the window
+# covers a month. This is exactly the bug this policy replaces, so
+# leave it empty unless you understand the tradeoff.
+# zot_retention_always_keep: list of tag regex patterns always retained.
 zot_retention_keep_count: 10
-zot_retention_keep_within: "720h"
+zot_retention_keep_pulled_count: 3
+zot_retention_keep_within: ""
+zot_retention_always_keep:
+  - "^latest$"
 
 # ── Storage driver ────────────────────────────────────────────────
 # `filesystem` (default) keeps OCI blobs on local disk under

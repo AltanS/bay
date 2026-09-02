@@ -15,11 +15,18 @@
           "deleteReferrers": true,
           "deleteUntagged": true,
           "keepTags": [
+{% if zot_retention_always_keep %}
+            {
+              "patterns": {{ zot_retention_always_keep | to_json }}
+            },
+{% endif %}
             {
               "mostRecentlyPushedCount": {{ zot_retention_keep_count }},
-              "mostRecentlyPulledCount": {{ zot_retention_keep_count }},
+              "mostRecentlyPulledCount": {{ zot_retention_keep_pulled_count }}{% if zot_retention_keep_within %},
               "pulledWithin": "{{ zot_retention_keep_within }}",
               "pushedWithin": "{{ zot_retention_keep_within }}"
+{% endif %}
+
             }
           ]
         }

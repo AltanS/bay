@@ -7,6 +7,30 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.4.0] — 2026-09-02
+
+### Changed
+
+- **Zot tag-retention policy is now bounded.** The prior policy kept every
+  tag pushed OR pulled within `zot_retention_keep_within` (720h) **in
+  addition to** the N-most-recent rules, so a busy repo could accumulate
+  dozens of tags — one repo hit 91. The policy is now: 10 most recently
+  pushed tags (`zot_retention_keep_count`), 3 most recently pulled tags
+  (new `zot_retention_keep_pulled_count`, so the image a host is
+  currently running survives even if older than the last 10 pushes), and
+  any tag matching `zot_retention_always_keep` (new, default `["^latest$"]`).
+  `zot_retention_keep_within` is now empty/optional — set it only if you
+  understand that a time window is unbounded in count.
+
+### Upgrade notes
+
+- Consumers that already override `zot_retention_keep_within` keep their
+  window (it now layers on top of the bounded count rules instead of
+  replacing them). Everyone else gets the new bounded policy after
+  `bin/bay deploy <env> --tags zot` on the registry host. Zot applies the
+  new policy on its **next GC pass**, not immediately — GC runs on
+  `zot_gc_interval` (default `24h`).
+
 ## [0.3.4] — 2026-09-02
 
 ### Fixed
