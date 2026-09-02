@@ -469,6 +469,22 @@ fi
 
 _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
 
+{#
+  Two quoting helpers for the per-service config below. Read before editing.
+
+  `dq(v)` escapes a value for a bash DOUBLE-quoted assignment: backslash
+  first, then `$`, backtick and `"`. Without it a repo, branch, dockerfile or
+  context holding `$(...)` was a command substitution that ran at assignment
+  time, as the build user, on every rebuild.
+
+  `evq(v)` is for the three command strings that are later handed to `eval`.
+  Escaping for the assignment is not enough there: eval re-parses the VALUE,
+  so the value itself has to carry shell quoting. `| quote` produces that
+  quoting and `dq` then protects it from the assignment. Both layers are
+  needed; either alone is a hole.
+#}
+{% macro dq(v) %}{{ v | string | replace('\\', '\\\\') | replace('$', '\\$') | replace('`', '\\`') | replace('"', '\\"') }}{% endmacro %}
+{% macro evq(v) %}{{ dq(v | string | quote) }}{% endmacro %}
 # ── Per-service build config (rendered at deploy time) ──
 # git_deploy_rebuild_services includes local builds, remote builds,
 # and pull-only services (non-builder image consumers).
@@ -526,46 +542,54 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
 {% set askpass_local = git_deploy_build_dir ~ '/.git-askpass-' ~ slug %}
 {% if not _is_first.val %}el{% endif %}if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
 {% if strategy == 'remote' %}
-  REPO_DIR="${REMOTE_BUILD_DIR}/{{ svc_name }}/repo"
+  REPO_DIR="${REMOTE_BUILD_DIR}/{{ dq(svc_name) }}/repo"
 {% else %}
-  REPO_DIR="${BUILD_DIR}/shared/{{ slug }}/repo"
+  REPO_DIR="${BUILD_DIR}/shared/{{ dq(slug) }}/repo"
 {% endif %}
-  BRANCH="{{ branch }}"
-  DOCKERFILE="{{ dockerfile }}"
-  CONTEXT="{{ context }}"
-  IMAGE_NAME="{{ image_name }}"
+  BRANCH="{{ dq(branch) }}"
+  DOCKERFILE="{{ dq(dockerfile) }}"
+  CONTEXT="{{ dq(context) }}"
+  IMAGE_NAME="{{ dq(image_name) }}"
 {% if strategy == 'remote' and svc.image is defined %}
-  IMAGE_REF="{{ svc.image }}"
-  IMAGE_REPO="{{ svc.image | regex_replace(':.*$', '') }}"
+  IMAGE_REF="{{ dq(svc.image) }}"
+  IMAGE_REPO="{{ dq(svc.image | regex_replace(':.*$', '')) }}"
 {% else %}
   IMAGE_REF=""
   IMAGE_REPO=""
 {% endif %}
 {% if not _dedup[svc_name].primary %}
-  PRIMARY_IMAGE="{{ git_deploy_image_prefix }}-{{ _dedup[svc_name].primary_svc }}"
+  PRIMARY_IMAGE="{{ dq(git_deploy_image_prefix) }}-{{ dq(_dedup[svc_name].primary_svc) }}"
 {% else %}
   PRIMARY_IMAGE=""
 {% endif %}
-  BUILD_STRATEGY="{{ strategy }}"
+  BUILD_STRATEGY="{{ dq(strategy) }}"
+{#
+  The three command strings below are handed to `eval`, so every consumer
+  value in them is referenced as an ESCAPED parameter expansion — `\"\${BRANCH}\"`
+  renders the literal text `"${BRANCH}"` into the variable, which eval then
+  expands inside double quotes. Interpolating the value itself (or expanding
+  the variable here, at assignment time) puts the raw text where eval will
+  re-parse it, and a repo or branch holding `$(...)` becomes a command.
+#}
 {% if strategy == 'remote' %}
-  CLONE_URL="{{ clone_url }}"
-  GIT_AUTH_ENV="GIT_ASKPASS={{ askpass_remote }} GIT_TERMINAL_PROMPT=0"
-  CLONE_CMD="${GIT_AUTH_ENV} git clone --branch {{ branch }} --single-branch {{ clone_url }} ${REPO_DIR}"
-  FETCH_CMD="${GIT_AUTH_ENV} git -c url.{{ clone_url }}.insteadOf={{ build.repo }} fetch origin {{ branch }}"
+  CLONE_URL="{{ dq(clone_url) }}"
+  GIT_AUTH_ENV="GIT_ASKPASS={{ evq(askpass_remote) }} GIT_TERMINAL_PROMPT=0"
+  CLONE_CMD="GIT_ASKPASS={{ evq(askpass_remote) }} GIT_TERMINAL_PROMPT=0 git clone --branch \"\${BRANCH}\" --single-branch \"\${CLONE_URL}\" \"\${REPO_DIR}\""
+  FETCH_CMD="GIT_ASKPASS={{ evq(askpass_remote) }} GIT_TERMINAL_PROMPT=0 git -c url.\"\${CLONE_URL}\".insteadOf=\"\${CLONE_REPO}\" fetch origin \"\${BRANCH}\""
 {% set _token_key = namespace(val='unknown') %}
 {% if has_token and secrets is defined %}{% for _k, _v in secrets.items() %}{% if _v == build.token %}{% set _token_key.val = _k %}{% endif %}{% endfor %}{% endif %}
-  CLONE_TOKEN_KEY="{{ _token_key.val }}"
-  CLONE_REPO="{{ build.repo }}"
+  CLONE_TOKEN_KEY="{{ dq(_token_key.val) }}"
+  CLONE_REPO="{{ dq(build.repo) }}"
 {% elif has_token %}
-  CLONE_URL="{{ clone_url }}"
-  PULL_CMD="GIT_ASKPASS={{ askpass_local }} GIT_TERMINAL_PROMPT=0 git -c url.${CLONE_URL}.insteadOf={{ build.repo }} pull origin ${BRANCH}"
+  CLONE_URL="{{ dq(clone_url) }}"
 {% set _token_key = namespace(val='unknown') %}
 {% if secrets is defined %}{% for _k, _v in secrets.items() %}{% if _v == build.token %}{% set _token_key.val = _k %}{% endif %}{% endfor %}{% endif %}
-  CLONE_TOKEN_KEY="{{ _token_key.val }}"
-  CLONE_REPO="{{ build.repo }}"
+  CLONE_TOKEN_KEY="{{ dq(_token_key.val) }}"
+  CLONE_REPO="{{ dq(build.repo) }}"
+  PULL_CMD="GIT_ASKPASS={{ evq(askpass_local) }} GIT_TERMINAL_PROMPT=0 git -c url.\"\${CLONE_URL}\".insteadOf=\"\${CLONE_REPO}\" pull origin \"\${BRANCH}\""
 {% else %}
-  DEPLOY_KEY="${BUILD_DIR}/{{ svc_name }}/.deploy_key"
-  PULL_CMD="GIT_SSH_COMMAND='ssh -i ${DEPLOY_KEY} -o StrictHostKeyChecking=yes -o UserKnownHostsFile={{ git_deploy_known_hosts }}' git pull origin ${BRANCH}"
+  DEPLOY_KEY="${BUILD_DIR}/{{ dq(svc_name) }}/.deploy_key"
+  PULL_CMD="GIT_SSH_COMMAND='ssh -i ${DEPLOY_KEY} -o StrictHostKeyChecking=yes -o UserKnownHostsFile={{ dq(git_deploy_known_hosts) }}' git pull origin \"\${BRANCH}\""
 {% endif %}
 {% if build.args is defined %}
   BUILD_ARGS=(

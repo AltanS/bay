@@ -10,7 +10,12 @@
 #   * the build directory tree, which was created world-readable
 #
 # Mode 0700, owner {{ app_user }}. Rendered with no_log.
+#
+# The token is shell-quoted at render time (`| quote`) rather than wrapped in
+# hand-written single quotes: a PAT is opaque consumer-supplied text, and one
+# containing a `'` would have closed the literal and turned the remainder into
+# code running as {{ app_user }} on every git authentication.
 case "$1" in
   Username*|username*) printf '%s\n' 'x-access-token' ;;
-  *) printf '%s\n' '{{ _askpass_token }}' ;;
+  *) printf '%s\n' {{ _askpass_token | quote }} ;;
 esac

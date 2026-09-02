@@ -51,6 +51,14 @@ SELECT 'CREATE DATABASE ' || format('%I', {{ lit(_db) }})
 SELECT 'CHANGED: create role ' || {{ lit(_user) }}
  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }});
 
+-- The existing-role branch below runs ALTER ROLE ... PASSWORD unconditionally
+-- — the vault password is written to the server on every run, because there
+-- is no way to read the stored SCRAM verifier back and compare it. That is a
+-- real mutation, so it reports one. Without this line a password rotation
+-- deployed silently, as `ok`.
+SELECT 'CHANGED: set password for role ' || {{ lit(_user) }}
+ WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }});
+
 DO $bay$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }}) THEN

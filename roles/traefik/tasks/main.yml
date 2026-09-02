@@ -26,6 +26,29 @@
     mode: "0644"
   notify: Restart traefik
 
+# ── Dynamic Configuration (file provider) ──────────────────────────────
+# The file provider is always enabled in the static config, because
+# tls.options is dynamic-only configuration: the same block in traefik.yml is
+# parsed and then ignored. The directory therefore always exists and always
+# holds tls-options.yml, whether or not tailnet ingress is configured.
+
+- name: Ensure Traefik dynamic-config directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/dynamic"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0755"
+
+- name: Render default TLS options (dynamic config)
+  ansible.builtin.template:
+    src: dynamic/tls-options.yml.j2
+    dest: "{{ stack_dir }}/dynamic/tls-options.yml"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0644"
+  # The file provider watches the directory (watch: true) — no restart needed.
+
 # ── Docker Network ─────────────────────────────────────────────────────
 
 - name: Create services bridge network
@@ -68,15 +91,6 @@
     access_time: preserve
   become: true
   become_user: root
-  when: traefik_dns_challenge_enabled | default(false)
-
-- name: Ensure Traefik dynamic-config directory exists
-  ansible.builtin.file:
-    path: "{{ stack_dir }}/dynamic"
-    state: directory
-    owner: "{{ app_user }}"
-    group: docker
-    mode: "0755"
   when: traefik_dns_challenge_enabled | default(false)
 
 - name: Render tailnet-proxy dynamic routes (remote tailnet upstreams)

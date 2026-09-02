@@ -75,7 +75,10 @@ as good as the ACL — see [Locking the upstream](#locking-the-upstream-headscal
   One wildcard (`*.ts.example.com`) covers every tailnet route.
 - **Remote upstreams:** Traefik's **file provider** renders a router per
   `tailnet_proxies` entry pointing at any tailnet URL — something Docker-label
-  routing (local containers only) cannot express.
+  routing (local containers only) cannot express. The file provider itself is
+  always on (it also carries `tls.options.default`, which is dynamic-only
+  configuration); `traefik_dns_challenge_enabled` only adds the
+  `tailnet-proxies.yml` route file to `<stack_dir>/dynamic`.
 - **Resolution:** the control host's Headscale config maps each proxy domain to
   its tailnet IP via split-DNS + `extra-records.json`. No public record.
 - **Fail-closed (optional):** with `traefik_split_entrypoints`, public entrypoints
@@ -259,7 +262,7 @@ and exists only on the machine that made it.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `traefik_dns_challenge_enabled` | `false` | Enable the `letsencrypt_dns` resolver + file provider |
+| `traefik_dns_challenge_enabled` | `false` | Enable the `letsencrypt_dns` resolver and the `tailnet-proxies.yml` dynamic route file |
 | `traefik_cloudflare_dns_api_token` | `""` | CF token (vault ref) → `CF_DNS_API_TOKEN` |
 | `traefik_dns_provider` | `cloudflare` | Traefik dnsChallenge provider |
 | `traefik_dns_resolver_name` | `letsencrypt_dns` | Resolver name used by proxy routers |

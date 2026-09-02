@@ -23,6 +23,7 @@ import yaml
 from typer.testing import CliRunner
 
 from bay_cli.catalog import _package_framework_root
+from bay_cli.commands.validate import PROBE_CACHE_DIR_ENV
 
 ROOT = _package_framework_root()
 # Split so the literal never sits in the tree: scripts/leak-scan.sh flags any
@@ -37,6 +38,23 @@ def project(tmp_path: Path, monkeypatch) -> Path:
     root.mkdir()
     (root / ".bay").symlink_to(ROOT)
     monkeypatch.chdir(root)
+
+    # `.bay` is a symlink to the checkout, so validate's probe cache would
+    # land in the framework repo itself. Send it to the scratch directory,
+    # and stub the two probes that leave the machine: a real git ls-remote
+    # or skopeo inspect makes this test depend on the network, and a cache
+    # warmed by an earlier run would hide a broken image reference.
+    monkeypatch.setenv(PROBE_CACHE_DIR_ENV, str(tmp_path / "probe-cache"))
+    monkeypatch.setattr(
+        "bay_cli.commands.validate._check_git_repos",
+        lambda services, accessories, result, probe_cache=None: None,
+    )
+    monkeypatch.setattr(
+        "bay_cli.commands.validate._check_single_image",
+        lambda name, ref, has_skopeo, probe_cache=None: (
+            "ok", f"Image              '{name}' {ref} exists (stubbed)"
+        ),
+    )
     return root
 
 
@@ -167,3 +185,16 @@ def test_defaults_path_also_honours_the_email_flag(project: Path) -> None:
     assert result.exit_code == 0, result.output
     domains = yaml.safe_load((project / "group_vars/production/domains.yml").read_text())
     assert domains["letsencrypt_email"] == "ops@example.test"
+
+
+# ── The test must not write into the framework checkout ──────────────────
+
+
+def test_validate_leaves_no_probe_cache_in_the_framework_tree(
+    project: Path, tmp_path: Path
+) -> None:
+    """`.bay` is a symlink to the checkout, so this is easy to get wrong."""
+    _setup()
+    assert _run(["validate"]).exit_code == 0
+    assert not (ROOT / ".validate-probe-cache").exists()
+    assert not (project / ".bay" / ".validate-probe-cache").exists()

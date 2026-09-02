@@ -72,12 +72,39 @@ ln -sfn ../group_vars .bay/group_vars
 
 # ── Create bin/bay wrapper ─────────────────────────────────────────────
 
-if [ ! -f bin/bay ]; then
+# KEEP IN SYNC with _is_bay_boilerplate_wrapper() in
+# src/bay_cli/commands/framework.py. Both writers must classify an existing
+# bin/bay identically, or a consumer gets a different answer from 'bin/bay
+# setup' than from bootstrap.sh.
+#
+# The marker line matched below must NEVER be removed from
+# scripts/bin-bay-wrapper.sh: it is the only thing that identifies a wrapper as
+# Bay's own, and without it every shipped wrapper becomes un-updatable.
+# Both patterns also match the pre-1.0 wrapper, so a consumer that still has
+# one gets the same answer.
+_WRAPPER_MARKER_RE='^#[[:space:]]*(Bay|Argo) CLI wrapper([^[:alnum:]_]|$)'  # legacy-argo
+_WRAPPER_ALLOWED_RE='^(#!/usr/bin/env bash|set -euo pipefail|SCRIPT_DIR="\$\(cd "\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)/\.\." && pwd\)"|if \[ ! -d "\$\{SCRIPT_DIR\}/\.(bay|argo)" \]; then|echo .*>&2|exit 1|fi|unset VIRTUAL_ENV( 2>/dev/null)?|exec uv run --project "\$\{SCRIPT_DIR\}/\.(bay|argo)" (bay|argo) "\$@")$'  # legacy-argo
+
+wrapper_is_boilerplate() {
+    _f="$1"
+    # (a) Marker: one of the first 3 lines is the shipped header.
+    head -3 "$_f" | grep -qE "$_WRAPPER_MARKER_RE" || return 1
+    # (b) No stray code: drop blank lines and comments (but keep the shebang,
+    # which is code), then anything left that Bay never shipped is hand-added.
+    _stray="$(sed -e 's/^[[:space:]]*//' "$_f" \
+        | grep -vE '^$' \
+        | grep -vE '^#([^!]|$)' \
+        | grep -vE "$_WRAPPER_ALLOWED_RE" \
+        || true)"
+    [ -z "$_stray" ]
+}
+
+# scripts/bin-bay-wrapper.sh is the single source of truth for the wrapper.
+# bay_cli.commands.framework._ensure_bin_wrapper copies the same file, so the
+# two writers cannot drift. Prefer the pre-pin snapshot; fall back to the
+# checked-out tag's copy for a bootstrap.sh old enough to lack one.
+write_wrapper() {
     mkdir -p bin
-    # scripts/bin-bay-wrapper.sh is the single source of truth for the wrapper.
-    # bay_cli.commands.framework._ensure_bin_wrapper copies the same file, so
-    # the two writers cannot drift. Prefer the pre-pin snapshot; fall back to
-    # the checked-out tag's copy for a bootstrap.sh old enough to lack one.
     if [ -n "$WRAPPER_SNAPSHOT" ] && [ -f "$WRAPPER_SNAPSHOT" ]; then
         cp "$WRAPPER_SNAPSHOT" bin/bay
     elif [ -f "$WRAPPER_SRC" ]; then
@@ -86,7 +113,26 @@ if [ ! -f bin/bay ]; then
         die "wrapper source not found at $WRAPPER_SRC — the framework checkout is incomplete"
     fi
     chmod +x bin/bay
+}
+
+# Same source resolution as write_wrapper, for the byte-comparison below.
+WRAPPER_FROM=""
+if [ -n "$WRAPPER_SNAPSHOT" ] && [ -f "$WRAPPER_SNAPSHOT" ]; then
+    WRAPPER_FROM="$WRAPPER_SNAPSHOT"
+elif [ -f "$WRAPPER_SRC" ]; then
+    WRAPPER_FROM="$WRAPPER_SRC"
+fi
+
+if [ ! -f bin/bay ]; then
+    write_wrapper
     info "Created bin/bay wrapper"
+elif [ -n "$WRAPPER_FROM" ] && cmp -s "$WRAPPER_FROM" bin/bay; then
+    :
+elif wrapper_is_boilerplate bin/bay; then
+    write_wrapper
+    info "Updated bin/bay wrapper"
+else
+    info "bin/bay looks hand-edited, leaving it alone (shipped wrapper: .bay/scripts/bin-bay-wrapper.sh)"
 fi
 
 # ── Install dependencies ────────────────────────────────────────────────

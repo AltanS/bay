@@ -112,6 +112,33 @@ def bay_env_name(name):
     return text
 
 
+def bay_alert_env_value(value):
+    """Validate a value bound for /etc/bay/alert.env, refusing what it cannot hold.
+
+    That file is written as KEY='VALUE' and read two ways: systemd's
+    EnvironmentFile parser and a `.` (source) from root cron scripts. Single
+    quoting is what keeps a token inert in the sourced case, and there is no
+    escape for a literal `'` inside a single-quoted shell word — the value
+    would end the quoting and the rest would be code, under `set -e`, as root.
+    A newline or a carriage return is just as bad: both readers are
+    line-based, so the tail of the value becomes a second assignment.
+
+    None of the three can be escaped, so they are refused at render time.
+    Rotate the credential instead.
+    """
+    text = "" if value is None else str(value)
+    for char, label in (("'", "a single quote"), ("\n", "a newline"),
+                        ("\r", "a carriage return")):
+        if char in text:
+            raise ValueError(
+                f"alert credential contains {label}: /etc/bay/alert.env is a "
+                "single-quoted KEY='VALUE' file, read by systemd and sourced "
+                "by root cron scripts, and none of `'`, CR or LF can be "
+                "escaped in it. Rotate the credential to one without it."
+            )
+    return text
+
+
 def bay_env_value(value):
     """Escape a value for a docker `env_file` line, refusing what cannot be.
 
@@ -164,6 +191,7 @@ class FilterModule:
             "bay_gateway_bind_ip": bay_gateway_bind_ip,
             "bay_env_name": bay_env_name,
             "bay_env_value": bay_env_value,
+            "bay_alert_env_value": bay_alert_env_value,
         }
 
 

@@ -40,6 +40,7 @@ def _alert_filters() -> dict:
             "bay_alert_body",
             "bay_alert_content_type",
             "bay_env_name",
+            "bay_alert_env_value",
         )
     }
 

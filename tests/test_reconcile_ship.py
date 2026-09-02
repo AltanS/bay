@@ -116,3 +116,49 @@ def test_the_recursive_directory_copy_is_gone():
     text = _RECONCILE.read_text()
     assert "src/bay_reconcile\"" not in text
     assert "playbook_dir }}/src/bay_reconcile\n" not in text
+
+
+def test_the_controller_side_pack_runs_in_check_mode():
+    """`--check` must not fail on a tar the dry run itself refused to build.
+
+    The pack is a `command` with `creates:`, so check mode SKIPS it, and the
+    `unarchive` below then reports a missing source. Both controller-side
+    steps write only to the operator's own cache directory — nothing on a
+    managed host — so both run for real in check mode, and neither counts as
+    a change to the host being reported on.
+    """
+    for name in (
+        "Ensure the controller-side package cache exists",
+        "Pack bay_reconcile without __pycache__",
+    ):
+        task = _by_name(name)
+        assert task["check_mode"] is False, f"{name} is skipped by --check"
+        assert task["changed_when"] is False, f"{name} reports a false change"
+        assert task["delegate_to"] == "localhost"
+
+
+def test_a_missing_env_file_is_named_instead_of_tracebacking():
+    """`no_log` swallows the traceback, so the paths come back as data.
+
+    The read carries every secret in the fleet, so it must stay `no_log`; an
+    env file deploy_stack never rendered used to surface as a bare MODULE
+    FAILURE with nothing to go on.
+    """
+    read = _by_name("Read the rendered env files in one pass")
+    body = read["ansible.builtin.command"]["argv"][2]
+    assert "missing" in body and "except OSError" in body, (
+        "the reader must collect unreadable paths rather than raise"
+    )
+
+    check = _by_name("Fail with the list of env files that could not be read")
+    assert "no_log" not in check, "the whole point is that this one prints"
+    assert "_reconcile_env_missing" in check["ansible.builtin.assert"]["that"]
+    fail_msg = check["ansible.builtin.assert"]["fail_msg"]
+    assert "_reconcile_env_missing | join" in fail_msg, "name the paths"
+    assert "files" not in check["vars"]["_reconcile_env_missing"], (
+        "the message must read the path list, never the file contents"
+    )
+
+    # The consumer of the read follows the new shape.
+    build = _by_name("Build reconcile bundle entries")
+    assert "'files'" in build["vars"]["_env_map"]

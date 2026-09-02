@@ -9,9 +9,11 @@
       - {{ traefik_config_path }}:/etc/traefik/traefik.yml:ro
       - {{ traefik_acme_path }}:/etc/traefik/acme.json
       - {{ traefik_access_log_path | dirname }}:/var/log/traefik
+      # Always mounted: the file provider carries tls.options.default, which
+      # Traefik ignores in the static config.
+      - {{ stack_dir }}/dynamic:/etc/traefik/dynamic:ro
 {% if traefik_dns_challenge_enabled | default(false) %}
       - {{ traefik_acme_dns_path }}:/etc/traefik/acme-dns.json
-      - {{ stack_dir }}/dynamic:/etc/traefik/dynamic:ro
 {% endif %}
 {{ macros.logging_block({'log_rotation': traefik_log_rotation | default(log_rotation_defaults)}) }}
 {% if traefik_dns_challenge_enabled | default(false) %}

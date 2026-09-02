@@ -155,6 +155,45 @@ baked in, use the `_env` forms:
       chat_id_env: TELEGRAM_CHAT_ID   # instead of chat_id:
 ```
 
+### Where the credentials live: `/etc/bay/alert.env`
+
+Every literal credential — the Telegram token and chat ID, `alert_webhook_url`,
+and each recipient's `bot_token` or `url` — is written to **one** file:
+
+```
+/etc/bay/alert.env      mode 0600, root:root
+```
+
+The `alert_channel` role renders it. Nothing else on the host holds an alert
+credential: the emitter scripts, the systemd units and the Python monitor all
+read it at run time.
+
+It is read two ways, which is why the format is what it is:
+
+- **systemd units** name it as `EnvironmentFile=-/etc/bay/alert.env`. systemd
+  reads the file as PID 1, before it drops to `User=`, so an unprivileged unit
+  still receives the values from a root-only file.
+- **cron and hand runs** get them from the shared snippet, which `source`s the
+  file when it is readable.
+
+Two consequences worth knowing:
+
+- **Values are single-quoted, and three characters are refused.** A literal
+  `'`, a newline or a carriage return cannot be escaped in a file that is both
+  sourced by a root shell and parsed line by line. The render **fails** on
+  them rather than shipping a file that would execute the tail of a token.
+  Rotate the credential instead.
+- **The leading `-` in `EnvironmentFile=-` means a missing file is silent.**
+  A unit with no credentials looks healthy and simply never delivers. That is
+  why `alert_channel` is tagged `always` in both playbooks: a tag-scoped run
+  (`--tags deploy_stack`, `--tags build`) re-renders the units, so it must
+  render the file too. If alerts stop after a partial deploy, check that the
+  file exists before anything else:
+
+```bash
+sudo test -s /etc/bay/alert.env && echo present || echo MISSING
+```
+
 ## Muting alerts
 
 Two mechanisms, deliberately different in cost:
@@ -472,11 +511,15 @@ not run. That is the structural fix for the GH#33 class of bug.
 
 ### Secret hygiene, honestly
 
-Rendered emitter scripts in `/usr/local/bin` are mode `0755` with the Telegram
-token inlined. That predates this work and is unchanged by it. The override file
-carries no credentials, so it does not make this worse — but Bay does not
-currently claim host-local secrecy for alert credentials, and this document will
-not pretend otherwise.
+Alert credentials are no longer inlined into rendered emitter scripts. They
+live in `/etc/bay/alert.env` (0600 root:root) and reach the emitters through
+the environment; see *Where the credentials live* above. The override file
+carries no credentials at all.
+
+What this does **not** claim: anything that runs as root, or as the account a
+unit drops to, can still read the value out of its own environment. The file
+narrows who can read the credential at rest, which is what was actually
+broken — a world-readable script is not.
 
 ## Not covered
 

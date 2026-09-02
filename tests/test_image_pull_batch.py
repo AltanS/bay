@@ -45,9 +45,23 @@ def test_single_shell_task_replaces_both_loops():
 
 def test_pull_runs_in_parallel_through_xargs():
     cmd = _pull_task()["ansible.builtin.shell"]["cmd"]
-    assert "xargs -P 4 -n 1 docker pull" in cmd
+    assert "xargs -r -d '\\n' -P 4 -n 1 docker pull" in cmd
     assert "printf '%s\\n'" in cmd
     assert "map('quote')" in cmd
+
+
+def test_xargs_does_not_re_parse_the_quoting():
+    """`| quote` protects printf; xargs' own quote syntax would undo it.
+
+    Default xargs input syntax honours quotes and backslashes, so an image
+    name containing either was split into two arguments after printf had
+    already written it as one line. `-d '\n'` turns every line into exactly
+    one argument, whatever is inside it.
+    """
+    cmd = _pull_task()["ansible.builtin.shell"]["cmd"]
+    xargs = cmd.strip().split("|")[-1]
+    assert "-d '\\n'" in xargs, "xargs must take one argument per line"
+    assert "-r " in xargs, "an empty list must not invoke the pull at all"
 
 
 def test_retry_semantics_preserved():

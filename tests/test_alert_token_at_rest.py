@@ -209,6 +209,27 @@ def test_role_runs_from_both_playbooks(playbook):
     assert "alert_channel" in names, f"{playbook} never runs roles/alert_channel"
 
 
+@pytest.mark.parametrize("playbook", ["deploy.yml", "provision.yml"])
+def test_the_role_is_tagged_always(playbook):
+    """A tag-scoped run re-renders the units, so it must render the file.
+
+    The units say `EnvironmentFile=-{path}`, and the leading `-` makes a
+    missing file SILENT. `--tags deploy_stack` or `--tags build` used to skip
+    alert_channel while still rewriting the units, which produced emitters
+    with no credentials and no error anywhere.
+    """
+    plays = yaml.safe_load((_REPO_ROOT / playbook).read_text())
+    entry = next(
+        r
+        for play in plays
+        for r in (play.get("roles") or [])
+        if isinstance(r, dict) and r.get("role") == "alert_channel"
+    )
+    assert "always" in entry["tags"], (
+        f"{playbook}: alert_channel must run whatever the tag selection is"
+    )
+
+
 # ── The emitters ─────────────────────────────────────────────────────────
 
 
@@ -359,6 +380,47 @@ def test_recipient_credentials_land_in_the_env_file():
     assert f"BAY_RC_2_URL='{_SENTINEL_RC_URL}'" in out
     # A recipient that names an env var has nothing to write here.
     assert "BAY_RC_3_" not in out
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["tok'en", "tok\nen", "tok\ren"],
+    ids=["single_quote", "newline", "carriage_return"],
+)
+@pytest.mark.parametrize("field", ["global", "recipient"])
+def test_a_value_that_cannot_be_quoted_fails_the_render(bad, field):
+    """/etc/bay/alert.env is KEY='VALUE', sourced by root cron under `set -e`.
+
+    There is no escape for a literal `'` inside a single-quoted shell word,
+    and both readers are line-based, so a CR or LF starts a second
+    assignment. None of the three can be made safe, so the render refuses
+    them rather than shipping a file that runs the tail of a token as root.
+    """
+    if field == "global":
+        ctx = dict(docker_monitor_telegram_bot_token=bad)
+    else:
+        ctx = dict(
+            alert_recipients=[
+                {
+                    "name": "ops",
+                    "adapter": "telegram",
+                    "min_level": "info",
+                    "config": {"bot_token": bad, "chat_id": "123"},
+                }
+            ]
+        )
+    with pytest.raises(ValueError) as exc:
+        _render_env_file(**ctx)
+    message = str(exc.value).lower()
+    assert "alert credential" in message
+    assert "rotate" in message, "the operator needs to be told what to do"
+    assert bad not in str(exc.value), "the failure must not print the credential"
+
+
+def test_a_well_behaved_credential_still_renders():
+    out = _render_env_file(alert_recipients=_RECIPIENTS, **_CREDENTIAL_VARS)
+    assert f"TELEGRAM_BOT_TOKEN='{_SENTINEL_TOKEN}'" in out
+    assert f"ALERT_WEBHOOK_URL='{_SENTINEL_URL}'" in out
 
 
 def test_recipient_indices_agree_between_the_two_templates():

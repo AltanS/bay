@@ -190,7 +190,7 @@ _NO_CONSUMER_INPUT: dict[str, str] = {
     # `_askpass_token` is a GitHub PAT (charset [A-Za-z0-9_]), rendered inside
     # a single-quoted printf argument. Covered by tests/test_git_askpass.py.
     "roles/git_deploy/templates/git-askpass.sh.j2":
-        "only the PAT, already single-quoted; see test_git_askpass.py",
+        "only the PAT, shell-quoted with `| quote`; see test_git_askpass.py",
 }
 
 
@@ -489,6 +489,84 @@ def _rebuild_sh(payload: str) -> str:
     return _render_rebuild_sh(services, ["api"], git_deploy_services=["api"])
 
 
+def _rebuild_sh_build_fields(payload: str) -> str:
+    """The `build:` block itself — repo, branch, dockerfile, context.
+
+    The v0.2.4 audit left these unexercised: the only rebuild.sh case poisoned
+    the image and an env value, so the four fields that reach BRANCH/
+    DOCKERFILE/CONTEXT and the eval'd CLONE/FETCH/PULL command strings were
+    never rendered with anything hostile. `docker_monitor_alert_header` is
+    left benign here on purpose, so this case carries no documented residual
+    and every payload is a real assertion.
+    """
+    from test_rebuild_config import _render_rebuild_sh
+
+    services = {
+        "api": {
+            "access": "public",
+            "domains": ["api.example.com"],
+            "ports": {"internal": 3000},
+            "build": {
+                "repo": f"git@github.com:acme/{payload}.git",
+                "branch": payload,
+                "dockerfile": payload,
+                "context": payload,
+            },
+        }
+    }
+    return _render_rebuild_sh(services, ["api"], git_deploy_services=["api"])
+
+
+def _rebuild_sh_build_fields_token(payload: str) -> str:
+    """Same fields, HTTPS/token path — a different clone_url and PULL_CMD."""
+    from test_rebuild_config import _render_rebuild_sh
+
+    services = {
+        "api": {
+            "access": "public",
+            "domains": ["api.example.com"],
+            "ports": {"internal": 3000},
+            "build": {
+                "repo": f"https://github.com/acme/{payload}.git",
+                "branch": payload,
+                "dockerfile": payload,
+                "context": payload,
+                "token": "ghp_sentinel",
+            },
+        }
+    }
+    return _render_rebuild_sh(
+        services, ["api"], git_deploy_services=["api"],
+        secrets={"API_GIT_TOKEN": "ghp_sentinel"},
+    )
+
+
+def _rebuild_sh_build_fields_remote(payload: str) -> str:
+    """Same fields, remote strategy — CLONE_CMD and FETCH_CMD."""
+    from test_rebuild_config import _render_rebuild_sh
+
+    services = {
+        "api": {
+            "access": "public",
+            "image": "registry.invalid/acme/api:latest",
+            "domains": ["api.example.com"],
+            "ports": {"internal": 3000},
+            "build": {
+                "repo": f"https://github.com/acme/{payload}.git",
+                "branch": payload,
+                "dockerfile": payload,
+                "context": payload,
+                "token": "ghp_sentinel",
+                "strategy": "remote",
+            },
+        }
+    }
+    return _render_rebuild_sh(
+        services, ["api"], git_deploy_services=["api"],
+        secrets={"API_GIT_TOKEN": "ghp_sentinel"},
+    )
+
+
 _CASES: list[Case] = [
     Case("roles/backup/templates/backup.sh.j2", _backup_sh),
     Case("roles/backup/templates/backup.sh.j2", _backup_sh_mysql),
@@ -531,6 +609,9 @@ _CASES: list[Case] = [
         _rebuild_sh,
         residuals={"docker_monitor_alert_header"},
     ),
+    Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_build_fields),
+    Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_build_fields_token),
+    Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_build_fields_remote),
 ]
 
 _CASE_IDS = [f"{Path(c.template).name}-{c.render.__name__}" for c in _CASES]
@@ -706,3 +787,48 @@ def test_env_file_rejects_a_newline_in_a_value():
     assert mod.bay_env_value("a$b") == "a$$b"
     with pytest.raises(ValueError):
         mod.bay_env_value("secret\nINJECTED=1")
+
+
+def test_every_env_file_template_uses_bay_env_value():
+    """A newline in a value injects a second KEY=VALUE into the container.
+
+    env.j2 has gone through `bay_env_value` since the audit; webhook.env.j2 and
+    watchtower.env.j2 were left doubling `$` by hand, which handles Compose
+    interpolation and nothing else. The env-file format is one KEY=VALUE per
+    line and has no escape for a newline, so the filter refuses it — a
+    hand-rolled `replace()` cannot.
+    """
+    templates = sorted(
+        (_ROLES / "deploy_stack" / "templates").glob("*env.j2")
+    )
+    assert {p.name for p in templates} >= {
+        "env.j2", "webhook.env.j2", "watchtower.env.j2"
+    }
+    for path in templates:
+        text = path.read_text()
+        assert "replace('$', '$$')" not in text, (
+            f"{path.name} doubles `$` by hand instead of using bay_env_value, "
+            "so a newline in the value is not refused"
+        )
+        if path.name == "env.j2":
+            # env.j2 also writes DB_HOST/DB_PORT/DB_NAME/DB_USER, which are
+            # schema-checked identifiers rather than free-text credentials.
+            continue
+        for line in text.splitlines():
+            if "=" in line and "{{" in line and not line.startswith("#"):
+                assert "bay_env_value" in line, (
+                    f"{path.name}: unfiltered value in {line!r}"
+                )
+
+
+def test_bay_env_value_is_what_refuses_the_newline():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "hostile_env_value_2", _REPO_ROOT / "filter_plugins" / "bay_filters.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    for bad in ("a\nINJECTED=1", "a\rINJECTED=1"):
+        with pytest.raises(ValueError):
+            mod.bay_env_value(bad)

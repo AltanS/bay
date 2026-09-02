@@ -27,6 +27,7 @@ import pytest
 
 from bay_cli.commands.validate import (
     _PROBE_CACHE_MAX_AGE,
+    PROBE_CACHE_DIR_ENV,
     ProbeCache,
     ValidationResult,
     _check_docker_images,
@@ -265,3 +266,44 @@ class TestCacheFile:
         from bay_cli.commands.ops import _RIG_CACHE_MAX_AGE
 
         assert _PROBE_CACHE_MAX_AGE == _RIG_CACHE_MAX_AGE == 3600
+
+
+class TestCacheDirOverride:
+    """`BAY_PROBE_CACHE_DIR` moves the cache file out of the framework tree.
+
+    A test that drives `bay validate` through a `.bay` symlink to the checkout
+    used to write `.validate-probe-cache` into the framework repo itself, and a
+    warm cache sitting there hides a broken image reference from the next run.
+    """
+
+    def test_override_wins_over_bay_dir(self, bay_dir: Path, tmp_path: Path, monkeypatch) -> None:
+        elsewhere = tmp_path / "scratch"
+        monkeypatch.setenv(PROBE_CACHE_DIR_ENV, str(elsewhere))
+        cache = ProbeCache(bay_dir)
+        cache.put("image:nginx:latest", "ok", "image reference resolved")
+        cache.flush()
+        assert (elsewhere / CACHE_NAME).is_file()
+        assert not (bay_dir / CACHE_NAME).exists()
+
+    def test_override_creates_a_missing_directory(self, tmp_path: Path, monkeypatch) -> None:
+        target = tmp_path / "a" / "b"
+        monkeypatch.setenv(PROBE_CACHE_DIR_ENV, str(target))
+        cache = ProbeCache(None)
+        cache.put("image:nginx:latest", "ok", "image reference resolved")
+        cache.flush()
+        assert (target / CACHE_NAME).is_file()
+
+    def test_an_empty_override_is_ignored(self, bay_dir: Path, monkeypatch) -> None:
+        monkeypatch.setenv(PROBE_CACHE_DIR_ENV, "  ")
+        cache = ProbeCache(bay_dir)
+        cache.put("image:nginx:latest", "ok", "image reference resolved")
+        cache.flush()
+        assert (bay_dir / CACHE_NAME).is_file()
+
+    def test_the_override_is_read_back(self, bay_dir: Path, tmp_path: Path, monkeypatch) -> None:
+        elsewhere = tmp_path / "scratch"
+        monkeypatch.setenv(PROBE_CACHE_DIR_ENV, str(elsewhere))
+        first = ProbeCache(bay_dir)
+        first.put("image:nginx:latest", "ok", "image reference resolved")
+        first.flush()
+        assert ProbeCache(bay_dir).get("image:nginx:latest") == "image reference resolved"

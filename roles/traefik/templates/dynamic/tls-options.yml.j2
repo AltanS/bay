@@ -1,0 +1,15 @@
+# {{ ansible_managed }}
+# Default TLS policy — Traefik file provider (dynamic config).
+#
+# tls.options is dynamic-only configuration. The same block in the static
+# traefik.yml is read and silently ignored, so it must live here.
+#
+# `default` applies to every router that names no tls.options of its own.
+#
+# sniStrict is opt-in: it refuses requests without SNI, which also refuses
+# access by raw IP and the default certificate. See roles/traefik/defaults.
+tls:
+  options:
+    default:
+      minVersion: {{ traefik_tls_min_version | default('VersionTLS12', true) }}
+      sniStrict: {{ 'true' if traefik_tls_sni_strict | default(false) else 'false' }}

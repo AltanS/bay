@@ -191,13 +191,12 @@
     _traefik_log_rotation: "{{ traefik_log_rotation | default(None) | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
     # Mirror the gated block in roles/deploy_stack/templates/_traefik.j2: when the
     # DNS-01 challenge is on (tailnet ingress), Traefik needs the acme-dns.json
-    # store + the file-provider dynamic dir mounted, and CF_DNS_API_TOKEN from
-    # {{ stack_dir }}/env/traefik.env (slurped by reconcile.yml). Gated so a
-    # non-ingress host builds a byte-identical spec.
+    # store mounted, and CF_DNS_API_TOKEN from {{ stack_dir }}/env/traefik.env
+    # (slurped by reconcile.yml). Gated so a non-ingress host builds a
+    # byte-identical spec. The dynamic dir is NOT gated — see below.
     _traefik_dns_enabled: "{{ traefik_dns_challenge_enabled | default(false) | bool }}"
     _traefik_dns_volumes: >-
-      {{ [(traefik_acme_dns_path | default(stack_dir ~ '/acme-dns.json')) ~ ':/etc/traefik/acme-dns.json',
-          stack_dir ~ '/dynamic:/etc/traefik/dynamic:ro']
+      {{ [(traefik_acme_dns_path | default(stack_dir ~ '/acme-dns.json')) ~ ':/etc/traefik/acme-dns.json']
          if _traefik_dns_enabled else [] }}
     _traefik_optional: "{{ {'env_file': stack_dir ~ '/env/traefik.env'} if _traefik_dns_enabled else {} }}"
     _traefik_spec:
@@ -210,7 +209,8 @@
         {{ ['/var/run/docker.sock:/var/run/docker.sock:ro',
             (traefik_config_path | default(stack_dir ~ '/traefik.yml')) ~ ':/etc/traefik/traefik.yml:ro',
             (traefik_acme_path | default(stack_dir ~ '/acme.json')) ~ ':/etc/traefik/acme.json',
-            ((traefik_access_log_path | default(stack_dir ~ '/logs/traefik/access.log')) | dirname) ~ ':/var/log/traefik']
+            ((traefik_access_log_path | default(stack_dir ~ '/logs/traefik/access.log')) | dirname) ~ ':/var/log/traefik',
+            stack_dir ~ '/dynamic:/etc/traefik/dynamic:ro']
            + _traefik_dns_volumes }}
       labels: "{{ _traefik_label_config | bay_traefik_global_labels }}"
 
@@ -356,6 +356,10 @@
         ALERT_WEBHOOK_FORMAT: "{{ alert_webhook_format | default('campfire') if (alert_webhook_url | default('')) | length > 0 else omit }}"
       volumes:
         - "{{ stack_dir }}/triggers:/triggers"
+        # app.py appends Telegram delivery failures to /state — unmounted, the
+        # writes land in the container's writable layer and vanish on recreate.
+        # Mirrors _webhook_receiver.j2.
+        - "{{ stack_dir }}/state:/state"
         - "{{ stack_dir }}/webhook/config.json:/config/services.json:ro"
         - "{{ stack_dir }}/webhook/image-map.json:/config/image-map.json:ro"
       labels:

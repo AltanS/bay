@@ -29,7 +29,14 @@ release adds validate failures that stop a deploy.
 - **Traefik TLS floor and metrics bind.** `minVersion` is TLS 1.2 by default,
   and the metrics entrypoint binds `traefik_metrics_bind_ip` (`127.0.0.1`)
   instead of every interface. `sniStrict` stays off unless you set
-  `traefik_tls_sni_strict: true`.
+  `traefik_tls_sni_strict: true`. `tls.options` is dynamic-only configuration,
+  so the floor is rendered to `<stack_dir>/dynamic/tls-options.yml` and served
+  by Traefik's file provider, which is now always enabled. The same block in
+  the static `traefik.yml` is parsed and then ignored, so it enforced nothing.
+- **The webhook receiver mounts `<stack_dir>/state`.** It writes its Telegram
+  delivery-failure log there. The compose path already mounted it, the
+  reconciler spec did not, so on the reconciler path those writes went to the
+  container's writable layer and were lost on every recreate.
 - **New nftables knobs, both default-compatible.**
   `nftables_forward_permissive` defaults to `true` and
   `nftables_container_host_ports` defaults to empty, so today's behaviour is
@@ -252,6 +259,13 @@ Work through these in order on an existing consumer.
 - **TLS 1.2 floor and loopback metrics.** Clients below TLS 1.2 are refused.
   Any external Prometheus scraping Traefik's metrics port directly breaks, set
   `traefik_metrics_bind_ip` back or scrape over the tailnet.
+- **Traefik gains a dynamic-config mount and is recreated once.**
+  `<stack_dir>/dynamic` is now mounted on every host, not only hosts with
+  `traefik_dns_challenge_enabled`, because the TLS floor lives there. The file
+  provider is enabled unconditionally for the same reason. Nothing else in the
+  directory changes, so no routing changes with it.
+- **The webhook receiver is recreated once** to pick up the
+  `<stack_dir>/state` mount.
 - **Remote builds no longer leave a local image on the build server.** The
   build pushes directly, so anything expecting to `docker run` the image there
   will not find it, and registry credentials now fail inside `buildx build`

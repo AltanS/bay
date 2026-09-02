@@ -98,7 +98,10 @@
 
     # Phase 1: System baseline
     - { role: netplan, tags: [netplan], when: netplan_enabled | default(false) }
-    - { role: alert_channel, tags: [alert_channel, alerts] }
+    # `always` for the same reason as deploy.yml: the units reference
+    # /etc/bay/alert.env with a leading `-`, so a tag-scoped run that skipped
+    # this role left the emitters silently credential-less.
+    - { role: alert_channel, tags: [always, alert_channel, alerts] }
     - { role: alert_policy, tags: [alert_policy, alerts] }
     - { role: outbound_monitor, tags: [outbound_monitor] }
     - { role: common, tags: [common] }

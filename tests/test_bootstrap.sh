@@ -203,6 +203,118 @@ fi
 cd "$BAY_DIR"
 rm -rf "$OLD_TAG_DIR"
 
+# ── Existing bin/bay: update, keep, or leave alone ───────────────────────
+# bootstrap.sh used to skip a bin/bay that already existed, so a consumer could
+# never receive a fixed wrapper. It now refreshes unmodified Bay boilerplate and
+# steps aside for a hand-edited file. wrapper_is_boilerplate() here must stay in
+# sync with _is_bay_boilerplate_wrapper() in the Python CLI.
+section "Existing bin/bay handling"
+
+WRAP_DIR=$(mktemp -d)
+
+# A framework repo with no tags, so bootstrap leaves the clone on HEAD.
+mkdir -p "$WRAP_DIR/framework/scripts"
+cd "$WRAP_DIR/framework"
+git init -q .
+printf 'placeholder\n' > pyproject.toml
+cp "$BAY_DIR/scripts/bin-bay-wrapper.sh" scripts/bin-bay-wrapper.sh
+cp "$BAY_DIR/bootstrap.sh" bootstrap.sh
+chmod +x bootstrap.sh scripts/bin-bay-wrapper.sh
+git add -A
+git -c user.email=t@example.test -c user.name=t commit -qm "framework"
+
+# The wrapper Bay shipped to every real consumer: old body, same header marker.
+SHIPPED_WRAPPER="$WRAP_DIR/old-consumer-wrapper.sh"
+cat > "$SHIPPED_WRAPPER" <<'OLDWRAP'
+#!/usr/bin/env bash
+# Bay CLI wrapper — rewritten by 'bay migrate-consumer'
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ ! -d "${SCRIPT_DIR}/.bay" ]; then
+  echo "Error: .bay/ directory not found." >&2
+  echo "Run 'make bay:setup' to bootstrap the framework first." >&2
+  exit 1
+fi
+unset VIRTUAL_ENV 2>/dev/null
+exec uv run --project "${SCRIPT_DIR}/.bay" bay "$@"
+OLDWRAP
+
+# The same file with one hand-added line.
+HAND_WRAPPER="$WRAP_DIR/hand-edited-wrapper.sh"
+sed 's/^set -euo pipefail$/set -euo pipefail\nexport FOO=bar/' "$SHIPPED_WRAPPER" > "$HAND_WRAPPER"
+
+# Run only the wrapper half of bootstrap; `uv sync` would triple the runtime.
+run_wrapper_bootstrap() {
+  _consumer="$1"
+  mkdir -p "$_consumer"
+  cd "$_consumer"
+  git clone --quiet "$WRAP_DIR/framework" .bay
+  sed -n '1,/^# ── Install dependencies/p' .bay/bootstrap.sh \
+    | sed '$d' > .bay/bootstrap-wrapper-only.sh
+  bash .bay/bootstrap-wrapper-only.sh >"$_consumer.log" 2>&1
+}
+
+# 1. Existing file already identical — untouched, and no "Updated" noise.
+mkdir -p "$WRAP_DIR/same/bin"
+cp "$BAY_DIR/scripts/bin-bay-wrapper.sh" "$WRAP_DIR/same/bin/bay"
+chmod +x "$WRAP_DIR/same/bin/bay"
+if run_wrapper_bootstrap "$WRAP_DIR/same"; then
+  if diff -q "$BAY_DIR/scripts/bin-bay-wrapper.sh" "$WRAP_DIR/same/bin/bay" >/dev/null 2>&1 \
+     && ! grep -q "Updated bin/bay wrapper" "$WRAP_DIR/same.log"; then
+    pass "identical bin/bay is left alone, silently"
+  else
+    fail "identical bin/bay was rewritten or announced"
+  fi
+else
+  fail "bootstrap failed with an identical bin/bay: $(tail -3 "$WRAP_DIR/same.log")"
+fi
+
+# 2. Existing file is unmodified Bay boilerplate — refreshed.
+mkdir -p "$WRAP_DIR/stale/bin"
+cp "$SHIPPED_WRAPPER" "$WRAP_DIR/stale/bin/bay"
+chmod +x "$WRAP_DIR/stale/bin/bay"
+if run_wrapper_bootstrap "$WRAP_DIR/stale"; then
+  if diff -q "$BAY_DIR/scripts/bin-bay-wrapper.sh" "$WRAP_DIR/stale/bin/bay" >/dev/null 2>&1; then
+    pass "stale boilerplate bin/bay is updated to the shipped wrapper"
+  else
+    fail "stale boilerplate bin/bay was not updated"
+  fi
+  if grep -q "Updated bin/bay wrapper" "$WRAP_DIR/stale.log"; then
+    pass "the update is reported"
+  else
+    fail "the update was not reported"
+  fi
+  if [[ -x "$WRAP_DIR/stale/bin/bay" ]]; then
+    pass "updated bin/bay stays executable"
+  else
+    fail "updated bin/bay lost its executable bit"
+  fi
+else
+  fail "bootstrap failed with a stale bin/bay: $(tail -3 "$WRAP_DIR/stale.log")"
+fi
+
+# 3. Existing file is hand-edited — left byte-identical, with one notice.
+mkdir -p "$WRAP_DIR/hand/bin"
+cp "$HAND_WRAPPER" "$WRAP_DIR/hand/bin/bay"
+chmod +x "$WRAP_DIR/hand/bin/bay"
+if run_wrapper_bootstrap "$WRAP_DIR/hand"; then
+  if diff -q "$HAND_WRAPPER" "$WRAP_DIR/hand/bin/bay" >/dev/null 2>&1; then
+    pass "hand-edited bin/bay is left byte-identical"
+  else
+    fail "hand-edited bin/bay was overwritten"
+  fi
+  if grep -q "looks hand-edited" "$WRAP_DIR/hand.log"; then
+    pass "hand-edited bin/bay gets a notice"
+  else
+    fail "no notice printed for a hand-edited bin/bay"
+  fi
+else
+  fail "bootstrap failed with a hand-edited bin/bay: $(tail -3 "$WRAP_DIR/hand.log")"
+fi
+
+cd "$BAY_DIR"
+rm -rf "$WRAP_DIR"
+
 # ── Summary ──────────────────────────────────────────────────────────────
 section "Bootstrap test results"
 printf "  %d passed, %d failed\n" "$PASS" "$FAIL"

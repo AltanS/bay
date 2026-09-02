@@ -88,6 +88,20 @@
 # purging that stale global entry is a one-off manual step, documented in the
 # changelog upgrade notes (delete it from trusted.gpg / trusted.gpg.d).
 
+# The unsigned line has to GO, not just be joined. apt refuses a source that is
+# listed twice with different signing options — "Conflicting values set for
+# option Signed-By" — and that error fails EVERY later apt task on the host,
+# not just this repository. `apt_repository` matches on the exact repo string,
+# so the old line is named here verbatim; on a fresh host it matches nothing
+# and the task is a no-op.
+- name: Remove the legacy unsigned CrowdSec repository line
+  ansible.builtin.apt_repository:
+    repo: "deb https://packagecloud.io/crowdsec/crowdsec/{{ ansible_distribution | lower }}/ {{ ansible_distribution_release }} main"
+    state: absent
+    filename: crowdsec
+    update_cache: false
+  when: crowdsec_enabled | bool
+
 - name: Add CrowdSec repository
   ansible.builtin.apt_repository:
     repo: "deb [signed-by={{ crowdsec_gpg_keyring }}] https://packagecloud.io/crowdsec/crowdsec/{{ ansible_distribution | lower }}/ {{ ansible_distribution_release }} main"

@@ -13,7 +13,11 @@ Three findings converge on `traefik.yml.j2`:
   - S15: metrics bound on all interfaces; now `traefik_metrics_bind_ip`
     (127.0.0.1 by default).
   - S15: no `tls.options` block at all; now `tls.options.default` with
-    `minVersion` always on and `sniStrict` opt-in.
+    `minVersion` always on and `sniStrict` opt-in. `tls.options` is
+    DYNAMIC configuration — Traefik parses and then ignores a `tls:` key
+    in the static file — so it is rendered to
+    `dynamic/tls-options.yml` and served by the file provider, which is
+    therefore always enabled.
 """
 
 from __future__ import annotations
@@ -44,6 +48,10 @@ def _base_context(**overrides) -> dict:
         "gateway_bind_ip": "",
         "traefik_tls_min_version": "VersionTLS12",
         "traefik_tls_sni_strict": False,
+        "traefik_dns_challenge_enabled": False,
+        "traefik_dns_resolver_name": "letsencrypt_dns",
+        "traefik_dns_provider": "cloudflare",
+        "traefik_acme_dns_email": "ops@example.com",
     }
     base.update(overrides)
     return base
@@ -52,6 +60,14 @@ def _base_context(**overrides) -> dict:
 def _render(**overrides) -> dict:
     env = make_ansible_env(TEMPLATE_DIR)
     rendered = env.get_template("traefik.yml.j2").render(**_base_context(**overrides))
+    return yaml.safe_load(rendered)
+
+
+def _render_tls_options(**overrides) -> dict:
+    env = make_ansible_env(TEMPLATE_DIR)
+    rendered = env.get_template("dynamic/tls-options.yml.j2").render(
+        **_base_context(**overrides)
+    )
     return yaml.safe_load(rendered)
 
 
@@ -134,28 +150,48 @@ class TestMetricsBind:
         assert "metrics" not in doc
 
 
-# ── tls.options.default ────────────────────────────────────────────────
+# ── tls.options.default (DYNAMIC config) ───────────────────────────────
 
 
 class TestTlsOptions:
     def test_min_version_is_tls12_by_default(self):
-        opts = _render()["tls"]["options"]["default"]
+        opts = _render_tls_options()["tls"]["options"]["default"]
         assert opts["minVersion"] == "VersionTLS12"
+
+    def test_min_version_is_overridable(self):
+        opts = _render_tls_options(traefik_tls_min_version="VersionTLS13")["tls"][
+            "options"
+        ]["default"]
+        assert opts["minVersion"] == "VersionTLS13"
 
     def test_sni_strict_off_by_default(self):
         """sniStrict refuses SNI-less requests, breaking IP-based probes."""
-        opts = _render()["tls"]["options"]["default"]
+        opts = _render_tls_options()["tls"]["options"]["default"]
         assert opts["sniStrict"] is False
 
     def test_sni_strict_opt_in(self):
-        opts = _render(traefik_tls_sni_strict=True)["tls"]["options"]["default"]
+        opts = _render_tls_options(traefik_tls_sni_strict=True)["tls"]["options"][
+            "default"
+        ]
         assert opts["sniStrict"] is True
 
-    def test_tls_options_present_in_every_split_mode(self):
+    def test_static_config_has_no_tls_key(self):
+        """The regression this replaces.
+
+        Traefik reads `tls:` out of the static file and ignores it, so a
+        TLS floor declared there is a silent no-op. If this assertion
+        ever fails again, the floor is not being enforced.
+        """
         for kwargs in (
             {"traefik_split_entrypoints": False},
             {"traefik_split_entrypoints": True, "traefik_public_bind_ip": "203.0.113.10"},
-            {"traefik_split_entrypoints": True, "traefik_public_bind_ip": ""},
+            {"traefik_dns_challenge_enabled": True},
         ):
-            doc = _render(**kwargs)
-            assert doc["tls"]["options"]["default"]["minVersion"] == "VersionTLS12"
+            assert "tls" not in _render(**kwargs)
+
+    def test_file_provider_is_always_enabled(self):
+        """tls-options.yml is only read if the file provider is on."""
+        for dns in (False, True):
+            providers = _render(traefik_dns_challenge_enabled=dns)["providers"]
+            assert providers["file"]["directory"] == "/etc/traefik/dynamic"
+            assert providers["file"]["watch"] is True

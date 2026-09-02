@@ -203,3 +203,44 @@ def test_the_setup_task_derives_changed_from_script_output():
     run = next(t for t in tasks if t.get("name") == "Create per-service log artefacts")
     assert "_log_archive_setup.stdout" in str(run["changed_when"])
     assert run["changed_when"] is not True
+
+
+# ── The shared stack bin/ directory ──────────────────────────────────────
+#
+# log_archive and git_deploy both create `{{ stack_dir }}/bin`, and they used
+# to disagree about it: 0750 here, 0755 there. Whichever role ran last won, so
+# the mode flipped on every deploy and the diff was never empty.
+
+
+def _bin_dir_tasks() -> list[tuple[str, dict]]:
+    import yaml
+
+    root = Path(__file__).resolve().parent.parent / "roles"
+    out: list[tuple[str, dict]] = []
+
+    def walk(rel, items):
+        for task in items or []:
+            mod = task.get("ansible.builtin.file", {})
+            if isinstance(mod, dict) and mod.get("path") in (
+                "{{ stack_dir }}/bin",
+                "{{ log_archive_bin_dir }}",
+            ):
+                out.append((rel, mod))
+            for key in ("block", "rescue", "always"):
+                if key in task:
+                    walk(rel, task[key])
+
+    for path in sorted(root.rglob("tasks/*.yml")):
+        walk(str(path.relative_to(root)), yaml.safe_load(path.read_text()))
+    return out
+
+
+def test_every_role_agrees_on_the_stack_bin_directory():
+    found = _bin_dir_tasks()
+    assert len(found) >= 4, f"expected the log_archive and git_deploy creators, got {found}"
+    shapes = {
+        (mod.get("owner"), mod.get("group"), mod.get("mode")) for _, mod in found
+    }
+    assert shapes == {("{{ app_user }}", "{{ app_user_group }}", "0750")}, (
+        f"the stack bin/ directory is created with more than one shape: {shapes}"
+    )

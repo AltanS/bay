@@ -18,10 +18,11 @@ def doctor(
 ) -> None:
     """Run pre-flight checks on your project before deploying.
 
-    Checks .vault_pass, the inventory, SSH connectivity (as root, then as
-    admin_user), DNS resolution of your first service domain and the
-    headscale domain, gateway configuration, and (when configured) GitHub
-    webhook health. Exits 1 when issues are found.
+    Checks .vault_pass, the inventory, SSH connectivity (as the inventory's
+    ansible_user, then admin_user, then the ssh default user, then root),
+    DNS resolution of your first service domain and the headscale domain,
+    gateway configuration, and (when configured) GitHub webhook health.
+    Exits 1 when issues are found.
     Complements `bin/bay validate`, which checks config files rather than
     the environment.
 
@@ -61,13 +62,13 @@ def doctor(
     # ── SSH connectivity ─────────────────────────────────────────────
     if hosts:
         host = hosts[0]
-        candidates = _ssh_users(root)
-        connected_as, reason = _probe_ssh(host, candidates)
-        if connected_as:
-            console.success(f"SSH connectivity   connected to {connected_as}@{host}")
+        candidates = _ssh_users(root, host=host, inventory_file=inventory_file)
+        connected, connected_as, reason = _probe_ssh(host, candidates)
+        if connected:
+            console.success(f"SSH connectivity   connected as {_describe_user(connected_as, host)}")
         else:
-            attempted = ", ".join(f"{u}@{host}" for u in candidates)
-            console.error(f"SSH connectivity   cannot reach {attempted} — {reason}")
+            attempted = ", ".join(_describe_user(u, host) for u in candidates)
+            console.error(f"SSH connectivity   cannot reach {attempted} ({reason})")
             issues += 1
     else:
         console.warning("SSH connectivity   skipped (no hosts in inventory)")
@@ -174,26 +175,108 @@ def doctor(
 DEFAULT_ADMIN_USER = "bay-admin"
 
 
-def _ssh_users(root: Path) -> list[str]:
-    """Return the SSH users to try, in order: root, then the admin account.
+def _inventory_ansible_user(inventory_file: Path | None, host: str) -> str | None:
+    """Return the ``ansible_user`` the inventory sets for *host*, if any.
 
-    A fresh server only accepts ``root``; after ``bin/bay provision`` root
-    login is disabled and only ``admin_user`` works. Probing with no user at
-    all (the old behaviour) authenticates as the local account name, which
-    fails on both sides of that transition.
+    Ansible is the tool that actually connects to the server, so its own
+    answer comes first. Three places are read, most specific first:
+
+    1. the host line itself (``1.2.3.4 ansible_user=ops``),
+    2. a ``[<group>:vars]`` block for a group the host belongs to,
+    3. the ``[all:vars]`` block.
+
+    This is a best-effort INI reader, not an inventory parser. Anything it
+    cannot understand simply yields None, and the caller falls back.
+    """
+    if inventory_file is None or not inventory_file.exists():
+        return None
+
+    var_re = re.compile(r"\bansible_user\s*=\s*(\S+)")
+    section = ""
+    host_groups: list[str] = []
+    group_vars: dict[str, str] = {}
+
+    for raw in inventory_file.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            section = line.strip("[]").strip()
+            continue
+        if section.endswith(":vars"):
+            key, sep, value = line.partition("=")
+            if sep and key.strip() == "ansible_user" and value.strip():
+                group_vars[section[: -len(":vars")]] = value.strip()
+            continue
+        if section.endswith(":children"):
+            continue
+        if re.split(r"\s+", line)[0] != host:
+            continue
+        host_groups.append(section)
+        match = var_re.search(line)
+        if match:
+            return match.group(1)
+
+    for group in host_groups:
+        if group in group_vars:
+            return group_vars[group]
+    return group_vars.get("all")
+
+
+def _ssh_users(
+    root: Path,
+    host: str | None = None,
+    inventory_file: Path | None = None,
+) -> list[str | None]:
+    """Return the SSH users to try, most likely first.
+
+    Order: the inventory's ``ansible_user`` for *host*, then ``admin_user``
+    from group_vars, then no user at all (the ssh default, which honours
+    ``~/.ssh/config``), then ``root``.
+
+    ``root`` is last on purpose. Every hardened host has root login off, so
+    trying it first spends a guaranteed failed authentication against an
+    sshd that CrowdSec is watching. ``None`` means "no user in the target",
+    which lets a matching ``Host`` block in ``~/.ssh/config`` decide.
     """
     main_cfg = _load_yaml(root / "group_vars" / "all" / "main.yml") or {}
     admin_user = main_cfg.get("admin_user") or DEFAULT_ADMIN_USER
-    users = ["root"]
-    if isinstance(admin_user, str) and admin_user.strip() and admin_user.strip() != "root":
+
+    users: list[str | None] = []
+    if host:
+        inventory_user = _inventory_ansible_user(inventory_file, host)
+        if inventory_user:
+            users.append(inventory_user)
+    if isinstance(admin_user, str) and admin_user.strip():
         users.append(admin_user.strip())
-    return users
+    users.append(None)  # the ssh default user
+    users.append("root")
+
+    ordered: list[str | None] = []
+    for user in users:
+        if user is None and None in ordered:
+            continue
+        if user is not None and (not user or user in ordered):
+            continue
+        ordered.append(user)
+    return ordered
 
 
-def _probe_ssh(host: str, users: list[str]) -> tuple[str | None, str]:
-    """Try each user in turn. Returns (user that connected, failure reason)."""
+def _describe_user(user: str | None, host: str) -> str:
+    """Human-readable form of one probe target."""
+    return f"{user}@{host}" if user else f"{host} (ssh default user)"
+
+
+def _probe_ssh(host: str, users: list[str | None]) -> tuple[bool, str | None, str]:
+    """Try each user in turn.
+
+    Returns (connected, the user that connected, failure reason). The user
+    is None for the no-user target, so the boolean carries success, not the
+    user value.
+    """
     reason = "connection failed"
     for user in users:
+        target = f"{user}@{host}" if user else host
         try:
             proc = subprocess.run(
                 [
@@ -201,7 +284,7 @@ def _probe_ssh(host: str, users: list[str]) -> tuple[str | None, str]:
                     "-o", "BatchMode=yes",
                     "-o", "ConnectTimeout=5",
                     "-o", "StrictHostKeyChecking=accept-new",
-                    f"{user}@{host}",
+                    target,
                     "true",
                 ],
                 capture_output=True,
@@ -212,12 +295,12 @@ def _probe_ssh(host: str, users: list[str]) -> tuple[str | None, str]:
             reason = "timeout"
             continue
         except FileNotFoundError:
-            return None, "ssh command not found"
+            return False, None, "ssh command not found"
         if proc.returncode == 0:
-            return user, ""
+            return True, user, ""
         if proc.stderr:
             reason = proc.stderr.strip().split("\n")[0]
-    return None, reason
+    return False, None, reason
 
 
 def _services_file(root: Path, env: str) -> Path | None:

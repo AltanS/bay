@@ -96,6 +96,22 @@ def _uv_run_cmd(bay_dir: Path) -> list[str]:
     return ["uv", "run", "--project", str(bay_dir)]
 
 
+def _normalise_stdin_value(raw: str) -> str:
+    """Normalise a value read from stdin.
+
+    A single-line value (exactly one trailing "\\n" and no other newline)
+    has that trailing newline stripped, so `echo` and a heredoc both work.
+    A multi-line value, such as a PEM key, is returned verbatim, including
+    its terminating newline, because that newline is significant.
+    """
+    if raw.count("\n") == 1 and raw.endswith("\n"):
+        value = raw[:-1]
+        if value.endswith("\r"):
+            value = value[:-1]
+        return value
+    return raw
+
+
 @app.command("set")
 def set_key(
     env: str = typer.Argument(..., help="Target environment."),
@@ -112,9 +128,12 @@ def set_key(
 
     Prefer stdin. A value passed as an argument lands in the operator's shell
     history and is readable in /proc/<pid>/cmdline by any local user for as
-    long as the command runs. Omitting it reads the value from stdin, with a
-    single trailing newline stripped so `echo` and a heredoc both work. The
-    positional form still works for one transition release.
+    long as the command runs. Omitting it reads the value from stdin. A
+    single-line value has its one trailing newline stripped, so `echo` and a
+    heredoc both work. A multi-line value, such as a PEM key, is stored
+    verbatim, including its terminating newline, because that newline is
+    significant. The positional form still works for one transition
+    release.
 
     Examples:
 
@@ -131,9 +150,7 @@ def set_key(
                     f"bay vault set {env} {key}"
                 ),
             )
-        value = sys.stdin.read()
-        if value.endswith("\n"):
-            value = value[:-1]
+        value = _normalise_stdin_value(sys.stdin.read())
         if not value:
             raise BayError.config(
                 "Empty value on stdin.",

@@ -168,3 +168,66 @@ def test_scan_of_a_past_ref_sees_a_leak_the_worktree_no_longer_has(scratch):
     stale = _scan(scratch, bad)
     assert stale.returncode != 0
     assert LOWER_KEY in stale.stdout + stale.stderr
+
+
+# ── the 0.3.0 history fixture allowlist ─────────────────────────────────
+# Two credential-shaped literals sit in already-written 0.3.0 commits, from
+# before the assemble-from-fragments discipline landed. `scripts/leak-scan.sh`
+# absolves them BY EXACT VALUE so the pre-push per-commit gate can pass without
+# a history rewrite. These tests pin both halves of that bargain: the fixtures
+# are green, and they do NOT shield a real secret sharing their line.
+#
+# Both are assembled from fragments here, same rule as every other value in
+# this file — a literal would put the value back in the tree at HEAD.
+HISTORIC_LOWER_FIXTURE = "kaqs5jwr4rzaug5" + "jlv5cvj9agu8olh4s05clrx5t"
+HISTORIC_PEM_FIXTURE = "-----BEGIN " + "OPENSSH PRIVATE KEY" + "-----"
+# A real GitHub PAT is ghp_ + exactly 36 chars; assembled, never a literal.
+REAL_PAT = "ghp_" + "".join(random.choices(string.ascii_letters + string.digits, k=36))
+
+
+def test_historic_lowercase_fixture_is_allowlisted(scratch):
+    _plant(scratch, "planted.py", f'EXAMPLE = "{HISTORIC_LOWER_FIXTURE}"\n')
+    result = _scan(scratch)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_historic_pem_fixture_is_allowlisted(scratch):
+    _plant(scratch, "planted.py", f'BANNER = "{HISTORIC_PEM_FIXTURE}"\n')
+    result = _scan(scratch)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_lowercase_fixture_does_not_shield_a_secret_on_its_line(scratch):
+    """The allowlist is anchored to one exact candidate, not to the line."""
+    _plant(
+        scratch,
+        "planted.py",
+        f'EXAMPLE = "{HISTORIC_LOWER_FIXTURE}"  # real: {LOWER_KEY}\n',
+    )
+    result = _scan(scratch)
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert LOWER_KEY in result.stdout + result.stderr
+
+
+def test_pem_fixture_does_not_shield_a_secret_on_its_line(scratch):
+    """The PEM banner is stripped as a SUBSTRING, then the line is re-tested."""
+    _plant(
+        scratch,
+        "planted.py",
+        f'answers = ["{HISTORIC_PEM_FIXTURE}", "{REAL_PAT}"]\n',
+    )
+    result = _scan(scratch)
+    assert result.returncode != 0, result.stdout + result.stderr
+    out = result.stdout + result.stderr
+    assert REAL_PAT in out
+    # Named by section 3(a) specifically — the entropy tiers would also catch a
+    # PAT, so without this the test would pass even if the strip broke 3(a).
+    assert "Credential-shaped token found" in out
+
+
+def test_pem_fixture_does_not_shield_another_pem_banner(scratch):
+    """Only the OPENSSH banner is blessed; every other PRIVATE KEY banner fails."""
+    other = "-----BEGIN " + "RSA PRIVATE KEY" + "-----"
+    _plant(scratch, "planted.py", f'a = ["{HISTORIC_PEM_FIXTURE}", "{other}"]\n')
+    result = _scan(scratch)
+    assert result.returncode != 0, result.stdout + result.stderr

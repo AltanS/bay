@@ -344,21 +344,88 @@ def _flags_to_prefill(flags: _SetupFlags) -> WizardResult:
 #: copies the very same file, so the two writers cannot drift apart.
 WRAPPER_SOURCE = "scripts/bin-bay-wrapper.sh"
 
+# ── Boilerplate detection ────────────────────────────────────────────────
+# KEEP IN SYNC with wrapper_is_boilerplate() in bootstrap.sh. The two writers
+# must classify an existing bin/bay identically, or a consumer gets a different
+# answer from `bay setup` than from bootstrap.sh.
+#
+# The marker line below must NEVER be removed from scripts/bin-bay-wrapper.sh:
+# it is the only thing that identifies a file as Bay's own, and without it every
+# shipped wrapper becomes un-updatable.
+
+#: One of the first 3 lines of every wrapper Bay ever shipped, including the
+#: ones from the legacy-argo era.
+_WRAPPER_MARKER_RE = re.compile(r"^#\s*(Bay|Argo) CLI wrapper\b")  # legacy-argo
+
+#: Every code shape Bay has ever written into the wrapper, legacy-argo era
+#: included. A line that
+#: matches none of these is hand-added, so the file is not ours to overwrite.
+_WRAPPER_ALLOWED_RES = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"^#!/usr/bin/env bash$",
+        r"^set -euo pipefail$",
+        r'^SCRIPT_DIR="\$\(cd "\$\(dirname "\$\{BASH_SOURCE\[0\]\}"\)/\.\." && pwd\)"$',
+        r'^if \[ ! -d "\$\{SCRIPT_DIR\}/\.(bay|argo)" \]; then$',  # legacy-argo
+        r"^echo .*>&2$",
+        r"^exit 1$",
+        r"^fi$",
+        r"^unset VIRTUAL_ENV( 2>/dev/null)?$",
+        r'^exec uv run --project "\$\{SCRIPT_DIR\}/\.(bay|argo)" (bay|argo) "\$@"$',  # legacy-argo
+    )
+)
+
+
+def _is_bay_boilerplate_wrapper(text: str) -> bool:
+    """True when ``text`` is an unmodified Bay (or legacy-argo) wrapper.
+
+    Two conditions, both required: the header marker is present in the first
+    three lines, and every code line is one Bay itself shipped.
+    """
+    lines = text.splitlines()
+    if not any(_WRAPPER_MARKER_RE.match(line) for line in lines[:3]):
+        return False
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        # Comments are dropped, but the shebang looks like one and is code.
+        if line.startswith("#") and not line.startswith("#!"):
+            continue
+        if not any(allowed.match(line) for allowed in _WRAPPER_ALLOWED_RES):
+            return False
+    return True
+
 
 def _ensure_bin_wrapper(root: Path, bay_dir: Path) -> None:
-    """Create bin/bay wrapper script if it doesn't exist."""
+    """Write, refresh, or leave alone the consumer's bin/bay wrapper."""
     bin_dir = root / "bin"
     wrapper = bin_dir / "bay"
-    if wrapper.exists():
-        return
     source = bay_dir / WRAPPER_SOURCE
     if not source.is_file():
         raise BayError(
             f"wrapper template missing at {source} — the framework checkout is incomplete; "
             "re-run '.bay/bootstrap.sh'"
         )
+    shipped = source.read_text()
+
+    if wrapper.exists():
+        existing = wrapper.read_text()
+        if existing == shipped:
+            return
+        if not _is_bay_boilerplate_wrapper(existing):
+            console.warning(
+                "bin/bay looks hand-edited, leaving it alone "
+                f"(shipped wrapper: .bay/{WRAPPER_SOURCE})"
+            )
+            return
+        wrapper.write_text(shipped)
+        wrapper.chmod(0o755)
+        console.success("Updated bin/bay wrapper")
+        return
+
     bin_dir.mkdir(exist_ok=True)
-    wrapper.write_text(source.read_text())
+    wrapper.write_text(shipped)
     wrapper.chmod(0o755)
     console.success("Created bin/bay wrapper")
 

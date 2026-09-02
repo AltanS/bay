@@ -86,6 +86,21 @@ def _build_context(result: WizardResult) -> dict:
     }
 
 
+SECRETS_FILENAME = "secrets.yml"
+
+
+def _harden_if_secrets(path: Path) -> None:
+    """Chmod a freshly written ``secrets.yml`` to 0600.
+
+    Every scaffolded ``secrets.yml`` holds real, generated passwords in
+    plaintext until the operator runs ``bin/bay vault encrypt`` on it — a
+    file written under the process umask (typically 0644) leaves those
+    passwords readable by any local user in the meantime.
+    """
+    if path.name == SECRETS_FILENAME:
+        path.chmod(0o600)
+
+
 _VAULT_HEADER = "$ANSIBLE_VAULT;"
 
 
@@ -275,7 +290,7 @@ def _fill_empty_secrets(secrets_file: Path) -> None:
     if filled:
         with secrets_file.open("w") as f:
             yaml.dump(data, f)
-        secrets_file.chmod(0o600)
+        _harden_if_secrets(secrets_file)
         console.success(f"generated {filled} secret(s) in {secrets_file}")
 
 
@@ -324,6 +339,7 @@ def _render_one(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(content)
+    _harden_if_secrets(output_path)
     created.append(output_path)
     console.success(f"created {output_path}")
 
@@ -355,6 +371,7 @@ def copy_examples(bay_dir: Path, target_dir: Path, *, force: bool = False) -> No
 
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+            _harden_if_secrets(dst)
             console.success(f"created {dst}")
 
     _log_skipped_summary(skipped)

@@ -309,7 +309,7 @@ _bay_send_r{{ loop.index }}() {
 # file, truncated write, unknown schema, malformed epoch — yields NO mutes, so
 # the alert still fires. The inverse would make a failed `mv` silence the
 # fleet, which is GH#33 arriving via the filesystem.
-BAY_ALERT_POLICY_FILE='{{ alert_policy_path | default('/etc/bay/alert-overrides') }}'
+BAY_ALERT_POLICY_FILE={{ alert_policy_path | default('/etc/bay/alert-overrides') | quote }}
 BAY_ALERT_POLICY_SCHEMA=1
 
 _bay_muted() {

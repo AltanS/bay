@@ -24,6 +24,13 @@
 # rc 0 with an empty stdout, which would make `from_json` blow up the play.
 # argv (not cmd) so no path is ever shell-split; the path list travels as one
 # JSON argument.
+#
+# A missing file is COLLECTED, not raised. The task is `no_log` because the
+# output carries every secret in the fleet, and no_log swallows the traceback
+# too — an env file that deploy_stack never rendered used to fail this task
+# with nothing on screen but "MODULE FAILURE". The paths come back in their
+# own key so the assert below can name them without printing a byte of
+# content.
 - name: Read the rendered env files in one pass
   ansible.builtin.command:
     argv:
@@ -33,10 +40,14 @@
         import base64, json, sys
         paths = json.loads(sys.argv[1])
         out = {}
+        missing = []
         for path in paths:
-            with open(path, "rb") as handle:
-                out[path] = base64.b64encode(handle.read()).decode("ascii")
-        print(json.dumps(out))
+            try:
+                with open(path, "rb") as handle:
+                    out[path] = base64.b64encode(handle.read()).decode("ascii")
+            except OSError:
+                missing.append(path)
+        print(json.dumps({"files": out, "missing": missing}))
       - >-
         {{ container_specs | selectattr('env_file', 'defined')
            | map(attribute='env_file') | list | to_json }}
@@ -44,6 +55,21 @@
   changed_when: false
   check_mode: false
   no_log: true
+
+- name: Fail with the list of env files that could not be read
+  ansible.builtin.assert:
+    that: _reconcile_env_missing | length == 0
+    fail_msg: >-
+      the reconciler could not read {{ _reconcile_env_missing | length }}
+      rendered env file(s): {{ _reconcile_env_missing | join(', ') }}.
+      deploy_stack renders these; a missing one usually means the play was run
+      with a tag selection that skipped it. Re-run without --tags, or with
+      --tags deploy_stack.
+    quiet: true
+  vars:
+    _reconcile_env_missing: >-
+      {{ (_reconcile_env_read.stdout | default('{}') | from_json)
+         .get('missing', []) }}
 
 - name: Build reconcile bundle entries
   ansible.builtin.set_fact:
@@ -53,7 +79,9 @@
     loop_var: _spec
     label: "{{ _spec.name }}"
   vars:
-    _env_map: "{{ _reconcile_env_read.stdout | default('{}') | from_json }}"
+    _env_map: >-
+      {{ (_reconcile_env_read.stdout | default('{}') | from_json)
+         .get('files', {}) }}
     _env_b64: >-
       {{ _env_map[_spec.env_file] if (_spec.env_file is defined
          and _spec.env_file in _env_map) else '' }}
@@ -142,6 +170,13 @@
     _pkg_tar: >-
       {{ _pkg_cache }}/bay_reconcile-{{ _reconcile_pkg_marker | hash('sha1') }}.tar.gz
   block:
+    # Both controller-side steps run in check mode. They touch a cache
+    # directory under the operator's own HOME, never a managed host, and the
+    # `unarchive` below cannot even be simulated without the tar: a
+    # check-mode-SKIPPED pack left `--check` failing on a missing file, which
+    # is the worst kind of dry-run result — one that says the change is broken
+    # when only the dry run is. `changed_when: false` for the same reason:
+    # filling a local cache is not a change to the host being reported on.
     - name: Ensure the controller-side package cache exists
       ansible.builtin.file:
         path: "{{ _pkg_cache }}"
@@ -149,6 +184,8 @@
         mode: "0700"
       delegate_to: localhost
       become: false
+      check_mode: false
+      changed_when: false
 
     # `creates:` makes this a no-op once the tar for this exact marker exists,
     # so a multi-host deploy packs once and ships N times.
@@ -166,6 +203,8 @@
         creates: "{{ _pkg_tar }}"
       delegate_to: localhost
       become: false
+      check_mode: false
+      changed_when: false
 
     - name: Ensure the reconciler directory exists
       ansible.builtin.file:

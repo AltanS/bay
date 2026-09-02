@@ -236,7 +236,29 @@ CRED_PATTERNS+='|tskey-auth-[A-Za-z0-9-]{16,}'
 CRED_PATTERNS+='|-----BEGIN [A-Z ]*PRIVATE KEY-----'
 CRED_PATTERNS+='|\$2[aby]\$[0-9]{2}\$[A-Za-z0-9./]{53}'
 
+#     Two literals in this repo's HISTORY are credential-SHAPED but carry no
+#     secret: they were test fixtures written out in full before the
+#     assemble-from-fragments discipline landed. They live in commits that are
+#     already written and cannot be un-published without a history rewrite, so
+#     they are allowlisted BY EXACT VALUE here. See LOWER_ENTROPY_FIXTURES
+#     below for the other one.
+#
+#       -----BEGIN OPENSSH PRIVATE KEY-----   tests/test_wizard_ssh_keys.py
+#         The PEM banner only. No key body ever accompanied it; a real key's
+#         base64 body is caught independently by tier (b).
+#
+#     NEW fixtures must be ASSEMBLED AT RUNTIME from fragments (see the header
+#     of tests/test_leak_scan.py) — do not grow this list.
+#
+#     The literal is stripped as a SUBSTRING and the line re-tested, the same
+#     way section 1 handles the repo slug. Dropping the whole line would let a
+#     real credential hide by sharing a line with the fixture.
+CRED_FIXTURE_LITERALS='-----BEGIN OPENSSH PRIVATE KEY-----'
+
 if hits=$(ggrep -InE "$CRED_PATTERNS" -- "${NO_LOCK[@]}" 2>/dev/null | strip_ref); then
+    hits=$(printf '%s\n' "$hits" \
+            | sed -E "s#${CRED_FIXTURE_LITERALS}##g" \
+            | grep -E "$CRED_PATTERNS" || true)
     if [ -n "$hits" ]; then
         fail "Credential-shaped token found:"
         echo "$hits" >&2
@@ -268,6 +290,16 @@ ENTROPY_ALLOW+='|^ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789
 # that clear the entropy bar but are structurally not secrets.
 LOWER_ENTROPY_ALLOW='^[a-f0-9]{7,40}-'                      # short-sha-prefixed names
 LOWER_ENTROPY_ALLOW+='|^sha256$'
+# A test fixture, not a secret. `tests/test_leak_scan.py` used to write this
+# 40-char [a-z0-9] value out in full in its docstring, as the worked example of
+# the shape tier (b2) was built to catch. It is a throwaway value that never
+# authenticated anything, and it sits in commits of the 0.3.0 series that are
+# already written — so it is allowlisted by EXACT VALUE rather than removed by
+# a history rewrite. HEAD assembles the example at runtime instead.
+# NEW fixtures must be assembled at runtime; do not grow this list.
+# Anchored ^...$ against a single extracted candidate, so a DIFFERENT secret on
+# the same line is a separate candidate and is still reported.
+LOWER_ENTROPY_ALLOW+='|^kaqs5jwr4rzaug5jlv5cvj9agu8olh4s05clrx5t$'
 
 ent=$(ggrep -IhoE '\b[A-Za-z0-9+/_-]{32,}={0,2}\b' -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null \
         | grep -E '[A-Z]' | grep -E '[a-z]' | grep -E '[0-9]' | sort -u \

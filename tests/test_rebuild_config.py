@@ -265,18 +265,26 @@ class TestRemoteStrategyRendering:
         assert 'REPO_DIR="${REMOTE_BUILD_DIR}/animals/repo"' in rendered
 
     def test_clone_cmd_rendered(self):
-        """Remote service has CLONE_CMD for initial clone."""
+        """Remote service has CLONE_CMD for initial clone.
+
+        The branch, the URL and the target directory are referenced as escaped
+        parameter expansions rather than pasted in: the string is handed to
+        `eval`, which re-parses the VALUE, so an interpolated branch holding
+        `$(...)` would run. BRANCH= and CLONE_URL= are asserted separately.
+        """
         services = _remote_service_with_token()
         rendered = _render_rebuild_sh(services, ["animals"])
         assert "CLONE_CMD=" in rendered
-        assert "git clone --branch main --single-branch" in rendered
+        assert r'git clone --branch \"\${BRANCH}\" --single-branch' in rendered
+        assert 'BRANCH="main"' in rendered
 
     def test_fetch_cmd_rendered(self):
         """Remote service has FETCH_CMD for subsequent fetches."""
         services = _remote_service_with_token()
         rendered = _render_rebuild_sh(services, ["animals"])
         assert "FETCH_CMD=" in rendered
-        assert "fetch origin main" in rendered
+        assert r'fetch origin \"\${BRANCH}\"' in rendered
+        assert 'BRANCH="main"' in rendered
 
     def test_remote_strategy_no_pull_cmd(self):
         """Remote service does NOT have PULL_CMD (that's for local strategy)."""

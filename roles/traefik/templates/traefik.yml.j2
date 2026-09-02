@@ -43,13 +43,13 @@ providers:
     endpoint: "unix:///var/run/docker.sock"
     exposedByDefault: false
     network: {{ traefik_docker_network }}
-{% if traefik_dns_challenge_enabled | default(false) %}
-  # File provider for tailnet-proxy routes to remote upstreams (Docker
-  # labels can only target local containers).
+  # File provider. Always on: it carries tls.options.default (dynamic-only —
+  # Traefik reads but ignores a `tls:` key in this static file) and, when the
+  # DNS-01 challenge is enabled, the tailnet-proxy routes to remote upstreams
+  # that Docker labels cannot express.
   file:
     directory: /etc/traefik/dynamic
     watch: true
-{% endif %}
 
 certificatesResolvers:
   letsencrypt:
@@ -99,11 +99,6 @@ log:
 api:
   dashboard: false
 
-# Default TLS policy for every router that names no tls.options of its own.
-# sniStrict is opt-in: it refuses requests without SNI, which also refuses
-# access by raw IP and the default certificate. See roles/traefik/defaults.
-tls:
-  options:
-    default:
-      minVersion: {{ traefik_tls_min_version | default('VersionTLS12', true) }}
-      sniStrict: {{ 'true' if traefik_tls_sni_strict | default(false) else 'false' }}
+# NOTE: tls.options is DYNAMIC configuration. A `tls:` key in this static file
+# is parsed and then ignored by Traefik, so the TLS floor lives in
+# dynamic/tls-options.yml, served by the file provider above.

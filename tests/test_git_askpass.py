@@ -128,12 +128,12 @@ def test_rendered_rebuild_still_parses():
 # ── The helper itself ────────────────────────────────────────────────────
 
 
-def _render_helper(tmp_path: Path) -> Path:
+def _render_helper(tmp_path: Path, token: str = _SENTINEL_PAT) -> Path:
     env = make_ansible_env(_GIT_DEPLOY / "templates")
     out = env.get_template("git-askpass.sh.j2").render(
         ansible_managed="test render",
         app_user="deploy",
-        _askpass_token=_SENTINEL_PAT,
+        _askpass_token=token,
     )
     helper = tmp_path / "askpass"
     helper.write_text(out)
@@ -158,6 +158,43 @@ def test_helper_answers_both_prompts(tmp_path):
         check=True,
     )
     assert password.stdout.strip() == _SENTINEL_PAT
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "hz'; id; 'hz",
+        "hz$(id)hz",
+        "hz`id`hz",
+        'hz" ; id ; "hz',
+        "hz\\hz",
+    ],
+    ids=["single_quote", "cmdsub", "backtick", "double_quote", "backslash"],
+)
+def test_a_hostile_token_is_returned_verbatim_and_never_executed(tmp_path, token):
+    """The PAT is opaque consumer text, so it is `| quote`d, not hand-quoted.
+
+    It used to be pasted between two hand-written single quotes. A token
+    holding a `'` closed the literal and the remainder ran as the build user,
+    on every git authentication.
+    """
+    helper = _render_helper(tmp_path, token=token)
+    proc = subprocess.run(
+        [str(helper), "Password for 'https://x-access-token@github.com': "],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert proc.stdout == token + "\n", "the token must survive byte for byte"
+    assert "uid=" not in proc.stdout, "`id` ran"
+
+
+def test_helper_still_parses_with_a_hostile_token(tmp_path):
+    helper = _render_helper(tmp_path, token="hz'; id; 'hz")
+    proc = subprocess.run(
+        ["bash", "-n", str(helper)], capture_output=True, text=True, check=False
+    )
+    assert proc.returncode == 0, proc.stderr
 
 
 def test_helper_is_installed_private():
@@ -333,3 +370,44 @@ def test_build_args_are_passed_by_name_not_by_value():
         "no_log here hides the build failure output, which is the one thing "
         "this task exists to show"
     )
+
+
+def test_pinned_host_keys_are_installed_outside_the_local_build_block():
+    """rebuild.sh runs on the build server too, and it needs this file.
+
+    Every git-over-ssh pull in rebuild.sh sets StrictHostKeyChecking=yes with
+    UserKnownHostsFile pointed here. The copy used to live inside the
+    "Clone and build services" block, which is gated on the host having
+    LOCAL-strategy services — so a remote-only build server never got the
+    file and every deploy-key pull failed closed, at build time.
+    """
+    tasks = yaml.safe_load((_GIT_DEPLOY / "tasks" / "main.yml").read_text())
+
+    def find(items, depth=0):
+        for task in items or []:
+            mod = task.get("ansible.builtin.copy", {})
+            if isinstance(mod, dict) and mod.get("src") == "github_known_hosts":
+                yield depth, task
+            for key in ("block", "rescue", "always"):
+                if key in task:
+                    yield from find(task[key], depth + 1)
+
+    found = list(find(tasks))
+    assert len(found) == 1, "exactly one place installs the pinned host keys"
+    depth, task = found[0]
+    assert depth == 1, (
+        "the copy is nested inside a conditional block again; a build server "
+        "with no local-strategy services will not get it"
+    )
+    assert task["ansible.builtin.copy"]["dest"] == "{{ git_deploy_known_hosts }}"
+
+    # The directory it lands in has to be hoisted with it.
+    def names(items, depth=0):
+        for t in items or []:
+            yield depth, t.get("name")
+            for key in ("block", "rescue", "always"):
+                if key in t:
+                    yield from names(t[key], depth + 1)
+
+    build_dir = [d for d, n in names(tasks) if n == "Ensure build directory exists"]
+    assert build_dir == [1], "the build directory must be created at the same level"

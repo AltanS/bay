@@ -26,6 +26,14 @@
 #      leaves a clean worktree and a dirty history — and history is what a
 #      push publishes.
 #
+#      The scanner that RUNS is always the one in the working tree
+#      ($repo_root/scripts/leak-scan.sh); each commit is passed to it as a
+#      ref argument, never checked out. That is deliberate: the current
+#      scanner is the strongest one, and its fixture allowlist can absolve a
+#      known-harmless literal in an already-written commit without a history
+#      rewrite. A commit's own (older, weaker) copy of the scanner is never
+#      executed.
+#
 # Installed by `make hooks` (sets core.hooksPath=.githooks). A fresh clone,
 # INCLUDING the public one, has no hooks until that runs.
 #

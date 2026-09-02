@@ -40,7 +40,7 @@ def _invoke(project: Path, monkeypatch):
 
 
 def _no_network(monkeypatch) -> None:
-    monkeypatch.setattr("bay_cli.commands.doctor._probe_ssh", lambda h, u: ("root", ""))
+    monkeypatch.setattr("bay_cli.commands.doctor._probe_ssh", lambda h, u: (True, "root", ""))
     monkeypatch.setattr("bay_cli.commands.doctor._resolve_domain", lambda d: "203.0.113.10")
     monkeypatch.setattr(
         "bay_cli.commands.validate._probe_webhook_health",

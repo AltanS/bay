@@ -222,33 +222,46 @@
       register: _remote_pull_result
       until: _remote_pull_result.rc == 0
 
+    # Pinned github.com host keys, and the directory that holds them.
+    #
+    # Hoisted OUT of the local-build block below. rebuild.sh points every
+    # git-over-ssh pull at this file with StrictHostKeyChecking=yes, and
+    # rebuild.sh is installed on a remote-only build server too — one with no
+    # local-strategy services, where the block never ran. There the file was
+    # absent and every deploy-key pull failed closed, at build time, on the
+    # host furthest from the operator. It costs one file to always write it.
+    - name: Ensure build directory exists
+      ansible.builtin.file:
+        path: "{{ git_deploy_build_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        # 0700: repo checkouts, deploy keys, GIT_ASKPASS helpers.
+        mode: "0700"
+
+    - name: Install pinned github.com host keys
+      ansible.builtin.copy:
+        src: github_known_hosts
+        dest: "{{ git_deploy_known_hosts }}"
+        owner: "{{ app_user }}"
+        mode: "0644"
+
     # ── Local strategy: clone and build on deployment server ──
     - name: Clone and build services
       when: git_deploy_services | length > 0
       block:
-        - name: Ensure build directory exists
-          ansible.builtin.file:
-            path: "{{ git_deploy_build_dir }}"
-            state: directory
-            owner: "{{ app_user }}"
-            # 0700: repo checkouts, deploy keys, GIT_ASKPASS helpers.
-            mode: "0700"
-
-        # Pinned github.com host keys. Every git-over-ssh call in this role
-        # (clone_repos.yml and rebuild.sh) points UserKnownHostsFile here with
-        # StrictHostKeyChecking=yes, replacing trust-on-first-use.
-        - name: Install pinned github.com host keys
-          ansible.builtin.copy:
-            src: github_known_hosts
-            dest: "{{ git_deploy_known_hosts }}"
-            owner: "{{ app_user }}"
-            mode: "0644"
-
         - name: Ensure bin directory exists
           ansible.builtin.file:
             path: "{{ stack_dir }}/bin"
             state: directory
-            mode: "0755"
+            owner: "{{ app_user }}"
+            group: "{{ app_user_group }}"
+            # 0750, matching log_archive, which creates the same directory.
+            # The two roles used to disagree (0755 here, 0750 there), so the
+            # mode flipped on every deploy depending on which ran last.
+            # Everything installed here is 0700/0750 app_user and is executed
+            # either as app_user (the systemd units set User=) or as root,
+            # which ignores the mode; nothing else needs to traverse it.
+            mode: "0750"
 
         - name: Provision buildx builder
           ansible.builtin.include_tasks: setup_builder.yml
@@ -340,7 +353,10 @@
           ansible.builtin.file:
             path: "{{ stack_dir }}/bin"
             state: directory
-            mode: "0755"
+            owner: "{{ app_user }}"
+            group: "{{ app_user_group }}"
+            # 0750 app_user — see the first "Ensure bin directory exists".
+            mode: "0750"
 
         - name: Deploy webhook receiver
           ansible.builtin.include_tasks: webhook.yml
@@ -383,7 +399,10 @@
           ansible.builtin.file:
             path: "{{ stack_dir }}/bin"
             state: directory
-            mode: "0755"
+            owner: "{{ app_user }}"
+            group: "{{ app_user_group }}"
+            # 0750 app_user — see the first "Ensure bin directory exists".
+            mode: "0750"
 
         - name: Deploy webhook receiver (build server)
           ansible.builtin.include_tasks: webhook.yml

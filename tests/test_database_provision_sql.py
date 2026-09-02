@@ -176,12 +176,32 @@ def test_changed_marker_is_emitted_only_for_real_work():
     for line in sql.splitlines():
         if "CHANGED:" in line:
             assert line.lstrip().startswith("SELECT 'CHANGED:")
-    # Both markers are guarded by a NOT EXISTS on the next line.
-    marked = [i for i, l in enumerate(sql.splitlines()) if "CHANGED:" in l]
-    assert len(marked) == 2
+    # Three markers, each guarded by an EXISTS test on the next line: create
+    # database, create role, and set the role's password. The third is the
+    # one that used to be missing — `ALTER ROLE ... PASSWORD` runs on every
+    # deploy for an existing role (the stored SCRAM verifier cannot be read
+    # back and compared), so a rotation landed and reported `ok`.
     lines = sql.splitlines()
+    marked = [i for i, line in enumerate(lines) if "CHANGED:" in line]
+    assert len(marked) == 3
     for i in marked:
+        assert "EXISTS (SELECT 1 FROM pg_" in lines[i + 1]
+    creates = [i for i in marked if "create " in lines[i]]
+    assert len(creates) == 2
+    for i in creates:
         assert "WHERE NOT EXISTS" in lines[i + 1]
+
+
+def test_the_password_write_reports_changed():
+    """A rotation is a mutation; it may not deploy silently."""
+    sql = _strip_comments(_render([_binding("app")], {_vault_key("app"): "pw"}))
+    lines = sql.splitlines()
+    rotate = [i for i, line in enumerate(lines) if "CHANGED: set password" in line]
+    assert len(rotate) == 1, "the ALTER ROLE ... PASSWORD branch needs a marker"
+    guard = lines[rotate[0] + 1]
+    assert "WHERE EXISTS" in guard and "NOT EXISTS" not in guard, (
+        "the marker fires for an existing role, which is the branch that ALTERs"
+    )
 
 
 def test_multiple_bindings_share_one_script():

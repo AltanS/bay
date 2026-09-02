@@ -40,7 +40,12 @@
 #     remote_build.yml builds, pushes, then pulls those post-push;
 #   - every accessory image.
 # Names are `quote`d and fed through printf, so they never hit the shell
-# unquoted. `set -o pipefail` is the house pattern and is safe HERE only
+# unquoted — the shell strips that quoting, so printf writes the raw name and
+# one name per line reaches xargs. xargs is told `-d '\n'`: its DEFAULT input
+# syntax has its own quote and backslash rules, so it would have re-parsed a
+# name containing a quote or a space and split it back apart, undoing the
+# protection one stage earlier. `-r` keeps an empty list from invoking the
+# pull with no image at all. `set -o pipefail` is the house pattern and is safe HERE only
 # because xargs is the last stage and reads its input to the end: the rc is
 # the pull result either way. Never pair pipefail with a short-circuiting
 # reader such as `grep -q` — the reader exits early, the writer takes SIGPIPE,
@@ -66,7 +71,7 @@
     cmd: >-
       set -o pipefail;
       printf '%s\n' {{ _pull_images | map('quote') | join(' ') }}
-      | xargs -P 4 -n 1 docker pull
+      | xargs -r -d '\n' -P 4 -n 1 docker pull
     executable: /bin/bash
   register: _pull_result
   changed_when: "'Downloaded newer image' in (_pull_result.stdout | default(''))"

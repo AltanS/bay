@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import threading
@@ -1499,6 +1500,12 @@ _PROBE_CACHE_MAX_AGE = 3600  # 1 hour — mirrors _RIG_CACHE_MAX_AGE in ops.py
 #: Sibling dotfile of ``.rig-state-cache``, in the framework directory.
 _PROBE_CACHE_FILENAME = ".validate-probe-cache"
 
+#: Overrides the directory the probe cache is written to. Set it to a scratch
+#: directory in tests: a test that runs validate through a ``.bay`` symlink to
+#: the checkout would otherwise drop the cache file into the framework repo,
+#: and a warm cache there hides a broken image reference from the next run.
+PROBE_CACHE_DIR_ENV = "BAY_PROBE_CACHE_DIR"
+
 
 def _strip_url_credentials(url: str) -> str:
     """Drop any ``user:password@`` (or ``x-access-token:<pat>@``) from a URL.
@@ -1521,7 +1528,9 @@ class ProbeCache:
     """
 
     def __init__(self, bay_dir: Path | None, *, enabled: bool = True) -> None:
-        self._path = (bay_dir / _PROBE_CACHE_FILENAME) if bay_dir is not None else None
+        override = os.environ.get(PROBE_CACHE_DIR_ENV, "").strip()
+        directory = Path(override) if override else bay_dir
+        self._path = (directory / _PROBE_CACHE_FILENAME) if directory is not None else None
         #: When False every probe runs; results are still recorded, so
         #: ``--no-probe-cache`` refreshes the cache rather than bypassing it.
         self.enabled = enabled
@@ -1593,6 +1602,7 @@ class ProbeCache:
             }
             payload = json.dumps({"version": 1, "entries": fresh})
         try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
             self._path.write_text(payload)
             self._path.chmod(0o600)
         except OSError:
@@ -2686,7 +2696,9 @@ def run_validation(
             recorded in ``<bay_dir>/.validate-probe-cache`` less than an hour
             ago is reused instead of re-run. Failures are never cached.
             ``bay validate --no-probe-cache`` sets this False, which re-runs
-            every probe and refreshes the cache.
+            every probe and refreshes the cache. Set ``BAY_PROBE_CACHE_DIR``
+            to write the cache somewhere else, for example a scratch
+            directory in a test.
 
     Returns:
         A ValidationResult with all checks applied.
