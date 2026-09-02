@@ -2,7 +2,7 @@
 name = "bay"
 # Kept in lockstep with version.yml by scripts/release.sh — see
 # tests/test_pyproject_metadata.py, which fails the build if they drift.
-version = "0.3.4"
+version = "0.4.0"
 description = "Ansible framework for provisioning hardened Docker servers with VPN-aware reverse proxy and declarative service deployment"
 readme = "README.md"
 requires-python = ">=3.12"
