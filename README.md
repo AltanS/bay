@@ -8,6 +8,8 @@
 ∼∽∼∽∼∽∼∽∼∽∼∽∼∽∼∽∼∽∼∽∼∽∼∽∼
 ```
 
+[![CI](https://github.com/AltanS/bay/actions/workflows/ci.yml/badge.svg)](https://github.com/AltanS/bay/actions/workflows/ci.yml)
+
 Ansible framework for provisioning hardened Docker servers with VPN-aware reverse proxy and declarative service deployment.
 
 > **[docs/features.md](docs/features.md)** -- full feature overview and competitive advantages.
@@ -572,6 +574,19 @@ The command renames the Headscale user and all node hostnames under it. Node hos
 ## Framework development
 
 ### Test suites
+
+Run `make install` first in a fresh clone. It installs the Galaxy roles and
+collections this framework depends on into `vendor/`, and it points git at
+`.githooks/` (`core.hooksPath`) so the pre-commit and pre-push gates run.
+`core.hooksPath` is per-clone config, so every checkout needs it once. Without
+`make install` the suite runs against an incomplete `vendor/` tree — the
+framework test writes mock Galaxy role stubs to fill the gap, so it can go
+green against stubs instead of the real dependencies.
+
+```bash
+make install                 # Galaxy deps into vendor/ + core.hooksPath
+make test                    # Framework + bootstrap + Python suites
+```
 
 | Command | Script | What it tests |
 |---------|--------|---------------|
