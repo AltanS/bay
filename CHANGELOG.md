@@ -7,109 +7,284 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
-## [Unreleased]
+## [0.3.0] — 2026-09-02
 
-### Changed
+Three milestones land together: security hardening, onboarding repair and
+performance. Read **Upgrade notes** before you bump an existing consumer, the
+release adds validate failures that stop a deploy.
 
-- The setup wizard now defaults the access gateway to **none**. Headscale is
-  still offered; add it later with `bin/bay setup --gateway headscale`.
-  Headscale adds a DNS record, a Tailscale client install and four post-deploy
-  steps to a first run, which is a lot to carry before anything works.
-- `bin/bay setup --defaults` now requires `--server-ip` and `--domain`. It
+### Security
+
+- **Headscale OIDC needs an allowlist.** `headscale_oidc_allowed_domains`,
+  `headscale_oidc_allowed_users` and `headscale_oidc_allowed_groups` render
+  into the OIDC block. `bin/bay validate` fails when OIDC is on with no
+  allowlist, and warns when OIDC is on with no `headscale_acl_policy`.
+- **`expose: host` needs `expose_host_ack: true`.** The flag records that you
+  accept the port bypassing nftables and CrowdSec. Nothing about the rendered
+  port changes.
+- **A split entrypoint fails closed.** The deploy now stops when
+  `traefik_split_entrypoints` is true and `traefik_public_bind_ip` is blank,
+  instead of rendering a wildcard bind that collides with
+  `websecure_tailnet`.
+- **Traefik TLS floor and metrics bind.** `minVersion` is TLS 1.2 by default,
+  and the metrics entrypoint binds `traefik_metrics_bind_ip` (`127.0.0.1`)
+  instead of every interface. `sniStrict` stays off unless you set
+  `traefik_tls_sni_strict: true`.
+- **New nftables knobs, both default-compatible.**
+  `nftables_forward_permissive` defaults to `true` and
+  `nftables_container_host_ports` defaults to empty, so today's behaviour is
+  unchanged until you tighten them.
+- **Alert credentials leave world-readable files.** The Telegram token and
+  alert webhook URL now live in `/etc/bay/alert.env` (0600 root), sourced by
+  every notify snippet and read through `EnvironmentFile=` in nine systemd
+  units. Emitter scripts drop to 0750, and recipient literals render as
+  `BAY_RC_<n>_*` names.
+- **PATs leave `argv` and `.git/config`.** `git_deploy` uses a `GIT_ASKPASS`
+  helper in `clone_repos`, remote builds and `rebuild.sh`, build directories
+  are 0700, and build args pass through the task environment rather than the
+  command line.
+- **Other credential handling.** `rebuild.sh` reads its HMAC key from a 0600
+  file, `zot` takes the htpasswd password on stdin, webhook receiver and
+  Watchtower secrets ship via `env_file`, and `no_log` covers the `cscli
+  console enroll` and `alert_channel` URI tasks.
+- **Basic-auth hashes move from APR1 to bcrypt**, with a deterministic
+  secret-derived salt so the render stays stable for the reconciler. Passwords
+  are unchanged. This adds a `bcrypt` Python dependency.
+- **`bay-docker-ro inspect --format` is restricted** to an allowlist that
+  cannot reach `Config.Env`, and the Headscale config file is 0640.
+- **Every consumer value that reaches a shell or SQL is quoted.** The services
+  schema gained name and env-key regexes plus route patterns, and
+  `bin/bay validate` restates them in words. A bare `/` in `public_routes` and
+  a backtick in a Traefik rule literal are now errors.
+- **`bin/bay vault set` reads the value from stdin** when the positional
+  argument is omitted, so a secret stops landing in shell history. The
+  positional form still works for one transition release.
+- **Build trigger and state directories are 2770**, owned by a fixed
+  `bay-build` group (GID 2000) shared by `app_user` and the webhook container
+  (UID 10001). They were 0777, so any local user could force a rebuild or
+  rewrite the circuit breaker state.
+- **Webhook receiver hardening.** A 1 MiB body cap is checked before any read,
+  a 256-entry `X-GitHub-Delivery` cache drops repeat deliveries after the HMAC
+  check, `/health` returns a service count instead of names, and the webhook
+  router carries a Traefik rate-limit middleware
+  (`webhook_rate_limit_average|burst|period`).
+- **Supply chain pins.** restic is verified by sha256, Watchtower is pinned by
+  index digest, the CrowdSec apt repository uses a `signed-by` keyring instead
+  of the deprecated global key, and `github.com` host keys ship with the role
+  so every `GIT_SSH_COMMAND` uses `StrictHostKeyChecking=yes`.
+- **Push gates.** Gate A matches the public remote by root-commit identity,
+  bypass environment variables print a loud warning, and `leak-scan` gained a
+  lowercase-plus-digit entropy tier proven red by re-injection, plus an
+  allowlist for RFC 2606 reserved TLDs.
+
+### Onboarding
+
+- **A scaffolded project now validates and deploys.** The generated Gatus
+  service used `healthcheck.path` and the MariaDB accessory used
+  `backup.method: mysqldump`, neither of which the schema accepts. They are now
+  `healthcheck_path` and `mysql`.
+- **Services that declare `config_files` now ship them.** `catalog/gatus/`
+  gained `files/gatus/config.yaml`, and `bin/bay setup` copies catalog files
+  into the consumer's `files/` through the same helper `bin/bay service add`
+  uses.
+- **Scaffolded secrets are generated**, by the same generator `bin/bay secret`
+  uses, instead of written as empty strings.
+- **The SSH-key step has no Skip.** At least one key is required for the admin
+  account, because provisioning disables root and password login and a keyless
+  admin locks you out. `--defaults` and `--no-interactive` take `--ssh-key` or
+  `--ssh-key-file`, or fall back to `~/.ssh/*.pub`.
+- **Four new validate hard failures**: a missing `config_files` entry, an admin
+  user with no SSH keys, an empty referenced secret, and an empty or
+  placeholder `letsencrypt_email`.
+- **The wizard defaults the access gateway to none.** Headscale is still
+  offered, and you can add it later with `bin/bay setup --gateway headscale`.
+  It adds a DNS record, a Tailscale client install and four post-deploy steps
+  to a first run, which is a lot to carry before anything works.
+- **`bin/bay setup --defaults` requires `--server-ip` and `--domain`.** It
   previously scaffolded `0.0.0.0` and `example.com`, which can never deploy.
-- The wizard scaffolds `group_vars/all/alerts.yml` with an empty
+  `--defaults` also works without a TTY now.
+- **`bin/bay setup` takes `--email`** (alias of `--letsencrypt-email`), honoured
+  on every path. Without it, `admin@<domain>` is derived and announced.
+- **The wizard scaffolds `group_vars/all/alerts.yml`** with an empty
   `alert_recipients` list. The legacy `docker_monitor_telegram_*` keys are no
-  longer generated — they sit at env level, outrank `group_vars/all/alerts.yml`
-  by Ansible precedence, and cause duplicate delivery once a real recipient is
-  added. Configure alerts with `bin/bay alerts`. See `docs/alerting.md`.
-- `bin/bay setup` takes `--email` (alias of `--letsencrypt-email`), honoured on
-  every path including `--no-interactive`. Without it, `admin@<domain>` is
-  derived and announced. The example copy previously left the shipped
-  placeholder in place, so a `--no-interactive` scaffold failed validate.
-- `bin/bay validate` now hard-fails on an empty `letsencrypt_email`. There is
-  no ACME opt-out in the framework, so an empty value always means broken SSL.
-  `example/group_vars/production/domains.yml` shipped it empty; it now carries
-  a placeholder that validate rejects until you replace it.
-- One documented entry path: clone over **HTTPS** into `.bay/`, run
+  longer generated, they sit at env level and outrank
+  `group_vars/all/alerts.yml` by Ansible precedence, which causes duplicate
+  delivery once a real recipient is added.
+- **One documented entry path**: clone over HTTPS into `.bay/`, run
   `.bay/bootstrap.sh`, then `bin/bay setup`. `README.md`, `SKILL.md`,
-  `docs/onboarding.md` and `example/README.md` now say the same thing, and a
-  test fails the build if they drift apart again.
-- The generated `Makefile`'s `bay:setup` target clones the framework and then
-  calls `.bay/bootstrap.sh`. It no longer carries its own copy of the pin /
-  symlink / `uv sync` / Galaxy-install logic, which had already drifted from
-  the script — it never created `bin/bay`.
-- `BAY_REPO` now defaults to the HTTPS clone URL, in the generated `Makefile`
-  and in `bin/bay dev-unlink`'s fallback. Override it for SSH:
-  `make bay:setup BAY_REPO=<ssh url>`.
-- `bin/bay setup` and `bootstrap.sh` now write an identical `bin/bay` wrapper,
-  copied from `scripts/bin-bay-wrapper.sh`. Previously whichever ran first won,
-  and only the bootstrap version unset `VIRTUAL_ENV`.
+  `docs/onboarding.md` and `example/README.md` now agree, and a test fails the
+  build if they drift.
+- **`make bay:setup` delegates to `.bay/bootstrap.sh`.** It no longer carries
+  its own copy of the pin, symlink, `uv sync` and Galaxy-install logic, which
+  had drifted and never created `bin/bay`. `BAY_REPO` defaults to the HTTPS
+  clone URL, override it for SSH.
+- **`bin/bay setup` and `bootstrap.sh` write an identical `bin/bay` wrapper**,
+  from the single source `scripts/bin-bay-wrapper.sh`. `bootstrap.sh` also
+  snapshots the wrapper before checking out an older pinned tag, which used to
+  leave a newer checkout with no wrapper to copy.
+- **`bin/bay doctor` is trustworthy now.** The SSH check tries `root` then
+  `admin_user` instead of your local username, the DNS check resolves a service
+  domain instead of the apex a wildcard record does not cover, the webhook
+  check reads `group_vars/all/services.yml` which the wizard actually writes,
+  and a crashed probe counts as an issue instead of printing "All checks
+  passed".
+- **The next-steps panel lists DNS, secrets, validate, doctor, provision and
+  deploy, in order.** DNS guidance prints for every gateway choice, not only
+  for Headscale.
+- **Error hints point at commands that exist.** "bay not found" names the clone
+  and `.bay/bootstrap.sh` rather than `bin/bay setup`, and the version-drift
+  guard names `.bay/version.yml` and `.bay-version` instead of the pre-1.0
+  `.argo` paths.
+- **Docs corrections.** `docs/features.md` dropped a non-existent `admin`
+  access mode and the `validate` versus `doctor` mix-up, and `README.md`
+  dropped a dangling link and the hand-written `git tag` advice.
+  `CONTRIBUTING.md` documents the release process.
+- **Repository metadata**: GitHub issue and pull request templates, a CI badge,
+  and a README note to run `make install` before `make test`.
+- **`docker_registry_org`, `docker_registry_username` and
+  `docker_registry_token` are no longer scaffolded.** They stay readable and
+  deprecated for existing consumers, move to the `docker_registries` list in
+  `registry.yml`.
 
 ### Performance
 
-- `bin/bay validate` caches successful git and image reachability probes for an
-  hour in `<bay_dir>/.validate-probe-cache`, a gitignored JSON dotfile next to
-  `.rig-state-cache`. A repeat validate (including the implicit one every deploy
-  runs) makes no `git ls-remote` or `skopeo inspect` call. **Only successes are
-  cached** — a failure is always re-probed, so a fix shows up immediately, and
-  credentials embedded in a repo URL are stripped before anything is written.
-  `bin/bay validate --no-probe-cache` forces a full re-probe. Note that a
-  success can go stale for up to an hour: a repo or image that has since
-  disappeared still validates green until the entry expires.
-- `requests` and `ruamel.yaml` are no longer imported when the CLI starts. They
-  now load inside the functions that use them, which takes `import bay_cli.cli`
-  from ~200 ms to ~80 ms — paid back on every `bay` invocation. Guarded by
-  `tests/test_cli_import_time.py`. See `docs/performance.md`.
-- `make test-python` runs pytest under `pytest-xdist` (`-n auto --dist
-  loadfile`): ~125 s down to ~28 s.
-
-### Fixed
-
-- `bin/bay doctor`'s SSH check connected as your local username. It now tries
-  `root` (fresh server) and then `admin_user` (provisioned server), and names
-  the one that worked.
-- `bin/bay doctor`'s DNS check probed the bare apex domain, which a wildcard
-  `*.example.com` record does not cover — so a correct DNS zone reported
-  NXDOMAIN. It now resolves the first service domain, or
-  `status.<domain_base>`.
-- `bin/bay doctor`'s webhook check read `group_vars/<env>/services.yml`, which
-  the wizard never writes, so it always skipped. It now reads
-  `group_vars/all/services.yml`, falling back to the per-environment file.
-- `bin/bay doctor` could print "All checks passed" after a probe raised. A
-  failed probe is now counted as an issue.
-- The framework-version guard's error messages named the pre-1.0 paths
-  `.argo/version.yml` and `.argo-version`. They now name `.bay/version.yml`
-  and `.bay-version`, matching the layout every consumer actually has.
-- `make bay:setup` on its own left no `bin/bay` wrapper, so the documented next
-  command could not run. The delegated target creates it.
-- The post-setup next-steps panel omitted the DNS record, `bin/bay validate`
-  and `bin/bay doctor`. All three are now listed, and DNS guidance is printed
-  for every gateway choice rather than only for Headscale — with no gateway,
-  the operator was told to deploy with no record in place and Traefik's first
-  ACME challenge failed.
-- `docs/features.md` documented an `admin` access mode that does not exist (the
-  schema allows `public` and `vpn`), and described `bay validate` as performing
-  `bay doctor`'s SSH/DNS/vault probes. Both corrected.
-- `README.md` linked to a production-access document that is not part of this
-  repo, and instructed a hand-written `git tag` instead of `make release`.
-  `CONTRIBUTING.md` now documents the release process.
-- "bay not found" no longer tells you to run `bin/bay setup`, which cannot run
-  without `.bay/`. It names the clone and `.bay/bootstrap.sh` instead.
-- The framework-version-drift message in `provision.yml` and `deploy.yml` names
-  `bin/bay install` instead of the `make bay:install` alias.
+- **The connection strategy is visible.** `run_playbook` prints one
+  `strategy: mitogen_linear` line, or names the linear fallback. `--profile` on
+  `deploy` and `provision` turns on `profile_tasks` and the timer. See
+  `docs/performance.md`.
+- **Pipelining and lighter facts.** The wizard `ansible.cfg` template and the
+  example gain `pipelining = True`, and `provision.yml` and `restore.yml` now
+  gather a reduced fact subset like `deploy.yml` already did.
+- **Image pulls batch into one task** with `xargs -P 4`, reported changed only
+  on a real download, retries kept.
+- **Per-container task fans collapse.** `log_archive` renders one setup script
+  instead of 16 looped tasks, `database_provision` runs one idempotent SQL
+  script per accessory instead of six `docker exec` calls, and the log
+  retention boundary uses one batched `docker inspect` per side.
+  `deploy --list-tasks` drops from 269 to 255.
+- **The reconciler ships as a tar**, gated on `<stack_dir>/.reconcile/.version`,
+  and reads env digests in one batched call instead of one per container. The
+  canary poll interval is 1 s.
+- **Remote builds push straight from buildx.** One `--push` call carries both
+  tags, so the `--load` export and import and the two separate `docker push`
+  steps are gone, on the Ansible path and the webhook path alike.
+- **Opt-in registry layer cache.** `git_deploy_registry_cache` (default
+  `false`) adds `--cache-to`/`--cache-from type=registry` against a
+  `:buildcache` tag, so a builder prune no longer costs a from-scratch rebuild.
+- **`bin/bay validate` caches successful probes for an hour** in
+  `<bay_dir>/.validate-probe-cache`, a gitignored JSON dotfile. Only successes
+  are cached, credentials in a repo URL are stripped before writing, and
+  `--no-probe-cache` forces a full re-probe. A success can go stale for up to
+  an hour.
+- **The CLI starts faster.** `requests` and `ruamel.yaml` load inside the
+  functions that use them, taking `import bay_cli.cli` from about 200 ms to
+  about 80 ms, pinned by a test.
+- **`make test-python` runs under `pytest-xdist`** (`-n auto --dist loadfile`),
+  about 125 s down to about 29 s.
 
 ### Upgrade notes
 
-- No host-side action for the alert change. Existing consumers that set
-  `docker_monitor_telegram_*` keep working; migrate to `alert_recipients` when
-  convenient and delete the legacy keys in the same change, or alerts arrive
-  twice.
-- Framework development only: `make test` now needs `pytest-xdist`. Run
-  `uv sync` in the framework checkout after this bump, or pytest fails with
-  `unrecognized arguments: -n`. Consumers need no action.
-- Existing consumers: your `Makefile` is a generated file. Re-run
-  `bin/bay setup --force` to pick up the new `bay:setup` target (it backs the
-  old one up to `Makefile.bak`), or leave it — the old target still works.
+Work through these in order on an existing consumer.
+
+- **Run `bin/bay validate` first, before you deploy.** This release adds hard
+  failures that stop the pre-deploy gate, and each one is real breakage that
+  used to be silent.
+- **OIDC allowlist.** If `headscale_oidc_issuer` is set, add at least one of
+  `headscale_oidc_allowed_domains`, `headscale_oidc_allowed_users` or
+  `headscale_oidc_allowed_groups`. Until now the tailnet accepted any account
+  your issuer authenticated, so audit `bin/bay gateway nodes` for unexpected
+  entries and treat it as an incident.
+- **`expose: host`.** Add `expose_host_ack: true` next to every `expose: host`
+  on a service port or accessory, or validate fails.
+- **Admin SSH keys.** Every user in the `ssh-access` group needs a non-empty
+  `keys` list. An empty list was skipped silently and left the server with no
+  way in.
+- **Empty secrets.** A referenced vault key with an empty value now fails.
+  Generate one with `bin/bay secret` and re-encrypt with
+  `bin/bay vault encrypt production`.
+- **`letsencrypt_email`.** It must be set and not a placeholder. There is no
+  ACME opt-out, so an empty value always meant broken SSL.
+- **`config_files`.** Every entry must have a real file behind it under the
+  consumer's `files/`. A service that mounts a config it never received starts
+  and dies.
+- **Identifier regexes.** Service, accessory, database and database-user names
+  must match `[a-z0-9_-]`, and env keys must be POSIX names. Renaming a service
+  is not free, it renames the container and the database, so check before you
+  rename.
+- **`public_routes: ["/"]` is an error.** It made a `vpn` service entirely
+  public. Set `access: public` deliberately instead.
+- **Uppercase database names.** SQL identifiers are quoted now, and a quoted
+  identifier is case-sensitive where an unquoted one was folded to lower case.
+  Compare `psql -c '\l'` and `\du` against `services.yml` before upgrading.
+- **Rotate the Telegram bot token and the alert webhook URL.** Both were
+  readable by any local user on every Bay host, through 0755 scripts and
+  `systemctl show`. Changing the file mode does not un-leak the old value.
+- **Rotate the GitHub PAT.** The token is removed from `.git/config` only on
+  the next clone, so existing build checkouts still hold the old one.
+- **Delete `{{ git_deploy_build_dir }}` to force a fresh clone.** The role
+  re-creates it at 0700 with the `GIT_ASKPASS` helper in place.
+- **`/etc/bay/alert.env` needs a run to exist.** `roles/alert_channel` is in
+  both `provision.yml` and `deploy.yml`, and alerts stop working on a host that
+  has not been re-run since the upgrade. The roles that own the affected
+  systemd units re-render them and reload systemd themselves, so no manual
+  `daemon-reload` is needed, but a deploy alone does not cover the
+  provision-only units.
+- **Provision-only roles need a provision run.** Use
+  `bin/bay provision <env> --tags crowdsec`, `--tags nftables`,
+  `--tags outbound_monitor` and `--tags docker_monitor`, or
+  `bin/bay deploy --rig <env>` for the rig roles. A plain deploy does not reach
+  them.
+- **Purge the old CrowdSec apt key by hand.** A host provisioned before this
+  release still carries it in the global `/etc/apt/trusted.gpg`, where it can
+  sign any repository. Delete it from `trusted.gpg` or `trusted.gpg.d`, the new
+  `signed-by` keyring does not remove it.
+- **The webhook container is recreated once.** The image gains a fixed UID
+  (10001) and the build directories move to group `bay-build`, GID 2000. Change
+  `git_deploy_build_gid` only if 2000 collides on your host. Local tooling that
+  drops a `.trigger` file as another user stops working, use `bin/bay build`.
+- **One extra container recreate from the basic-auth change.** The label value
+  moves from APR1 to bcrypt, so each basic-auth-protected container is
+  recreated on the first deploy. Passwords are unchanged and no consumer edit
+  is needed.
+- **`traefik.yml` and `nftables.conf` change once**, so Traefik is recreated
+  and the ruleset reloads on the first run after the upgrade. The nftables
+  defaults are compatible, so nothing is blocked that was allowed before.
+- **TLS 1.2 floor and loopback metrics.** Clients below TLS 1.2 are refused.
+  Any external Prometheus scraping Traefik's metrics port directly breaks, set
+  `traefik_metrics_bind_ip` back or scrape over the tailnet.
+- **Remote builds no longer leave a local image on the build server.** The
+  build pushes directly, so anything expecting to `docker run` the image there
+  will not find it, and registry credentials now fail inside `buildx build`
+  rather than at a later push step.
+- **`git_deploy_registry_cache` is opt-in.** Setting it writes an extra
+  `:buildcache` tag to the image repository, expect that tag to grow to about
+  one full layer set.
+- **Add `pipelining = True`** under `[ssh_connection]` in your consumer
+  `ansible.cfg`. The wizard template only renders at scaffold time, so an
+  existing consumer keeps the old block. If a host was hardened outside Bay
+  with `requiretty`, you will see `sudo: sorry, you must have a tty`, see
+  `docs/performance.md`.
+- **First deploy rewrites each `.retention` file and reships the reconciler.**
+  Both are expected one-time changes. A host with a hand-edited `.reconcile/`
+  tree is only repaired when the marker moves, delete
+  `<stack_dir>/.reconcile/.version` to force a reship.
+- **Watchtower and restic.** Watchtower is pinned by digest and recreated once.
+  Overriding `backup_restic_version` now also requires
+  `backup_restic_checksum`, the two move together.
+- **Webhook behaviour changes.** Payloads above 1 MiB get 413, repeated
+  deliveries are no-ops within the cache window, `/health` returns a `services`
+  integer instead of an array, and bursty fan-out may see 429.
+- **The wizard gateway default flipped to none.** This affects new projects
+  only. An existing consumer with Headscale configured is untouched.
+- **Legacy alert keys.** Consumers setting `docker_monitor_telegram_*` keep
+  working. Migrate to `alert_recipients` and delete the legacy keys in the same
+  change, or alerts arrive twice.
+- **Your `Makefile` is a generated file.** Re-run `bin/bay setup --force` to
+  pick up the new `bay:setup` target, it backs the old one up to
+  `Makefile.bak`. The old target still works.
+- **Framework developers: run `uv sync`.** This bump adds `bcrypt` and
+  `pytest-xdist`. Without it, `make test` fails with
+  `unrecognized arguments: -n`. Consumers get both through `bin/bay install`.
 
 ## [0.2.4] — 2026-08-25
 
