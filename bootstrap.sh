@@ -39,6 +39,19 @@ command -v uv  >/dev/null 2>&1 || die "uv not found — install from https://doc
 
 info "Bootstrapping project '$PROJECT_NAME' in $PROJECT_DIR"
 
+# ── Snapshot the wrapper source ─────────────────────────────────────────
+# Read it BEFORE the pin below checks out an older tag. This script runs from
+# the clone's HEAD, but the pin rewinds the working tree underneath it — and a
+# tag that predates scripts/bin-bay-wrapper.sh would leave nothing to copy.
+
+WRAPPER_SRC="$BAY_DIR/scripts/bin-bay-wrapper.sh"
+WRAPPER_SNAPSHOT=""
+if [ -f "$WRAPPER_SRC" ]; then
+    WRAPPER_SNAPSHOT="$(mktemp)"
+    cp "$WRAPPER_SRC" "$WRAPPER_SNAPSHOT"
+    trap 'rm -f "$WRAPPER_SNAPSHOT"' EXIT
+fi
+
 # ── Pin framework version ───────────────────────────────────────────────
 
 if [ -f .bay-version ]; then
@@ -63,8 +76,15 @@ if [ ! -f bin/bay ]; then
     mkdir -p bin
     # scripts/bin-bay-wrapper.sh is the single source of truth for the wrapper.
     # bay_cli.commands.framework._ensure_bin_wrapper copies the same file, so
-    # the two writers cannot drift.
-    cp "$BAY_DIR/scripts/bin-bay-wrapper.sh" bin/bay
+    # the two writers cannot drift. Prefer the pre-pin snapshot; fall back to
+    # the checked-out tag's copy for a bootstrap.sh old enough to lack one.
+    if [ -n "$WRAPPER_SNAPSHOT" ] && [ -f "$WRAPPER_SNAPSHOT" ]; then
+        cp "$WRAPPER_SNAPSHOT" bin/bay
+    elif [ -f "$WRAPPER_SRC" ]; then
+        cp "$WRAPPER_SRC" bin/bay
+    else
+        die "wrapper source not found at $WRAPPER_SRC — the framework checkout is incomplete"
+    fi
     chmod +x bin/bay
     info "Created bin/bay wrapper"
 fi

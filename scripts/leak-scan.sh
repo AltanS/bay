@@ -403,6 +403,7 @@ ALLOWED_DOMAINS+='|crowdsec\.net|hub\.crowdsec\.net'
 ALLOWED_DOMAINS+='|canarytokens\.com|requestbin\.net|oastify\.com|cypex\.ai'  # crowdsec SSRF/UA scenarios
 ALLOWED_DOMAINS+='|bitbucket\.org|gitlab\.com|ghcr\.io|docker\.io|packagecloud\.io'  # vendor/registry
 ALLOWED_DOMAINS+='|json-schema\.org|restic\.net|non-github\.com'
+ALLOWED_DOMAINS+='|gatus\.io|networkgenomics\.com'  # Gatus docs / Mitogen docs (public project sites)
 ALLOWED_DOMAINS+='|a\.com|app\.com|b\.com|y\.com|z\.com|test\.com'          # test fixtures
 ALLOWED_DOMAINS+='|blogco\.de|wrong-domain\.com|yourdomain\.com'           # test fixtures / wizard prompt example
 
@@ -435,9 +436,12 @@ fi
 # covers exactly that form — a templated unit type after the final dot, and
 # nothing else. A real address like `someone@company.com` still fails.
 SYSTEMD_UNIT_RE='^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]*\.(service|timer|path|socket|mount|target)$'
+# RFC 2606 reserves .test, .example, .invalid and .localhost (alongside the
+# example.com/org/net/de domains already excluded above) for documentation —
+# any address at those TLDs is a placeholder, not a real leak.
 bad_mail=$(ggrep -IhoE '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b' \
              -- "${NO_LOCK[@]}" 2>/dev/null \
-             | grep -viE '@([a-z0-9-]+\.)*(example|test)\.(com|org|net|de)$|@github\.com$' \
+             | grep -viE '@([a-z0-9-]+\.)*(example|test)\.(com|org|net|de)$|@github\.com$|@([a-z0-9-]+\.)*(test|example|invalid|localhost)$' \
              | grep -vE "$SYSTEMD_UNIT_RE" \
              | sort -u || true)
 if [ -n "$bad_mail" ]; then

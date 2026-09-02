@@ -142,6 +142,67 @@ else
   fail "tests/test_infra.sh not found or not executable"
 fi
 
+# ── Wrapper survives a pin to an older tag ───────────────────────────────
+# Regression: bootstrap.sh runs from the clone's HEAD, then checks out the
+# pinned tag — which rewinds the working tree underneath it. A tag older than
+# scripts/bin-bay-wrapper.sh left nothing to copy and the run died with
+# "cp: cannot stat". Only the wrapper half is exercised here; a full bootstrap
+# would sync Ansible for a third time.
+section "Wrapper survives an old pinned tag"
+
+OLD_TAG_DIR=$(mktemp -d)
+
+# A framework repo whose only tag predates the wrapper source.
+mkdir -p "$OLD_TAG_DIR/framework/scripts"
+cd "$OLD_TAG_DIR/framework"
+git init -q .
+printf 'placeholder\n' > pyproject.toml
+git add -A
+git -c user.email=t@example.test -c user.name=t commit -qm "old release"
+git tag v0.0.1
+# The wrapper source arrives only after the tag, exactly as it did in reality.
+cp "$BAY_DIR/scripts/bin-bay-wrapper.sh" scripts/bin-bay-wrapper.sh
+cp "$BAY_DIR/bootstrap.sh" bootstrap.sh
+chmod +x bootstrap.sh scripts/bin-bay-wrapper.sh
+git add -A
+git -c user.email=t@example.test -c user.name=t commit -qm "add wrapper source"
+
+# A consumer that clones it and bootstraps. Stop before the dependency install:
+# this test is about the wrapper, and `uv sync` here would double the runtime.
+mkdir -p "$OLD_TAG_DIR/consumer"
+cd "$OLD_TAG_DIR/consumer"
+git clone --quiet "$OLD_TAG_DIR/framework" .bay
+sed -n '1,/^# ── Install dependencies/p' .bay/bootstrap.sh \
+  | sed '$d' > .bay/bootstrap-wrapper-only.sh
+
+if bash .bay/bootstrap-wrapper-only.sh >"$OLD_TAG_DIR/out.log" 2>&1; then
+  pass "bootstrap runs against a clone pinned to a pre-wrapper tag"
+else
+  fail "bootstrap failed against a pre-wrapper tag: $(tail -3 "$OLD_TAG_DIR/out.log")"
+fi
+
+if [[ -x "$OLD_TAG_DIR/consumer/bin/bay" ]]; then
+  pass "bin/bay created despite the pinned tag lacking the wrapper source"
+else
+  fail "bin/bay missing after bootstrap against a pre-wrapper tag"
+fi
+
+if diff -q "$BAY_DIR/scripts/bin-bay-wrapper.sh" "$OLD_TAG_DIR/consumer/bin/bay" >/dev/null 2>&1; then
+  pass "bin/bay matches the shared wrapper source"
+else
+  fail "bin/bay differs from scripts/bin-bay-wrapper.sh"
+fi
+
+# The pin must still have happened — the fix must not skip the checkout.
+if [[ "$(cat "$OLD_TAG_DIR/consumer/.bay-version" 2>/dev/null)" == "v0.0.1" ]]; then
+  pass "framework still pinned to the tag"
+else
+  fail "framework was not pinned to v0.0.1"
+fi
+
+cd "$BAY_DIR"
+rm -rf "$OLD_TAG_DIR"
+
 # ── Summary ──────────────────────────────────────────────────────────────
 section "Bootstrap test results"
 printf "  %d passed, %d failed\n" "$PASS" "$FAIL"

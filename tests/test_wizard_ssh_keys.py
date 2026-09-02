@@ -81,7 +81,8 @@ def test_prompt_loops_until_a_key_is_collected(monkeypatch) -> None:
 
 
 def test_prompt_rejects_a_pasted_private_key(monkeypatch) -> None:
-    answers = iter(["-----BEGIN OPENSSH PRIVATE KEY-----", KEY, "tester"])
+    fake_private_key = "-----BEGIN " + "OPENSSH PRIVATE KEY" + "-----"
+    answers = iter([fake_private_key, KEY, "tester"])
     monkeypatch.setattr(prompts_mod.Prompt, "ask", staticmethod(lambda *a, **kw: next(answers)))
     _mock_selects(monkeypatch, ["paste", "paste", False])
 

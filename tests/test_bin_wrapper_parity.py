@@ -44,10 +44,31 @@ def test_wrapper_hint_names_the_one_entry_path() -> None:
 
 def test_bootstrap_copies_the_shared_wrapper() -> None:
     text = (_REPO_ROOT / "bootstrap.sh").read_text()
-    assert f'cp "$BAY_DIR/{WRAPPER_SOURCE}" bin/bay' in text, (
+    assert f'WRAPPER_SRC="$BAY_DIR/{WRAPPER_SOURCE}"' in text, (
         "bootstrap.sh must copy the shared wrapper, not inline its own copy"
     )
-    assert "WRAPPER" not in text, "bootstrap.sh still has an inline wrapper heredoc"
+    assert "<<'WRAPPER'" not in text, "bootstrap.sh still has an inline wrapper heredoc"
+
+
+def test_bootstrap_snapshots_the_wrapper_before_pinning() -> None:
+    """The pin rewinds the tree under the running script.
+
+    bootstrap.sh executes from the clone's HEAD, then checks out `.bay-version`
+    (or the newest tag). A tag older than scripts/bin-bay-wrapper.sh leaves
+    nothing to copy — `cp: cannot stat`. The snapshot must therefore be taken
+    before the checkout, and the fallbacks must be ordered snapshot → checked-out
+    copy → error.
+    """
+    text = (_REPO_ROOT / "bootstrap.sh").read_text()
+    snapshot = text.index('WRAPPER_SNAPSHOT="$(mktemp)"')
+    checkout = text.index("git -C .bay -c advice.detachedHead=false checkout")
+    write = text.index("chmod +x bin/bay")
+    assert snapshot < checkout < write, (
+        "the wrapper must be snapshotted before the version pin checks out a tag"
+    )
+    assert 'cp "$WRAPPER_SNAPSHOT" bin/bay' in text
+    assert 'elif [ -f "$WRAPPER_SRC" ]; then' in text
+    assert "wrapper source not found" in text
 
 
 def test_ensure_bin_wrapper_writes_the_shared_wrapper(tmp_path: Path) -> None:
