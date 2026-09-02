@@ -7,6 +7,24 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.3.1] — 2026-09-02
+
+### Fixed
+
+- **Webhook receiver rate-limit labels rendered as integers, breaking every
+  deploy that enables it.** `build_specs.yml` set the
+  `bay-webhook-ratelimit` Traefik labels (`ratelimit.average`,
+  `ratelimit.burst`) from `"{{ webhook_rate_limit_average | default(10) }}"`.
+  Ansible's native Jinja renders a pure `{{ ... }}` template as its native
+  Python type, so with no override set the label came out as the int `10`,
+  not the string `"10"`. The reconciler feeds specs straight to the Docker
+  API, and Docker requires label values to be strings, so `docker create`
+  for the webhook receiver failed on every 0.3.0 deploy with the webhook
+  receiver enabled, and the container was removed. Fixed by adding
+  `| string` to both labels, matching the existing pattern next to them
+  (`zot_port | default(5000) | string`, `WEBHOOK_PEER_TIMEOUT`). The
+  container is recreated on the next deploy with the fix in place.
+
 ## [0.3.0] — 2026-09-02
 
 Three milestones land together: security hardening, onboarding repair and

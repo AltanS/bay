@@ -372,8 +372,8 @@
         # request is accepted, so an attacker without the secret can still
         # spend the receiver's threads. Bound it at the edge. Same label shape
         # as the per-service opt-in rate limit in _service.j2.
-        traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.average: "{{ webhook_rate_limit_average | default(10) }}"
-        traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.burst: "{{ webhook_rate_limit_burst | default(30) }}"
+        traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.average: "{{ webhook_rate_limit_average | default(10) | string }}"
+        traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.burst: "{{ webhook_rate_limit_burst | default(30) | string }}"
         traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.period: "{{ webhook_rate_limit_period | default('1s') }}"
         traefik.http.middlewares.bay-webhook-ratelimit.ratelimit.sourceCriterion.ipStrategy.depth: "1"
         traefik.http.routers.bay-webhook.middlewares: public-chain,bay-webhook-ratelimit
