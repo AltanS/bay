@@ -59,6 +59,7 @@
       ssh -i {{ git_deploy_build_dir }}/{{ _repo_group.auth_svc }}/.deploy_key
       -o StrictHostKeyChecking=yes
       -o UserKnownHostsFile={{ git_deploy_known_hosts }}
+    GIT_TERMINAL_PROMPT: "0"
   when:
     - not _shared_repo_stat.stat.exists
     - not _repo_group.has_token
@@ -98,6 +99,7 @@
       ssh -i {{ git_deploy_build_dir }}/{{ _repo_group.auth_svc }}/.deploy_key
       -o StrictHostKeyChecking=yes
       -o UserKnownHostsFile={{ git_deploy_known_hosts }}
+    GIT_TERMINAL_PROMPT: "0"
   when:
     - _shared_repo_stat.stat.exists
     - not _repo_group.has_token

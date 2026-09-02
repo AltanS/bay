@@ -72,6 +72,8 @@
       git clone --branch {{ _branch }} --single-branch
       {{ _build.repo }}
       {{ _remote_clone_dir }}/repo
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
   when:
     - not _remote_repo_stat.stat.exists
     - _build.token is not defined
@@ -113,6 +115,8 @@
   ansible.builtin.command:
     cmd: git fetch origin {{ _branch }}
     chdir: "{{ _remote_clone_dir }}/repo"
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
   when:
     - _remote_repo_stat.stat.exists
     - _build.token is not defined

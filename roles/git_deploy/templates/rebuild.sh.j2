@@ -593,7 +593,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   PULL_CMD="GIT_ASKPASS={{ evq(askpass_local) }} GIT_TERMINAL_PROMPT=0 git -c url.\"\${CLONE_URL}\".insteadOf=\"\${CLONE_REPO}\" pull origin \"\${BRANCH}\""
 {% else %}
   DEPLOY_KEY="${BUILD_DIR}/{{ dq(svc_name) }}/.deploy_key"
-  PULL_CMD="GIT_SSH_COMMAND='ssh -i ${DEPLOY_KEY} -o StrictHostKeyChecking=yes -o UserKnownHostsFile={{ dq(git_deploy_known_hosts) }}' git pull origin \"\${BRANCH}\""
+  PULL_CMD="GIT_SSH_COMMAND='ssh -i ${DEPLOY_KEY} -o StrictHostKeyChecking=yes -o UserKnownHostsFile={{ dq(git_deploy_known_hosts) }}' GIT_TERMINAL_PROMPT=0 git pull origin \"\${BRANCH}\""
 {% endif %}
 {% if build.args is defined %}
   BUILD_ARGS=(

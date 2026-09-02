@@ -7,6 +7,14 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.3.4] — 2026-09-02
+
+### Fixed
+
+- **A git credential prompt could hang a deploy indefinitely on the
+  SSH/no-token fetch path.** Every git invocation now disables terminal
+  prompts and fails fast instead.
+
 ## [0.3.3] — 2026-09-02
 
 ### Fixed
