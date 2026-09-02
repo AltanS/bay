@@ -45,6 +45,24 @@ before upgrading — anything needing manual action is called out under
   copied from `scripts/bin-bay-wrapper.sh`. Previously whichever ran first won,
   and only the bootstrap version unset `VIRTUAL_ENV`.
 
+### Performance
+
+- `bin/bay validate` caches successful git and image reachability probes for an
+  hour in `<bay_dir>/.validate-probe-cache`, a gitignored JSON dotfile next to
+  `.rig-state-cache`. A repeat validate (including the implicit one every deploy
+  runs) makes no `git ls-remote` or `skopeo inspect` call. **Only successes are
+  cached** — a failure is always re-probed, so a fix shows up immediately, and
+  credentials embedded in a repo URL are stripped before anything is written.
+  `bin/bay validate --no-probe-cache` forces a full re-probe. Note that a
+  success can go stale for up to an hour: a repo or image that has since
+  disappeared still validates green until the entry expires.
+- `requests` and `ruamel.yaml` are no longer imported when the CLI starts. They
+  now load inside the functions that use them, which takes `import bay_cli.cli`
+  from ~200 ms to ~80 ms — paid back on every `bay` invocation. Guarded by
+  `tests/test_cli_import_time.py`. See `docs/performance.md`.
+- `make test-python` runs pytest under `pytest-xdist` (`-n auto --dist
+  loadfile`): ~125 s down to ~28 s.
+
 ### Fixed
 
 - `bin/bay doctor`'s SSH check connected as your local username. It now tries
@@ -86,6 +104,9 @@ before upgrading — anything needing manual action is called out under
   `docker_monitor_telegram_*` keep working; migrate to `alert_recipients` when
   convenient and delete the legacy keys in the same change, or alerts arrive
   twice.
+- Framework development only: `make test` now needs `pytest-xdist`. Run
+  `uv sync` in the framework checkout after this bump, or pytest fails with
+  `unrecognized arguments: -n`. Consumers need no action.
 - Existing consumers: your `Makefile` is a generated file. Re-run
   `bin/bay setup --force` to pick up the new `bay:setup` target (it backs the
   old one up to `Makefile.bak`), or leave it — the old target still works.

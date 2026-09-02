@@ -135,3 +135,54 @@ with a warning rather than forwarded to `ansible-playbook`.
   network interface and virtualisation discovery. No role reads those.
 - **A server-side reconciler.** Container convergence is one Python pass on the
   host, not an Ansible loop per container. See [reconciler.md](reconciler.md).
+
+## Validate's probe cache
+
+Every deploy runs `bin/bay validate` first (unless you pass `--skip-validate`), and
+validate reaches the network twice: `git ls-remote` for each build-from-source
+service, and `skopeo inspect` for each image service. On a consumer with a handful
+of services that is 2-5 seconds of the same answers, every single run.
+
+Successful probes are cached in `<bay_dir>/.validate-probe-cache`, a JSON dotfile
+next to `.rig-state-cache`, with a **1 hour TTL** — the same TTL as the rig-state
+cache. A hit skips the subprocess entirely; a miss probes and records. The file is
+written `0600` and is gitignored.
+
+Three properties are worth knowing:
+
+- **Only successes are cached.** An unreachable repo, a missing branch or an
+  unverified image is re-probed on every run, so a fix shows up immediately. A
+  green validate is the thing operators act on, so it is never served from a
+  cached failure.
+- **A success can go stale for up to an hour.** A repo or image that was reachable
+  and has since disappeared still validates green until the entry expires. This is
+  the one trade the cache makes.
+- **Credentials are stripped before anything is written.** Build repo URLs
+  routinely carry a token (`https://x-access-token:<pat>@github.com/...`); the
+  userinfo is removed before the URL is used as a cache key, so a rotated token is
+  also not a cache miss.
+
+Force a full re-probe with:
+
+```bash
+bin/bay validate --no-probe-cache
+```
+
+which re-runs every probe and refreshes the cache entries. Deleting the file has
+the same effect. The cache records only that a reference resolved — it never
+records or hands off an image digest.
+
+## CLI start-up
+
+`bay_cli.cli` imports every command module eagerly, so a module-level import
+anywhere under `src/bay_cli/` is paid for by every invocation, `bay --help`
+included. The two heavyweights, `requests` (~60 ms) and `ruamel.yaml` (~12 ms),
+are imported inside their call sites instead; that took `import bay_cli.cli` from
+~200 ms to ~80 ms on the dev box.
+
+`tests/test_cli_import_time.py` guards it from both ends: `requests` and
+`ruamel.yaml` must be absent from `sys.modules` after importing the CLI (exact,
+never skipped), and cumulative import time must stay under 100 ms (machine
+dependent — skipped when `BAY_SKIP_PERF_ASSERTS` is set, and inside an xdist
+worker). If you add a heavy import to a module on the CLI path, move it into the
+function that needs it.

@@ -12,7 +12,6 @@ from typing import Any
 
 import typer
 from rich.table import Table
-from ruamel.yaml.scalarstring import SingleQuotedScalarString
 
 from bay_cli import console
 from bay_cli.catalog import CatalogEntry
@@ -383,6 +382,8 @@ def _build_domain(
     if domain_base is None:
         return None
     if is_multi:
+        from ruamel.yaml.scalarstring import SingleQuotedScalarString
+
         return SingleQuotedScalarString(f"{domain_prefix}.{{{{ domain_base }}}}")
     return f"{domain_prefix}.{domain_base}"
 

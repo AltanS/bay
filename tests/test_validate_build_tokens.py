@@ -195,7 +195,7 @@ class TestProbeTokenScope:
         r = _result()
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("bay_cli.commands.validate.requests.get", return_value=mock_resp):
+        with patch("requests.get", return_value=mock_resp):
             _probe_token_scope(self._services(), self._vault(), r)
         assert not r.failed, f"Unexpected errors: {r.failed}"
 
@@ -204,7 +204,7 @@ class TestProbeTokenScope:
         r = _result()
         mock_resp = MagicMock()
         mock_resp.status_code = 403
-        with patch("bay_cli.commands.validate.requests.get", return_value=mock_resp):
+        with patch("requests.get", return_value=mock_resp):
             _probe_token_scope(self._services(), self._vault(), r)
         assert r.failed, "Expected failure on HTTP 403"
         msg = r.failed[0]
@@ -216,7 +216,7 @@ class TestProbeTokenScope:
         r = _result()
         mock_resp = MagicMock()
         mock_resp.status_code = 403
-        with patch("bay_cli.commands.validate.requests.get", return_value=mock_resp):
+        with patch("requests.get", return_value=mock_resp):
             _probe_token_scope(self._services(), self._vault(), r)
         assert r.failed
         # Vault KEY name should appear, not the resolved ghp_ value
@@ -228,7 +228,7 @@ class TestProbeTokenScope:
         r = _result()
         mock_resp = MagicMock()
         mock_resp.status_code = 404
-        with patch("bay_cli.commands.validate.requests.get", return_value=mock_resp):
+        with patch("requests.get", return_value=mock_resp):
             _probe_token_scope(self._services(), self._vault(), r)
         assert r.failed, "Expected failure on HTTP 404"
         msg = r.failed[0]
@@ -240,7 +240,7 @@ class TestProbeTokenScope:
         r = _result()
         mock_resp = MagicMock()
         mock_resp.status_code = 500
-        with patch("bay_cli.commands.validate.requests.get", return_value=mock_resp):
+        with patch("requests.get", return_value=mock_resp):
             _probe_token_scope(self._services(), self._vault(), r)
         assert r.failed
         assert "500" in r.failed[0]
@@ -250,7 +250,7 @@ class TestProbeTokenScope:
         import requests as req_mod
         r = _result()
         with patch(
-            "bay_cli.commands.validate.requests.get",
+            "requests.get",
             side_effect=req_mod.exceptions.ConnectionError("Connection refused"),
         ):
             _probe_token_scope(self._services(), self._vault(), r)
@@ -266,7 +266,7 @@ class TestProbeTokenScope:
         }
         mock_resp = MagicMock()
         mock_resp.status_code = 403
-        with patch("bay_cli.commands.validate.requests.get", return_value=mock_resp) as mock_get:
+        with patch("requests.get", return_value=mock_resp) as mock_get:
             _probe_token_scope(services, self._vault(), r)
         mock_get.assert_not_called()
         assert not r.failed, "Local-strategy service should not be probed"
@@ -286,7 +286,7 @@ class TestProbeTokenScope:
     def test_vault_none_emits_warn_and_returns(self):
         """vault_data=None → warn, no probe, no errors."""
         r = _result()
-        with patch("bay_cli.commands.validate.requests.get") as mock_get:
+        with patch("requests.get") as mock_get:
             _probe_token_scope(self._services(), None, r)
         mock_get.assert_not_called()
         assert not r.failed
@@ -303,7 +303,7 @@ class TestProbeTokenScope:
         }
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("bay_cli.commands.validate.requests.get", return_value=mock_resp) as mock_get:
+        with patch("requests.get", return_value=mock_resp) as mock_get:
             _probe_token_scope(services, self._vault(), r)
         assert mock_get.called
         called_url = mock_get.call_args[0][0]
@@ -320,7 +320,7 @@ class TestProbeTokenScope:
         }
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("bay_cli.commands.validate.requests.get", return_value=mock_resp) as mock_get:
+        with patch("requests.get", return_value=mock_resp) as mock_get:
             _probe_token_scope(services, self._vault(), r)
         assert mock_get.called
         called_url = mock_get.call_args[0][0]

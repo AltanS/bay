@@ -129,16 +129,36 @@ def test_expired_mute_is_inert(tmp_path, sink):
 # ── Fail-open, in the correct direction ──────────────────────────────────
 
 
+# Explicit ids, because one body embeds `_FUTURE` — a wall-clock epoch. Left to
+# pytest, the generated id carries that number, so two xdist workers that start
+# in different seconds collect different test ids and the run aborts with
+# "Different tests were collected between gw0 and gwN".
 @pytest.mark.parametrize(
     "body,label",
     [
-        (None, "missing file"),
-        ("", "empty file"),
-        ("BAY_ALERTS_SCHEMA=1\nBAY_ALERTS_MUTE=deploy.comp", "truncated mid-write"),
-        ("\x00\x01garbage\xff", "binary garbage"),
-        (f"BAY_ALERTS_SCHEMA=99\nBAY_ALERTS_MUTE=alerts.test\nBAY_ALERTS_MUTE_UNTIL={_FUTURE}", "unknown schema major"),
-        ("BAY_ALERTS_SCHEMA=1\nBAY_ALERTS_MUTE=alerts.test\nBAY_ALERTS_MUTE_UNTIL=notanumber", "malformed epoch"),
-        ("BAY_ALERTS_SCHEMA=x\nBAY_ALERTS_MUTE=alerts.test\nBAY_ALERTS_MUTE_UNTIL=1", "malformed schema"),
+        pytest.param(None, "missing file", id="missing file"),
+        pytest.param("", "empty file", id="empty file"),
+        pytest.param(
+            "BAY_ALERTS_SCHEMA=1\nBAY_ALERTS_MUTE=deploy.comp",
+            "truncated mid-write",
+            id="truncated mid-write",
+        ),
+        pytest.param("\x00\x01garbage\xff", "binary garbage", id="binary garbage"),
+        pytest.param(
+            f"BAY_ALERTS_SCHEMA=99\nBAY_ALERTS_MUTE=alerts.test\nBAY_ALERTS_MUTE_UNTIL={_FUTURE}",
+            "unknown schema major",
+            id="unknown schema major",
+        ),
+        pytest.param(
+            "BAY_ALERTS_SCHEMA=1\nBAY_ALERTS_MUTE=alerts.test\nBAY_ALERTS_MUTE_UNTIL=notanumber",
+            "malformed epoch",
+            id="malformed epoch",
+        ),
+        pytest.param(
+            "BAY_ALERTS_SCHEMA=x\nBAY_ALERTS_MUTE=alerts.test\nBAY_ALERTS_MUTE_UNTIL=1",
+            "malformed schema",
+            id="malformed schema",
+        ),
     ],
 )
 def test_every_broken_policy_file_still_delivers(tmp_path, sink, body, label):

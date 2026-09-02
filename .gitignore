@@ -18,6 +18,9 @@ vendor/collections/
 # Rig-state cache (written by deploy auto-rig detection)
 .rig-state-cache
 
+# Network probe cache (written by validate's git/image reachability checks)
+.validate-probe-cache
+
 # Implementation tracker — lives in the workspace repo, never in the framework
 .tracker/
 

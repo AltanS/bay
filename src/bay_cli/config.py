@@ -6,12 +6,24 @@ import copy
 import difflib
 from io import StringIO
 from pathlib import Path
-from typing import Any
-
-from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedMap
+from typing import TYPE_CHECKING, Any
 
 from bay_cli.errors import BayError
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ruamel.yaml.comments import CommentedMap
+
+# ruamel.yaml costs ~12 ms to import and this module sits on the
+# `bay_cli.cli` import path (commands/webhook.py, commands/healthcheck.py),
+# so it is imported inside the call sites instead of at module scope.
+# See tests/test_cli_import_time.py.
+
+
+def _commented_map() -> type:
+    """The ruamel CommentedMap class, imported on first use."""
+    from ruamel.yaml.comments import CommentedMap
+
+    return CommentedMap
 
 
 class StackConfig:
@@ -22,6 +34,8 @@ class StackConfig:
     """
 
     def __init__(self, root: Path) -> None:
+        from ruamel.yaml import YAML
+
         self._root = root
         self._yaml = YAML()
         self._yaml.preserve_quotes = True
@@ -48,7 +62,7 @@ class StackConfig:
         with self._services_path.open() as f:
             self._original = self._yaml.load(f)
 
-        if not isinstance(self._original, CommentedMap):
+        if not isinstance(self._original, _commented_map()):
             raise BayError(f"services.yml is not a valid YAML mapping: {self._services_path}")
 
         self._working = copy.deepcopy(self._original)
@@ -66,7 +80,7 @@ class StackConfig:
             raise BayError(f"File not found: {path}")
         with path.open() as f:
             data = self._yaml.load(f)
-        if not isinstance(data, CommentedMap):
+        if not isinstance(data, _commented_map()):
             raise BayError(f"Not a valid YAML mapping: {path}")
         return data
 
@@ -159,9 +173,10 @@ class StackConfig:
         section = "services" if category == "service" else "accessories"
         current = self._working.get(section)  # type: ignore[union-attr]
 
-        if not isinstance(current, CommentedMap):
+        cm_type = _commented_map()
+        if not isinstance(current, cm_type):
             # Section doesn't exist or is empty scalar — create it
-            current = CommentedMap()
+            current = cm_type()
             self._working[section] = current  # type: ignore[index]
 
         if name in current:
@@ -364,8 +379,9 @@ class StackConfig:
 
     def _to_commented(self, obj: Any) -> Any:
         """Recursively convert plain dicts to CommentedMap for YAML output."""
-        if isinstance(obj, dict) and not isinstance(obj, CommentedMap):
-            cm = CommentedMap()
+        cm_type = _commented_map()
+        if isinstance(obj, dict) and not isinstance(obj, cm_type):
+            cm = cm_type()
             for k, v in obj.items():
                 cm[k] = self._to_commented(v)
             return cm

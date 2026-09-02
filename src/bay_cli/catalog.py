@@ -6,9 +6,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ruamel.yaml import YAML
-
 from bay_cli.errors import BayError
+
+# ruamel.yaml costs ~12 ms to import and this module is reached from
+# `bay_cli.cli` (via commands/service.py), so the loader is built on first
+# use instead of at import time. See tests/test_cli_import_time.py.
+_yaml_singleton: Any = None
+
+
+def _get_yaml() -> Any:
+    """The shared ruamel YAML loader, built on first use."""
+    global _yaml_singleton
+    if _yaml_singleton is None:
+        from ruamel.yaml import YAML
+
+        _yaml_singleton = YAML()
+        _yaml_singleton.preserve_quotes = True
+    return _yaml_singleton
 
 
 @dataclass
@@ -27,9 +41,6 @@ class CatalogEntry:
     config_files: list[str]
     definition_path: Path
 
-
-_yaml = YAML()
-_yaml.preserve_quotes = True
 
 _VALID_CATEGORIES = {"service", "accessory"}
 
@@ -100,7 +111,7 @@ def _scan_catalog_dir(path: Path) -> dict[str, CatalogEntry]:
 def _load_definition(source_path: Path, expected_id: str) -> CatalogEntry:
     """Parse a single YAML definition file and return a CatalogEntry."""
     with source_path.open() as f:
-        data = _yaml.load(f)
+        data = _get_yaml().load(f)
 
     if not isinstance(data, dict):
         raise BayError(f"Catalog definition is not a YAML mapping: {source_path}")

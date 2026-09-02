@@ -5,16 +5,23 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import threading
+import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import requests
 import typer
-from ruamel.yaml import YAML
-from ruamel.yaml.error import YAMLError
 
 from bay_cli import console, paths
 from bay_cli.errors import BayError
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ruamel.yaml import YAML
+
+# `requests` (~60 ms) and `ruamel.yaml` (~12 ms) are imported inside the call
+# sites below, not at module scope: this module is on the `bay_cli.cli` import
+# path, so a module-level import makes every `bay` invocation pay for them.
+# See tests/test_cli_import_time.py.
 
 # ── Stale config detection constants ──────────────────────────────────────
 # sentinel file written by git_deploy/tasks/main.yml on every deploy
@@ -46,6 +53,8 @@ def _read_stack_name_local(root: Path) -> str | None:
     if not main_yml.is_file():
         return None
     try:
+        from ruamel.yaml import YAML
+
         _yaml = YAML()
         with main_yml.open() as fh:
             data = _yaml.load(fh)
@@ -293,6 +302,9 @@ def _validate_yaml_files(root: Path, env: str, result: ValidationResult) -> dict
 
     Returns a dict of {relative_path: parsed_data} for files that parsed OK.
     """
+    from ruamel.yaml import YAML
+    from ruamel.yaml.error import YAMLError
+
     console.header("YAML Syntax")
 
     parsed: dict[str, Any] = {}
@@ -353,6 +365,8 @@ def _validate_vault_file(
     parsed: dict[str, Any],
 ) -> None:
     """Try to decrypt and validate a vault-encrypted file."""
+    from ruamel.yaml.error import YAMLError
+
     vault_pass = root / ".vault_pass"
     if not vault_pass.exists():
         result.warn(f"{rel}  vault-encrypted, skipped (no .vault_pass)")
@@ -1215,6 +1229,7 @@ def _validate_connectivity(
     services_data: dict[str, Any],
     parsed_files: dict[str, Any],
     result: ValidationResult,
+    probe_cache: ProbeCache | None = None,
 ) -> None:
     """Run connectivity and access pre-checks on service definitions.
 
@@ -1248,10 +1263,13 @@ def _validate_connectivity(
     _validate_build_tokens(services, accessories, _bt_vault_data, _bt_secrets_path, result)
 
     # ── Git repo accessibility (build services) ────────────────────────
-    _check_git_repos(services, accessories, result)
+    _check_git_repos(services, accessories, result, probe_cache)
 
     # ── Docker image existence (image services) ────────────────────────
-    _check_docker_images(services, accessories, result)
+    _check_docker_images(services, accessories, result, probe_cache)
+
+    if probe_cache is not None:
+        probe_cache.flush()
 
 
 def _check_domain_uniqueness(
@@ -1471,10 +1489,121 @@ def _validate_build_tokens(
         result.ok(f"Build tokens       all {checked} build.token reference(s) valid")
 
 
+# ── Network probe cache ──────────────────────────────────────────────────
+
+# Same TTL as the rig-state cache (`_RIG_CACHE_MAX_AGE` in
+# bay_cli/commands/ops.py) — one hour. Deliberately not imported from there:
+# ops.py pulls in the deploy machinery, and validate must stay cheap.
+_PROBE_CACHE_MAX_AGE = 3600  # 1 hour — mirrors _RIG_CACHE_MAX_AGE in ops.py
+
+#: Sibling dotfile of ``.rig-state-cache``, in the framework directory.
+_PROBE_CACHE_FILENAME = ".validate-probe-cache"
+
+
+def _strip_url_credentials(url: str) -> str:
+    """Drop any ``user:password@`` (or ``x-access-token:<pat>@``) from a URL.
+
+    Build repos routinely carry a token in the URL. The cache is a plain file,
+    so the credential is removed before the URL is used as a key or written."""
+    return re.sub(r"(?<=://)[^/@]*@", "", url)
+
+
+class ProbeCache:
+    """TTL cache for validate's outbound network probes.
+
+    Keys are ``git:<url>@<branch>`` and ``image:<name>:<tag>``. Only
+    **successful** probes are stored — caching a failure would hide a fix, and
+    a green validate is the thing operators act on. Entries older than
+    ``_PROBE_CACHE_MAX_AGE`` are misses and are dropped on the next write.
+
+    A missing, unreadable or corrupt cache file is an empty cache, never an
+    error — same posture as ``_read_rig_cache``.
+    """
+
+    def __init__(self, bay_dir: Path | None, *, enabled: bool = True) -> None:
+        self._path = (bay_dir / _PROBE_CACHE_FILENAME) if bay_dir is not None else None
+        #: When False every probe runs; results are still recorded, so
+        #: ``--no-probe-cache`` refreshes the cache rather than bypassing it.
+        self.enabled = enabled
+        self._lock = threading.Lock()
+        self._entries: dict[str, dict[str, Any]] = self._load()
+        self._dirty = False
+
+    def _load(self) -> dict[str, dict[str, Any]]:
+        if self._path is None or not self._path.exists():
+            return {}
+        try:
+            data = json.loads(self._path.read_text())
+            entries = data.get("entries")
+            if not isinstance(entries, dict):
+                return {}
+            return {k: v for k, v in entries.items() if isinstance(v, dict)}
+        except (json.JSONDecodeError, ValueError, OSError):
+            return {}  # corrupt or unreadable — behave as a cold cache
+
+    @staticmethod
+    def git_key(repo: str, branch: str | None) -> str:
+        return f"git:{_strip_url_credentials(repo)}@{branch or ''}"
+
+    @staticmethod
+    def image_key(image_name: str, tag: str) -> str:
+        return f"image:{image_name}:{tag}"
+
+    def get(self, key: str) -> str | None:
+        """The cached success detail for ``key``, or None on miss/stale/disabled."""
+        if not self.enabled:
+            return None
+        with self._lock:
+            entry = self._entries.get(key)
+        if not entry or entry.get("result") != "ok":
+            return None
+        try:
+            age = time.time() - float(entry["checked_at"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if age < 0 or age > _PROBE_CACHE_MAX_AGE:
+            return None
+        detail = entry.get("detail")
+        return detail if isinstance(detail, str) else ""
+
+    def put(self, key: str, result: str, detail: str = "") -> None:
+        """Record a probe outcome. Anything other than ``ok`` is dropped."""
+        with self._lock:
+            if result != "ok":
+                self._entries.pop(key, None)
+                self._dirty = True
+                return
+            self._entries[key] = {
+                "result": "ok",
+                "detail": detail,
+                "checked_at": time.time(),
+            }
+            self._dirty = True
+
+    def flush(self) -> None:
+        """Persist the cache, dropping expired entries. Never fatal."""
+        if self._path is None or not self._dirty:
+            return
+        now = time.time()
+        with self._lock:
+            fresh = {
+                k: v for k, v in self._entries.items()
+                if isinstance(v.get("checked_at"), (int, float))
+                and now - float(v["checked_at"]) <= _PROBE_CACHE_MAX_AGE
+            }
+            payload = json.dumps({"version": 1, "entries": fresh})
+        try:
+            self._path.write_text(payload)
+            self._path.chmod(0o600)
+        except OSError:
+            pass  # non-fatal — the cache is an optimisation, never a gate
+
+
 def _check_git_repos(
     services: dict[str, Any],
     accessories: dict[str, Any],
     result: ValidationResult,
+    probe_cache: ProbeCache | None = None,
 ) -> None:
     """Check git repo accessibility for build-from-source services."""
     all_entries = {**services, **accessories}
@@ -1496,6 +1625,13 @@ def _check_git_repos(
         """Check a single git repo. Returns (level, svc_name, message)."""
         repo = str(build["repo"])
         branch = build.get("branch")
+        branch_info = f" (branch: {branch})" if branch else ""
+        ok_msg = f"Git repo           '{svc_name}'{branch_info} accessible"
+
+        key = ProbeCache.git_key(repo, branch)
+        if probe_cache is not None and probe_cache.get(key) is not None:
+            return ("ok", svc_name, ok_msg)
+
         try:
             proc = subprocess.run(
                 ["git", "ls-remote", "--exit-code", repo],
@@ -1519,8 +1655,9 @@ def _check_git_repos(
                     return ("warn", svc_name,
                         f"Git repo           '{svc_name}' branch '{branch}' not found in {repo}")
 
-            branch_info = f" (branch: {branch})" if branch else ""
-            return ("ok", svc_name, f"Git repo           '{svc_name}'{branch_info} accessible")
+            if probe_cache is not None:
+                probe_cache.put(key, "ok", "repo accessible")
+            return ("ok", svc_name, ok_msg)
 
         except subprocess.TimeoutExpired:
             return ("warn", svc_name,
@@ -1549,6 +1686,7 @@ def _check_docker_images(
     services: dict[str, Any],
     accessories: dict[str, Any],
     result: ValidationResult,
+    probe_cache: ProbeCache | None = None,
 ) -> None:
     """Check Docker image tag existence via registry API or docker manifest."""
     all_entries = {**services, **accessories}
@@ -1571,7 +1709,7 @@ def _check_docker_images(
 
     with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {
-            pool.submit(_check_single_image, name, ref, has_skopeo): name
+            pool.submit(_check_single_image, name, ref, has_skopeo, probe_cache): name
             for name, ref in image_entries
         }
         for future in as_completed(futures):
@@ -1599,6 +1737,7 @@ def _check_single_image(
     svc_name: str,
     image_ref: str,
     has_skopeo: bool,
+    probe_cache: ProbeCache | None = None,
 ) -> tuple[str, str]:
     """Check a single Docker image tag. Returns (level, message)."""
     # Parse image reference into registry/repo:tag
@@ -1613,6 +1752,11 @@ def _check_single_image(
             tag = potential_tag
             image_name = image_ref[:last_colon]
 
+    ok_msg = f"Image              '{svc_name}' {image_name}:{tag} exists"
+    key = ProbeCache.image_key(image_name, tag)
+    if probe_cache is not None and probe_cache.get(key) is not None:
+        return ("ok", ok_msg)
+
     if has_skopeo:
         try:
             proc = subprocess.run(
@@ -1622,7 +1766,9 @@ def _check_single_image(
                 timeout=5,
             )
             if proc.returncode == 0:
-                return ("ok", f"Image              '{svc_name}' {image_name}:{tag} exists")
+                if probe_cache is not None:
+                    probe_cache.put(key, "ok", "image reference resolved")
+                return ("ok", ok_msg)
             stderr = (proc.stderr or "").strip().split("\n")[0]
             return ("warn",
                 f"Image              '{svc_name}' {image_name}:{tag} "
@@ -1634,7 +1780,10 @@ def _check_single_image(
 
     # Fallback: try Docker Hub API for Docker Hub images
     if _is_docker_hub_image(image_name):
-        return _check_dockerhub_image(svc_name, image_name, tag)
+        level, msg = _check_dockerhub_image(svc_name, image_name, tag)
+        if level == "ok" and probe_cache is not None:
+            probe_cache.put(key, "ok", "image reference resolved")
+        return (level, msg)
 
     return ("warn",
         f"Image              '{svc_name}' {image_name}:{tag} "
@@ -1984,6 +2133,7 @@ def _probe_token_scope(
     The resolved token value NEVER appears in any error message — only the
     vault key name is logged.
     """
+    import requests
 
     if vault_data is None:
         result.warn("Token scope check skipped — vault not decryptable")
@@ -2106,6 +2256,8 @@ def _probe_webhook_health(
     - Flags orphan hooks that belong to this consumer's webhook_domain but have
       no matching service (safe to remove with ``bin/bay service prune-webhooks``).
     """
+    import requests
+
     from bay_cli.github_webhook import (
         find_orphan_hooks,
         list_repo_hooks,
@@ -2511,6 +2663,7 @@ def run_validation(
     show_banner: bool = True,
     check_token_scope: bool = False,
     check_webhook_health: bool = False,
+    use_probe_cache: bool = True,
 ) -> ValidationResult:
     """Run all validation checks and return the result.
 
@@ -2529,6 +2682,11 @@ def run_validation(
             Never runs automatically — caller must opt in.
         check_webhook_health: When True, probe GitHub webhook health for
             all build services. Never runs automatically — caller must opt in.
+        use_probe_cache: When True (default) a successful git/image probe
+            recorded in ``<bay_dir>/.validate-probe-cache`` less than an hour
+            ago is reused instead of re-run. Failures are never cached.
+            ``bay validate --no-probe-cache`` sets this False, which re-runs
+            every probe and refreshes the cache.
 
     Returns:
         A ValidationResult with all checks applied.
@@ -2579,7 +2737,8 @@ def run_validation(
 
     # 6. Connectivity and reference checks (only if schema passed)
     if services_data is not None:
-        _validate_connectivity(root, services_data, parsed, result)
+        probe_cache = ProbeCache(bay_dir, enabled=use_probe_cache)
+        _validate_connectivity(root, services_data, parsed, result, probe_cache)
 
     # 7. Deprecation warnings
     _validate_deprecations(parsed, result)
@@ -2676,6 +2835,16 @@ def validate(
         "-r",
         help="Limit --check-config-age to a specific region (ansible --limit).",
     ),
+    no_probe_cache: bool = typer.Option(
+        False,
+        "--no-probe-cache",
+        help=(
+            "Re-run every git and image reachability probe instead of reusing "
+            "a successful result cached within the last hour. Failures are "
+            "never cached, so this only matters when something that used to "
+            "resolve has since disappeared."
+        ),
+    ),
 ) -> None:
     """Validate configuration files before deploying.
 
@@ -2698,7 +2867,14 @@ def validate(
     if env is None:
         env = _default_env(root)
 
-    result = run_validation(root, env, bay_dir=bay_dir, check_token_scope=check_token_scope, check_webhook_health=check_webhook_health)
+    result = run_validation(
+        root,
+        env,
+        bay_dir=bay_dir,
+        check_token_scope=check_token_scope,
+        check_webhook_health=check_webhook_health,
+        use_probe_cache=not no_probe_cache,
+    )
 
     # ── Optional remote config-age check ────────────────────────────────
     if check_config_age:

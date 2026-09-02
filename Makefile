@@ -20,8 +20,13 @@ test-framework:
 test-bootstrap:
 	bash tests/test_bootstrap.sh
 
+# Two passes. The first is parallel (`--dist loadfile` keeps each file on one
+# worker, so module-scoped fixtures are built once). The second re-runs the
+# `serial`-marked wall-clock tests, which skip themselves inside an xdist
+# worker because N-way CPU contention makes a timing assertion meaningless.
 test-python:
-	uv run pytest tests/ -v
+	uv run pytest tests/ -n auto --dist loadfile -q
+	uv run pytest tests/ -q -m serial -p no:xdist
 
 docs-alerts:
 	uv run python scripts/gen_alert_docs.py

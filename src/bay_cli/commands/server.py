@@ -11,7 +11,6 @@ import typer
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
-from ruamel.yaml import YAML
 
 from bay_cli import ansible, console, paths, runner
 from bay_cli.errors import BayError
@@ -460,6 +459,8 @@ def _detect_network(
 
 def _load_network_yml(root: Path, group: str) -> dict[str, Any] | None:
     """Load existing network.yml for a group, or None if not found."""
+    from ruamel.yaml import YAML  # lazy: keeps ruamel off the `bay --help` path
+
     yaml = YAML()
     for candidate in [
         root / "group_vars" / group / "network.yml",

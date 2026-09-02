@@ -20,16 +20,16 @@ import concurrent.futures
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
-import requests
-from requests.exceptions import (
-    ConnectionError as RequestsConnectionError,
-    RequestException,
-    SSLError,
-    Timeout,
-)
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    import requests
+
+# `requests` costs ~60 ms to import and this module is on the `bay_cli.cli`
+# import path (via commands/healthcheck.py). It is imported inside the two
+# functions that actually issue HTTP, so `bay --help` never pays for it.
+# See tests/test_cli_import_time.py.
 
 
 # Connect timeout. Read timeout stays low too — a healthy service's root
@@ -198,6 +198,13 @@ def _check_once(url: str, *, session: requests.Session) -> tuple[int | None, lis
 
     Error strings carry a stable `<kind>: <detail>` prefix — `classify_failure`
     matches on it, and the CLI renders `error.split(":")[0]` as the badge."""
+    from requests.exceptions import (
+        ConnectionError as RequestsConnectionError,
+        RequestException,
+        SSLError,
+        Timeout,
+    )
+
     try:
         resp = session.get(
             url,
@@ -268,6 +275,8 @@ def check_domain(
     healthy service returns on attempt 1 and costs nothing extra."""
     url = f"https://{domain}{path}"
     start = time.monotonic()
+    import requests
+
     session = requests.Session()
     # A vanilla User-Agent avoids triggering WAF rules on some services.
     session.headers["User-Agent"] = "bay-healthcheck/1.0"
