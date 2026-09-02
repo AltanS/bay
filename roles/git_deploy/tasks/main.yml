@@ -216,7 +216,13 @@
       loop_control:
         label: "{{ item }}"
       when: _remote_build_services | default([]) | length > 0
-      changed_when: true
+      # docker pull prints "Status: Downloaded newer image for ..." only when
+      # it actually fetched layers, and "Status: Image is up to date for ..."
+      # otherwise. changed_when: true reported changed on every deploy even
+      # when the registry had nothing new. _remote_pull_result here is this
+      # loop iteration's own result (registered before it is appended to
+      # results[]), same pattern as build_image's batched pull task.
+      changed_when: "'Downloaded newer image' in (_remote_pull_result.stdout | default(''))"
       retries: 3
       delay: 10
       register: _remote_pull_result
@@ -379,7 +385,13 @@
             content: "{{ ansible_date_time.iso8601 }}\n"
             dest: "{{ stack_dir }}/state/git-deploy-config.timestamp"
             owner: "{{ app_user }}"
-            mode: "0644"
+            # Group + 0664, not 0644: the re-group task in webhook.yml sweeps
+            # {{ stack_dir }}/state to group git_deploy_build_group with g+w.
+            # A file written here without the group and write bit is exactly
+            # what that sweep exists to catch, so it flips this file's mode
+            # on every single run instead of finding nothing to do.
+            group: "{{ git_deploy_build_group }}"
+            mode: "0664"
 
     # ── Build server webhook: deploy webhook + systemd for remote builds ──
     # When this host IS the build server and has remote-strategy services,
@@ -419,4 +431,6 @@
             content: "{{ ansible_date_time.iso8601 }}\n"
             dest: "{{ stack_dir }}/state/git-deploy-config.timestamp"
             owner: "{{ app_user }}"
-            mode: "0644"
+            # See the matching comment on the deployment-server sentinel above.
+            group: "{{ git_deploy_build_group }}"
+            mode: "0664"

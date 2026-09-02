@@ -7,6 +7,28 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.3.3] — 2026-09-02
+
+### Fixed
+
+- **Two more tasks reported "changed" on every deploy of an unchanged
+  consumer.** The git-deploy-config timestamp sentinel was written with
+  mode `0644` and no group, so `webhook.yml`'s state/ re-group task found
+  it group-write-less and flipped it back on every following run. Fixed by
+  writing the sentinel with group `git_deploy_build_group` and mode `0664`,
+  same as the directory it lives in. Applied the same fix to the other
+  writers under `state/`: `cb_state_migration.yml`'s migration script,
+  `rebuild.sh`'s `_write_state`, and the stall watchdog's audit log and
+  rate-limit file. The first deploy after this change flips the sentinel's
+  mode once; every deploy after that is a no-op.
+- **The git_deploy-side image pull reported "changed" on every deploy,
+  even with nothing new to pull.** `roles/git_deploy/tasks/main.yml`'s
+  "Pull freshly-pushed images on deployment server" task (the
+  remote-build-strategy counterpart to `build_image`'s batched pull) had
+  `changed_when: true` unconditionally. Fixed by keying `changed_when` on
+  `docker pull`'s own "Downloaded newer image" marker, matching the
+  batched task. No behaviour change beyond the reported status.
+
 ## [0.3.2] — 2026-09-02
 
 ### Fixed

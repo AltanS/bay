@@ -70,7 +70,12 @@
               os.write(fd, json.dumps(new).encode())
           finally:
               os.close(fd)
-          os.chmod(tmp, 0o644)
+          # 0664, not 0644: state/ is shared between app_user and the webhook
+          # container via git_deploy_build_group with setgid + g+w. A file
+          # written without the group write bit is exactly what webhook.yml's
+          # one-off re-group task exists to catch, so it flips this file's
+          # mode again on the next run instead of finding nothing to do.
+          os.chmod(tmp, 0o664)
           os.rename(tmp, path)
           migrated += 1
 

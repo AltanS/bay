@@ -44,6 +44,11 @@ _audit() {
   printf '[%s] host=%s stale_count=%d action=%s\n' \
     "$(date -Iseconds)" "${HOSTNAME}" "${count}" "${action}" \
     >> "${AUDIT_LOG}" 2>/dev/null || true
+  # A shell `>>` create picks up mode 666 minus umask, which loses the group
+  # write bit under a typical 022 umask. STATE_DIR is shared with the
+  # webhook container via git_deploy_build_group (setgid + g+w) — without
+  # this, webhook.yml's re-group task keeps finding the log on every deploy.
+  chmod 0664 "${AUDIT_LOG}" 2>/dev/null || true
 }
 
 # If the triggers directory doesn't exist (fresh host, no builds yet),
@@ -128,6 +133,9 @@ if [[ "${SHOULD_ALERT}" -eq 1 ]]; then
   else
     printf '{"services":"%s","ts_epoch":%s}\n' "${CURRENT_SET}" "${NOW_EPOCH}" > "${tmpfile}"
   fi
+  # mktemp defaults to 0600 (owner-only); restore the shared group + write
+  # bit before the file replaces LAST_ALERT_FILE, same reasoning as _audit above.
+  chmod 0664 "${tmpfile}" 2>/dev/null || true
   mv -f "${tmpfile}" "${LAST_ALERT_FILE}" 2>/dev/null || true
   _audit "${STALE_COUNT}" "alerted"
 else

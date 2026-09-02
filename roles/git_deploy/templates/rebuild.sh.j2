@@ -171,7 +171,11 @@ _write_state() {
   mkdir -p "${STATE_DIR}" || true
   local tmpfile="${STATE_FILE}.tmp"
   cat > "${tmpfile}"
-  chmod 0644 "${tmpfile}"
+  # 0664, not 0644: STATE_DIR is shared with the webhook container via
+  # git_deploy_build_group (setgid + g+w). Without the group write bit,
+  # webhook.yml's one-off re-group task keeps finding this file on every
+  # deploy instead of nothing.
+  chmod 0664 "${tmpfile}"
   mv -f "${tmpfile}" "${STATE_FILE}"
 }
 
