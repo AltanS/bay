@@ -7,6 +7,26 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.3.2] — 2026-09-02
+
+### Fixed
+
+- **`systemd.yml` reset the build state directory to 0755 on every deploy,
+  blocking the webhook container from writing its own log.** Two tasks in
+  `roles/git_deploy` disagreed about `{{ stack_dir }}/state`. `webhook.yml`
+  sets it to owner `app_user`, group `git_deploy_build_group`, mode `2770`,
+  so the webhook container (UID 10001, GID 2000) and `rebuild.sh` can both
+  write into it. `systemd.yml` runs right after and re-created the same
+  directory as mode `0755` with no group at all, undoing that on every
+  single run. The webhook container could not write
+  `telegram-failures.log` into `/state` on any 0.3.0 or 0.3.1 host, which
+  is exactly the failure the `/state` mount was meant to fix. The mode
+  flip also made three unrelated tasks report "changed" on every deploy
+  for no functional reason. Fixed by making `systemd.yml` declare the same
+  owner, group, mode and `become: true` / `become_user: root` as
+  `webhook.yml`. The first 0.3.2 deploy changes the directory mode once,
+  from `0755` back to `2770`; every deploy after that is a no-op.
+
 ## [0.3.1] — 2026-09-02
 
 ### Fixed

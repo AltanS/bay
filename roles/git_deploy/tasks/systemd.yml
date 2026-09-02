@@ -2,11 +2,21 @@
 # Deploy systemd path and service units for build triggers
 
 - name: Ensure build state directory exists
+  # Must agree with "Ensure state directory exists" in webhook.yml (2770,
+  # git_deploy_build_group). This task always runs immediately after
+  # webhook.yml (see main.yml), which creates git_deploy_build_group first —
+  # so become: true here can rely on the group already existing. A previous
+  # 0755/no-group version of this task ran after webhook.yml on every deploy
+  # and flipped the directory back to 0755, locking the webhook container
+  # (which writes telegram-failures.log) out of its own state directory.
   ansible.builtin.file:
     path: "{{ stack_dir }}/state"
     state: directory
     owner: "{{ app_user }}"
-    mode: "0755"
+    group: "{{ git_deploy_build_group }}"
+    mode: "2770"
+  become: true
+  become_user: root
 
 - name: Deploy rebuild script
   ansible.builtin.template:
