@@ -7,6 +7,20 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.5.2] — 2026-09-08
+
+### Changed
+
+- The `[gated]` reason is shorter, so it stops wrapping in an 80-column
+  terminal: `gated -- basicauth, no healthcheck_path`.
+
+### Fixed
+
+- `docs/services.md` said a dead service behind the carve-out answers 502/503.
+  That is the supervisor case. A fully stopped container answers 404, because
+  Traefik's Docker provider drops the router with the container. Both fail; the
+  docs now say which you will see.
+
 ## [0.5.1] — 2026-09-08
 
 ### Fixed
@@ -40,7 +54,8 @@ before upgrading — anything needing manual action is called out under
   A service declaring both `middleware.basic_auth` and `healthcheck_path` now
   gets a dedicated Traefik router for that one exact path with basic auth
   removed from its chain, so the probe reaches the real backend. A healthy
-  service answers 200; a dead one answers 502/503 and still reads FAIL. The
+  service answers 200; a dead one fails, with 502/503 when an inner process
+  died behind a live supervisor and 404 when the container is gone. The
   carve-out is an exact `Path()` match, never a prefix, and every other
   middleware still applies to it.
 

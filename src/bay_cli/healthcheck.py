@@ -179,7 +179,7 @@ def should_skip_vpn_only(service: dict[str, Any], include_vpn: bool) -> tuple[bo
     return True, "VPN-only (healthcheck_path not in public_routes)"
 
 
-_GATED_REASON = "gated -- basicauth, no healthcheck_path to verify"
+_GATED_REASON = "gated -- basicauth, no healthcheck_path"
 
 
 def is_gated(service: dict[str, Any]) -> tuple[bool, str | None]:

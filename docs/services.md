@@ -1234,6 +1234,13 @@ prefix, so `/healthcheck` does not also open `/healthcheck-admin`. Every other
 middleware in the chain (security headers, compression, rate limits, a VPN
 allow-list on a VPN route) still applies to it.
 
+**A dead service still reads FAIL.** That is the whole point of the carve-out,
+and it is worth knowing which failure you will see. An inner process that dies
+behind a live supervisor gives 502/503, the case `healthcheck_path` exists for.
+A container that is fully stopped gives 404, because Traefik's Docker provider
+drops the router with the container. Both are failures. A 401 on a carved-out
+path means the labels did not apply, which is also a failure.
+
 **The health route must be safe to serve unauthenticated.** It should return
 liveness only. If yours leaks build metadata, config, or internal hostnames,
 fix the route rather than relying on the password.
