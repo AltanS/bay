@@ -438,6 +438,9 @@ crowdsec_nftables_blocklist: true
 #       service: http
 #       type: scan
 #       remediation: true
+#
+# Removing or renaming an entry removes the rendered file from the host and
+# flushes that scenario's decisions on the next `bin/bay provision --tags crowdsec`.
 crowdsec_custom_scenarios: []
 
 # =============================================================================

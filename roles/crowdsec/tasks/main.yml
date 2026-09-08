@@ -276,6 +276,64 @@
     - crowdsec_enabled | bool
     - crowdsec_custom_scenarios | length > 0
 
+# A provision must converge: a scenario the consumer drops from
+# `crowdsec_custom_scenarios`, or renames, has to leave the host too. Three
+# times `custom/proxy-asn-trigger` stayed behind after a rename and kept
+# banning until an operator deleted the file by hand.
+#
+# Only regular files carrying this template's own header are candidates. Hub
+# content at the same path is a SYMLINK into /etc/crowdsec/hub (see the
+# http-probing comment above), and the built-in templates start with
+# "# CrowdSec Scenario:", so neither can be caught by this sweep.
+- name: Find rendered custom scenario files
+  ansible.builtin.find:
+    paths: /etc/crowdsec/scenarios
+    patterns: '*.yaml'
+    file_type: file
+    contains: '^# Custom CrowdSec Scenario'
+  register: _custom_scenario_files
+  when: crowdsec_enabled | bool
+
+- name: Determine custom scenarios that left the list
+  ansible.builtin.set_fact:
+    _stale_custom_scenarios: >-
+      {{ _custom_scenario_files.files | default([])
+         | map(attribute='path') | map('basename')
+         | map('regex_replace', '\.yaml$', '') | list
+         | difference(crowdsec_custom_scenarios | default([]) | map(attribute='name') | list) }}
+  when: crowdsec_enabled | bool
+
+# Deliberately NOT gated on `crowdsec_custom_scenarios | length > 0`: emptying
+# the list must prune everything this template ever rendered.
+- name: Remove custom scenarios that left the list
+  ansible.builtin.file:
+    path: "/etc/crowdsec/scenarios/{{ item }}.yaml"
+    state: absent
+  loop: "{{ _stale_custom_scenarios | default([]) }}"
+  loop_control:
+    label: "{{ item }}.yaml"
+  notify: Reload crowdsec
+  when: crowdsec_enabled | bool
+
+# Deleting the file stops new overflows, never the bans already written. A
+# rename would otherwise leave thousands of decisions under the old scenario
+# name with nothing left to explain them.
+- name: Flush decisions of removed custom scenarios
+  ansible.builtin.command:
+    cmd: cscli decisions delete --scenario "custom/{{ item }}"
+  loop: "{{ _stale_custom_scenarios | default([]) }}"
+  loop_control:
+    label: "custom/{{ item }}"
+  register: _stale_decision_delete
+  changed_when:
+    - _stale_decision_delete.rc == 0
+    - "'Nothing to delete' not in (_stale_decision_delete.stderr | default('') ~ _stale_decision_delete.stdout | default(''))"
+    - "'0 decision' not in (_stale_decision_delete.stderr | default('') ~ _stale_decision_delete.stdout | default(''))"
+  # cscli exits non-zero when there is nothing to delete on some versions, and
+  # a leftover file is still gone either way.
+  failed_when: false
+  when: crowdsec_enabled | bool
+
 # Defense in depth — fail fast with the offending file path if any rendered
 # scenario is invalid YAML, instead of letting `cscli hub update` fail with
 # a cryptic error that requires SSH-level inspection to triage.

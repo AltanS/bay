@@ -188,6 +188,9 @@ crowdsec_custom_scenarios:
       remediation: true
 ```
 
+Removing an entry from `crowdsec_custom_scenarios`, or renaming one, removes the rendered file
+and flushes that scenario's decisions on the next `bin/bay provision --tags crowdsec`.
+
 Validate before deploy with `cscli explain --log '<sample line>' --type <acquisition label type>` — `evt.Meta.source_ip` should be populated and the trigger scenario should overflow into a decision. This replaces the brittle UA-substring `spoofed-googlebot` heuristic (no token list to maintain, no rDNS-whitelist double-negative).
 
 ## Hub data refresh (GeoLite2)
