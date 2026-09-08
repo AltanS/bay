@@ -7,6 +7,31 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.6.2] - 2026-09-08
+
+### Fixed
+
+- **A custom scenario removed from `crowdsec_custom_scenarios` stayed on the
+  host and kept banning.** The role rendered one file per list entry and never
+  removed the file of an entry that left the list, so dropping or renaming a
+  scenario left it live in `/etc/crowdsec/scenarios`. One renamed scenario
+  survived three times on a production consumer, and an operator deleted the
+  stale file by hand each time. The role now removes the orphaned files and
+  flushes their decisions, so a provision converges. Only regular files
+  carrying the custom-scenario template header are candidates, so hub content
+  (a symlink into `/etc/crowdsec/hub`) and the built-in scenarios are never
+  touched.
+
+### Upgrade notes
+
+- The prune lives in `provision.yml`, not `deploy.yml`. Run
+  `bin/bay provision <env> --tags crowdsec` to pick it up. A deploy will not
+  apply it.
+- The first run removes every file this template rendered whose name is no
+  longer in your `crowdsec_custom_scenarios`, and deletes that scenario's
+  decisions. If you renamed a scenario and want its bans kept, re-add the old
+  name to the list before you provision.
+
 ## [0.6.1] — 2026-09-08
 
 ### Fixed
