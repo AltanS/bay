@@ -1262,7 +1262,9 @@ never touched cannot answer "did I just break something".
 
 Nothing is hidden. Everything is still probed, and an untouched failure is
 still printed, under its own heading and named as pre-existing or collateral.
-When the untouched group is entirely green it collapses to one line. Probing
+When the untouched group is entirely green it collapses to one line, unless
+the deploy changed nothing at all — then it is the only group there is, and
+you get the full table. Probing
 only the changed containers would have been simpler and wrong: a deploy can
 break something it never touched, such as an accessory recreated under an
 unchanged app, and those are the failures most worth catching.

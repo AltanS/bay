@@ -648,8 +648,12 @@ def _render_grouped(
         console.info("  This deploy changed no containers.")
 
     if theirs:
+        # Collapse a green untouched group only when there is a touched group
+        # to contrast it against. A deploy that changed nothing puts EVERY
+        # service in this group, and collapsing then leaves the operator with
+        # no table at all — strictly less than they saw before grouping.
         other_summary = summarize(theirs)
-        if other_summary["failed"]:
+        if other_summary["failed"] or not mine:
             console.console.print()
             console.console.print("  Not part of this deploy")
             _render_table(theirs, indent="    ")

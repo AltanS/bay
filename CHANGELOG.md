@@ -7,6 +7,16 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.6.1] — 2026-09-08
+
+### Fixed
+
+- **A deploy that changed nothing showed no probe table at all.** Every service
+  landed in the untouched group, the green-collapse rule fired, and the whole
+  summary was two lines — less than an operator saw before grouping existed.
+  The untouched group now collapses only when there is a touched group to
+  contrast it against. Caught on a live deploy, not by the tests.
+
 ## [0.6.0] — 2026-09-08
 
 ### Added

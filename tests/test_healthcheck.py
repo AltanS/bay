@@ -1356,6 +1356,21 @@ class TestAttributionRendering:
         assert "none failing" in out
         assert "old.example.com" not in out, "a green untouched group must collapse"
 
+    def test_attribution_noop_deploy_still_shows_the_table(self, capsys):
+        """A deploy that changed nothing puts every service in the untouched
+        group. Collapsing it there would leave the operator with no table at
+        all, which is less than they saw before grouping existed. Caught on a
+        live host, not by the unit tests."""
+        results = [
+            CheckResult(service="api", domain="api.example.com", status=200, ok=True),
+            CheckResult(service="old", domain="old.example.com", status=200, ok=True),
+        ]
+        render_results(results, headline="h", touched=set())
+        out = capsys.readouterr().out
+        assert "api.example.com" in out
+        assert "old.example.com" in out
+        assert "none failing" not in out
+
     def test_attribution_noop_deploy_says_so(self, capsys):
         """An empty touched set is not the same as no report, and the output
         has to say which one happened."""
