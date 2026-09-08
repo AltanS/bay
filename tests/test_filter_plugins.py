@@ -670,6 +670,41 @@ class TestHealthRouter:
             labels["traefik.http.routers.translate-vpn.priority"]
         )
 
+    def test_health_router_outranks_a_router_with_no_priority_label(self):
+        """The bug this exists for. A single-router service renders NO
+        priority label, and Traefik then ranks it by the character length of
+        its rule. The first shipped version used 30 and lost to a 66-character
+        two-domain Host rule on a live host, so the probe still got the password
+        challenge while every unit test passed."""
+        svc = {
+            "access": "public",
+            "domains": ["whoami.a.example.com", "whoami.b.example.com"],
+            "healthcheck_path": "/healthcheck",
+            "ports": {"internal": 80},
+            "middleware": {"basic_auth": {"users": ["user:hash"]}},
+        }
+        labels = bay_traefik_labels(svc, "whoami", _BASE_CONFIG)
+        plain = labels["traefik.http.routers.whoami.rule"]
+        assert "traefik.http.routers.whoami.priority" not in labels, (
+            "shape changed: this test is only meaningful while the plain "
+            "router has no explicit priority"
+        )
+        health = int(labels["traefik.http.routers.whoami-health.priority"])
+        assert health > len(plain), (
+            f"health priority {health} must beat Traefik's length-derived "
+            f"default for the plain router ({len(plain)})"
+        )
+
+    def test_health_priority_beats_any_rule_a_label_can_hold(self):
+        """Guards the constant itself. The length rule is bounded by how long
+        a rule string can get; the constant has to stay clear of that."""
+        labels = bay_traefik_labels(_GATED, "translate", _BASE_CONFIG)
+        health = int(labels["traefik.http.routers.translate-health.priority"])
+        longest = max(
+            len(v) for k, v in labels.items() if k.endswith(".rule")
+        )
+        assert health > longest * 100
+
     def test_health_router_parenthesises_multi_domain_host(self):
         """`&&` binds tighter than `||`, so an unwrapped OR-group would open
         the whole of the first domain instead of just its health path."""

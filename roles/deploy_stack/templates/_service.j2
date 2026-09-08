@@ -175,7 +175,7 @@
       # Health probe: same chain, minus this service's basicauth
       - "traefik.http.routers.{{ name }}-health.rule={{ _sec_host }} && Path(`{{ _hp }}`)"
       - "traefik.http.routers.{{ name }}-health.service={{ name if svc.access == 'public' or svc.public_routes is defined else name ~ '-vpn' }}"
-      - "traefik.http.routers.{{ name }}-health.priority=30"
+      - "traefik.http.routers.{{ name }}-health.priority=1000000"
       - "traefik.http.routers.{{ name }}-health.entrypoints={{ public_entrypoints | default('websecure') if svc.access == 'public' else vpn_entrypoints | default('websecure') }}"
       - "traefik.http.routers.{{ name }}-health.tls.certresolver=letsencrypt"
       - "traefik.http.routers.{{ name }}-health.middlewares={{ _health_mw | reject('equalto', name ~ '-basicauth') | join(',') }}"

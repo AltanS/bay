@@ -7,6 +7,25 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.5.1] — 2026-09-08
+
+### Fixed
+
+- **The health-probe carve-out shipped in 0.5.0 did not actually take effect.**
+  The router was emitted correctly and still lost. A Traefik router with no
+  explicit priority does not rank last — it ranks by the CHARACTER LENGTH of
+  its rule. A plain two-domain public service renders a single router with no
+  priority label, giving it an effective priority of 66, and the health
+  router's `30` lost to it. The probe kept getting the password challenge.
+
+  The health router's priority is now far above anything the length rule can
+  produce. Anyone on 0.5.0 with a `basic_auth` + `healthcheck_path` service
+  should move to 0.5.1; 0.5.0 behaves exactly like 0.4.0 for them.
+
+  Only the two-router shape (`public_routes` / `vpn_routes`) sets explicit
+  priorities, so the original test compared against the one shape that already
+  worked. Two tests now pin the single-router shape and the constant itself.
+
 ## [0.5.0] — 2026-09-08
 
 ### Fixed

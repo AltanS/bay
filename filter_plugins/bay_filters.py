@@ -532,6 +532,9 @@ def _path_under(path, routes):
     return False
 
 
+_HEALTH_ROUTER_PRIORITY = 1000000
+
+
 def _add_health_router_labels(
     labels, svc, name, domains, *,
     access, public_mw, vpn_mw, public_entrypoints, vpn_entrypoints,
@@ -578,9 +581,21 @@ def _add_health_router_labels(
     # Exact Path, never PathPrefix: /healthcheck must not open /healthcheck-admin.
     labels[f"traefik.http.routers.{router}.rule"] = f"{sec_host} && Path(`{_rule_literal(path)}`)"
     labels[f"traefik.http.routers.{router}.service"] = service_ref
-    # Above both the catch-all (10) and the public/vpn split (20), so the
-    # carve-out wins for this one path and nothing else moves.
-    labels[f"traefik.http.routers.{router}.priority"] = "30"
+    # This MUST outrank the service's ordinary router, and "30" did not.
+    #
+    # A router with no explicit priority does not get zero — Traefik gives it
+    # the CHARACTER LENGTH of its rule. A plain two-domain public service
+    # renders one router with no priority label at all, so its effective
+    # priority was 66, the length of `Host(`a`) || Host(`b`)`. It beat 30 and
+    # kept answering the probe with the password challenge. Verified live on
+    # a real deploy of v0.5.0: the labels below were correct on the
+    # container and the health path still returned 401.
+    #
+    # Only the routers built by _add_two_router_labels carry an explicit
+    # priority (10 and 20), so comparing against those was never enough. This
+    # constant is far above any rule length a label value can hold, which is
+    # the only ceiling the length rule can produce.
+    labels[f"traefik.http.routers.{router}.priority"] = str(_HEALTH_ROUTER_PRIORITY)
     labels[f"traefik.http.routers.{router}.entrypoints"] = entrypoints
     labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
     labels[f"traefik.http.routers.{router}.middlewares"] = ",".join(health_mw)
