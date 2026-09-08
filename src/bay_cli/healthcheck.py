@@ -17,9 +17,11 @@ lives in `src/bay_cli/commands/healthcheck.py`.
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -534,22 +536,11 @@ def run_healthcheck(
 _LABEL_MIN_WIDTH = 40
 
 
-def render_results(results: list[CheckResult], *, headline: str) -> None:
-    """Print the probe table, the totals line and the failure block.
-
-    ONE renderer, deliberately. `bin/bay healthcheck` and the post-deploy
-    summary used to keep separate copies of this loop, and they had already
-    drifted apart on glyphs and on the wording of the headline — so the same
-    fleet could be described two different ways depending on which command
-    the operator happened to run. `headline` is the only intended difference.
-
-    Every number printed here carries its unit, because the totals line is
-    domain-grained and the headline is service-grained. A bare number next to
-    another bare number of a different kind is how an operator misreads a
-    summary at 2am."""
+def _render_table(results: list[CheckResult], *, indent: str = "  ") -> None:
+    """The per-probe lines. Shared by the flat and the grouped output so the
+    two can never drift apart the way the two commands once did."""
     from bay_cli import console
 
-    summary = summarize(results)
     labels = [display_label(r) for r in results]
     width = max([_LABEL_MIN_WIDTH, *(len(s) for s in labels)]) if labels else _LABEL_MIN_WIDTH
 
@@ -557,25 +548,32 @@ def render_results(results: list[CheckResult], *, headline: str) -> None:
         padded = f"{label:<{width}s}"
         if r.gated:
             # Not a pass. Traefik answered; the app was never reached.
-            console.warning(f"  {padded} {'--':14s} [gated] {r.skip_reason}")
+            console.warning(f"{indent}{padded} {'--':14s} [gated] {r.skip_reason}")
         elif r.skipped:
-            console.info(f"  {padded} (skipped -- {r.skip_reason})")
+            console.info(f"{indent}{padded} (skipped -- {r.skip_reason})")
         elif r.ok:
             status = f"{r.status} OK" if r.status is not None else "OK"
-            console.success(f"  {padded} {status:14s} [pass]{readiness_note(r)}")
+            console.success(f"{indent}{padded} {status:14s} [pass]{readiness_note(r)}")
         else:
             tag = (r.error.split(":")[0] if r.error else str(r.status))[:24]
-            console.error(f"  {padded} {tag:14s} [FAIL]")
+            console.error(f"{indent}{padded} {tag:14s} [FAIL]")
 
+
+def _render_totals(results: list[CheckResult]) -> dict[str, int]:
+    from bay_cli import console
+
+    summary = summarize(results)
     console.console.print()
     console.console.print(
         f"  {summary['total']} checks: {summary['passed']} passed, "
         f"{summary['failed']} failed, {summary['gated']} gated, "
         f"{summary['skipped']} skipped"
     )
+    return summary
 
-    if not summary["failed"]:
-        return
+
+def _render_failures(results: list[CheckResult], *, headline: str, summary: dict[str, int]) -> None:
+    from bay_cli import console
 
     console.console.print()
     n = summary["failed_services"]
@@ -588,6 +586,165 @@ def render_results(results: list[CheckResult], *, headline: str) -> None:
         console.console.print(
             f"    -> Run: [cyan]ssh debugbot@<host> \"docker logs {r.service} --tail 50\"[/cyan]"
         )
+
+
+def render_results(
+    results: list[CheckResult],
+    *,
+    headline: str,
+    touched: set[str] | None = None,
+) -> None:
+    """Print the probe table, the totals line and the failure block.
+
+    ONE renderer, deliberately. `bin/bay healthcheck` and the post-deploy
+    summary used to keep separate copies of this loop, and they had already
+    drifted apart on glyphs and on the wording of the headline — so the same
+    fleet could be described two different ways depending on which command
+    the operator happened to run. `headline` is the only intended difference.
+
+    Every number printed here carries its unit, because the totals line is
+    domain-grained and the headline is service-grained. A bare number next to
+    another bare number of a different kind is how an operator misreads a
+    summary at 2am.
+
+    `touched` names the services THIS deploy changed, or is None when there is
+    nothing to attribute against — then the output is flat, exactly as before.
+
+    Note what grouping does NOT do: it never narrows the probe set. Probing
+    only the touched containers was the obvious design and it is wrong. A
+    deploy can break something it never touched — an accessory recreated under
+    a NoOp app, a Traefik config change, a link moving — and hiding those is a
+    worse failure than the noise this started from."""
+    if touched is not None:
+        _render_grouped(results, headline=headline, touched=touched)
+        return
+
+    _render_table(results)
+    summary = _render_totals(results)
+    if summary["failed"]:
+        _render_failures(results, headline=headline, summary=summary)
+
+
+def _render_grouped(
+    results: list[CheckResult], *, headline: str, touched: set[str]
+) -> None:
+    """Attributed output: this deploy's services first, everything else after.
+
+    The headline and the outage warning are driven by the touched group only.
+    That is the whole point — an operator reading a deploy summary is asking
+    "did I break something", and a service this deploy never went near cannot
+    answer that question."""
+    from bay_cli import console
+
+    mine = [r for r in results if r.service in touched]
+    theirs = [r for r in results if r.service not in touched]
+
+    if mine:
+        console.console.print("  Changed by this deploy")
+        _render_table(mine, indent="    ")
+    else:
+        # Distinct from "no report": the reconciler ran and every container
+        # already matched, so nothing here is this deploy's doing.
+        console.info("  This deploy changed no containers.")
+
+    if theirs:
+        other_summary = summarize(theirs)
+        if other_summary["failed"]:
+            console.console.print()
+            console.console.print("  Not part of this deploy")
+            _render_table(theirs, indent="    ")
+        else:
+            console.console.print()
+            console.info(
+                f"  Not part of this deploy: {len(theirs)} check"
+                f"{'' if len(theirs) == 1 else 's'}, none failing."
+            )
+
+    summary = _render_totals(results)
+
+    mine_summary = summarize(mine)
+    if mine_summary["failed"]:
+        _render_failures(mine, headline=headline, summary=mine_summary)
+
+    if theirs:
+        stale = summarize(theirs)
+        if stale["failed"]:
+            console.console.print()
+            n = stale["failed_services"]
+            console.warning(
+                f"{n} other service{'' if n == 1 else 's'} also failing."
+            )
+            console.info("  Pre-existing or collateral, not this deploy.")
+            for r in theirs:
+                if r.ok or r.skipped:
+                    continue
+                what = (
+                    f"HTTP {r.status}" if r.status is not None
+                    else (r.error or "unknown error")
+                )
+                console.console.print(f"  [red]x[/red] {display_label(r)}  {what}")
+
+
+# ── Which services did THIS deploy touch? ─────────────────────────────
+# The reconciler already knows. It computes the exact list, prints it into an
+# Ansible `debug` message, and that is where the knowledge used to die: the
+# playbook's stdout goes straight to the terminal (runner.py hands over the
+# fd), so there is nothing for the CLI to parse. So the reconciler also writes
+# its report to a control-node file, one per host, and this reads them back.
+#
+# Absence is normal, not an error. `--check`, a tags-filtered run, an older
+# framework on the server: all produce no report, and the caller then prints
+# today's ungrouped summary. Returning None for "no report" is deliberately
+# NOT the same as returning an empty set, which means "the deploy ran and
+# touched nothing".
+
+REPORT_DIRNAME = ".reconcile-report"
+
+# Every action but NoOp mutates the container.
+_UNTOUCHED_KINDS = {"NoOp"}
+
+
+def purge_reconcile_reports(bay_dir: Path) -> None:
+    """Delete last run's reports. Called BEFORE the playbook, so a report that
+    is present afterwards can only be this run's. Without this a tags-filtered
+    or failed deploy would silently inherit the previous run's touched list."""
+    report_dir = bay_dir / REPORT_DIRNAME
+    try:
+        for f in report_dir.glob("*.json"):
+            f.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def read_touched_services(bay_dir: Path) -> set[str] | None:
+    """Names of the services this deploy changed, merged across hosts.
+
+    None means no report was written at all. An empty set means the reconciler
+    ran and every container was already correct."""
+    report_dir = bay_dir / REPORT_DIRNAME
+    try:
+        files = sorted(report_dir.glob("*.json"))
+    except OSError:
+        return None
+    if not files:
+        return None
+
+    touched: set[str] = set()
+    seen_any = False
+    for f in files:
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            # A truncated or unreadable file is not a reason to fail a deploy
+            # that already succeeded. Skip it; the group just reads smaller.
+            continue
+        seen_any = True
+        for entry in data.get("results") or []:
+            kind = entry.get("kind")
+            name = entry.get("name")
+            if name and kind not in _UNTOUCHED_KINDS:
+                touched.add(name)
+    return touched if seen_any else None
 
 
 def summarize(results: list[CheckResult]) -> dict[str, int]:

@@ -7,6 +7,39 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.6.0] — 2026-09-08
+
+### Added
+
+- **The post-deploy summary now says which failures are this deploy's.**
+  Results are split into what the deploy changed and everything else, and the
+  headline count plus the "users may see outages" warning are driven by the
+  first group only. Nothing is hidden: everything is still probed, and an
+  untouched failure is still shown under its own heading, named as pre-existing
+  or collateral. A fully green untouched group collapses to one line.
+
+  Narrowing the probe set to the changed containers was the obvious design and
+  it is wrong. A deploy can break a container it never touched — an accessory
+  recreated under an unchanged app, a Traefik config change, a link moving —
+  and hiding those would be a worse failure than the noise this replaces.
+
+  The grouping comes from the reconciler, which already knew. It now writes its
+  report to `.bay/.reconcile-report/<host>.json` on the control node, one file
+  per host, because role-scoped facts do not cross into `hostvars`. The CLI
+  empties that directory before each deploy, so a report present afterwards can
+  only be the current run's.
+
+  No report is a normal outcome, never an error: the summary prints one line
+  saying so and falls back to the previous ungrouped output. That covers
+  `--check`, a `--tags` deploy, and a server still on an older framework.
+
+- `bin/bay healthcheck` is unchanged. It has no deploy to attribute to.
+
+### Upgrade notes
+
+- `.bay/.reconcile-report/` is created inside the framework clone, which is
+  already gitignored in every consumer. Nothing to add.
+
 ## [0.5.2] — 2026-09-08
 
 ### Changed

@@ -535,6 +535,14 @@ def deploy(
             raise BayError(f"Unknown region '{region}' for env '{env}'")
         extra_args = ["-l", host] + extra_args
 
+    # Drop last run's .reconcile-report/ files BEFORE the playbook, never after.
+    # A report found afterwards can then only be this run's — a tags-filtered
+    # or aborted deploy leaves the directory empty rather than handing the
+    # summary a stale touched list to attribute against.
+    from bay_cli.healthcheck import purge_reconcile_reports
+
+    purge_reconcile_reports(bay_dir)
+
     _run_playbook("deploy", env, tags, extra_args, profile=profile)
     _show_headscale_onboarding(root, bay_dir)
 
@@ -566,10 +574,10 @@ def deploy(
             f"Skipping post-deploy healthcheck (--tags={tags} did not include deploy_stack)."
         )
     else:
-        _run_post_deploy_healthcheck(env, root)
+        _run_post_deploy_healthcheck(env, root, bay_dir)
 
 
-def _run_post_deploy_healthcheck(env: str, root: Path) -> None:
+def _run_post_deploy_healthcheck(env: str, root: Path, bay_dir: Path) -> None:
     """Post-deploy reachability audit. Probes every public service's
     `domains:` with HTTPS GET in parallel and reports status. Does not
     exit the deploy non-zero — the deploy itself already succeeded, and
@@ -577,7 +585,11 @@ def _run_post_deploy_healthcheck(env: str, root: Path) -> None:
     an otherwise-good rollout. Failures are reported loudly with a
     `docker logs` hint so the operator sees them."""
     from bay_cli.config import StackConfig
-    from bay_cli.healthcheck import render_results, run_healthcheck
+    from bay_cli.healthcheck import (
+        read_touched_services,
+        render_results,
+        run_healthcheck,
+    )
 
     cfg = StackConfig(root)
     services = cfg.get_services()
@@ -594,9 +606,18 @@ def _run_post_deploy_healthcheck(env: str, root: Path) -> None:
         console.info("No public services with domains — nothing to probe.")
         return
 
+    touched = read_touched_services(bay_dir)
+    if touched is None:
+        console.info(
+            "No reconciler report for this run — showing every service "
+            "ungrouped. (Expected under --check, a tags-filtered deploy, or a "
+            "server still on an older framework.)"
+        )
+
     render_results(
         results,
         headline="Deploy succeeded, but users may see outages.",
+        touched=touched,
     )
 
 

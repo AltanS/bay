@@ -251,6 +251,41 @@
     msg: "{{ _reconcile_result.stdout | from_json }}"
   when: _reconcile_result is not skipped
 
+# ── Hand the touched-container list to the CLI ────────────────────────────
+# The reconciler is the only thing that knows which containers this deploy
+# actually changed, and until now that knowledge died in the debug message
+# above: `src/bay_cli/runner.py` gives the playbook's stdout straight to the
+# terminal, so the CLI has nothing to parse. The post-deploy summary needs it
+# to say which failures are this deploy's doing.
+#
+# ONE FILE PER HOST, on the control node. Not a merged file, and not an
+# Ansible fact: role-scoped facts do not cross into hostvars[other_host], so
+# each host writes its own and the CLI merges them. The CLI empties this
+# directory before every run, so a file here is always current.
+#
+# `when: ... is not skipped` for the same reason the debug task above has it:
+# in --check mode the command task is skipped, and a skipped command still
+# registers rc 0, so an rc-based guard would pass and this would write "".
+- name: Ensure the control-node report directory exists
+  ansible.builtin.file:
+    path: "{{ playbook_dir }}/.reconcile-report"
+    state: directory
+    mode: "0700"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  when: _reconcile_result is not skipped
+
+- name: Hand the reconciler report to the CLI
+  ansible.builtin.copy:
+    content: "{{ _reconcile_result.stdout }}"
+    dest: "{{ playbook_dir }}/.reconcile-report/{{ inventory_hostname }}.json"
+    mode: "0600"
+  delegate_to: localhost
+  become: false
+  changed_when: false
+  when: _reconcile_result is not skipped
+
 - name: Remove reconcile bundle (contains resolved env)
   ansible.builtin.file:
     path: "{{ stack_dir }}/.reconcile-bundle.json"

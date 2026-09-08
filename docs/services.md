@@ -1253,6 +1253,28 @@ code. Declare `healthcheck_path` to turn it into a real check.
 **Upgrade note.** The first deploy after adopting this recreates each affected
 service once, because the new router changes the container's config hash.
 
+#### The deploy summary says which failures are yours
+
+`bin/bay deploy` probes every service, then splits the result: what this deploy
+changed, and everything else. The headline count and the "users may see
+outages" warning are driven by the first group only. A service this deploy
+never touched cannot answer "did I just break something".
+
+Nothing is hidden. Everything is still probed, and an untouched failure is
+still printed, under its own heading and named as pre-existing or collateral.
+When the untouched group is entirely green it collapses to one line. Probing
+only the changed containers would have been simpler and wrong: a deploy can
+break something it never touched, such as an accessory recreated under an
+unchanged app, and those are the failures most worth catching.
+
+The grouping comes from the reconciler, which writes what it changed to
+`.bay/.reconcile-report/<host>.json` on your machine, one file per host. The
+CLI empties that directory before every deploy, so a report found afterwards
+can only be the current run's. When there is no report the summary says so in
+one line and prints ungrouped, exactly as it did before. That is the normal
+case for `--check`, for a `--tags` deploy, and for a server still on an older
+framework.
+
 #### Cold starts and the readiness window
 
 `bin/bay healthcheck` retries a failing probe inside a **wall-clock budget**,

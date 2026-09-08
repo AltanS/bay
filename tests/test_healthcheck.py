@@ -14,10 +14,14 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import json
 import pytest
 
 from bay_cli.healthcheck import (
     is_gated,
+    purge_reconcile_reports,
+    read_touched_services,
+    render_results,
     DEFINITIVE_BUDGET_S,
     STARTUP_BUDGET_S,
     CheckResult,
@@ -1218,3 +1222,157 @@ class TestGatedTargets:
             with patch("bay_cli.healthcheck.time.sleep"):
                 results = run_healthcheck(services)
         assert results[0].ok is False
+
+
+# ── Attribution: which failures are THIS deploy's ─────────────────────
+
+
+def _report(*entries):
+    """An ExecutionReport payload as the reconciler serialises it."""
+    return json.dumps({
+        "ok": True,
+        "changed": bool(entries),
+        "results": [
+            {"kind": kind, "name": name, "status": "done", "detail": ""}
+            for kind, name in entries
+        ],
+    })
+
+
+class TestAttributionReports:
+    """The touched list comes from files the reconciler leaves on the control
+    node. Absence is the normal case, not an error, so it gets more tests than
+    the happy path."""
+
+    def test_attribution_missing_report_returns_none(self, tmp_path):
+        """None, not an empty set. `--check`, a tags-filtered deploy and an
+        older server all land here, and the caller must fall back to today's
+        ungrouped output rather than claim nothing was touched."""
+        assert read_touched_services(tmp_path) is None
+
+    def test_attribution_missing_directory_is_not_an_error(self, tmp_path):
+        assert read_touched_services(tmp_path / "nope") is None
+
+    def test_attribution_noop_only_deploy_is_an_empty_set(self, tmp_path):
+        """Different from a missing report. The reconciler DID run and found
+        every container already correct."""
+        d = tmp_path / ".reconcile-report"
+        d.mkdir()
+        (d / "host-a.json").write_text(_report(("NoOp", "api"), ("NoOp", "web")))
+        assert read_touched_services(tmp_path) == set()
+
+    def test_attribution_multi_host_reports_are_merged(self, tmp_path):
+        d = tmp_path / ".reconcile-report"
+        d.mkdir()
+        (d / "host-a.json").write_text(_report(("Recreate", "api"), ("NoOp", "web")))
+        (d / "host-b.json").write_text(_report(("CanarySwap", "worker")))
+        assert read_touched_services(tmp_path) == {"api", "worker"}
+
+    def test_attribution_every_mutating_kind_counts_as_touched(self, tmp_path):
+        d = tmp_path / ".reconcile-report"
+        d.mkdir()
+        (d / "h.json").write_text(_report(
+            ("Create", "a"), ("Recreate", "b"), ("CanarySwap", "c"),
+            ("Remove", "d"), ("NoOp", "e"),
+        ))
+        assert read_touched_services(tmp_path) == {"a", "b", "c", "d"}
+
+    def test_attribution_unreadable_file_does_not_fail_the_deploy(self, tmp_path):
+        """The deploy already succeeded. A truncated report is not a reason to
+        blow up in the summary."""
+        d = tmp_path / ".reconcile-report"
+        d.mkdir()
+        (d / "good.json").write_text(_report(("Recreate", "api")))
+        (d / "bad.json").write_text("{not json")
+        assert read_touched_services(tmp_path) == {"api"}
+
+    def test_attribution_all_files_unreadable_falls_back_to_none(self, tmp_path):
+        """The `seen_any` branch. If nothing could be parsed we know nothing,
+        and that must read as "no report" — an empty set would claim the deploy
+        touched nothing, which is a different and false statement."""
+        d = tmp_path / ".reconcile-report"
+        d.mkdir()
+        (d / "a.json").write_text("{not json")
+        (d / "b.json").write_text("")
+        assert read_touched_services(tmp_path) is None
+
+    def test_attribution_stale_report_is_purged_before_the_next_run(self, tmp_path):
+        """The purge is what stops last week's touched list being presented as
+        this deploy's. Without it a tags-filtered run inherits it silently."""
+        d = tmp_path / ".reconcile-report"
+        d.mkdir()
+        (d / "host-a.json").write_text(_report(("Recreate", "api")))
+        assert read_touched_services(tmp_path) == {"api"}
+        purge_reconcile_reports(tmp_path)
+        assert read_touched_services(tmp_path) is None
+
+    def test_attribution_purge_on_a_missing_directory_is_silent(self, tmp_path):
+        purge_reconcile_reports(tmp_path / "nope")  # must not raise
+
+
+class TestAttributionRendering:
+    """The headline is driven by the touched group alone. An operator reading a
+    deploy summary is asking 'did I break something', and a service this deploy
+    never went near cannot answer that."""
+
+    @staticmethod
+    def _results():
+        return [
+            CheckResult(service="api", domain="api.example.com", status=200, ok=True),
+            CheckResult(service="old", domain="old.example.com", status=502, ok=False),
+        ]
+
+    def test_attribution_untouched_failure_is_not_blamed_on_this_deploy(self, capsys):
+        render_results(
+            self._results(),
+            headline="Deploy succeeded, but users may see outages.",
+            touched={"api"},
+        )
+        out = capsys.readouterr().out
+        assert "Pre-existing or collateral" in out
+        assert "Deploy succeeded, but users may see outages." not in out
+
+    def test_attribution_touched_failure_still_gets_the_headline(self, capsys):
+        render_results(
+            self._results(),
+            headline="Deploy succeeded, but users may see outages.",
+            touched={"api", "old"},
+        )
+        out = capsys.readouterr().out
+        assert "Deploy succeeded, but users may see outages." in out
+
+    def test_attribution_untouched_failure_is_still_shown(self, capsys):
+        render_results(self._results(), headline="h", touched={"api"})
+        out = capsys.readouterr().out
+        assert "old.example.com" in out
+
+    def test_attribution_collapse_when_the_other_group_is_all_green(self, capsys):
+        results = [
+            CheckResult(service="api", domain="api.example.com", status=200, ok=True),
+            CheckResult(service="old", domain="old.example.com", status=200, ok=True),
+        ]
+        render_results(results, headline="h", touched={"api"})
+        out = capsys.readouterr().out
+        assert "none failing" in out
+        assert "old.example.com" not in out, "a green untouched group must collapse"
+
+    def test_attribution_noop_deploy_says_so(self, capsys):
+        """An empty touched set is not the same as no report, and the output
+        has to say which one happened."""
+        render_results(self._results(), headline="h", touched=set())
+        out = capsys.readouterr().out
+        assert "changed no containers" in out
+
+    def test_attribution_none_renders_flat_exactly_as_before(self, capsys):
+        render_results(self._results(), headline="h", touched=None)
+        out = capsys.readouterr().out
+        assert "Changed by this deploy" not in out
+        assert "Not part of this deploy" not in out
+        assert "1 service failed. h" in out
+
+    def test_attribution_totals_line_still_covers_every_probe(self, capsys):
+        """Grouping must never narrow the probe set. The totals line is the
+        proof: it counts both groups."""
+        render_results(self._results(), headline="h", touched={"api"})
+        out = capsys.readouterr().out
+        assert "2 checks:" in out
