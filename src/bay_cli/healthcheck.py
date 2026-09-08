@@ -98,6 +98,7 @@ class CheckResult:
     skipped: bool = False
     skip_reason: str | None = None
     probed_url: str | None = None
+    gated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -112,6 +113,7 @@ class CheckResult:
             "elapsed_ms": self.elapsed_ms,
             "skipped": self.skipped,
             "skip_reason": self.skip_reason,
+            "gated": self.gated,
         }
 
 
@@ -175,6 +177,32 @@ def should_skip_vpn_only(service: dict[str, Any], include_vpn: bool) -> tuple[bo
     if _path_covered_by_public_routes(probe_path, public_routes):
         return False, None
     return True, "VPN-only (healthcheck_path not in public_routes)"
+
+
+_GATED_REASON = "gated -- basicauth, no healthcheck_path to verify"
+
+
+def is_gated(service: dict[str, Any]) -> tuple[bool, str | None]:
+    """Return (gated?, reason) for a service we cannot verify past its door.
+
+    Traefik's basicauth answers before the request reaches the backend, so an
+    unauthenticated probe of a password-protected service tells us only that
+    Traefik is up. It cannot distinguish a healthy app from a dead one.
+
+    When the service declares `healthcheck_path`, the framework carves that
+    one path out of the basicauth chain (`bay_traefik_labels`), so the
+    probe reaches the real backend and this returns False — a normal check,
+    and a 401 there is a genuine failure meaning the labels did not apply.
+
+    Without `healthcheck_path` there is nothing to carve out and nothing to
+    learn. That is reported as `gated`: never a pass, never a failure, and
+    never silent. The fix is to declare the path, and the reason says so."""
+    mw = service.get("middleware") or {}
+    if "basic_auth" not in mw:
+        return False, None
+    if service.get("healthcheck_path"):
+        return False, None
+    return True, _GATED_REASON
 
 
 # requests folds DNS failure into ConnectionError, so the only way to tell
@@ -397,6 +425,13 @@ def _collect_targets(
             continue
         path = svc.get("healthcheck_path") or "/"
         skip, reason = should_skip_vpn_only(svc, include_vpn)
+        # A gated service is not probed at all. We already know the answer is
+        # 401 and that it means nothing, so spending the retry budget to
+        # rediscover that on every deploy would be pure cost.
+        if not skip:
+            gated, gated_reason = is_gated(svc)
+            if gated:
+                skip, reason = True, gated_reason
         regions = svc.get("regions")
         for domain in domains:
             for candidate in expand_domain(domain, regions, rvars):
@@ -488,6 +523,7 @@ def run_healthcheck(
                     ok=True,
                     skipped=True,
                     skip_reason=reason,
+                    gated=(reason == _GATED_REASON),
                 )
             )
         else:
@@ -495,9 +531,87 @@ def run_healthcheck(
     return out
 
 
+_LABEL_MIN_WIDTH = 40
+
+
+def render_results(results: list[CheckResult], *, headline: str) -> None:
+    """Print the probe table, the totals line and the failure block.
+
+    ONE renderer, deliberately. `bin/bay healthcheck` and the post-deploy
+    summary used to keep separate copies of this loop, and they had already
+    drifted apart on glyphs and on the wording of the headline — so the same
+    fleet could be described two different ways depending on which command
+    the operator happened to run. `headline` is the only intended difference.
+
+    Every number printed here carries its unit, because the totals line is
+    domain-grained and the headline is service-grained. A bare number next to
+    another bare number of a different kind is how an operator misreads a
+    summary at 2am."""
+    from bay_cli import console
+
+    summary = summarize(results)
+    labels = [display_label(r) for r in results]
+    width = max([_LABEL_MIN_WIDTH, *(len(s) for s in labels)]) if labels else _LABEL_MIN_WIDTH
+
+    for r, label in zip(results, labels):
+        padded = f"{label:<{width}s}"
+        if r.gated:
+            # Not a pass. Traefik answered; the app was never reached.
+            console.warning(f"  {padded} {'--':14s} [gated] {r.skip_reason}")
+        elif r.skipped:
+            console.info(f"  {padded} (skipped -- {r.skip_reason})")
+        elif r.ok:
+            status = f"{r.status} OK" if r.status is not None else "OK"
+            console.success(f"  {padded} {status:14s} [pass]{readiness_note(r)}")
+        else:
+            tag = (r.error.split(":")[0] if r.error else str(r.status))[:24]
+            console.error(f"  {padded} {tag:14s} [FAIL]")
+
+    console.console.print()
+    console.console.print(
+        f"  {summary['total']} checks: {summary['passed']} passed, "
+        f"{summary['failed']} failed, {summary['gated']} gated, "
+        f"{summary['skipped']} skipped"
+    )
+
+    if not summary["failed"]:
+        return
+
+    console.console.print()
+    n = summary["failed_services"]
+    console.warning(f"{n} service{'' if n == 1 else 's'} failed. {headline}")
+    for r in results:
+        if r.ok or r.skipped:
+            continue
+        what = f"HTTP {r.status}" if r.status is not None else (r.error or "unknown error")
+        console.console.print(f"  [red]x[/red] {display_label(r)}  {what}")
+        console.console.print(
+            f"    -> Run: [cyan]ssh debugbot@<host> \"docker logs {r.service} --tail 50\"[/cyan]"
+        )
+
+
 def summarize(results: list[CheckResult]) -> dict[str, int]:
+    """Counts for the operator-facing summary.
+
+    `total`, `passed`, `failed`, `skipped` and `gated` are DOMAIN-grained —
+    one service with two domains contributes two. They partition the results:
+    passed + failed + skipped + gated == total.
+
+    `failed_services` is the only SERVICE-grained figure, and it exists because
+    the headline sentence says "service(s)". Counting probe targets there
+    reported one two-domain service as two failures. `failed` keeps
+    its per-target meaning because it is part of the `--json` payload."""
     total = len(results)
-    skipped = sum(1 for r in results if r.skipped)
+    gated = sum(1 for r in results if r.gated)
+    skipped = sum(1 for r in results if r.skipped and not r.gated)
     passed = sum(1 for r in results if r.ok and not r.skipped)
     failed = sum(1 for r in results if not r.ok)
-    return {"total": total, "passed": passed, "failed": failed, "skipped": skipped}
+    failed_services = len({r.service for r in results if not r.ok})
+    return {
+        "total": total,
+        "passed": passed,
+        "failed": failed,
+        "skipped": skipped,
+        "gated": gated,
+        "failed_services": failed_services,
+    }

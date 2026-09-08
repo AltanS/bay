@@ -618,3 +618,134 @@ class TestBuildDedupMap:
         assert dedup["api"]["primary"] is True
         assert dedup["worker"]["primary"] is True
         assert dedup["api"]["group_size"] == 1
+
+
+# ── The health-probe carve-out ────────────────────────────────────────
+
+
+_GATED = {
+    "access": "public",
+    "domains": ["stage.example.com", "stage-alt.example.com"],
+    "healthcheck_path": "/healthcheck",
+    "vpn_routes": ["/super"],
+    "ports": {"internal": 3000},
+    "middleware": {"basic_auth": {"users": ["user:hash"], "realm": "Staging"}},
+}
+
+
+class TestHealthRouter:
+    """Traefik's basicauth answers before the backend, so an unauthenticated
+    probe of a gated service says nothing about the app. The declared health
+    path gets its own router with basicauth stripped, and nothing else moves."""
+
+    def test_health_router_emitted_for_basic_auth_plus_healthcheck_path(self):
+        labels = bay_traefik_labels(_GATED, "translate", _BASE_CONFIG)
+        assert "traefik.http.routers.translate-health.rule" in labels
+
+    def test_health_router_chain_excludes_basicauth(self):
+        labels = bay_traefik_labels(_GATED, "translate", _BASE_CONFIG)
+        chain = labels["traefik.http.routers.translate-health.middlewares"]
+        assert "translate-basicauth" not in chain
+        # but the ordinary router still has it
+        assert "translate-basicauth" in labels["traefik.http.routers.translate.middlewares"]
+
+    def test_health_router_keeps_the_rest_of_the_chain(self):
+        """Removing the door must not remove the walls: headers, compress and
+        any rate limiting still apply to the health route."""
+        labels = bay_traefik_labels(_GATED, "translate", _BASE_CONFIG)
+        chain = labels["traefik.http.routers.translate-health.middlewares"]
+        assert "public-chain" in chain
+
+    def test_health_router_uses_exact_path_not_prefix(self):
+        """PathPrefix(`/healthcheck`) would also open /healthcheck-admin."""
+        rule = bay_traefik_labels(_GATED, "translate", _BASE_CONFIG)[
+            "traefik.http.routers.translate-health.rule"
+        ]
+        assert "Path(`/healthcheck`)" in rule
+        assert "PathPrefix" not in rule
+
+    def test_health_router_outranks_both_existing_routers(self):
+        labels = bay_traefik_labels(_GATED, "translate", _BASE_CONFIG)
+        assert int(labels["traefik.http.routers.translate-health.priority"]) > int(
+            labels["traefik.http.routers.translate-vpn.priority"]
+        )
+
+    def test_health_router_parenthesises_multi_domain_host(self):
+        """`&&` binds tighter than `||`, so an unwrapped OR-group would open
+        the whole of the first domain instead of just its health path."""
+        rule = bay_traefik_labels(_GATED, "translate", _BASE_CONFIG)[
+            "traefik.http.routers.translate-health.rule"
+        ]
+        assert rule.startswith("(Host(")
+        assert ") && Path(" in rule
+
+    def test_no_health_router_without_basic_auth(self):
+        svc = {k: v for k, v in _GATED.items() if k != "middleware"}
+        labels = bay_traefik_labels(svc, "translate", _BASE_CONFIG)
+        assert not [k for k in labels if "-health." in k]
+
+    def test_no_health_router_without_healthcheck_path(self):
+        """Nothing to carve out. The CLI reports this service `gated`."""
+        svc = {k: v for k, v in _GATED.items() if k != "healthcheck_path"}
+        labels = bay_traefik_labels(svc, "translate", _BASE_CONFIG)
+        assert not [k for k in labels if "-health." in k]
+
+    def test_health_router_points_at_the_right_backend_for_a_vpn_service(self):
+        """A VPN service with no public_routes names its backend `<name>-vpn`;
+        pointing the health router at `<name>` would 404."""
+        svc = {
+            "access": "vpn",
+            "domains": ["dash.example.com"],
+            "healthcheck_path": "/hz",
+            "ports": {"internal": 80},
+            "middleware": {"basic_auth": {"users": ["u:h"]}},
+        }
+        labels = bay_traefik_labels(svc, "dash", _BASE_CONFIG)
+        ref = labels["traefik.http.routers.dash-health.service"]
+        assert f"traefik.http.services.{ref}.loadbalancer.server.port" in labels
+
+
+class TestFilterCopyParity:
+    """`filter_plugins/` and `roles/container_lifecycle/filter_plugins/` are
+    two separate files that both define `bay_traefik_labels`, and Ansible
+    loads both. They have drifted before, and a fix had to land in both. This
+    pins them to identical OUTPUT rather than identical source, since the
+    top-level copy is refactored into helpers."""
+
+    def test_both_copies_render_identical_labels(self):
+        import importlib.util
+
+        root = Path(__file__).parent.parent
+
+        def _load(rel, name):
+            spec = importlib.util.spec_from_file_location(name, root / rel)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mod
+            spec.loader.exec_module(mod)
+            return mod
+
+        top = _load("filter_plugins/bay_filters.py", "_parity_top")
+        role = _load(
+            "roles/container_lifecycle/filter_plugins/bay_filters.py", "_parity_role"
+        )
+
+        cases = [
+            _GATED,
+            {"access": "public", "domains": ["a.com"], "ports": {"internal": 80}},
+            {
+                "access": "vpn",
+                "domains": ["a.com", "b.com"],
+                "public_routes": ["/hook"],
+                "ports": {"internal": 80},
+            },
+            {
+                "access": "vpn",
+                "domains": ["a.com"],
+                "healthcheck_path": "/hz",
+                "middleware": {"basic_auth": {"users": ["u:h"]}},
+            },
+        ]
+        for i, svc in enumerate(cases):
+            assert top.bay_traefik_labels(svc, "svc", _BASE_CONFIG) == role.bay_traefik_labels(
+                svc, "svc", _BASE_CONFIG
+            ), f"filter copies disagree on case {i}"

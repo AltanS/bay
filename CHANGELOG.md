@@ -7,6 +7,62 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.5.0] — 2026-09-08
+
+### Fixed
+
+- **A password-protected service is no longer reported as an outage.**
+  Traefik's basic-auth middleware answers before the request reaches the
+  container, so an unauthenticated probe of a gated service returned 401
+  whether the app was healthy or dead. `bin/bay deploy` reported those as
+  failures on every single run, and `bin/bay healthcheck` exited non-zero for
+  them.
+
+  A service declaring both `middleware.basic_auth` and `healthcheck_path` now
+  gets a dedicated Traefik router for that one exact path with basic auth
+  removed from its chain, so the probe reaches the real backend. A healthy
+  service answers 200; a dead one answers 502/503 and still reads FAIL. The
+  carve-out is an exact `Path()` match, never a prefix, and every other
+  middleware still applies to it.
+
+  This deliberately does **not** treat 401 as a pass. That would have converted
+  a false failure into a false success and defeated `healthcheck_path`, which
+  exists to catch an inner process dying behind a live supervisor.
+
+- **A gated service with no `healthcheck_path` now reports `[gated]`** rather
+  than failing. There is nothing to carve out and the probe cannot see the
+  backend, so it is counted separately: never a pass, never a failure, and it
+  does not affect the `bin/bay healthcheck` exit code. The message names the
+  field to declare.
+
+- **The failure headline counts services, not domains.** A service with two
+  domains reported as "2 service(s) failed". `summarize()` gains
+  `failed_services` for the headline; `failed` keeps its per-target meaning
+  because it is part of the `--json` payload.
+
+### Changed
+
+- **One renderer for both healthcheck outputs.** `bin/bay healthcheck` and the
+  post-deploy summary kept separate copies of the same render loop and had
+  already drifted apart on glyphs and on the wording of the headline. They now
+  share `render_results()`. Every number in the totals line carries its unit.
+
+### Upgrade notes
+
+- **Expect one recreation per affected service on the first deploy after this
+  version.** The new health router changes the container's config hash, so the
+  reconciler recreates (or canary-swaps, where `zero_downtime: true`) each
+  service that declares both `middleware.basic_auth` and `healthcheck_path`.
+  No action needed; it settles after one deploy.
+- **Check that your health route is safe to serve unauthenticated.** It becomes
+  reachable without a password on services that declare both fields. It should
+  return liveness only. If yours leaks build metadata, config or internal
+  hostnames, fix the route before upgrading. See the `basic_auth` section in
+  `docs/services.md`.
+- **`--json` consumers:** `summarize()` gained `gated` and `failed_services`,
+  and each result object gained a `gated` boolean. `failed` is unchanged and
+  still counts probe targets, not services.
+
 ## [0.4.0] — 2026-09-02
 
 ### Changed

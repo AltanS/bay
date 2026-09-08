@@ -489,6 +489,102 @@ def _add_router_labels(labels, name, svc, public_mw, vpn_mw, config=None):
                 entrypoints=vpn_ep,
             )
 
+    # ── Health-probe carve-out ───────────────────────────────────────
+    # Traefik's basicauth answers BEFORE the request reaches the backend, so
+    # an unauthenticated probe of a password-protected service returns 401
+    # whether the app is alive or dead. That defeats `healthcheck_path`, which
+    # docs/services.md makes mandatory for supervisor-pattern services — the
+    # exact shape most likely to die silently behind a live nginx.
+    #
+    # So the declared health path gets its own router with basicauth removed
+    # from its chain, and nothing else changed. The probe then reaches the real
+    # backend: healthy answers 200, dead answers 502/503 and reads FAIL. A 401
+    # here afterwards means these labels did not apply, which is also a real
+    # failure — the CLI keeps treating it as one.
+    #
+    # Only the ONE exact path is carved out (Path, not PathPrefix), and only
+    # when the service declares both basic_auth and healthcheck_path. A service
+    # with basic_auth and no healthcheck_path is reported `gated` by the CLI
+    # instead; there is nothing to open up and no way to verify it.
+    _add_health_router_labels(
+        labels, svc, name, domains,
+        access=access,
+        public_mw=public_mw,
+        vpn_mw=vpn_mw,
+        public_entrypoints=public_ep,
+        vpn_entrypoints=vpn_ep,
+    )
+
+
+def _path_under(path, routes):
+    """True iff `path` falls under any PathPrefix in `routes`.
+
+    Same prefix semantics Traefik uses, and the same boundary rule as the
+    CLI's `_path_covered_by_public_routes`: /foo covers /foo and /foo/bar,
+    but not /food."""
+    for route in routes or []:
+        route = route.rstrip("/") or "/"
+        if path == route:
+            return True
+        prefix = route if route.endswith("/") else route + "/"
+        if path.startswith(prefix):
+            return True
+    return False
+
+
+def _add_health_router_labels(
+    labels, svc, name, domains, *,
+    access, public_mw, vpn_mw, public_entrypoints, vpn_entrypoints,
+):
+    """Add an unauthenticated router for `healthcheck_path`, if warranted.
+
+    No-op unless the service declares BOTH a basic_auth middleware and a
+    healthcheck_path. The new router copies the middleware chain of whichever
+    router the path would otherwise have hit, minus this service's basicauth
+    entry, so every other protection (rate limit, headers, compress, the VPN
+    allow-list on a VPN route) still applies to it."""
+    mw = svc.get("middleware", {})
+    if "basic_auth" not in mw:
+        return
+    path = svc.get("healthcheck_path")
+    if not path:
+        return
+
+    # Which router would this path hit, and therefore which chain and
+    # entrypoints does it inherit?
+    if access == "public":
+        vpn_routes = svc.get("vpn_routes", [])
+        if vpn_routes and _path_under(path, vpn_routes):
+            base_mw, entrypoints = vpn_mw, vpn_entrypoints
+        else:
+            base_mw, entrypoints = public_mw, public_entrypoints
+        # Single-router public services name their backend after the service.
+        service_ref = name
+    else:
+        public_routes = svc.get("public_routes", [])
+        if public_routes and _path_under(path, public_routes):
+            base_mw, entrypoints = public_mw, public_entrypoints
+        else:
+            base_mw, entrypoints = vpn_mw, vpn_entrypoints
+        # A VPN service with no public_routes renders one router suffixed
+        # `-vpn`, and _add_single_router_labels names the backend to match.
+        service_ref = name if svc.get("public_routes") else f"{name}-vpn"
+
+    health_mw = [m for m in base_mw if m != f"{name}-basicauth"]
+
+    router = f"{name}-health"
+    host_expr = _host_rule(domains)
+    sec_host = f"({host_expr})" if len(domains) > 1 else host_expr
+    # Exact Path, never PathPrefix: /healthcheck must not open /healthcheck-admin.
+    labels[f"traefik.http.routers.{router}.rule"] = f"{sec_host} && Path(`{_rule_literal(path)}`)"
+    labels[f"traefik.http.routers.{router}.service"] = service_ref
+    # Above both the catch-all (10) and the public/vpn split (20), so the
+    # carve-out wins for this one path and nothing else moves.
+    labels[f"traefik.http.routers.{router}.priority"] = "30"
+    labels[f"traefik.http.routers.{router}.entrypoints"] = entrypoints
+    labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
+    labels[f"traefik.http.routers.{router}.middlewares"] = ",".join(health_mw)
+
 
 def _rule_literal(value):
     """Validate a value that is about to sit inside a Traefik backquoted string.

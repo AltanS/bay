@@ -1204,6 +1204,48 @@ services:
 
 **Incident** — 2026-04-22: a demo deploy audit reported "all services healthy" while two storefront locale Node backends had silently died inside their nginx supervisors. Probing `/healthcheck` (proxied to Node on :3001) would have surfaced the failure as a 502; probing `/` returned 200 from nginx. This triggered the addition of the `healthcheck_path:` schema field, probe wiring, output formatting, and migration of every nginx+Node service in demo.
 
+#### Services behind `basic_auth` (framework v0.5.0+)
+
+Traefik's basic-auth middleware answers **before** the request reaches your
+container. An unauthenticated probe of a password-protected service therefore
+returns 401 whether the app is healthy or completely dead, and the probe never
+sends credentials — it is checking that the service answers, not that a
+password works.
+
+So when a service declares **both** `middleware.basic_auth` and
+`healthcheck_path`, the framework gives that one exact path its own Traefik
+router with the basic-auth middleware removed from its chain:
+
+```yaml
+services:
+  myapp-stage:
+    access: public
+    domains:
+      - 'stage.myapp.example.com'
+    healthcheck_path: /healthcheck   # reachable without a password
+    middleware:
+      basic_auth:
+        users:
+          - '{{ secrets.MYAPP_STAGE_BASIC_AUTH }}'
+```
+
+Everything else stays gated. The carve-out is an exact `Path()` match, never a
+prefix, so `/healthcheck` does not also open `/healthcheck-admin`. Every other
+middleware in the chain (security headers, compression, rate limits, a VPN
+allow-list on a VPN route) still applies to it.
+
+**The health route must be safe to serve unauthenticated.** It should return
+liveness only. If yours leaks build metadata, config, or internal hostnames,
+fix the route rather than relying on the password.
+
+**A `basic_auth` service with no `healthcheck_path` reports `[gated]`.** Not a
+pass and not a failure: there is nothing to carve out, so the probe can say
+nothing about the backend. It does not affect the `bin/bay healthcheck` exit
+code. Declare `healthcheck_path` to turn it into a real check.
+
+**Upgrade note.** The first deploy after adopting this recreates each affected
+service once, because the new router changes the container's config hash.
+
 #### Cold starts and the readiness window
 
 `bin/bay healthcheck` retries a failing probe inside a **wall-clock budget**,

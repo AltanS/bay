@@ -577,12 +577,7 @@ def _run_post_deploy_healthcheck(env: str, root: Path) -> None:
     an otherwise-good rollout. Failures are reported loudly with a
     `docker logs` hint so the operator sees them."""
     from bay_cli.config import StackConfig
-    from bay_cli.healthcheck import (
-        display_label,
-        readiness_note,
-        run_healthcheck,
-        summarize,
-    )
+    from bay_cli.healthcheck import render_results, run_healthcheck
 
     cfg = StackConfig(root)
     services = cfg.get_services()
@@ -599,43 +594,10 @@ def _run_post_deploy_healthcheck(env: str, root: Path) -> None:
         console.info("No public services with domains — nothing to probe.")
         return
 
-    # Pad the label column to the widest label in this run (min 40) so the
-    # status badges stay aligned even when one service has a long probed URL.
-    labels = [display_label(r) for r in results]
-    width = max([40, *(len(s) for s in labels)])
-
-    for r, label in zip(results, labels):
-        padded = f"{label:<{width}s}"
-        if r.skipped:
-            console.info(f"  {padded} (skipped -- {r.skip_reason})")
-        elif r.ok:
-            status = f"{r.status} OK" if r.status is not None else "OK"
-            console.success(f"  {padded} {status:14s} [pass]{readiness_note(r)}")
-        else:
-            tag = (r.error or str(r.status) or "FAIL")[:24]
-            console.error(f"  {padded} {tag:14s} [FAIL]")
-
-    summary = summarize(results)
-    console.console.print()
-    console.console.print(
-        f"  {summary['passed']} passed, {summary['failed']} failed, "
-        f"{summary['skipped']} skipped ({summary['total']} checks)"
+    render_results(
+        results,
+        headline="Deploy succeeded, but users may see outages.",
     )
-
-    if summary["failed"]:
-        console.console.print()
-        console.warning(
-            f"{summary['failed']} service(s) failed post-deploy healthcheck. "
-            "Deploy succeeded, but users may see outages."
-        )
-        for r in results:
-            if r.ok or r.skipped:
-                continue
-            what = f"HTTP {r.status}" if r.status is not None else (r.error or "unknown")
-            console.console.print(f"  [red]x[/red] {display_label(r)}  {what}")
-            console.console.print(
-                f"    -> Run: [cyan]ssh debugbot@<host> \"docker logs {r.service} --tail 50\"[/cyan]"
-            )
 
 
 def _region_extra_args(

@@ -154,6 +154,32 @@
       - "traefik.http.services.{{ name }}-vpn.loadbalancer.server.port={{ svc.ports.internal }}"
 {% endif %}
 {% endif %}
+{# Health-probe carve-out.                                           #}
+{# NOTE: this template is NOT the deploy path. The reconciler builds these     #}
+{# labels in roles/container_lifecycle/filter_plugins/bay_filters.py           #}
+{# (bay_traefik_labels / _add_health_router_labels), and that file plus the    #}
+{# top-level filter_plugins/bay_filters.py are the two authoritative copies.   #}
+{# This block exists so a reader of the template is not misled; a change made  #}
+{# ONLY here is dead code. tests/test_filter_plugins.py pins the two Python    #}
+{# copies to identical output.                                                 #}
+{#                                                                             #}
+{# Traefik's basicauth answers before the request reaches the backend, so an   #}
+{# unauthenticated probe of a gated service returns 401 whether the app is     #}
+{# alive or dead — defeating healthcheck_path, which docs/services.md makes    #}
+{# mandatory for supervisor-pattern services. The declared health path gets    #}
+{# its own router with basicauth removed and everything else kept. Exact       #}
+{# Path(), never PathPrefix: /healthcheck must not open /healthcheck-admin.    #}
+{% if svc.middleware is defined and svc.middleware.basic_auth is defined and svc.healthcheck_path is defined %}
+{% set _hp = svc.healthcheck_path %}
+{% set _health_mw = (vpn_mw if (svc.access == 'public' and svc.vpn_routes is defined and svc.vpn_routes | select('in', [_hp]) | list | length > 0) else public_mw) if svc.access == 'public' else vpn_mw %}
+      # Health probe: same chain, minus this service's basicauth
+      - "traefik.http.routers.{{ name }}-health.rule={{ _sec_host }} && Path(`{{ _hp }}`)"
+      - "traefik.http.routers.{{ name }}-health.service={{ name if svc.access == 'public' or svc.public_routes is defined else name ~ '-vpn' }}"
+      - "traefik.http.routers.{{ name }}-health.priority=30"
+      - "traefik.http.routers.{{ name }}-health.entrypoints={{ public_entrypoints | default('websecure') if svc.access == 'public' else vpn_entrypoints | default('websecure') }}"
+      - "traefik.http.routers.{{ name }}-health.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.{{ name }}-health.middlewares={{ _health_mw | reject('equalto', name ~ '-basicauth') | join(',') }}"
+{% endif %}
 {% if watchtower_enabled | default(false) %}
 {# Watchtower update labels: monitor (default), auto, or false #}
 {% set _update = svc['update'] | default('monitor') %}

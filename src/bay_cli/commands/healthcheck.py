@@ -18,16 +18,10 @@ from bay_cli import console, paths
 from bay_cli.config import StackConfig
 from bay_cli.healthcheck import (
     CheckResult,
-    display_label,
-    readiness_note,
+    render_results,
     run_healthcheck,
     summarize,
 )
-
-
-# Minimum width for the URL/domain column. Keeps short-domain runs aligned
-# with the historical layout so operators don't see column jitter.
-_LABEL_MIN_WIDTH = 40
 
 
 def _emit_json(env: str, results: list[CheckResult]) -> None:
@@ -45,52 +39,10 @@ def _emit_rich(env: str, consumer: str, results: list[CheckResult]) -> None:
     summary = summarize(results)
     header = f"Post-deploy healthcheck ({consumer} [{env}] — {summary['total']} checks)"
     console.header(header)
-
-    # Pad the label column to the widest label in this run (min 40) so the
-    # status badges stay aligned even when one service has a long probed URL.
-    labels = [display_label(r) for r in results]
-    width = max([_LABEL_MIN_WIDTH, *(len(s) for s in labels)])
-
-    for r, label in zip(results, labels):
-        padded = f"{label:<{width}s}"
-        if r.skipped:
-            console.info(f"  {padded} (skipped — {r.skip_reason})")
-            continue
-        if r.ok:
-            status = f"{r.status} OK" if r.status is not None else "OK"
-            console.success(f"  {padded} {status:14s} [pass]{readiness_note(r)}")
-        else:
-            if r.error:
-                tag = r.error.split(":")[0][:24]
-                console.error(f"  {padded} {tag:14s} [FAIL]")
-            else:
-                console.error(f"  {padded} {str(r.status):14s} [FAIL]")
-
-    console.console.print()
-    console.console.print(
-        f"  {summary['passed']} passed, {summary['failed']} failed, "
-        f"{summary['skipped']} skipped ({summary['total']} checks)"
+    render_results(
+        results,
+        headline="Not all services are healthy.",
     )
-    console.console.print()
-
-    if summary["failed"]:
-        console.error(
-            f"{summary['failed']} service(s) failed healthcheck. "
-            "Deploy completed but not all services are healthy."
-        )
-        console.console.print()
-        for r in results:
-            if r.ok or r.skipped:
-                continue
-            what = f"HTTP {r.status}" if r.status is not None else (r.error or "unknown error")
-            # Show the exact URL probed — operators investigating a failure
-            # need to know which path was checked, not just the bare domain.
-            console.console.print(f"  [red]✗[/red] {display_label(r)}  {what}")
-            # Best-effort actionable hint. Service name is the map key;
-            # operators grep logs for it.
-            console.console.print(
-                f"    → Run: [cyan]ssh debugbot@<host> \"docker logs {r.service} --tail 50\"[/cyan]"
-            )
 
 
 def healthcheck(

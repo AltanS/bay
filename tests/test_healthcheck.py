@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 from bay_cli.healthcheck import (
+    is_gated,
     DEFINITIVE_BUDGET_S,
     STARTUP_BUDGET_S,
     CheckResult,
@@ -182,7 +183,7 @@ class TestCollectTargets:
 class TestCheckResultDict:
     def test_dict_matches_spec_schema(self):
         """Spec JSON schema: service, domain, status, ok, redirect_chain,
-        error, attempts, elapsed_ms, skipped, skip_reason."""
+        error, attempts, elapsed_ms, skipped, skip_reason, gated."""
         r = CheckResult(
             service="svc",
             domain="example.com",
@@ -196,7 +197,7 @@ class TestCheckResultDict:
         assert set(d.keys()) == {
             "service", "domain", "status", "ok", "redirect_chain",
             "error", "attempts", "elapsed_ms", "skipped", "skip_reason",
-            "probed_url",
+            "probed_url", "gated",
         }
         assert d["ok"] is True
         assert d["status"] == 200
@@ -274,10 +275,56 @@ class TestSummarize:
             CheckResult(service="c", domain="z.com", status=None, ok=True, skipped=True),
         ]
         s = summarize(results)
-        assert s == {"total": 3, "passed": 1, "failed": 1, "skipped": 1}
+        assert s == {
+            "total": 3, "passed": 1, "failed": 1, "skipped": 1,
+            "gated": 0, "failed_services": 1,
+        }
 
     def test_empty(self):
-        assert summarize([]) == {"total": 0, "passed": 0, "failed": 0, "skipped": 0}
+        assert summarize([]) == {
+            "total": 0, "passed": 0, "failed": 0, "skipped": 0,
+            "gated": 0, "failed_services": 0,
+        }
+
+    def test_buckets_partition_the_results(self):
+        """passed + failed + skipped + gated == total, always. The four
+        buckets are the only thing keeping the totals line honest."""
+        results = [
+            CheckResult(service="a", domain="a.example.com", status=200, ok=True),
+            CheckResult(service="b", domain="b.example.com", status=502, ok=False),
+            CheckResult(service="c", domain="c.example.com", status=None, ok=True, skipped=True),
+            CheckResult(
+                service="d", domain="d.example.com", status=None, ok=True,
+                skipped=True, gated=True,
+            ),
+        ]
+        s = summarize(results)
+        assert s["passed"] + s["failed"] + s["skipped"] + s["gated"] == s["total"]
+        assert s["gated"] == 1
+        assert s["skipped"] == 1
+
+    def test_failed_services_counts_services_not_domains(self):
+        """One service with two failing domains is ONE failed service. The
+        headline says "service(s)"; counting probe targets there reported the
+        2026-09-08 incident as two failures when it was one service."""
+        results = [
+            CheckResult(service="translate", domain="a.example.com", status=401, ok=False),
+            CheckResult(service="translate", domain="b.example.com", status=401, ok=False),
+        ]
+        s = summarize(results)
+        assert s["failed"] == 2, "per-target count stays per-target (--json contract)"
+        assert s["failed_services"] == 1
+
+    def test_gated_is_never_counted_as_passed(self):
+        results = [
+            CheckResult(
+                service="g", domain="g.example.com", status=None, ok=True,
+                skipped=True, gated=True,
+            ),
+        ]
+        s = summarize(results)
+        assert s["passed"] == 0
+        assert s["gated"] == 1
 
 
 # ── CLI exit-code / nonzero tests ─────────────────────────────────────
@@ -1054,3 +1101,120 @@ class TestReadinessNoteRendering:
             cli_result = typer.testing.CliRunner().invoke(app, ["healthcheck", "testing"])
         assert cli_result.exit_code == 0
         assert "7 attempts" in cli_result.stdout
+
+
+# ── Basic-auth gating and the health-route carve-out ──────────────────
+
+
+class TestIsGated:
+    """A password-protected service can only be verified if the framework
+    carved its health route out of the basicauth chain. Without a declared
+    healthcheck_path there is nothing to carve and nothing to learn."""
+
+    def test_basic_auth_without_healthcheck_path_is_gated(self):
+        svc = {"middleware": {"basic_auth": {"users": ["u:h"]}}}
+        gated, reason = is_gated(svc)
+        assert gated is True
+        assert "healthcheck_path" in reason
+
+    def test_basic_auth_with_healthcheck_path_is_not_gated(self):
+        """The carve-out router makes this path reachable, so it gets a real
+        probe — and a 401 there becomes a genuine failure."""
+        svc = {
+            "middleware": {"basic_auth": {"users": ["u:h"]}},
+            "healthcheck_path": "/healthcheck",
+        }
+        assert is_gated(svc) == (False, None)
+
+    def test_no_middleware_is_not_gated(self):
+        assert is_gated({"access": "public"}) == (False, None)
+
+    def test_other_middleware_is_not_gated(self):
+        """Only basicauth answers ahead of the backend. A rate limiter or an
+        open circuit breaker returning non-2xx is a real failure and must not
+        be laundered into a gated pass."""
+        svc = {"middleware": {"rate_limit": {"average": 10}, "retry": {"attempts": 2}}}
+        assert is_gated(svc) == (False, None)
+
+
+class TestGatedTargets:
+    def test_gated_service_is_not_probed(self):
+        """We already know the answer is 401 and that it means nothing, so
+        spending the retry budget to rediscover it every deploy is pure cost."""
+        services = {
+            "locked": {
+                "access": "public",
+                "domains": ["locked.example.com"],
+                "middleware": {"basic_auth": {"users": ["u:h"]}},
+            }
+        }
+        with patch("bay_cli.healthcheck.check_domain") as probe:
+            results = run_healthcheck(services)
+        probe.assert_not_called()
+        assert len(results) == 1
+        assert results[0].gated is True
+        assert results[0].ok is True, "gated must not read as a failure"
+
+    def test_gated_service_does_not_fail_the_summary(self):
+        services = {
+            "locked": {
+                "access": "public",
+                "domains": ["locked.example.com"],
+                "middleware": {"basic_auth": {"users": ["u:h"]}},
+            }
+        }
+        s = summarize(run_healthcheck(services))
+        assert s["failed"] == 0
+        assert s["failed_services"] == 0
+        assert s["gated"] == 1
+        assert s["passed"] == 0
+
+    def test_carved_out_service_is_probed_and_401_still_fails(self):
+        """THE negative case. After the carve-out, a 401 on the probed path
+        means the labels did not apply. That is a real failure and must stay
+        red — this fix must never turn a broken service green."""
+        services = {
+            "translate": {
+                "access": "public",
+                "domains": ["stage.example.com"],
+                "healthcheck_path": "/healthcheck",
+                "middleware": {"basic_auth": {"users": ["u:h"]}},
+            }
+        }
+        with patch("bay_cli.healthcheck._check_once", return_value=(401, [], None)):
+            results = run_healthcheck(services)
+        assert len(results) == 1
+        assert results[0].gated is False
+        assert results[0].ok is False, "401 on a carved-out path is a real failure"
+        assert summarize(results)["failed"] == 1
+
+    def test_carved_out_service_passes_when_backend_answers(self):
+        services = {
+            "translate": {
+                "access": "public",
+                "domains": ["stage.example.com"],
+                "healthcheck_path": "/healthcheck",
+                "middleware": {"basic_auth": {"users": ["u:h"]}},
+            }
+        }
+        with patch("bay_cli.healthcheck._check_once", return_value=(200, [], None)):
+            results = run_healthcheck(services)
+        assert results[0].ok is True
+        assert results[0].gated is False
+        assert results[0].probed_url.endswith("/healthcheck")
+
+    def test_dead_backend_behind_carve_out_still_fails(self):
+        """The whole point of the carve-out: a crashed container answers 502
+        through the open route instead of 401 from the middleware."""
+        services = {
+            "translate": {
+                "access": "public",
+                "domains": ["stage.example.com"],
+                "healthcheck_path": "/healthcheck",
+                "middleware": {"basic_auth": {"users": ["u:h"]}},
+            }
+        }
+        with patch("bay_cli.healthcheck._check_once", return_value=(502, [], None)):
+            with patch("bay_cli.healthcheck.time.sleep"):
+                results = run_healthcheck(services)
+        assert results[0].ok is False
