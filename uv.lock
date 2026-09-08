@@ -131,7 +131,7 @@ wheels = [
 
 [[package]]
 name = "bay"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "." }
 dependencies = [
     { name = "ansible-core" },
