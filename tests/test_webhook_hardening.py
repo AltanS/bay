@@ -215,6 +215,49 @@ def test_missing_delivery_header_is_never_a_duplicate(receiver):
         (trigger_dir / "alpha.trigger").unlink()
 
 
+def test_one_guid_on_two_services_builds_both(receiver):
+    """GitHub sends ONE delivery GUID to every hook configured on a repo.
+
+    Two services fed by the same repo therefore see the same GUID on two
+    different paths. Keyed by the GUID alone the second path was answered
+    "duplicate" and never built, so a push landed nowhere.
+    """
+    addr, trigger_dir = receiver
+    body = _push_payload()
+    guid = "be65cc30-ac44-11f1-966a-20edab20e2f9"
+
+    for service in ("alpha", "beta"):
+        status, payload = _post(
+            addr, f"/webhook/{service}", body,
+            headers={"X-GitHub-Delivery": guid},
+        )
+        assert status == 200
+        assert json.loads(payload)["status"] == "triggered", service
+        assert (trigger_dir / f"{service}.trigger").exists()
+
+
+def test_one_guid_twice_on_one_service_is_still_a_duplicate(receiver):
+    """The control for the test above: per-service must not mean per-request."""
+    addr, trigger_dir = receiver
+    body = _push_payload()
+    guid = "be65cc30-ac44-11f1-966a-20edab20e2f9"
+
+    status, payload = _post(
+        addr, "/webhook/alpha", body,
+        headers={"X-GitHub-Delivery": guid},
+    )
+    assert json.loads(payload)["status"] == "triggered"
+    (trigger_dir / "alpha.trigger").unlink()
+
+    status, payload = _post(
+        addr, "/webhook/alpha", body,
+        headers={"X-GitHub-Delivery": guid},
+    )
+    assert status == 200
+    assert json.loads(payload)["status"] == "duplicate"
+    assert not (trigger_dir / "alpha.trigger").exists()
+
+
 def test_a_bad_signature_cannot_poison_the_cache(receiver):
     """The dedupe check runs AFTER the HMAC check, not before."""
     addr, trigger_dir = receiver
@@ -301,5 +344,5 @@ def test_only_one_body_read_in_the_module():
 
 def test_both_handlers_call_the_shared_preamble():
     source = (_WEBHOOK_DIR / "app.py").read_text()
-    assert source.count("self._read_verified_body()") == 2
+    assert source.count("self._read_verified_body(") == 2
     assert source.count("hmac.compare_digest") == 1

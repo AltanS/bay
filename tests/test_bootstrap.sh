@@ -82,7 +82,14 @@ fi
 section "Setup (scaffold)"
 
 cd "$PROJECT_DIR"
-if bin/bay setup --no-interactive 2>&1; then
+# The non-interactive wizard refuses to scaffold without an admin SSH key, and
+# it is right to: provisioning turns off root login and password auth. The test
+# therefore brings its own throwaway key instead of borrowing whoever is logged
+# in. A CI runner has no ~/.ssh at all, which is what turned this job red, and a
+# developer machine would otherwise scaffold with a real personal key.
+TEST_SSH_KEY="$TMPDIR/id_ed25519"
+ssh-keygen -t ed25519 -N "" -C "bay-bootstrap-test" -f "$TEST_SSH_KEY" -q
+if bin/bay setup --no-interactive --ssh-key-file "$TEST_SSH_KEY.pub" 2>&1; then
   pass "bin/bay setup --no-interactive completed successfully"
 else
   fail "bin/bay setup --no-interactive failed"

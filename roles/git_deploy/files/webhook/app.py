@@ -78,19 +78,25 @@ _delivery_seen: "OrderedDict[str, None]" = OrderedDict()
 _delivery_lock = threading.Lock()
 
 
-def _delivery_is_duplicate(delivery_id: str) -> bool:
-    """True when this X-GitHub-Delivery was already accepted (LRU, bounded).
+def _delivery_is_duplicate(delivery_id: str, service: str = "") -> bool:
+    """True when this X-GitHub-Delivery was already accepted for this service.
 
     An empty/absent ID is never a duplicate: peers and hand-rolled callers do
     not always set the header, and refusing them would break fan-out.
+
+    The key carries the service path, not the GUID alone. GitHub sends ONE
+    GUID to every hook configured on a repo, so two services fed by the same
+    repo receive the same GUID on two different paths. Keyed by GUID alone,
+    the second path was dropped as a replay and never built.
     """
     if not delivery_id:
         return False
+    key = f"{delivery_id}:{service}"
     with _delivery_lock:
-        if delivery_id in _delivery_seen:
-            _delivery_seen.move_to_end(delivery_id)
+        if key in _delivery_seen:
+            _delivery_seen.move_to_end(key)
             return True
-        _delivery_seen[delivery_id] = None
+        _delivery_seen[key] = None
         while len(_delivery_seen) > DELIVERY_CACHE_SIZE:
             _delivery_seen.popitem(last=False)
         return False
@@ -381,7 +387,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         svc_config = SERVICE_CONFIG[service]
         expected_branch = svc_config.get("branch", "main")
 
-        verified = self._read_verified_body()
+        verified = self._read_verified_body(service)
         if verified is None:
             return
         body, signature_header = verified
@@ -618,7 +624,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         """
         corr_id = str(uuid.uuid4())
 
-        verified = self._read_verified_body()
+        verified = self._read_verified_body("pull-image")
         if verified is None:
             return
         body, _signature_header = verified
@@ -682,8 +688,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             "corr_id": corr_id,
         })
 
-    def _read_verified_body(self):
+    def _read_verified_body(self, service: str):
         """Bounded read + HMAC check + replay check. The single front door.
+
+        ``service`` is the path segment this delivery arrived on. It joins the
+        delivery GUID in the replay key, so one GUID fanned out by GitHub to
+        two hooks on one repo gets an independent first look per service.
 
         Returns ``(body, signature_header)`` when the request may proceed, or
         ``None`` when a response has already been sent and the caller must
@@ -726,7 +736,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             return None
 
         delivery_id = self.headers.get("X-GitHub-Delivery", "")
-        if _delivery_is_duplicate(delivery_id):
+        if _delivery_is_duplicate(delivery_id, service):
             print(
                 f"[webhook] Duplicate delivery {delivery_id} ignored",
                 flush=True,

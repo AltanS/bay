@@ -7,6 +7,32 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.6.3] - 2026-09-09
+
+### Fixed
+
+- **A push to a repo with two hooks built only one of its services.** GitHub
+  sends the SAME `X-GitHub-Delivery` GUID to every hook configured on one
+  repository. The webhook receiver remembered accepted deliveries by that GUID
+  alone, so the first service path to arrive consumed the GUID and the second
+  path was answered "duplicate" and never built. Where the first service also
+  skipped on its own path filter, the push built nothing at all. The replay key
+  now carries the service path as well as the GUID, so each service gets an
+  independent first look at a delivery. Replay protection per service is
+  unchanged: the same GUID twice on one path is still ignored.
+- **The Tests job on CI was red at the bootstrap stage.** `tests/test_bootstrap.sh`
+  ran `bin/bay setup --no-interactive`, which refuses to scaffold without an
+  admin SSH key. A CI runner has no `~/.ssh`, so the job failed on every push
+  to main. The test now generates a throwaway key in its temp directory and
+  passes it with `--ssh-key-file`, so it is hermetic. It no longer borrows the
+  developer's personal key either.
+
+### Upgrade notes
+
+- The webhook fix is in `roles/git_deploy`. Run a deploy with the `git_deploy`
+  tags to put the new receiver on the host. Until you do, a repo with two hooks
+  keeps losing one of them.
+
 ## [0.6.2] - 2026-09-08
 
 ### Fixed
