@@ -7,7 +7,7 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
-## [Unreleased]
+## [0.6.4] - 2026-09-09
 
 ### Fixed
 
