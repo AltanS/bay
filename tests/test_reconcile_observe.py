@@ -99,3 +99,47 @@ class TestParseState:
         st = parse_state(attrs, managed_label="com.bay.managed")
         assert not st.managed
         assert st.config_hash is None
+
+
+class TestImageDigestParsing:
+    """``Config.Image`` is the reference; the top-level ``Image`` is the id."""
+
+    ID = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+
+    def _attrs(self, **over: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "Name": "/webhook",
+            "Image": self.ID,
+            "Config": {"Image": "bay-webhook:latest", "Labels": {"bay.managed": "true"}},
+            "State": {"Status": "running"},
+        }
+        base.update(over)
+        return base
+
+    def test_reference_and_running_id_are_separate_fields(self) -> None:
+        state = parse_state(self._attrs(), managed_label="bay.managed")
+        assert state.image == "bay-webhook:latest"
+        assert state.image_id == self.ID
+
+    def test_local_id_comes_from_the_caller(self) -> None:
+        state = parse_state(
+            self._attrs(), managed_label="bay.managed", local_image_id="sha256:44"
+        )
+        assert state.local_image_id == "sha256:44"
+        assert state.image_drifted
+
+    def test_local_id_defaults_to_unknown_and_never_drifts(self) -> None:
+        state = parse_state(self._attrs(), managed_label="bay.managed")
+        assert state.local_image_id is None
+        assert not state.image_drifted
+
+    def test_equal_ids_do_not_drift(self) -> None:
+        state = parse_state(
+            self._attrs(), managed_label="bay.managed", local_image_id=self.ID
+        )
+        assert not state.image_drifted
+
+    def test_missing_running_id_is_none_not_empty(self) -> None:
+        state = parse_state(self._attrs(Image=""), managed_label="bay.managed")
+        assert state.image_id is None
+        assert not state.image_drifted

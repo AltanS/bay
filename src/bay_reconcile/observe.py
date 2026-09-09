@@ -83,6 +83,7 @@ def parse_state(
     *,
     managed_label: str,
     hash_label: str = HASH_LABEL,
+    local_image_id: str | None = None,
 ) -> ContainerState:
     """Parse one docker inspect/list attrs dict into a ContainerState.
 
@@ -90,6 +91,13 @@ def parse_state(
     stamped only with the pre-1.0 label keys is still reported as managed and
     still yields its config hash, so the planner NoOps it instead of
     recreating the entire fleet after the rename.
+
+    ``Config.Image`` is the REFERENCE the container was started with (a tag);
+    the top-level ``Image`` is the resolved image ID it actually runs. Only the
+    second one changes when a floating tag is rebuilt, so both are recorded.
+    ``local_image_id`` is what that reference resolves to on the host today. It
+    cannot be read from ``attrs``, so the caller looks it up. None means "not
+    present locally", which the planner reads as no evidence of change.
     """
     config = attrs.get("Config") or {}
     labels = config.get("Labels") or {}
@@ -108,4 +116,6 @@ def parse_state(
         managed=managed_label in labels or LEGACY_MANAGED_LABEL in labels,
         restart_count=int(attrs.get("RestartCount") or 0),
         port_bindings=observed_port_tuples(host_config.get("PortBindings")),
+        image_id=attrs.get("Image") or None,
+        local_image_id=local_image_id or None,
     )

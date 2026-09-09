@@ -7,6 +7,24 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [Unreleased]
+
+### Fixed
+
+- **A rebuilt image under an unchanged tag was reported as a no-op.** The
+  reconciler decided no-op against the config hash alone, and that hash covers
+  the config text. Rebuilding `bay-webhook:latest` on the host left every byte
+  of that text identical, so `deploy_stack` planned a no-op and the container
+  kept running the old layers. The only recovery was `docker rm -f bay-webhook`
+  by hand, which cost about a minute of webhook downtime. The observed state of
+  a container now carries two image ids: the one the running container was
+  created from, and the one its image reference resolves to in the local image
+  store. A mismatch is a reason to redeploy, on the same path a config change
+  takes, so a zero-downtime service still swaps through a canary. This is not a
+  `:latest` special case. A pinned tag whose local id changed after a pull
+  redeploys under the same rule. An image that is not present locally reads as
+  unknown, which is never on its own a reason to redeploy.
+
 ## [0.6.3] - 2026-09-09
 
 ### Fixed

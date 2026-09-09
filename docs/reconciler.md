@@ -37,12 +37,16 @@ Typer/Ansible), so the whole package is shipped to the host and run there:
   (`NoOp`/`Create`/`Recreate`/`CanarySwap`/`Remove`) / `Plan` / `ExecutionReport`.
 - `planner.py` — pure `plan(desired, observed)`: hash match → NoOp; missing →
   Create; drift → CanarySwap (zero-downtime service) else Recreate; port-binding
-  drift forces a standard recreate (canary can't share a host port). Orphan
+  drift forces a standard recreate (canary can't share a host port). A NoOp
+  additionally requires the image id to match. The hash covers config text, so a
+  rebuilt or re-pulled image under an unchanged reference is invisible to it. Orphan
   removal (`remove_orphans`) defaults to the `container_lifecycle_cleanup` knob
   (true) — parity with the retired `cleanup.yml`; a bundle that doesn't
   enumerate every managed container never removes one.
 - `observe.py` — pure `parse_state()` + port normalization (mirrors the
-  `bay_port_*_tuple` filters).
+  `bay_port_*_tuple` filters). It records both the image id the container runs
+  and the id its reference resolves to locally; the SDK client supplies the
+  second, one lookup per distinct reference.
 - `executor.py` — phased (infra → accessory → service), concurrent within a
   phase; the 9-step canary swap with a rescue → standard-recreate fallback;
   every action recorded (observability contract).

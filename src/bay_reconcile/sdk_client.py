@@ -64,10 +64,40 @@ class SdkDockerClient:
 
     def observe(self, managed_label: str) -> dict[str, ContainerState]:
         out: dict[str, ContainerState] = {}
+        local_ids: dict[str, str | None] = {}
         for ctr in self._c.containers.list(all=True):
-            state = parse_state(ctr.attrs, managed_label=managed_label, hash_label=_HASH_LABEL)
+            reference = (ctr.attrs.get("Config") or {}).get("Image")
+            state = parse_state(
+                ctr.attrs,
+                managed_label=managed_label,
+                hash_label=_HASH_LABEL,
+                local_image_id=self._local_image_id(reference, local_ids),
+            )
             out[state.name] = state
         return out
+
+    def _local_image_id(self, reference: object, cache: dict[str, str | None]) -> str | None:
+        """The id ``reference`` resolves to in the LOCAL image store, or None.
+
+        One lookup per distinct reference per observe pass, cached, because a
+        fleet repeats the same image across containers. None means the daemon
+        has no such image, which the planner reads as no evidence of change
+        rather than as a reason to redeploy.
+        """
+        ref = str(reference or "").strip()
+        if not ref:
+            return None
+        if ref not in cache:
+            cache[ref] = self._image_id(ref)
+        return cache[ref]
+
+    def _image_id(self, reference: str) -> str | None:
+        try:
+            image = self._c.images.get(reference)
+        except (docker.errors.ImageNotFound, docker.errors.APIError):
+            # Never pulled, or the daemon could not answer. Both are "unknown".
+            return None
+        return str(getattr(image, "id", "") or "") or None
 
     def create(self, spec: ContainerSpec, *, name_override: str | None = None) -> None:
         labels = dict(spec.labels)
@@ -121,7 +151,12 @@ class SdkDockerClient:
             ctr = self._c.containers.get(name)
         except docker.errors.NotFound:
             return ContainerState(name=name, exists=False)
-        return parse_state(ctr.attrs, managed_label=self._managed_label, hash_label=_HASH_LABEL)
+        return parse_state(
+            ctr.attrs,
+            managed_label=self._managed_label,
+            hash_label=_HASH_LABEL,
+            local_image_id=self._local_image_id((ctr.attrs.get("Config") or {}).get("Image"), {}),
+        )
 
     def pull(self, image: str) -> None:
         # present-aware: only contact the registry when the image is absent

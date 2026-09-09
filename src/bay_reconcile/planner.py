@@ -33,9 +33,15 @@ def plan(
     Decision table (mirrors the S1 config-hash gate, fleet-wide):
 
     - container missing            -> Create
-    - config_hash matches (stamped)-> NoOp
+    - config_hash matches AND the image id matches -> NoOp
     - config_hash differs/absent    -> CanarySwap (zero-downtime service) else Recreate
+    - image id differs from the local one -> same change path as a config change
     - managed container not desired -> Remove (orphan cleanup)
+
+    The image check is what the config hash alone cannot see. The hash covers
+    the config TEXT, so a rebuilt image under an unchanged reference (the
+    classic ``:latest``, but equally a pinned tag re-pulled after a fix) left
+    the old container running and the run reported NoOp.
     """
     actions: list[Action] = []
     desired_names = {spec.name for spec in desired}
@@ -44,7 +50,11 @@ def plan(
         state = observed.get(spec.name)
         if state is None or not state.exists:
             actions.append(Create(spec))
-        elif state.config_hash and state.config_hash == spec.config_hash:
+        elif (
+            state.config_hash
+            and state.config_hash == spec.config_hash
+            and not state.image_drifted
+        ):
             actions.append(NoOp(spec.name))
         else:
             reason = _change_reason(spec, state)
@@ -73,4 +83,22 @@ def plan(
 def _change_reason(spec: ContainerSpec, state: ContainerState) -> str:
     if not state.config_hash:
         return "no config-hash label (pre-reconciler container)"
-    return f"config-hash changed ({state.config_hash[:12]} -> {spec.config_hash[:12]})"
+    if state.config_hash == spec.config_hash:
+        return _image_reason(state)
+    reason = f"config-hash changed ({state.config_hash[:12]} -> {spec.config_hash[:12]})"
+    if state.image_drifted:
+        reason += f"; {_image_reason(state)}"
+    return reason
+
+
+def _image_reason(state: ContainerState) -> str:
+    running = _short_id(state.image_id)
+    local = _short_id(state.local_image_id)
+    return f"image changed under {state.image or 'its reference'} ({running} -> {local})"
+
+
+def _short_id(image_id: str | None) -> str:
+    """'sha256:abcdef...' -> 'abcdef012345'; a bare id is shortened the same way."""
+    if not image_id:
+        return "unknown"
+    return image_id.split(":", 1)[-1][:12]

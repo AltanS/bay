@@ -51,17 +51,35 @@ class ContainerState:
 
     name: str
     exists: bool
-    image: str | None = None
+    image: str | None = None  # the image REFERENCE, e.g. "bay-webhook:latest"
     config_hash: str | None = None
     status: str | None = None  # running | exited | created | ...
     health: str | None = None  # healthy | unhealthy | starting | None
     managed: bool = False  # carries the "managed" label (either spelling)
     restart_count: int = 0
     port_bindings: tuple[str, ...] = ()  # normalized '<ip>:<host_port>', sorted
+    # The image id the RUNNING container was created from (docker's top-level
+    # ``.Image``), and the id that same reference resolves to on the host RIGHT
+    # NOW. They diverge when the tag is floating and the image was rebuilt or
+    # re-pulled underneath a container that is still running the old layers.
+    image_id: str | None = None
+    local_image_id: str | None = None
 
     @property
     def running(self) -> bool:
         return self.status == "running"
+
+    @property
+    def image_drifted(self) -> bool:
+        """True when the local image for this reference is not the running one.
+
+        Unknown is not drift. A never-pulled image (``local_image_id`` None) or
+        a container docker reported without an id yields False, so a missing
+        image can never force a redeploy on its own.
+        """
+        if not self.image_id or not self.local_image_id:
+            return False
+        return self.image_id != self.local_image_id
 
 
 # ── Actions (discriminated union) ──────────────────────────────────────────

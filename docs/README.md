@@ -87,7 +87,9 @@ for the current architecture.
 - **config-hash gate** — The mechanism that decides whether a container needs to change: a
   SHA-256 hash (`bay_spec_hash`) over the compose-visible spec plus a digest of its
   rendered env file. Same container + same hash = no-op; a mismatch triggers a recreate or
-  canary swap. See `reconciler.md`'s "Parity with the Ansible gate" section.
+  canary swap. The hash covers config text only, so the reconciler also compares the image
+  id the container runs against the id its reference resolves to on the host, and a
+  rebuilt image redeploys. See `reconciler.md`'s "Parity with the Ansible gate" section.
 - **bundle** — The resolved deploy payload the server-side reconciler consumes: every
   container spec with secrets already merged and `config_hash` precomputed (vault is
   decrypted client-side, never on the host). See `reconciler.md`.
