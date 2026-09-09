@@ -7,7 +7,8 @@ no-op never contacts the registry.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import docker
@@ -44,6 +45,75 @@ def _ports_to_sdk(ports: Sequence[str]) -> dict[str, object]:
         elif len(parts) == 2:
             host, ctr = parts
             out[_ctr_port_key(ctr)] = host
+    return out
+
+
+_DURATION_UNITS_NS: dict[str, int] = {
+    "ns": 1,
+    "us": 1_000,
+    "µs": 1_000,
+    "ms": 1_000_000,
+    "s": 1_000_000_000,
+    "m": 60_000_000_000,
+    "h": 3_600_000_000_000,
+}
+
+_DURATION_PART_RE = re.compile(r"(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h)")
+
+_DURATION_KEYS = ("interval", "timeout", "start_period")
+
+
+def _duration_ns(value: object) -> int:
+    """A Go duration string or a number of nanoseconds -> integer nanoseconds.
+
+    The docker SDK's Healthcheck wants ``interval``, ``timeout`` and
+    ``start_period`` as integer nanoseconds. A services.yml healthcheck writes
+    them in compose syntax (``5s``), and the daemon answers a string with
+    "cannot unmarshal string into Go struct field
+    HealthcheckConfig.Config.Healthcheck.Interval of type time.Duration".
+    Numbers pass through untouched, so an inventory that already writes
+    nanoseconds keeps working.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"not a duration: {value!r}")
+    if isinstance(value, int | float):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        raise ValueError("not a duration: empty string")
+    sign = 1
+    if text[0] in "+-":
+        sign = -1 if text[0] == "-" else 1
+        text = text[1:]
+    total = 0.0
+    position = 0
+    for match in _DURATION_PART_RE.finditer(text):
+        if match.start() != position:
+            break
+        total += float(match.group(1)) * _DURATION_UNITS_NS[match.group(2)]
+        position = match.end()
+    if position != len(text) or not position:
+        raise ValueError(f"not a duration: {value!r}")
+    return sign * int(total)
+
+
+def _healthcheck_to_sdk(hc: Mapping[str, object]) -> dict[str, Any]:
+    """A spec healthcheck block -> the docker SDK ``healthcheck`` argument.
+
+    Only the three duration fields are rewritten; ``test`` and ``retries``
+    are handed over as they were written. A duration that does not parse
+    raises ValueError here, at plan time, naming the key and the value, which
+    is far cheaper than a daemon 400 after the old container is already gone.
+    """
+    out: dict[str, Any] = dict(hc)
+    for key in _DURATION_KEYS:
+        if key in out and out[key] is not None:
+            try:
+                out[key] = _duration_ns(out[key])
+            except ValueError as exc:
+                raise ValueError(f"healthcheck {key}: {exc}") from exc
+    if "retries" in out and out["retries"] is not None:
+        out["retries"] = int(out["retries"])  # type: ignore[arg-type]
     return out
 
 
@@ -129,7 +199,7 @@ class SdkDockerClient:
         if spec.ports:
             kwargs["ports"] = _ports_to_sdk(spec.ports)
         if spec.healthcheck:
-            kwargs["healthcheck"] = dict(spec.healthcheck)
+            kwargs["healthcheck"] = _healthcheck_to_sdk(spec.healthcheck)
         if spec.log_driver:
             kwargs["log_config"] = {"type": spec.log_driver, "config": dict(spec.log_options or {})}
         self._c.containers.run(**kwargs)

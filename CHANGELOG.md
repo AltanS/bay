@@ -7,6 +7,27 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [Unreleased]
+
+### Fixed
+
+- **A healthcheck interval written as `5s` took postgres down for ten
+  minutes.** The reconciler forwarded a spec's healthcheck block to the docker
+  SDK unchanged, and the SDK's `Healthcheck` wants `interval`, `timeout` and
+  `start_period` as integer nanoseconds. The daemon answered "cannot unmarshal
+  string into Go struct field
+  HealthcheckConfig.Config.Healthcheck.Interval of type time.Duration" and the
+  create failed. A `Recreate` removes the old container first, so postgres was
+  simply gone, and every service on that host that talks to it went down with
+  it. The three duration fields are now converted from Go duration syntax
+  (`5s`, `1m30s`, `500ms`, `1.5s`) to nanoseconds before the create, and a
+  number is passed through as it was written. A duration that cannot be parsed
+  raises at plan time, naming the key and the value, instead of reaching the
+  daemon. Postgres was the only shipped service with a healthcheck, which is
+  why no earlier deploy hit this. The remove-before-create ordering that turned
+  a rejected create into an outage is not fixed; it is written up under
+  **Known gaps** in `docs/reconciler.md`.
+
 ## [0.6.4] - 2026-09-09
 
 ### Fixed

@@ -83,6 +83,16 @@ def _run_batch(
             try:
                 out.append(ActionResult(action, "done", future.result()))
             except Exception as exc:
+                # A Recreate removes the old container before it creates the new
+                # one, so a create that fails here leaves nothing running. On
+                # 2026-09-10 a healthcheck written in compose syntax was handed
+                # to the daemon unconverted, the create returned 400, and
+                # postgres was absent for about ten minutes; every service on
+                # that host went down with it. The converter now runs before the
+                # remove, but the ordering is still the real hazard. The fix is
+                # to create the replacement first and remove the old one only
+                # after it exists, or at least to dry create against the daemon
+                # before the remove. Neither is done yet.
                 out.append(ActionResult(action, "failed", f"{type(exc).__name__}: {exc}"))
     return out
 

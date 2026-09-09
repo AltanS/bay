@@ -132,3 +132,18 @@ normal deploy reads all-NoOp.
 The reconciler container pass is fast regardless of fleet size; the remaining
 deploy wall-clock (connection/bootstrap, rig roles) is addressed by the rig-skip
 fix and, ultimately, a persistent-connection daemon.
+
+## Known gaps
+
+- **A Recreate removes before it creates.** `_apply` in `executor.py` calls
+  `client.remove` and then `client.create`, so a create that the daemon rejects
+  leaves the service with no container at all. On 2026-09-10 a postgres
+  healthcheck written in compose syntax (`interval: 5s`) reached the daemon
+  unconverted, the create returned 400, and postgres was gone for about ten
+  minutes. Every service on that host that talks to it went down too. The
+  conversion is fixed (`_healthcheck_to_sdk` in `sdk_client.py`), and a bad
+  duration now raises at plan time with the key and the value in the message.
+  The ordering is not fixed. A create-before-remove sequence, or a dry create
+  checked against the daemon before the remove, would remove the whole class of
+  failure. Zero-downtime services already avoid it through the canary path;
+  everything else is exposed.
