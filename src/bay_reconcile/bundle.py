@@ -13,10 +13,33 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .models import ContainerSpec
+from .models import ContainerSpec, healthcheck_to_sdk
 from .observe import MANAGED_LABEL
 
 _VALID_TYPES = ("service", "accessory", "infra")
+
+
+def _healthcheck(d: Mapping[str, Any]) -> Mapping[str, object] | None:
+    """This entry's healthcheck with its durations already in nanoseconds.
+
+    Load time is deliberate. A duration the docker SDK cannot accept has to
+    stop the run HERE, before the fleet is observed and before any action is
+    planned, because a Recreate removes the running container before it creates
+    the replacement. Validating at create time is validating after the outage
+    has started. The message names the service, the key and the value, so the
+    operator reads a fixable sentence instead of a Go unmarshal error.
+
+    The spec's config_hash is NOT recomputed from this. It arrives precomputed
+    in the bundle from `bay_spec_hash` over the raw inventory spec, so
+    converting here cannot recreate a container that was a NoOp before.
+    """
+    raw = d.get("healthcheck")
+    if not raw:
+        return raw
+    try:
+        return healthcheck_to_sdk(raw)
+    except ValueError as exc:
+        raise ValueError(f"{d.get('name')!r}: {exc}") from exc
 
 
 def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
@@ -40,7 +63,7 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         restart_policy=d.get("restart_policy") or "unless-stopped",
         mem_limit=d.get("mem_limit"),
         labels=dict(d.get("labels") or {}),
-        healthcheck=d.get("healthcheck"),
+        healthcheck=_healthcheck(d),
         log_driver=d.get("log_driver"),
         log_options=d.get("log_options"),
         zero_downtime=bool(d.get("zero_downtime", False)),

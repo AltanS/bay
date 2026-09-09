@@ -7,6 +7,28 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [Unreleased]
+
+### Fixed
+
+- **The healthcheck duration check ran too late to protect the container.**
+  v0.6.5 converted the durations in `SdkDockerClient.create`. A `Recreate`
+  removes the running container before it creates the replacement, so a
+  `ValueError` raised at create time costs the same outage the daemon's own 400
+  cost, and the docstring claiming it failed "at plan time" was wrong. The
+  conversion now runs in `bundle.spec_from_dict`, as the JSON bundle is turned
+  into ContainerSpecs, which is before the fleet is observed and before a single
+  action is planned. A bundle carrying a duration that cannot be parsed fails
+  the whole run there, with the service name, the key and the value in the
+  message, and the reconciler exits non-zero without making one docker call.
+  `create` still calls the converter, on values that are already integers, so a
+  ContainerSpec built by hand rather than loaded from a bundle is still
+  protected. **No container recreates because of this.** `config_hash` is
+  computed by the `bay_spec_hash` filter over the raw inventory spec, on the
+  control node, before the bundle is written, so converting a duration on the
+  server cannot reach it. The hash of a spec with `interval: 5s` is frozen in a
+  test against the value v0.6.5 produced.
+
 ## [0.6.5] - 2026-09-10
 
 ### Fixed

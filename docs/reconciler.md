@@ -141,9 +141,13 @@ fix and, ultimately, a persistent-connection daemon.
   healthcheck written in compose syntax (`interval: 5s`) reached the daemon
   unconverted, the create returned 400, and postgres was gone for about ten
   minutes. Every service on that host that talks to it went down too. The
-  conversion is fixed (`_healthcheck_to_sdk` in `sdk_client.py`), and a bad
-  duration now raises at plan time with the key and the value in the message.
-  The ordering is not fixed. A create-before-remove sequence, or a dry create
+  conversion is fixed: `bundle.spec_from_dict` now converts every healthcheck
+  duration to nanoseconds as the bundle is loaded, and a duration it cannot
+  parse fails the run there, naming the service, the key and the value. Load
+  time is before the fleet is observed and before any action is planned, which
+  is the only point at which a rejected duration costs nothing. The ordering
+  itself is not fixed, so any other create the daemon rejects still leaves the
+  service with no container. A create-before-remove sequence, or a dry create
   checked against the daemon before the remove, would remove the whole class of
   failure. Zero-downtime services already avoid it through the canary path;
   everything else is exposed.

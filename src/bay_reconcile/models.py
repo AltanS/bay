@@ -6,11 +6,94 @@ into docker calls.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 ContainerType = Literal["service", "accessory", "infra"]
+
+_DURATION_UNITS_NS: dict[str, int] = {
+    "ns": 1,
+    "us": 1_000,
+    "µs": 1_000,
+    "ms": 1_000_000,
+    "s": 1_000_000_000,
+    "m": 60_000_000_000,
+    "h": 3_600_000_000_000,
+}
+
+_DURATION_PART_RE = re.compile(r"(\d+(?:\.\d+)?)(ns|us|µs|ms|s|m|h)")
+
+_DURATION_KEYS = ("interval", "timeout", "start_period")
+
+
+def duration_ns(value: object) -> int:
+    """A Go duration string or a number of nanoseconds -> integer nanoseconds.
+
+    The docker SDK's ``Healthcheck`` wants ``interval``, ``timeout`` and
+    ``start_period`` as integer nanoseconds. A services.yml healthcheck writes
+    them in compose syntax (``5s``), and the daemon rejects a string with
+    "cannot unmarshal string into Go struct field
+    HealthcheckConfig.Config.Healthcheck.Interval of type time.Duration".
+    Numbers pass through as int, so a spec that already carries nanoseconds is
+    converted a second time without changing.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"not a duration: {value!r}")
+    if isinstance(value, int | float):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        raise ValueError("not a duration: empty string")
+    sign = 1
+    if text[0] in "+-":
+        sign = -1 if text[0] == "-" else 1
+        text = text[1:]
+    total = 0.0
+    position = 0
+    for match in _DURATION_PART_RE.finditer(text):
+        if match.start() != position:
+            break
+        total += float(match.group(1)) * _DURATION_UNITS_NS[match.group(2)]
+        position = match.end()
+    if position != len(text) or not position:
+        raise ValueError(f"not a duration: {value!r}")
+    return sign * int(total)
+
+
+def healthcheck_to_sdk(hc: Mapping[str, object]) -> dict[str, Any]:
+    """A healthcheck block -> the docker SDK ``healthcheck`` argument.
+
+    Where this runs is the whole point. The reconciler calls it from
+    ``bundle.spec_from_dict``, while the JSON bundle is being turned into
+    ContainerSpecs, which is before the fleet is observed and before a single
+    action is planned. That is the only place a rejected duration is free. By
+    the time ``SdkDockerClient.create`` runs, a Recreate has already removed
+    the running container, so raising there costs the same outage the daemon's
+    own 400 cost: on 2026-09-10 postgres was absent for about ten minutes and
+    every service on that host that talks to it went down. A bad duration must
+    therefore stop the run before the first remove, not at the create.
+
+    ``create`` still calls this, on a spec whose durations are already ints. It
+    is a passthrough then, and it stays because a ContainerSpec built by hand
+    rather than loaded from a bundle carries whatever its caller wrote, and
+    ``healthcheck`` is typed ``Mapping[str, object]``, which guarantees
+    nothing.
+
+    Only the three duration fields are rewritten. ``test`` is handed over
+    untouched and ``retries`` is coerced to int.
+    """
+    out: dict[str, Any] = dict(hc)
+    for key in _DURATION_KEYS:
+        if key in out and out[key] is not None:
+            try:
+                out[key] = duration_ns(out[key])
+            except ValueError as exc:
+                raise ValueError(f"healthcheck {key}: {exc}") from exc
+    if "retries" in out and out["retries"] is not None:
+        out["retries"] = int(out["retries"])  # type: ignore[arg-type]
+    return out
 
 
 @dataclass(frozen=True)

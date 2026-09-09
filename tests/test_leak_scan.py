@@ -131,6 +131,30 @@ def test_hex_with_digest_context_is_green(scratch):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_hex_with_frozen_spec_hash_context_is_green(scratch):
+    """A frozen `bay_spec_hash` output in a test is a digest of public shape."""
+    _plant(scratch, "planted.py", f'_FROZEN_SPEC_HASH = "{HEX_BLOB}"\n')
+    result = _scan(scratch)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_frozen_spec_hash_context_does_not_absolve_a_neighbour(scratch):
+    """Control: the allowlist is the exact assignment, not the whole file.
+
+    Without this, adding the context above could quietly green a real secret
+    that happened to share a file with a frozen hash.
+    """
+    other = "3c9d18fe74b25a60" + "91ad72bb08e6fc4a1d55e0c3"
+    _plant(
+        scratch,
+        "planted.py",
+        f'_FROZEN_SPEC_HASH = "{HEX_BLOB}"\nAPI_KEY = "{other}"\n',
+    )
+    result = _scan(scratch)
+    assert result.returncode != 0
+    assert other in result.stdout + result.stderr
+
+
 def test_denylisted_identifier_is_red(scratch):
     _plant(scratch, "planted.md", f"Deployed for {IDENTIFIER} last week.\n")
     result = _scan(scratch)

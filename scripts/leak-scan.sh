@@ -380,7 +380,13 @@ fi
 #     the download fails closed. All three are allowlisted by context rather
 #     than by value: the values change when a pin is bumped, so pinning them
 #     here would rot.
-HEX_CONTEXT_ALLOW='(sha256:|(PRIVATE|PUBLIC)_ROOTS="|backup_restic_checksum: ")'
+#     `_FROZEN_SPEC_HASH` is a test freezing one `bay_spec_hash` output, so a
+#     future change cannot silently move the config hash and recreate every
+#     container with a healthcheck on the next deploy. A spec hash is a digest
+#     of public inventory shape, authenticates nothing, and has to be written
+#     literally or the freeze asserts nothing. Allowlisted by that variable
+#     name so the value can be re-frozen without editing this file.
+HEX_CONTEXT_ALLOW='(sha256:|(PRIVATE|PUBLIC)_ROOTS="|backup_restic_checksum: "|_FROZEN_SPEC_HASH = ")'
 hex_raw=$(ggrep -IihoE '\b[0-9a-f]{32,}\b' -- "${VENDOR_NO_LOCK[@]}" 2>/dev/null \
              | tr 'A-Z' 'a-z' | sort -u || true)
 hex_hits=""

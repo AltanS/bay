@@ -46,8 +46,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(json.dumps({"ok": False, "error": usage}))
         return 2
 
-    with open(positionals[0], encoding="utf-8") as fh:
-        bundle = load_bundle(json.load(fh))
+    # Loading validates as well as parses (container types, healthcheck
+    # durations). A bad bundle must fail the whole run right here: no client is
+    # built yet, so nothing has been observed, planned, removed or created.
+    try:
+        with open(positionals[0], encoding="utf-8") as fh:
+            bundle = load_bundle(json.load(fh))
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "error": f"invalid bundle: {exc}"}))
+        return 2
 
     # Local import: the docker SDK is only needed at run time, on the host.
     from .sdk_client import SdkDockerClient

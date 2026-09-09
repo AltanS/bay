@@ -88,8 +88,11 @@ def _run_batch(
                 # 2026-09-10 a healthcheck written in compose syntax was handed
                 # to the daemon unconverted, the create returned 400, and
                 # postgres was absent for about ten minutes; every service on
-                # that host went down with it. The converter now runs before the
-                # remove, but the ordering is still the real hazard. The fix is
+                # that host went down with it. Healthcheck durations are now
+                # converted and validated in bundle.spec_from_dict, before this
+                # function is ever reached, but the ordering is still the real
+                # hazard: any other create the daemon rejects lands here with
+                # the old container already gone. The fix is
                 # to create the replacement first and remove the old one only
                 # after it exists, or at least to dry create against the daemon
                 # before the remove. Neither is done yet.
