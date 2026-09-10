@@ -7,6 +7,17 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.6.7] - 2026-09-10
+
+### Fixed
+
+- `gateway enroll --help` led with `--user laptop`, which models a user per
+  device. The user is an ownership principal, so one human's machines share
+  one user; `docs/tailnet-naming.md` has said so since it was written, but
+  the CLI example taught the opposite and that is what gets copied. The
+  example now names a person and a device separately, and the docstring
+  points at `gateway key <user>` for an existing owner.
+
 ## [0.6.6] - 2026-09-10
 
 ### Fixed

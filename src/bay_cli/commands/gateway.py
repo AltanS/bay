@@ -1131,13 +1131,17 @@ def enroll(
     for the tag already exist; a tag no rule names is as dead on arrival as
     no grant at all.
 
-    --user names the OWNER in headscale; the device's tailnet name defaults
-    to the same value (override with --hostname, or --no-hostname to keep
-    the device's own). Keys are single-use unless --reusable.
+    --user names the OWNER in headscale, which is a PRINCIPAL and not a
+    device: one human's machines share one user. Enrolling a second device
+    under a new user is the common mistake, so pass --hostname to name the
+    device and leave --user alone. For an existing user, `gateway key <user>`
+    mints a key without touching users at all. The device's tailnet name
+    defaults to the --user value (override with --hostname, or --no-hostname
+    to keep the device's own). Keys are single-use unless --reusable.
 
     Examples:
 
-        bin/bay gateway enroll --user laptop
+        bin/bay gateway enroll --user alice --hostname alice-laptop
         bin/bay gateway enroll --user alice --hostname alice-phone --expiry 7d
         bin/bay gateway enroll --user ci-runner --tag tag:agent --reusable --expiry 30d
     """
