@@ -7,6 +7,20 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.6.8] - 2026-09-10
+
+### Changed
+
+- headscale: bump default `headscale_version` 0.29.2 → 0.29.3. Fixes
+  re-registering a tagged node with a different pre-auth key (it now applies
+  the new key's tags), plus other tag-related fixes.
+
+### Upgrade notes
+
+- `bin/bay deploy <env> --tags headscale` recreates the headscale container on
+  the new image. Headscale restarts; existing WireGuard sessions coast
+  through it.
+
 ## [0.6.7] - 2026-09-10
 
 ### Fixed
