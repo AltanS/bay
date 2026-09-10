@@ -17,6 +17,8 @@ before upgrading — anything needing manual action is called out under
   the CLI example taught the opposite and that is what gets copied. The
   example now names a person and a device separately, and the docstring
   points at `gateway key <user>` for an existing owner.
+- `make typecheck` failed on an unused `type: ignore` in
+  `src/bay_reconcile/models.py`, which blocked every release. Removed.
 
 ## [0.6.6] - 2026-09-10
 

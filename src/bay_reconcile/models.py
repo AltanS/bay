@@ -92,7 +92,7 @@ def healthcheck_to_sdk(hc: Mapping[str, object]) -> dict[str, Any]:
             except ValueError as exc:
                 raise ValueError(f"healthcheck {key}: {exc}") from exc
     if "retries" in out and out["retries"] is not None:
-        out["retries"] = int(out["retries"])  # type: ignore[arg-type]
+        out["retries"] = int(out["retries"])
     return out
 
 
