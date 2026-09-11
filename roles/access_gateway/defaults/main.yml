@@ -17,7 +17,14 @@ headscale_tailnet_cidr:
   - "100.64.0.0/10"
 headscale_domain: ""
 headscale_magic_dns_domain: "{{ stack_name }}.tailnet.internal"
-headscale_version: "0.29.2"
+# AUTHORITATIVE pin. container_lifecycle/tasks/build_specs.yml builds the
+# headscale container spec from this value, and the reconciler is the only
+# thing that creates the container, so this is the one that decides which
+# image runs. roles/headscale/defaults/main.yml carries a second copy for the
+# headscale role's own tasks; the two are asserted equal by
+# tests/test_headscale_version_pin.py. Bumping only the other one upgrades
+# nothing and the deploy reports no change, which is exactly how 0.6.8 shipped.
+headscale_version: "0.29.3"
 # Headscale user that owns VPS server nodes — defaults to stack_name.
 # Each Bay project creates its own user, preventing collisions when
 # multiple projects share one Headscale server.

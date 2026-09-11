@@ -7,6 +7,34 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.6.9] - 2026-09-11
+
+### Fixed
+
+- headscale: 0.6.8 did not actually upgrade anything. `headscale_version` is
+  declared twice, and 0.6.8 bumped the copy in `roles/headscale/defaults/`,
+  which only that role's own tasks read. The pin that decides the running image
+  is in `roles/access_gateway/defaults/`, because
+  `container_lifecycle/tasks/build_specs.yml` builds the container spec from it
+  and the reconciler is the only thing that creates the container. The deploy
+  ran clean and reported no change, which is what a bump to a value nothing
+  reads looks like. Both copies now pin 0.29.3.
+- `tests/test_headscale_version_pin.py` asserts the two pins agree, that the
+  reconciler still builds the image tag from the variable, and that neither
+  pins a floating tag. A duplicated constant fails silently in one direction
+  only, so a comment was not enough.
+
+### Upgrade notes
+
+- The 0.6.8 upgrade note named the wrong tag. `--tags headscale` renders
+  headscale's config but not the container, so it cannot change the image. Use
+  `bin/bay deploy <env> --tags deploy_stack`, which is what reconciles
+  containers. Headscale restarts; existing sessions coast through it.
+- Consumers that took 0.6.8 are still running headscale 0.29.2. Take 0.6.9 and
+  deploy with the tag above. Confirm with
+  `docker inspect headscale --format '{{.Config.Image}}'`, not with the deploy
+  output.
+
 ## [0.6.8] - 2026-09-10
 
 ### Changed
