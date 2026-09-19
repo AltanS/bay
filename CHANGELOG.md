@@ -7,6 +7,25 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.6.10] - 2026-09-19
+
+### Fixed
+
+- reconcile: canary swaps now run one at a time within a dependency phase. The
+  executor used to run every action of a phase in one thread pool, so a plan
+  with three zero-downtime services started three canaries at once. A canary
+  keeps the old container running until the new one is healthy, so each one
+  doubles its service's memory for the length of the health wait, and parallel
+  canaries add those peaks together. On a 4 GB host with its swap already full
+  that ended in a host-wide out-of-memory kill of one canary, whose rescue
+  then recreated the service with downtime. The phase's other actions still
+  run in parallel first. The report keeps plan order.
+
+### Upgrade notes
+
+- None. A deploy with several canaries takes longer, by roughly the sum of
+  their health waits instead of the longest one.
+
 ## [0.6.9] - 2026-09-11
 
 ### Fixed
