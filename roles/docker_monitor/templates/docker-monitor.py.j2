@@ -15,7 +15,7 @@ import tempfile
 import time
 import urllib.request
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Credentials come from the environment, never from a rendered literal: this
 # file is installed under /usr/local/bin and was world-readable for its whole
@@ -35,6 +35,9 @@ RESTART_LOOP_WINDOW = {{ docker_monitor_restart_loop_window }}
 # Wall-clock and persisted in STATE_FILE, so a monitor restart does not reset
 # it. See docker_monitor_restart_loop_cooldown in the role defaults.
 RESTART_LOOP_COOLDOWN = {{ docker_monitor_restart_loop_cooldown | default(1800) | int }}
+# Seconds a crash_state row may live before save_crash_state drops it. 0 keeps
+# rows forever. See docker_monitor_crash_state_max_age in the role defaults.
+CRASH_STATE_MAX_AGE = {{ docker_monitor_crash_state_max_age | default(604800) | int }}
 
 IGNORE_CONTAINERS = {{ docker_monitor_ignore_containers | to_json }}
 
@@ -189,6 +192,47 @@ def load_crash_state():
     return data
 
 
+def _crash_row_expired(row, now):
+    """True when a crash_state row is older than CRASH_STATE_MAX_AGE.
+
+    `crashed_at` is written by handle_die as `datetime.now().isoformat()`: a
+    naive LOCAL timestamp such as 2026-09-19T22:36:43.123456. An aware one
+    (a hand-edited file) is compared against an aware now instead of raising.
+
+    A row whose timestamp is missing or unparsable counts as EXPIRED. Keeping
+    it would be keeping it forever, because its age can never be computed,
+    which is the unbounded growth this prune exists to stop. The cost is at
+    most one container.recovered alert for a row that was already corrupt.
+    A timestamp in the future (clock skew) is not expired.
+    """
+    if not isinstance(row, dict):
+        return True
+    try:
+        crashed_at = datetime.fromisoformat(str(row["crashed_at"]))
+        if crashed_at.tzinfo is not None:
+            age = datetime.now(timezone.utc).timestamp() - crashed_at.timestamp()
+        else:
+            age = (now - crashed_at).total_seconds()
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return True
+    return age > CRASH_STATE_MAX_AGE
+
+
+def prune_crash_state(now=None):
+    """Drop crash_state rows older than CRASH_STATE_MAX_AGE. Returns the count.
+
+    Without this, a row written for a one-off `docker run` container that
+    never starts again stays in the state file for ever.
+    """
+    if CRASH_STATE_MAX_AGE <= 0:
+        return 0
+    current = datetime.now() if now is None else now
+    expired = [n for n, row in crash_state.items() if _crash_row_expired(row, current)]
+    for name in expired:
+        del crash_state[name]
+    return len(expired)
+
+
 def save_crash_state():
     """Write crash state atomically (tmp + rename) to avoid corruption."""
     state_dir = os.path.dirname(STATE_FILE)
@@ -196,6 +240,8 @@ def save_crash_state():
     now = time.time()
     for name in [n for n, ts in restart_loop_alerted.items() if now - ts >= RESTART_LOOP_COOLDOWN]:
         del restart_loop_alerted[name]
+    # Same for crash rows: see prune_crash_state.
+    prune_crash_state()
     data = dict(crash_state)
     if restart_loop_alerted:
         data[RESTART_LOOP_STATE_KEY] = restart_loop_alerted
@@ -402,6 +448,10 @@ def main():
     """Watch Docker events and dispatch to handlers."""
     global crash_state
     crash_state = load_crash_state()
+    # Rows from a long-dead one-off container must not fire a container.recovered
+    # when a new container reuses the name months later.
+    if prune_crash_state():
+        save_crash_state()
     if crash_state:
         print(
             f"[{datetime.now().isoformat()}] Loaded {len(crash_state)} crashed container(s) from state file",

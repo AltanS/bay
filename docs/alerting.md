@@ -484,6 +484,15 @@ monitor's state file, so restarting the monitor does not reset it. Set it to
 `0` to turn it off. `container.health_check_failed` keeps its fixed 300 second
 cooldown.
 
+The same state file holds one row per crashed container, removed when the
+container starts again. A row for a one-off `docker run` container that never
+starts again used to stay for ever. Rows older than
+`docker_monitor_crash_state_max_age` (default 604800 seconds, 7 days) are now
+dropped when the file is written and when the monitor starts. A row whose
+`crashed_at` cannot be parsed is dropped too, because its age can never be
+known. A container that stays down longer than the limit gets no
+`container.recovered` when it starts. Set it to `0` to keep rows for ever.
+
 There is a **third** emitter, and it is the odd one out.
 `deploy.complete`, `deploy.failed`, `restore.completed` and `restore.failed`
 are sent from the **control node** while Ansible is mid-play, so they cannot

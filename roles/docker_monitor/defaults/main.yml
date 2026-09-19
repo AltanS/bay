@@ -29,6 +29,15 @@ docker_monitor_restart_loop_window: 300  # seconds
 # reset it. 0 disables the cooldown. container.health_check_failed keeps its
 # own fixed 300 s cooldown.
 docker_monitor_restart_loop_cooldown: 1800  # seconds
+# Maximum age of a row in the monitor's crash state
+# ({{ stack_dir }}/.container-crashes.json). A row is written when a container
+# dies and removed when it starts again, so a one-off `docker run` container
+# that never starts again used to stay in the file for ever. Rows older than
+# this are dropped whenever the file is written and when the monitor starts.
+# A row with a missing or unparsable `crashed_at` is dropped too, because its
+# age can never be known. A container that stays down longer than this gets no
+# container.recovered alert when it finally starts. 0 keeps rows for ever.
+docker_monitor_crash_state_max_age: 604800  # seconds (7 days)
 
 # Containers to ignore (list of name patterns)
 # Canary containers (-new suffix) are transient and should not trigger alerts

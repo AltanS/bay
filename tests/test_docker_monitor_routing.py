@@ -426,3 +426,133 @@ def test_cooldown_default_is_in_the_role_defaults():
         (_REPO_ROOT / "roles" / "docker_monitor" / "defaults" / "main.yml").read_text()
     )
     assert defaults["docker_monitor_restart_loop_cooldown"] == 1800
+
+
+# ── crash_state is pruned by age ─────────────────────────────────────────
+#
+# A crash row is written on `die` and removed on the next `start`. A one-off
+# `docker run` container never starts again, so its row stayed in the state
+# file for ever. save_crash_state now drops rows older than
+# docker_monitor_crash_state_max_age.
+
+
+def _seed_state(tmp_path, rows):
+    (tmp_path / ".container-crashes.json").write_text(json.dumps(rows))
+
+
+def _state(tmp_path):
+    return json.loads((tmp_path / ".container-crashes.json").read_text())
+
+
+def _crash_row(age_seconds):
+    from datetime import datetime, timedelta
+
+    return {
+        "exit_code": 1,
+        "crashed_at": (datetime.now() - timedelta(seconds=age_seconds)).isoformat(),
+        "crash_count": 1,
+    }
+
+
+def test_old_crash_rows_are_pruned_on_save(tmp_path, sent, recipients_only):
+    _seed_state(
+        tmp_path,
+        {
+            "one-off-run": _crash_row(30 * 86400),
+            "fresh": _crash_row(3600),
+        },
+    )
+    monitor = _load(_render(tmp_path, alert_recipients=_RECIPIENTS))
+    monitor.crash_state = monitor.load_crash_state()
+    _die(monitor, "web")  # any write goes through save_crash_state
+
+    state = _state(tmp_path)
+    assert "one-off-run" not in state, "a 30-day-old crash row survived the save"
+    assert "fresh" in state and "web" in state
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"exit_code": 1, "crashed_at": "yesterday-ish", "crash_count": 1},
+        {"exit_code": 1, "crash_count": 1},
+        {"exit_code": 1, "crashed_at": None, "crash_count": 1},
+        "not-a-row",
+    ],
+    ids=["garbage", "missing", "null", "not-a-dict"],
+)
+def test_an_unparsable_crash_row_is_dropped_not_fatal(tmp_path, sent, recipients_only, row):
+    """Its age can never be known, so keeping it would mean keeping it for ever."""
+    _seed_state(tmp_path, {"broken": row, "fresh": _crash_row(60)})
+    monitor = _load(_render(tmp_path, alert_recipients=_RECIPIENTS))
+    monitor.crash_state = monitor.load_crash_state()
+    _die(monitor, "web")
+
+    state = _state(tmp_path)
+    assert "broken" not in state
+    assert "fresh" in state and "web" in state
+    assert len(_to(sent, _SECRET_URL)) == 1, "the crash alert still fired"
+
+
+def test_an_aware_timestamp_is_compared_not_fatal(tmp_path, sent, recipients_only):
+    from datetime import datetime, timedelta, timezone
+
+    old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    new = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+    _seed_state(
+        tmp_path,
+        {
+            "old": {"exit_code": 1, "crashed_at": old, "crash_count": 1},
+            "new": {"exit_code": 1, "crashed_at": new, "crash_count": 1},
+        },
+    )
+    monitor = _load(_render(tmp_path, alert_recipients=_RECIPIENTS))
+    monitor.crash_state = monitor.load_crash_state()
+    _die(monitor, "web")
+    state = _state(tmp_path)
+    assert "old" not in state and "new" in state
+
+
+def test_crash_state_max_age_is_configurable(tmp_path, sent, recipients_only):
+    _seed_state(tmp_path, {"hour-old": _crash_row(3600)})
+    monitor = _load(
+        _render(tmp_path, alert_recipients=_RECIPIENTS, docker_monitor_crash_state_max_age=600)
+    )
+    monitor.crash_state = monitor.load_crash_state()
+    _die(monitor, "web")
+    assert "hour-old" not in _state(tmp_path)
+
+
+def test_crash_state_max_age_zero_disables_the_prune(tmp_path, sent, recipients_only):
+    _seed_state(
+        tmp_path,
+        {
+            "ancient": _crash_row(365 * 86400),
+            "broken": {"exit_code": 1, "crashed_at": "garbage", "crash_count": 1},
+        },
+    )
+    monitor = _load(
+        _render(tmp_path, alert_recipients=_RECIPIENTS, docker_monitor_crash_state_max_age=0)
+    )
+    monitor.crash_state = monitor.load_crash_state()
+    _die(monitor, "web")
+    state = _state(tmp_path)
+    assert "ancient" in state and "broken" in state
+
+
+def test_restart_loop_cooldowns_survive_the_crash_prune(tmp_path, sent, recipients_only):
+    """The cooldown map shares the file; the prune must not eat it."""
+    monitor = _load(_render(tmp_path, alert_recipients=_RECIPIENTS))
+    monitor.crash_state = monitor.load_crash_state()
+    _loop(monitor, "web")
+    assert "web" in _state(tmp_path)[monitor.RESTART_LOOP_STATE_KEY]
+
+
+def test_crash_state_max_age_default_is_in_the_role_defaults():
+    import yaml
+
+    defaults = yaml.safe_load(
+        (_REPO_ROOT / "roles" / "docker_monitor" / "defaults" / "main.yml").read_text()
+    )
+    assert defaults["docker_monitor_crash_state_max_age"] == 604800
+
