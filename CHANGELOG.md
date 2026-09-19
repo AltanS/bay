@@ -7,6 +7,56 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.6.12] - 2026-09-19
+
+### Fixed
+
+- webhook receiver: alerts now reach `alert_recipients`. The receiver's
+  `send_alert` read only the legacy pair (`docker_monitor_telegram_*` and
+  `alert_webhook_url`). A consumer on `alert_recipients` has those empty, so
+  `webhook.fanout_failed` (warn, on by default) reached nobody, while
+  `bin/bay alerts list` showed it as delivered. The receiver now routes like
+  `bay_notify` and docker-monitor, with the same shared helpers: mute first,
+  then the legacy pair unchanged, then each recipient whose alert IDs contain
+  the alert. deploy_stack writes the routing table (`BAY_ALERT_ROUTING`, no
+  secrets) and the recipient credentials (`BAY_RC_<n>_TOKEN`,
+  `BAY_RC_<n>_URL`, `BAY_RC_<n>_HEADERS`, same index as `/etc/bay/alert.env`)
+  into the receiver's 0640 env file, and only when `alert_recipients` is set.
+- webhook receiver: the operator mute file now applies to its alerts, for the
+  legacy pair too. The directory that holds it is mounted read-only at
+  `/etc/bay-alert-policy`, so a new mute reaches the running container.
+- docker_monitor: crash rows no longer stay in the state file for ever. A row
+  for a one-off `docker run` container that never starts again was kept
+  indefinitely. Rows older than the new `docker_monitor_crash_state_max_age`
+  (default 604800 seconds, 7 days, `0` keeps them) are dropped when the file
+  is written and when the monitor starts. A row with an unparsable
+  `crashed_at` is dropped too.
+- docker_monitor: the first `container.health_check_failed` after a host boot
+  is no longer suppressed. The cooldown compared `time.monotonic()`, which
+  counts from boot, against a default of 0, so every unhealthy event in the
+  first 300 seconds after a reboot looked like a repeat.
+- docker_monitor, webhook receiver: `datetime.utcnow()`, which is deprecated,
+  is replaced. The alert timestamp reads the same.
+
+### Upgrade notes
+
+- Rebuild and recreate the webhook receiver on every host that runs
+  `bay-webhook`: `bin/bay deploy <env>`, or
+  `bin/bay deploy <env> --tags git_deploy,deploy_stack`. `git_deploy`
+  rebuilds the `bay-webhook:latest` image and `deploy_stack` writes the env
+  file and recreates the container. `bin/bay webhook <env>` alone rebuilds the
+  image but does not recreate the container. Every consumer gets one
+  recreate, because the image and the mounts change.
+- Re-render the monitor with `bin/bay deploy <env> --tags monitoring`.
+- Consumers still on the legacy pair see no change in what the receiver sends,
+  except that mutes now apply.
+- A recipient that uses `token_env`, `chat_id_env` or `url_env` reads that
+  variable from the receiver container's environment, which holds only what
+  its env file and spec set. Such a recipient gets no webhook receiver alerts
+  unless the named variable is one of those, for example
+  `TELEGRAM_BOT_TOKEN`. Use a literal `bot_token` or `url` from the vault to
+  get them.
+
 ## [0.6.11] - 2026-09-19
 
 ### Fixed
