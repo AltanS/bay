@@ -138,3 +138,71 @@ class TestCanary:
         client = Flaky({"web": ContainerState("web", exists=True, config_hash="old")})
         _run(client)
         assert ("rename", "web-new", "web") in client.calls
+
+
+class _SlowCanaryDocker(FakeDocker):
+    """Holds each canary briefly and counts how many are alive at once."""
+
+    def __init__(self, initial=None):
+        super().__init__(initial)
+        self.live_canaries = 0
+        self.max_live_canaries = 0
+
+    def create(self, spec, *, name_override=None):
+        super().create(spec, name_override=name_override)
+        if name_override and name_override.endswith("-new"):
+            with self._lock:
+                self.live_canaries += 1
+                self.max_live_canaries = max(self.max_live_canaries, self.live_canaries)
+
+    def inspect(self, name):
+        if name.endswith("-new"):
+            import time
+
+            time.sleep(0.05)
+        return super().inspect(name)
+
+    def rename(self, old, new):
+        super().rename(old, new)
+        if old.endswith("-new"):
+            with self._lock:
+                self.live_canaries -= 1
+
+
+def _running_old(name):
+    return ContainerState(
+        name=name, exists=True, image=f"{name}:old", config_hash="old",
+        status="running", health="healthy", managed=True,
+    )
+
+
+def _named_svc(name):
+    return ContainerSpec(
+        name=name, image=f"{name}:latest", type="service", config_hash="new", zero_downtime=True
+    )
+
+
+class TestCanariesRunOneAtATime:
+    def test_three_canaries_never_overlap(self) -> None:
+        names = ["web", "api", "worker"]
+        client = _SlowCanaryDocker({n: _running_old(n) for n in names})
+        swaps = tuple(CanarySwap(_named_svc(n), "changed") for n in names)
+        report = execute(Plan(swaps), client, config=FAST)
+
+        assert [r.status for r in report.results] == ["done", "done", "done"]
+        # The old executor ran all three in one pool: every canary was created
+        # before the first one was renamed into place, and this read 3.
+        assert client.max_live_canaries == 1
+
+    def test_results_keep_plan_order(self) -> None:
+        from bay_reconcile import Recreate
+
+        client = _SlowCanaryDocker({n: _running_old(n) for n in ("a", "b", "c")})
+        actions = (
+            CanarySwap(_named_svc("a"), "changed"),
+            Recreate(_named_svc("b"), "changed"),
+            CanarySwap(_named_svc("c"), "changed"),
+        )
+        report = execute(Plan(actions), client, config=FAST)
+
+        assert [r.action.spec.name for r in report.results] == ["a", "b", "c"]

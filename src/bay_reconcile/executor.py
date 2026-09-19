@@ -60,11 +60,38 @@ def execute(
     # Dependency phases: infra/accessories up before services that link them.
     for phase in (0, 1, 2):
         batch = [a for a in changes if _PHASE_ORDER.get(a.spec.type, 99) == phase]
-        results.extend(_run_batch(batch, client, cfg, max_workers))
+        results.extend(_run_phase(batch, client, cfg, max_workers))
 
     # Orphan removals last.
     results.extend(_run_batch(list(removes), client, cfg, max_workers))
     return ExecutionReport(tuple(results))
+
+
+def _run_phase(
+    batch: Sequence[Action],
+    client: DockerClient,
+    cfg: ReconcilerConfig,
+    max_workers: int,
+) -> list[ActionResult]:
+    """Run one dependency phase: canary swaps one at a time, the rest in parallel.
+
+    A canary swap keeps the old container running until the new one is
+    healthy, so for the length of its health wait it doubles that service's
+    memory. Run several at once and those peaks add up. On 2026-09-18 three
+    canaries started together on a 4 GB host whose swap was already full, the
+    kernel killed one of them host-wide, and its rescue recreated the service
+    with downtime. One at a time, the peak is the largest single service, not
+    the sum. The other actions keep running in parallel first; a Recreate
+    removes before it creates, so it adds no peak of its own.
+
+    Results come back in plan order, whatever order they ran in.
+    """
+    canaries = [a for a in batch if isinstance(a, CanarySwap)]
+    others = [a for a in batch if not isinstance(a, CanarySwap)]
+    done = _run_batch(others, client, cfg, max_workers)
+    done += _run_batch(canaries, client, cfg, 1)
+    position = {id(a): i for i, a in enumerate(batch)}
+    return sorted(done, key=lambda r: position[id(r.action)])
 
 
 def _run_batch(
