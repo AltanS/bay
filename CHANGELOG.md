@@ -7,6 +7,38 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.6.11] - 2026-09-19
+
+### Fixed
+
+- docker_monitor: container alerts now reach `alert_recipients`. The monitor's
+  `send_alert` threw the alert ID away and sent only through the legacy pair
+  (`docker_monitor_telegram_*` and `alert_webhook_url`). A consumer that had
+  moved to `alert_recipients` has those empty, so `container.crash`,
+  `container.restart_loop` and `container.health_check_failed` were delivered
+  to nobody, while `bin/bay alerts list` showed them as delivered. The monitor
+  now routes like `bay_notify`: the per-recipient alert IDs are resolved at
+  render time with the same filter, and credentials are read at run time from
+  `/etc/bay/alert.env`. They are never written into the script.
+- docker_monitor: the operator mute file (`bin/bay alerts disable`) now
+  applies to container alerts, for the legacy pair too. Before, a mute did not
+  reach the monitor at all.
+- docker_monitor: `container.restart_loop` no longer re-alerts every detection
+  window for the same container. A new per-container cooldown,
+  `docker_monitor_restart_loop_cooldown` (default 1800 seconds, `0` turns it
+  off), is stored in the monitor's state file, so restarting the monitor does
+  not reset it. A looping container sent the same critical alert every minute
+  before this.
+
+### Upgrade notes
+
+- Re-render the monitor with `bin/bay deploy <env> --tags monitoring`. Until
+  you do, the old script keeps sending to the legacy pair only.
+- Consumers still on the legacy pair see no change in what is sent, except
+  that mutes now apply. The legacy pair still ignores `alerts_disabled` and
+  `enabled_by_default`, the same as in the shell emitters, so it still gets
+  `container.recovered`.
+
 ## [0.6.10] - 2026-09-19
 
 ### Fixed
