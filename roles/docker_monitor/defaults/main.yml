@@ -21,6 +21,14 @@ docker_monitor_alert_healthcheck_failure: true
 # Restart loop tuning
 docker_monitor_restart_loop_threshold: 3
 docker_monitor_restart_loop_window: 300  # seconds
+# Minimum seconds between two container.restart_loop alerts for the SAME
+# container. A container that keeps looping crosses the threshold again every
+# window, and without a cooldown it paged once per window for as long as the
+# loop lasted. Persisted in the monitor's state file
+# ({{ stack_dir }}/.container-crashes.json), so restarting the monitor does not
+# reset it. 0 disables the cooldown. container.health_check_failed keeps its
+# own fixed 300 s cooldown.
+docker_monitor_restart_loop_cooldown: 1800  # seconds
 
 # Containers to ignore (list of name patterns)
 # Canary containers (-new suffix) are transient and should not trigger alerts

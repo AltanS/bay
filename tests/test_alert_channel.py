@@ -1137,13 +1137,11 @@ _TELEGRAM_NEEDLES = ("api.telegram.org", "sendMessage")
 _TELEGRAM_ALLOWED = {
     # The canonical fan-out. Shell + Python + control-node halves.
     "roles/alert_channel/templates/_notify.sh.j2",
+    "roles/alert_channel/files/bay_alert.py",
     "roles/alert_channel/tasks/send_alert.yml",
-    # The two Python `send_alert()` fan-outs. They are the sanctioned emitters
-    # for their runtimes (registry-recognised call sites, and both hand the
-    # generic sink to the shared bay_send_webhook), but each still carries its
-    # own Telegram transport. Folding that half into bay_alert.py as a shared
-    # bay_send_telegram() is the outstanding cleanup.
-    "roles/docker_monitor/templates/docker-monitor.py.j2",
+    # The webhook receiver's `send_alert()` still carries its own Telegram
+    # transport. docker-monitor's moved to the shared bay_send_telegram() in
+    # bay_alert.py; doing the same here is the outstanding cleanup.
     "roles/git_deploy/files/webhook/app.py",
     # CLI-side audit ping from `bay build`. Not a registry alert: it is an
     # operator audit trail written from the control node, deliberately

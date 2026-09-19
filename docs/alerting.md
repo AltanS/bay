@@ -271,7 +271,8 @@ They desugar into implicit recipients with a `debug` floor, so they receive
 everywhere else.
 
 **This is the reason to migrate.** The two legacy senders fire unconditionally
-inside `bay_notify()`; they never consult the registry, so
+inside `bay_notify()` and inside docker-monitor's `send_alert()`; they never
+consult the registry, so
 `enabled_by_default: false` does not reach them. A consumer still on
 `alert_webhook_url` keeps getting `webhook.received` on every push no matter
 what the registry says. Only mutes apply to them, because a mute has to be
@@ -414,6 +415,40 @@ bash cannot import Python and the webhook container cannot source bash:
 
 `tests/test_alert_channel.py` asserts the two agree byte for byte on the same
 inputs. Divergence is the failure mode this design exists to prevent.
+
+The container monitor (`roles/docker_monitor/templates/docker-monitor.py.j2`)
+routes exactly like `bay_notify()`, in the same order:
+
+1. A mute in `/etc/bay/alert-overrides` suppresses every sink, legacy
+   included. `bay_alert_muted()` in `bay_alert.py` is a port of the shell
+   `_bay_muted`, with the same fail-open rules;
+   `tests/test_docker_monitor_routing.py` checks the two agree on the same
+   files.
+2. The legacy pair fires unconditionally, as in the shell emitters. So a
+   legacy consumer still gets `container.recovered`, which is default-off,
+   and `alerts_disabled` does not reach it. Migrate to `alert_recipients` to
+   change that.
+3. Each explicit recipient gets the alert if its ID set contains it. The sets
+   are baked into the script at render time with the same
+   `bay_alert_ids_for` filter, and in the same recipient order, as the
+   shell `case` list. The script holds each recipient's routing and non-secret
+   config only. A literal `bot_token` or `url` is read at run time from
+   `BAY_RC_<n>_TOKEN` / `BAY_RC_<n>_URL` in `/etc/bay/alert.env`, and
+   `token_env` / `chat_id_env` / `url_env` from the unit's environment.
+   Declarative webhook `headers` are rendered into the script, as they are
+   into the shell emitters.
+
+Because the routing is baked in, a change to `alert_recipients`,
+`alerts_enabled` or `alerts_disabled` reaches the monitor only when it is
+re-rendered: `bin/bay deploy <env> --tags monitoring`.
+
+`container.restart_loop` has a per-container cooldown,
+`docker_monitor_restart_loop_cooldown` (default 1800 seconds). A container
+that keeps looping crosses the threshold again every detection window, and
+without the cooldown it paged once per window. The cooldown is stored in the
+monitor's state file, so restarting the monitor does not reset it. Set it to
+`0` to turn it off. `container.health_check_failed` keeps its fixed 300 second
+cooldown.
 
 There is a **third** emitter, and it is the odd one out.
 `deploy.complete`, `deploy.failed`, `restore.completed` and `restore.failed`

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # {{ ansible_managed }}
 # Docker container monitor
-# Watches Docker events and sends Telegram alerts for:
+# Watches Docker events and sends alerts (legacy pair + alert_recipients) for:
 #   - Container crashes (non-zero exit code)
 #   - Container recovery (start after crash)
 #   - Restart loops (too many starts within a time window)
@@ -31,6 +31,10 @@ ALERT_HEALTHCHECK_FAILURE = {{ docker_monitor_alert_healthcheck_failure | bool |
 
 RESTART_LOOP_THRESHOLD = {{ docker_monitor_restart_loop_threshold }}
 RESTART_LOOP_WINDOW = {{ docker_monitor_restart_loop_window }}
+# Seconds between two container.restart_loop alerts for the same container.
+# Wall-clock and persisted in STATE_FILE, so a monitor restart does not reset
+# it. See docker_monitor_restart_loop_cooldown in the role defaults.
+RESTART_LOOP_COOLDOWN = {{ docker_monitor_restart_loop_cooldown | default(1800) | int }}
 
 IGNORE_CONTAINERS = {{ docker_monitor_ignore_containers | to_json }}
 
@@ -43,50 +47,147 @@ ALERT_WEBHOOK_FORMAT = {{ alert_webhook_format | default('campfire') | to_json }
 ALERT_WEBHOOK_TIMEOUT = {{ alert_webhook_timeout | default(10) }}
 ALERT_WEBHOOK_MAX_CHARS = {{ alert_webhook_max_chars | default(3500) }}
 
+# Operator mute overrides, rendered by roles/alert_policy. Read at CALL time,
+# parsed and never executed, and fail-open: see bay_alert_muted.
+ALERT_POLICY_PATH = {{ alert_policy_path | default('/etc/bay/alert-overrides') | to_json }}
+
 # The generic webhook sink, shared verbatim with the webhook receiver and the
 # control-node deploy alerts. See roles/alert_channel/files/bay_alert.py.
 {% include 'bay_alert.py' %}
+
+{#
+  Explicit recipients: the Python twin of the _bay_send_r<n> functions and the
+  _bay_route `case` list in roles/alert_channel/templates/_notify.sh.j2.
+
+  ROUTING is baked in; CREDENTIALS are not. Each entry carries the alert IDs
+  this recipient receives, resolved at render time by the same
+  bay_alert_ids_for filter over the same recipient, and its non-secret config.
+  A literal bot_token or url is read at run time from BAY_RC_<n>_TOKEN /
+  BAY_RC_<n>_URL, which alert.env.j2 writes under the same 1-based index this
+  loop uses (same list, same order). token_env / chat_id_env / url_env name a
+  variable in the unit's environment instead; the name is validated at render
+  time like the shell twin does.
+
+  Each entry is emitted as a JSON string literal and parsed at import, so no
+  consumer value is ever pasted into Python syntax.
+#}
+# Explicit recipients (alert_recipients). Routing resolved at render time from
+# alerts/registry.yml; credentials come from the environment only.
+BAY_RECIPIENTS = [
+{% for _r in (alert_recipients | default([])) %}
+{% set _rn = _r | bay_alert_recipient %}
+{% set _rc = _rn.config %}
+{% set _entry = {
+  "index": loop.index,
+  "name": _rn.name | default('unnamed') | string,
+  "adapter": _rn.adapter | string,
+  "ids": _r | bay_alert_ids_for(alerts_disabled | default([]), alerts_enabled | default([])),
+  "token_env": (_rc.token_env | bay_env_name) if _rc.token_env is defined else "",
+  "chat_id": (_rc.chat_id | default('') | string),
+  "chat_id_env": (_rc.chat_id_env | bay_env_name) if _rc.chat_id_env is defined else "",
+  "url_env": (_rc.url_env | bay_env_name) if _rc.url_env is defined else "",
+  "transform": (_rc.transform | default('html') | string),
+  "content_type": (_rc.content_type | default('text/plain') | string),
+  "method": (_rc.method | default('POST') | string),
+  "headers": _rc.headers | default({}),
+} %}
+    json.loads({{ _entry | to_json | to_json }}),
+{% endfor %}
+]
 
 # In-memory state
 restart_timestamps = defaultdict(list)  # container_name -> [timestamps]
 health_cooldowns = {}  # container_name -> last_alert_timestamp
 crash_state = {}  # container_name -> {"exit_code": int, "crashed_at": str, "crash_count": int}
 HEALTH_COOLDOWN_SECONDS = 300
+# container_name -> wall-clock epoch of its last container.restart_loop alert.
+# Persisted in STATE_FILE under RESTART_LOOP_STATE_KEY. Docker container names
+# must start with a letter or digit, so a key starting with "_" can never
+# collide with a crash_state entry.
+restart_loop_alerted = {}
+RESTART_LOOP_STATE_KEY = "_restart_loop_alerted"
+
+
+def _recipient_env(name):
+    return os.environ.get(name, "") if name else ""
+
+
+def _send_to_recipient(recipient, body):
+    """Deliver one message to one explicit recipient. Never raises."""
+    label = recipient.get("name") or "unnamed"
+
+    def on_error(reason):
+        print(f"Failed to send alert to recipient {label}: {reason}", file=sys.stderr)
+
+    index = recipient.get("index")
+    if recipient.get("adapter") == "telegram":
+        token = _recipient_env(recipient.get("token_env")) if recipient.get(
+            "token_env"
+        ) else _recipient_env(f"BAY_RC_{index}_TOKEN")
+        chat = _recipient_env(recipient.get("chat_id_env")) if recipient.get(
+            "chat_id_env"
+        ) else recipient.get("chat_id", "")
+        bay_send_telegram(
+            body, token, chat, timeout=ALERT_WEBHOOK_TIMEOUT, on_error=on_error
+        )
+        return
+    url = _recipient_env(recipient.get("url_env")) if recipient.get(
+        "url_env"
+    ) else _recipient_env(f"BAY_RC_{index}_URL")
+    bay_send_recipient_webhook(
+        body,
+        url,
+        transform=recipient.get("transform"),
+        content_type=recipient.get("content_type"),
+        method=recipient.get("method"),
+        headers=recipient.get("headers"),
+        timeout=ALERT_WEBHOOK_TIMEOUT,
+        max_chars=ALERT_WEBHOOK_MAX_CHARS,
+        on_error=on_error,
+    )
 
 
 def send_alert(alert_id, message):
-    """Fan one alert out to every configured sink.
+    """Fan one alert out to every configured sink, the way bay_notify does.
 
     `alert_id` is the alert's registry ID from alerts/registry.yml. It must be
     passed as a literal string at every call site — tests/test_alert_registry.py
     enforces that, because the registry drift check scans for literals and a
-    variable would make it under-report silently. Accepted and unused here;
-    the webhook receiver routes on it.
+    variable would make it under-report silently.
 
-    Both sends are best-effort: a monitor that dies on a failed alert stops
+    Same order and rules as bay_notify in _notify.sh.j2:
+
+      1. An operator mute (ALERT_POLICY_PATH) suppresses every sink, legacy
+         included. Otherwise "disable this alert" would still deliver to the
+         two sinks people actually have.
+      2. The LEGACY pair (TELEGRAM_* and ALERT_WEBHOOK_URL) fires
+         unconditionally. It never consults the registry, so alerts_disabled
+         and enabled_by_default: false do not reach it — the same
+         grandfathering the shell emitters have. That keeps a legacy
+         consumer's delivery unchanged.
+      3. Each explicit recipient whose render-time ID set contains alert_id
+         gets it through its own adapter.
+
+    Every send is best-effort: a monitor that dies on a failed alert stops
     monitoring.
     """
-    del alert_id
+    try:
+        if bay_alert_muted(alert_id, ALERT_POLICY_PATH):
+            return
+    except Exception as e:  # noqa: BLE001 — a broken mute check must not mute
+        print(f"Failed to read alert overrides: {e}", file=sys.stderr)
+
     body = MSG_HEADER + message + MSG_FOOTER
 
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": body,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            urllib.request.urlopen(req, timeout=10)
-        except Exception as e:
-            print(f"Failed to send Telegram alert: {e}", file=sys.stderr)
+    bay_send_telegram(
+        body,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID,
+        timeout=10,
+        on_error=lambda reason: print(
+            f"Failed to send Telegram alert: {reason}", file=sys.stderr
+        ),
+    )
 
     bay_send_webhook(
         body,
@@ -99,6 +200,14 @@ def send_alert(alert_id, message):
         ),
     )
 
+    for recipient in BAY_RECIPIENTS:
+        if alert_id not in recipient.get("ids", ()):
+            continue
+        try:
+            _send_to_recipient(recipient, body)
+        except Exception as e:  # noqa: BLE001 — fail-open by design
+            print(f"Failed to route alert: {e}", file=sys.stderr)
+
 
 def is_ignored(container_name):
     """Check if a container should be ignored (suffix match)."""
@@ -109,22 +218,44 @@ def is_ignored(container_name):
 
 
 def load_crash_state():
-    """Load crash state from disk. Returns empty dict on missing/corrupt file."""
+    """Load crash state from disk. Returns empty dict on missing/corrupt file.
+
+    Also restores the restart-loop cooldowns, which share the file under
+    RESTART_LOOP_STATE_KEY; the returned dict holds crash entries only.
+    """
+    global restart_loop_alerted
     try:
         with open(STATE_FILE, "r") as f:
-            return json.load(f)
+            data = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    alerted = data.pop(RESTART_LOOP_STATE_KEY, None)
+    if isinstance(alerted, dict):
+        restart_loop_alerted = {
+            str(name): float(ts)
+            for name, ts in alerted.items()
+            if isinstance(ts, (int, float))
+        }
+    return data
 
 
 def save_crash_state():
     """Write crash state atomically (tmp + rename) to avoid corruption."""
     state_dir = os.path.dirname(STATE_FILE)
+    # Drop cooldowns that have run out, so the file cannot grow without bound.
+    now = time.time()
+    for name in [n for n, ts in restart_loop_alerted.items() if now - ts >= RESTART_LOOP_COOLDOWN]:
+        del restart_loop_alerted[name]
+    data = dict(crash_state)
+    if restart_loop_alerted:
+        data[RESTART_LOOP_STATE_KEY] = restart_loop_alerted
     try:
         fd, tmp_path = tempfile.mkstemp(dir=state_dir, suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
-                json.dump(crash_state, f, indent=2)
+                json.dump(data, f, indent=2)
             os.replace(tmp_path, STATE_FILE)
         except BaseException:
             os.unlink(tmp_path)
@@ -251,6 +382,23 @@ def handle_start(event):
 
     if len(restart_timestamps[container_name]) >= RESTART_LOOP_THRESHOLD:
         count = len(restart_timestamps[container_name])
+        # Reset to avoid repeated alerts for the same burst of starts
+        restart_timestamps[container_name] = []
+
+        # Cooldown: a container that keeps looping crosses the threshold every
+        # window. Without this it re-alerted every cycle (16 identical
+        # critical alerts in 16 minutes). Wall-clock, persisted in STATE_FILE.
+        wall_now = time.time()
+        last_alert = restart_loop_alerted.get(container_name)
+        if last_alert is not None and 0 <= wall_now - last_alert < RESTART_LOOP_COOLDOWN:
+            print(
+                f"[{datetime.now().isoformat()}] Restart loop: {container_name} ({count} starts in {RESTART_LOOP_WINDOW}s), alert suppressed by cooldown",
+                flush=True,
+            )
+            return
+        restart_loop_alerted[container_name] = wall_now
+        save_crash_state()
+
         print(
             f"[{datetime.now().isoformat()}] Restart loop: {container_name} ({count} starts in {RESTART_LOOP_WINDOW}s)",
             flush=True,
@@ -263,8 +411,6 @@ def handle_start(event):
             f"\u25b8 Restarts:   <code>{count}</code> in {RESTART_LOOP_WINDOW}s\n"
             f"\u25b8 Time:       {format_timestamp()}"
         )
-        # Reset to avoid repeated alerts for the same loop
-        restart_timestamps[container_name] = []
 
 
 def handle_health_status(event):

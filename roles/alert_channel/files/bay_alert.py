@@ -26,6 +26,8 @@ entities — which is what makes plain string substitution safe here.
 """
 
 import json
+import re
+import time
 import urllib.request
 
 BAY_ALERT_MAX_CHARS = 3500
@@ -142,6 +144,138 @@ def bay_send_webhook(
             except Exception:  # noqa: BLE001
                 pass
         return False
+
+
+def bay_send_telegram(message, token, chat_id, timeout=BAY_ALERT_TIMEOUT, on_error=None):
+    """Send one Telegram-HTML message via sendMessage. Never raises.
+
+    Returns False without a request when either credential is empty, which is
+    what "this sink is not configured" looks like. `on_error` receives a short
+    reason string when delivery fails.
+    """
+    if not token or not chat_id:
+        return False
+    try:
+        request = urllib.request.Request(
+            "https://api.telegram.org/bot" + str(token) + "/sendMessage",
+            data=json.dumps(
+                {
+                    "chat_id": chat_id,
+                    "text": message,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                }
+            ).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=timeout)
+        return True
+    except Exception as exc:  # noqa: BLE001 — fail-open by design
+        if on_error is not None:
+            try:
+                on_error(str(exc))
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+
+def bay_send_recipient_webhook(
+    message,
+    url,
+    transform="html",
+    content_type="text/html",
+    method="POST",
+    headers=None,
+    timeout=BAY_ALERT_TIMEOUT,
+    max_chars=BAY_ALERT_MAX_CHARS,
+    on_error=None,
+):
+    """Deliver one alert to an explicit `adapter: webhook` recipient. Never raises.
+
+    The declarative twin of `_bay_send_r<n>` in _notify.sh.j2: clip first,
+    then transform, then send with the recipient's own method, Content-Type
+    and extra headers. bay_send_webhook above serves the LEGACY sink, which
+    only knows the three `format` presets.
+    """
+    if not url:
+        return False
+    try:
+        body = bay_transform_body(bay_clip(message, max_chars), transform)
+        all_headers = {"Content-Type": content_type or "text/plain"}
+        for key, value in (headers or {}).items():
+            all_headers[str(key)] = str(value)
+        request = urllib.request.Request(
+            url,
+            data=body.encode("utf-8"),
+            headers=all_headers,
+            method=method or "POST",
+        )
+        urllib.request.urlopen(request, timeout=timeout)
+        return True
+    except Exception as exc:  # noqa: BLE001 — fail-open by design
+        if on_error is not None:
+            try:
+                on_error(str(exc))
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+
+# ── Operator mutes ──────────────────────────────────────────────────────────
+#
+# The Python twin of `_bay_muted` in _notify.sh.j2. Same file
+# (alert_policy_path, rendered by roles/alert_policy), same three keys, same
+# rules. PARSED, NEVER EXECUTED: only the whitelisted keys are read, and only
+# in their expected shapes.
+#
+# Fail-open has a direction. Every failure path (missing file, unreadable
+# file, truncated write, unknown schema, malformed epoch) yields NO mute, so
+# the alert still fires. The inverse would let a failed `mv` silence the fleet.
+
+BAY_ALERT_POLICY_SCHEMA = 1
+
+_BAY_DIGITS = re.compile("[0-9]+")
+
+
+def _bay_policy_value(lines, key):
+    """The value of the first `KEY=` line, like `grep -m1 '^KEY=' | cut -d= -f2-`."""
+    prefix = key + "="
+    for line in lines:
+        if line.startswith(prefix):
+            return line[len(prefix):]
+    return None
+
+
+def bay_alert_muted(alert_id, policy_path, now=None):
+    """True when the operator override file mutes `alert_id` right now."""
+    try:
+        with open(policy_path, "rb") as handle:
+            text = handle.read().decode("utf-8", "replace")
+    except (OSError, TypeError, ValueError):
+        return False
+    # grep is line-based on LF only; str.splitlines would also split on CR,
+    # form feed and friends and so disagree with the bash twin.
+    lines = text.split("\n")
+
+    schema = _bay_policy_value(lines, "BAY_ALERTS_SCHEMA")
+    if schema is None or not _BAY_DIGITS.fullmatch(schema):
+        return False
+    # An older framework must ignore a newer file rather than guess at it.
+    if int(schema) != BAY_ALERT_POLICY_SCHEMA:
+        return False
+
+    until = _bay_policy_value(lines, "BAY_ALERTS_MUTE_UNTIL")
+    if until is None or not _BAY_DIGITS.fullmatch(until):
+        return False
+    # An expired mute is inert, not extended.
+    current = int(time.time()) if now is None else int(now)
+    if int(until) <= current:
+        return False
+
+    mute = _bay_policy_value(lines, "BAY_ALERTS_MUTE")
+    if not mute:
+        return False
+    return alert_id in mute.split()
 
 
 # ── Recipients and routing ──────────────────────────────────────────────────
