@@ -556,3 +556,53 @@ def test_crash_state_max_age_default_is_in_the_role_defaults():
     )
     assert defaults["docker_monitor_crash_state_max_age"] == 604800
 
+
+# ── the health-check cooldown right after boot ───────────────────────────
+#
+# health_cooldowns used `.get(name, 0)` against time.monotonic(), which counts
+# from boot. For the first HEALTH_COOLDOWN_SECONDS after a reboot every
+# container looked like it had alerted at t=0, so the first unhealthy event
+# was swallowed exactly when it mattered most.
+
+
+def _unhealthy(monitor, name):
+    monitor.handle_health_status(
+        {"Action": "health_status: unhealthy", "Actor": {"Attributes": {"name": name}}}
+    )
+
+
+def test_first_unhealthy_event_after_boot_fires(tmp_path, sent, recipients_only, monkeypatch):
+    monitor = _load(_render(tmp_path, alert_recipients=_RECIPIENTS))
+    clock = [12.0]  # twelve seconds after boot
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+
+    _unhealthy(monitor, "web")
+    assert len(_to(sent, _SECRET_URL)) == 1, (
+        "the first container.health_check_failed after boot was suppressed"
+    )
+
+    clock[0] = 12.0 + 120
+    _unhealthy(monitor, "web")
+    assert len(_to(sent, _SECRET_URL)) == 1, "a second alert inside 300 s must be suppressed"
+
+    clock[0] = 12.0 + 301
+    _unhealthy(monitor, "web")
+    assert len(_to(sent, _SECRET_URL)) == 2, "the cooldown never ran out"
+
+
+def test_health_cooldown_is_per_container(tmp_path, sent, recipients_only, monkeypatch):
+    monitor = _load(_render(tmp_path, alert_recipients=_RECIPIENTS))
+    monkeypatch.setattr(time, "monotonic", lambda: 5.0)
+    _unhealthy(monitor, "web")
+    _unhealthy(monitor, "api")
+    assert len(_to(sent, _SECRET_URL)) == 2
+
+
+def test_no_utcnow_in_the_monitor(tmp_path):
+    """datetime.utcnow() is deprecated; the timestamp format must not change."""
+    source = _render(tmp_path)
+    assert "utcnow(" not in source
+    monitor = _load(source)
+    import re as _re
+
+    assert _re.fullmatch(r"[A-Z][a-z]{2} \d{2}, \d{2}:\d{2} UTC", monitor.format_timestamp())

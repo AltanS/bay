@@ -482,7 +482,8 @@ that keeps looping crosses the threshold again every detection window, and
 without the cooldown it paged once per window. The cooldown is stored in the
 monitor's state file, so restarting the monitor does not reset it. Set it to
 `0` to turn it off. `container.health_check_failed` keeps its fixed 300 second
-cooldown.
+cooldown per container. The first unhealthy event for a container always
+fires, including in the first five minutes after a host boot.
 
 The same state file holds one row per crashed container, removed when the
 container starts again. A row for a one-off `docker run` container that never
