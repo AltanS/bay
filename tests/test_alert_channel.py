@@ -518,7 +518,10 @@ def test_docker_monitor_renders_to_valid_python():
 
 def test_webhook_app_imports_the_shared_adapters():
     content = (_ROLES / "git_deploy" / "files" / "webhook" / "app.py").read_text()
-    assert "from bay_alert import bay_send_webhook" in content
+    assert "from bay_alert import (" in content
+    for name in ("bay_send_webhook", "bay_send_telegram", "bay_alert_muted",
+                 "bay_route_to_recipients"):
+        assert f"    {name},\n" in content, f"app.py no longer imports {name}"
     dockerfile = (
         _ROLES / "git_deploy" / "files" / "webhook" / "Dockerfile"
     ).read_text()
@@ -1139,10 +1142,6 @@ _TELEGRAM_ALLOWED = {
     "roles/alert_channel/templates/_notify.sh.j2",
     "roles/alert_channel/files/bay_alert.py",
     "roles/alert_channel/tasks/send_alert.yml",
-    # The webhook receiver's `send_alert()` still carries its own Telegram
-    # transport. docker-monitor's moved to the shared bay_send_telegram() in
-    # bay_alert.py; doing the same here is the outstanding cleanup.
-    "roles/git_deploy/files/webhook/app.py",
     # CLI-side audit ping from `bay build`. Not a registry alert: it is an
     # operator audit trail written from the control node, deliberately
     # independent of rebuild.sh and systemd env inheritance.

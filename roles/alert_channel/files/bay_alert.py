@@ -278,6 +278,124 @@ def bay_alert_muted(alert_id, policy_path, now=None):
     return alert_id in mute.split()
 
 
+# ── Explicit recipient delivery ─────────────────────────────────────────────
+#
+# The Python twin of the `_bay_send_r<n>` functions and the `_bay_route` case
+# list in _notify.sh.j2, shared by docker-monitor and the webhook receiver.
+#
+# Each entry is the NON-SECRET routing record that filter_plugins'
+# bay_alert_routing() builds at render time: index, name, adapter, the alert
+# IDs it receives, chat_id, transform, content_type, method, and the names in
+# token_env / chat_id_env / url_env. Credentials are never in the entry. They
+# are read at call time from `environ`: BAY_RC_<index>_TOKEN / _URL for a
+# literal bot_token / url (the same 1-based index alert.env.j2 writes), or the
+# variable a *_env field names.
+#
+# `headers` may carry a bearer token. docker-monitor renders them into its
+# 0750 script, like the shell emitters, so they arrive in the entry. The
+# webhook receiver's routing table holds no secret, so there they travel with
+# the other recipient credentials as BAY_RC_<index>_HEADERS (a JSON object).
+
+
+def _bay_env(environ, name):
+    return str(environ.get(name, "") or "") if name else ""
+
+
+def _bay_recipient_headers(recipient, environ):
+    headers = recipient.get("headers")
+    if headers:
+        return headers
+    raw = _bay_env(environ, "BAY_RC_" + str(recipient.get("index")) + "_HEADERS")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def bay_send_to_recipient(
+    recipient,
+    body,
+    environ,
+    timeout=BAY_ALERT_TIMEOUT,
+    max_chars=BAY_ALERT_MAX_CHARS,
+    on_error=None,
+):
+    """Deliver one message to one explicit recipient entry. Never raises."""
+    index = str(recipient.get("index"))
+    if recipient.get("adapter") == "telegram":
+        if recipient.get("token_env"):
+            token = _bay_env(environ, recipient.get("token_env"))
+        else:
+            token = _bay_env(environ, "BAY_RC_" + index + "_TOKEN")
+        if recipient.get("chat_id_env"):
+            chat = _bay_env(environ, recipient.get("chat_id_env"))
+        else:
+            chat = recipient.get("chat_id", "")
+        return bay_send_telegram(body, token, chat, timeout=timeout, on_error=on_error)
+    if recipient.get("url_env"):
+        url = _bay_env(environ, recipient.get("url_env"))
+    else:
+        url = _bay_env(environ, "BAY_RC_" + index + "_URL")
+    return bay_send_recipient_webhook(
+        body,
+        url,
+        transform=recipient.get("transform"),
+        content_type=recipient.get("content_type"),
+        method=recipient.get("method"),
+        headers=_bay_recipient_headers(recipient, environ),
+        timeout=timeout,
+        max_chars=max_chars,
+        on_error=on_error,
+    )
+
+
+def bay_route_to_recipients(
+    alert_id,
+    body,
+    recipients,
+    environ,
+    timeout=BAY_ALERT_TIMEOUT,
+    max_chars=BAY_ALERT_MAX_CHARS,
+    on_error=None,
+):
+    """Send `body` to every recipient whose render-time ID set holds `alert_id`.
+
+    `on_error(label, reason)` is told about each failed delivery. Returns the
+    number of recipients the alert was routed to. Never raises: an emitter
+    that dies on a failed alert stops emitting.
+    """
+    routed = 0
+    for recipient in recipients or ():
+        try:
+            if alert_id not in (recipient.get("ids") or ()):
+                continue
+            routed += 1
+            label = recipient.get("name") or "unnamed"
+
+            def _report(reason, label=label):
+                if on_error is not None:
+                    on_error(label, reason)
+
+            bay_send_to_recipient(
+                recipient,
+                body,
+                environ,
+                timeout=timeout,
+                max_chars=max_chars,
+                on_error=_report,
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-open by design
+            if on_error is not None:
+                try:
+                    on_error("unnamed", str(exc))
+                except Exception:  # noqa: BLE001
+                    pass
+    return routed
+
+
 # ── Recipients and routing ──────────────────────────────────────────────────
 #
 # The severity ladder is defined in

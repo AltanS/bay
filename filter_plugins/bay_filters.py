@@ -90,6 +90,43 @@ def bay_alert_ids_for(recipient, disabled=None, enabled=None):
     return bay_recipient_alert_ids(_ALERT_REGISTRY, recipient, disabled, enabled)
 
 
+def bay_alert_routing(recipients, disabled=None, enabled=None, with_headers=True):
+    """The non-secret routing table for the Python emitters, one entry each.
+
+    Same list, same order and the same 1-based `index` as alert.env.j2 and
+    _notify.sh.j2 use, so BAY_RC_<index>_* lines up across all three. Each
+    entry carries the IDs this recipient receives (bay_alert_ids_for) and its
+    non-secret config; a literal bot_token or url is NEVER included, because
+    bay_send_to_recipient() in bay_alert.py reads those from the environment.
+
+    `with_headers=False` drops the declarative webhook headers. A header may
+    carry a bearer token, and the webhook receiver's routing table is meant to
+    hold no secret, so the receiver gets its headers as BAY_RC_<n>_HEADERS,
+    next to the other recipient credentials.
+    """
+    out = []
+    for index, recipient in enumerate(recipients or (), start=1):
+        normalized = bay_alert_recipient(recipient)
+        config = normalized.get("config") or {}
+        entry = {
+            "index": index,
+            "name": str(normalized.get("name") or "unnamed"),
+            "adapter": str(normalized.get("adapter")),
+            "ids": bay_alert_ids_for(recipient, disabled or [], enabled or []),
+            "token_env": bay_env_name(config["token_env"]) if "token_env" in config else "",
+            "chat_id": str(config.get("chat_id", "")),
+            "chat_id_env": bay_env_name(config["chat_id_env"]) if "chat_id_env" in config else "",
+            "url_env": bay_env_name(config["url_env"]) if "url_env" in config else "",
+            "transform": str(config.get("transform", "html")),
+            "content_type": str(config.get("content_type", "text/plain")),
+            "method": str(config.get("method", "POST")),
+        }
+        if with_headers:
+            entry["headers"] = config.get("headers") or {}
+        out.append(entry)
+    return out
+
+
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -184,6 +221,7 @@ class FilterModule:
             "bay_alert_content_type": bay_alert_content_type,
             "bay_alert_recipients": bay_alert_recipients,
             "bay_alert_ids_for": bay_alert_ids_for,
+            "bay_alert_routing": bay_alert_routing,
             "bay_alert_recipient": bay_alert_recipient,
             "bay_alert_registry": bay_alert_registry,
             "bay_recipient_target": bay_recipient_target,

@@ -354,8 +354,17 @@
         # including those who never enable the feature. Same pattern as
         # WATCHTOWER_NOTIFICATION_URL above.
         ALERT_WEBHOOK_FORMAT: "{{ alert_webhook_format | default('campfire') if (alert_webhook_url | default('')) | length > 0 else omit }}"
+        # Operator mutes, read by send_alert() at call time. See the volume.
+        ALERT_POLICY_PATH: "/etc/bay-alert-policy/{{ alert_policy_path | default('/etc/bay/alert-overrides') | basename }}"
       volumes:
         - "{{ stack_dir }}/triggers:/triggers"
+        # The DIRECTORY holding the alert_policy file, read-only. Not the file:
+        # roles/alert_policy replaces it by rename, and a single-file bind
+        # mount keeps the old inode, so a mute would not reach the receiver
+        # until it restarted. The other file there, alert.env, is 0600
+        # root:root and unreadable to the receiver's fixed non-root UID.
+        # Missing file = no mute (fail-open).
+        - "{{ alert_policy_path | default('/etc/bay/alert-overrides') | dirname }}:/etc/bay-alert-policy:ro"
         # app.py appends Telegram delivery failures to /state — unmounted, the
         # writes land in the container's writable layer and vanish on recreate.
         # Mirrors _webhook_receiver.j2.

@@ -271,8 +271,8 @@ They desugar into implicit recipients with a `debug` floor, so they receive
 everywhere else.
 
 **This is the reason to migrate.** The two legacy senders fire unconditionally
-inside `bay_notify()` and inside docker-monitor's `send_alert()`; they never
-consult the registry, so
+inside `bay_notify()` and inside the `send_alert()` of docker-monitor and the
+webhook receiver; they never consult the registry, so
 `enabled_by_default: false` does not reach them. A consumer still on
 `alert_webhook_url` keeps getting `webhook.received` on every push no matter
 what the registry says. Only mutes apply to them, because a mute has to be
@@ -442,6 +442,40 @@ Because the routing is baked in, a change to `alert_recipients`,
 `alerts_enabled` or `alerts_disabled` reaches the monitor only when it is
 re-rendered: `bin/bay deploy <env> --tags monitoring`.
 
+The webhook receiver (`roles/git_deploy/files/webhook/app.py`, container
+`bay-webhook`) routes the same way, in the same order, with the same shared
+helpers (`bay_alert_muted`, `bay_send_telegram` and
+`bay_route_to_recipients` in `bay_alert.py`). It runs in a container, so the
+three inputs reach it differently:
+
+- **Routing.** `BAY_ALERT_ROUTING` in `<stack_dir>/env/bay-webhook.env`
+  holds the table from the same `bay_alert_routing` filter the monitor uses:
+  per recipient, the alert IDs it receives and its non-secret config. It holds
+  no credential and no headers. It is written only when `alert_recipients` is
+  set, so a legacy consumer's env file does not change.
+- **Credentials.** The same env file holds `BAY_RC_<n>_TOKEN` and
+  `BAY_RC_<n>_URL`, from the same values and under the same 1-based index as
+  `/etc/bay/alert.env`. Declarative webhook `headers` can carry a bearer
+  token, so they go there too, as `BAY_RC_<n>_HEADERS` (a JSON object). The
+  file is 0640, like the receiver's other secrets, and no credential is in
+  the container spec, the rendered compose file or app.py. A
+  `token_env`, `chat_id_env` or `url_env` names a variable in the
+  container's own environment, which holds only what that file and the
+  container spec set.
+- **Mutes.** The directory that holds `alert_policy_path` is mounted
+  read-only at `/etc/bay-alert-policy`, and `ALERT_POLICY_PATH` points at the
+  file inside it. The directory is mounted, not the file: `alert_policy`
+  replaces the file by rename, and a single-file bind mount keeps showing the
+  old one until the container restarts. The other file in that directory,
+  `alert.env`, is 0600 root and the receiver runs as a fixed non-root UID, so
+  it cannot read it. A missing or malformed file means no mute.
+
+A change to `alert_recipients`, `alerts_enabled` or `alerts_disabled` reaches
+the receiver when deploy_stack re-renders its env file. The reconciler hashes
+that file, so the container is recreated in the same run:
+`bin/bay deploy <env> --tags deploy_stack`. A mute set with
+`--tags alert_policy` reaches it without a container restart.
+
 `container.restart_loop` has a per-container cooldown,
 `docker_monitor_restart_loop_cooldown` (default 1800 seconds). A container
 that keeps looping crosses the threshold again every detection window, and
@@ -537,8 +571,12 @@ not run. That is the structural fix for the GH#33 class of bug.
 - **Off by default, and inert when off.** No recipients means zero extra
   outbound calls and zero log noise.
 - **No container churn.** The webhook receiver's `ALERT_WEBHOOK_*` env keys use
-  Ansible's `omit` when the feature is off, so the container spec — and its
-  `config_hash` — is unchanged for consumers who never enable it.
+  Ansible's `omit` when the feature is off, and `BAY_ALERT_ROUTING` and the
+  `BAY_RC_<n>_*` lines are written only when `alert_recipients` is set, so the
+  container spec and its `config_hash` do not change for consumers who never
+  enable them. The one exception is the upgrade to 0.6.12, which adds the
+  read-only mute mount for everyone; that release also rebuilds the receiver
+  image, which recreates the container anyway.
 - **Untrusted text is escaped.** Build-failure alerts embed a 500-byte tail of
   raw build output. It goes through `bay_html_escape` first: unescaped, a `<`
   or `&` produces malformed HTML, Telegram rejects it with a 400, and the

@@ -33,6 +33,8 @@ def _alert_filters() -> dict:
         for name in (
             "bay_alert_recipients",
             "bay_alert_ids_for",
+            "bay_alert_routing",
+            "bay_env_value",
             "bay_alert_recipient",
             "bay_alert_registry",
             "bay_recipient_target",

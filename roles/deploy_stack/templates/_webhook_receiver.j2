@@ -34,6 +34,7 @@
       - HOSTNAME={% include '_host_label.j2' +%}
       - LOCAL_REGION={{ region | default('') }}
       - WEBHOOK_PEER_TIMEOUT={{ git_deploy_webhook_peer_timeout | default(10) }}
+      - ALERT_POLICY_PATH=/etc/bay-alert-policy/{{ alert_policy_path | default('/etc/bay/alert-overrides') | basename }}
 {% if _is_build_server and ns.has_remote %}
       - IS_BUILD_SERVER=true
 {% endif %}
@@ -41,6 +42,8 @@
     volumes:
       - {{ stack_dir }}/triggers:/triggers
       - {{ stack_dir }}/state:/state
+      # Directory, not file: see the reconciler spec in build_specs.yml.
+      - {{ alert_policy_path | default('/etc/bay/alert-overrides') | dirname }}:/etc/bay-alert-policy:ro
       - {{ stack_dir }}/webhook/config.json:/config/services.json:ro
       - {{ stack_dir }}/webhook/image-map.json:/config/image-map.json:ro
 {{ macros.logging_block({}) }}

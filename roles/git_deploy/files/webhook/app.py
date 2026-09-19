@@ -16,7 +16,12 @@ from pathlib import Path
 
 import pathspec
 
-from bay_alert import bay_send_webhook
+from bay_alert import (
+    bay_alert_muted,
+    bay_route_to_recipients,
+    bay_send_telegram,
+    bay_send_webhook,
+)
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 TRIGGER_DIR = Path(os.environ.get("TRIGGER_DIR", "/triggers"))
@@ -55,6 +60,41 @@ ALERT_WEBHOOK_MAX_CHARS = int(os.environ.get("ALERT_WEBHOOK_MAX_CHARS", "3500"))
 TELEGRAM_FAILURES_LOG = Path(
     os.environ.get("TELEGRAM_FAILURES_LOG", "/state/telegram-failures.log")
 )
+
+# Operator mutes (roles/alert_policy). The host directory holding the file is
+# mounted read-only, not the file itself: Ansible replaces the file by rename,
+# and a single-file bind mount would keep showing the old inode until the
+# container restarted. Read at CALL time, parsed and never executed, and
+# fail-open: unset, missing or malformed means no mute. See bay_alert_muted.
+ALERT_POLICY_PATH = os.environ.get("ALERT_POLICY_PATH", "")
+
+
+def _load_alert_routing(raw: str) -> list[dict]:
+    """Parse BAY_ALERT_ROUTING, the explicit-recipient routing table.
+
+    Rendered by deploy_stack into bay-webhook.env from the same
+    bay_alert_routing filter docker-monitor uses: one entry per
+    alert_recipients item, with the alert IDs it receives and its non-secret
+    config. No credential is in it. Literal tokens and URLs arrive as
+    BAY_RC_<n>_TOKEN / BAY_RC_<n>_URL, and headers as BAY_RC_<n>_HEADERS.
+
+    Unset means a legacy consumer: no explicit recipients. A malformed value
+    is reported and treated the same way; the legacy pair still fires.
+    """
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError as e:
+        print(f"[webhook] WARNING: BAY_ALERT_ROUTING is not valid JSON: {e}", flush=True)
+        return []
+    if not isinstance(data, list):
+        print("[webhook] WARNING: BAY_ALERT_ROUTING is not a list", flush=True)
+        return []
+    return [entry for entry in data if isinstance(entry, dict)]
+
+
+BAY_RECIPIENTS: list[dict] = _load_alert_routing(os.environ.get("BAY_ALERT_ROUTING", ""))
 
 # Hard cap on a request body, enforced by the SERVER, not by the client's own
 # Content-Length header. Without it the only bound on how much this process
@@ -263,9 +303,7 @@ def compute_routing(
 
 
 def format_timestamp():
-    from datetime import datetime
-
-    return datetime.utcnow().strftime("%b %d, %H:%M UTC")
+    return datetime.now(timezone.utc).strftime("%b %d, %H:%M UTC")
 
 
 def _record_telegram_failure(reason: str) -> None:
@@ -295,37 +333,56 @@ def _record_webhook_failure(reason: str) -> None:
         pass
 
 
+def _record_recipient_failure(label: str, reason: str) -> None:
+    """Same best-effort record, for an explicit alert_recipients entry."""
+    try:
+        TELEGRAM_FAILURES_LOG.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).isoformat()
+        with TELEGRAM_FAILURES_LOG.open("a") as f:
+            f.write(f"[{ts}] recipient {label} send failed on {HOSTNAME}: {reason}\n")
+    except OSError:
+        pass
+
+
 def send_alert(alert_id, message):
     """Fan one alert out to every configured sink (best-effort, never blocks).
 
     `alert_id` is the alert's registry ID from alerts/registry.yml, and must be
     a literal at every call site — tests/test_alert_registry.py enforces that,
     because the drift check scans for literals and a variable would make it
-    under-report silently. Accepted and unused here; the monitor routes on it.
+    under-report silently.
+
+    Same order and rules as bay_notify in _notify.sh.j2 and send_alert in
+    docker-monitor.py.j2:
+
+      1. An operator mute (ALERT_POLICY_PATH) suppresses every sink, legacy
+         included.
+      2. The LEGACY pair (TELEGRAM_* and ALERT_WEBHOOK_URL) fires
+         unconditionally, exactly as before: it never consults the registry.
+      3. Each explicit recipient in BAY_RECIPIENTS whose render-time ID set
+         contains alert_id gets it through its own adapter.
 
     See roles/alert_channel/files/bay_alert.py for the shared adapters.
     """
-    del alert_id
+    try:
+        if ALERT_POLICY_PATH and bay_alert_muted(alert_id, ALERT_POLICY_PATH):
+            return
+    except Exception as e:  # noqa: BLE001 — a broken mute check must not mute
+        print(f"[webhook] alert override read failed: {e}", flush=True)
+
     body = MSG_HEADER + message
 
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": body,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        }
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        try:
-            urllib.request.urlopen(req, timeout=10)
-        except Exception as e:
-            print(f"[webhook] Telegram send failed: {e}", flush=True)
-            _record_telegram_failure(str(e))
+    def _on_telegram_error(reason: str) -> None:
+        print(f"[webhook] Telegram send failed: {reason}", flush=True)
+        _record_telegram_failure(reason)
+
+    bay_send_telegram(
+        body,
+        TELEGRAM_BOT_TOKEN,
+        TELEGRAM_CHAT_ID,
+        timeout=10,
+        on_error=_on_telegram_error,
+    )
 
     def _on_webhook_error(reason: str) -> None:
         print(f"[webhook] alert webhook send failed: {reason}", flush=True)
@@ -338,6 +395,20 @@ def send_alert(alert_id, message):
         timeout=ALERT_WEBHOOK_TIMEOUT,
         max_chars=ALERT_WEBHOOK_MAX_CHARS,
         on_error=_on_webhook_error,
+    )
+
+    def _on_recipient_error(label: str, reason: str) -> None:
+        print(f"[webhook] alert recipient {label} send failed: {reason}", flush=True)
+        _record_recipient_failure(label, reason)
+
+    bay_route_to_recipients(
+        alert_id,
+        body,
+        BAY_RECIPIENTS,
+        os.environ,
+        timeout=ALERT_WEBHOOK_TIMEOUT,
+        max_chars=ALERT_WEBHOOK_MAX_CHARS,
+        on_error=_on_recipient_error,
     )
 
 

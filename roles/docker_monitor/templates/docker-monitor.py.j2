@@ -59,14 +59,13 @@ ALERT_POLICY_PATH = {{ alert_policy_path | default('/etc/bay/alert-overrides') |
   Explicit recipients: the Python twin of the _bay_send_r<n> functions and the
   _bay_route `case` list in roles/alert_channel/templates/_notify.sh.j2.
 
-  ROUTING is baked in; CREDENTIALS are not. Each entry carries the alert IDs
-  this recipient receives, resolved at render time by the same
-  bay_alert_ids_for filter over the same recipient, and its non-secret config.
-  A literal bot_token or url is read at run time from BAY_RC_<n>_TOKEN /
-  BAY_RC_<n>_URL, which alert.env.j2 writes under the same 1-based index this
-  loop uses (same list, same order). token_env / chat_id_env / url_env name a
-  variable in the unit's environment instead; the name is validated at render
-  time like the shell twin does.
+  ROUTING is baked in; CREDENTIALS are not. The bay_alert_routing filter builds
+  one non-secret entry per recipient (same list, same order, same 1-based
+  index as alert.env.j2), carrying the alert IDs it receives. The webhook
+  receiver gets the same table from the same filter. A literal bot_token or url
+  is read at run time from BAY_RC_<n>_TOKEN / BAY_RC_<n>_URL, and token_env /
+  chat_id_env / url_env name a variable in the unit's environment instead; see
+  bay_send_to_recipient in bay_alert.py.
 
   Each entry is emitted as a JSON string literal and parsed at import, so no
   consumer value is ever pasted into Python syntax.
@@ -74,23 +73,7 @@ ALERT_POLICY_PATH = {{ alert_policy_path | default('/etc/bay/alert-overrides') |
 # Explicit recipients (alert_recipients). Routing resolved at render time from
 # alerts/registry.yml; credentials come from the environment only.
 BAY_RECIPIENTS = [
-{% for _r in (alert_recipients | default([])) %}
-{% set _rn = _r | bay_alert_recipient %}
-{% set _rc = _rn.config %}
-{% set _entry = {
-  "index": loop.index,
-  "name": _rn.name | default('unnamed') | string,
-  "adapter": _rn.adapter | string,
-  "ids": _r | bay_alert_ids_for(alerts_disabled | default([]), alerts_enabled | default([])),
-  "token_env": (_rc.token_env | bay_env_name) if _rc.token_env is defined else "",
-  "chat_id": (_rc.chat_id | default('') | string),
-  "chat_id_env": (_rc.chat_id_env | bay_env_name) if _rc.chat_id_env is defined else "",
-  "url_env": (_rc.url_env | bay_env_name) if _rc.url_env is defined else "",
-  "transform": (_rc.transform | default('html') | string),
-  "content_type": (_rc.content_type | default('text/plain') | string),
-  "method": (_rc.method | default('POST') | string),
-  "headers": _rc.headers | default({}),
-} %}
+{% for _entry in (alert_recipients | default([])) | bay_alert_routing(alerts_disabled | default([]), alerts_enabled | default([])) %}
     json.loads({{ _entry | to_json | to_json }}),
 {% endfor %}
 ]
@@ -106,45 +89,6 @@ HEALTH_COOLDOWN_SECONDS = 300
 # collide with a crash_state entry.
 restart_loop_alerted = {}
 RESTART_LOOP_STATE_KEY = "_restart_loop_alerted"
-
-
-def _recipient_env(name):
-    return os.environ.get(name, "") if name else ""
-
-
-def _send_to_recipient(recipient, body):
-    """Deliver one message to one explicit recipient. Never raises."""
-    label = recipient.get("name") or "unnamed"
-
-    def on_error(reason):
-        print(f"Failed to send alert to recipient {label}: {reason}", file=sys.stderr)
-
-    index = recipient.get("index")
-    if recipient.get("adapter") == "telegram":
-        token = _recipient_env(recipient.get("token_env")) if recipient.get(
-            "token_env"
-        ) else _recipient_env(f"BAY_RC_{index}_TOKEN")
-        chat = _recipient_env(recipient.get("chat_id_env")) if recipient.get(
-            "chat_id_env"
-        ) else recipient.get("chat_id", "")
-        bay_send_telegram(
-            body, token, chat, timeout=ALERT_WEBHOOK_TIMEOUT, on_error=on_error
-        )
-        return
-    url = _recipient_env(recipient.get("url_env")) if recipient.get(
-        "url_env"
-    ) else _recipient_env(f"BAY_RC_{index}_URL")
-    bay_send_recipient_webhook(
-        body,
-        url,
-        transform=recipient.get("transform"),
-        content_type=recipient.get("content_type"),
-        method=recipient.get("method"),
-        headers=recipient.get("headers"),
-        timeout=ALERT_WEBHOOK_TIMEOUT,
-        max_chars=ALERT_WEBHOOK_MAX_CHARS,
-        on_error=on_error,
-    )
 
 
 def send_alert(alert_id, message):
@@ -200,13 +144,17 @@ def send_alert(alert_id, message):
         ),
     )
 
-    for recipient in BAY_RECIPIENTS:
-        if alert_id not in recipient.get("ids", ()):
-            continue
-        try:
-            _send_to_recipient(recipient, body)
-        except Exception as e:  # noqa: BLE001 — fail-open by design
-            print(f"Failed to route alert: {e}", file=sys.stderr)
+    bay_route_to_recipients(
+        alert_id,
+        body,
+        BAY_RECIPIENTS,
+        os.environ,
+        timeout=ALERT_WEBHOOK_TIMEOUT,
+        max_chars=ALERT_WEBHOOK_MAX_CHARS,
+        on_error=lambda label, reason: print(
+            f"Failed to send alert to recipient {label}: {reason}", file=sys.stderr
+        ),
+    )
 
 
 def is_ignored(container_name):
