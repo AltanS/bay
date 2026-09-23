@@ -7,6 +7,30 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.7.0] - 2026-09-23
+
+### Added
+
+- `config_files_mode: public` on a service or accessory makes its
+  `config_files` world-readable. Bay writes config files as 0640 and their
+  directories as 0750, owner the deploy user, group `docker`, so a container
+  that runs as another uid (a `node` image runs as uid 1000) could not read a
+  folder mounted from there, and a service block has no `user` or `group_add`
+  to fix it from the container side. With `public`, that definition's files
+  become 0644, and every directory on the way to them, `<stack_dir>/config`
+  included, becomes 0755. A file listed by a public and a private definition
+  is public. A directory shared with private files exposes their names, never
+  their contents. `bin/bay validate` and the deploy both refuse any value
+  other than `private` and `public`. See "Config Files" in docs/services.md.
+- The config file tasks moved from `roles/deploy_stack/tasks/main.yml` into
+  `config_files.yml`, so a test can run them for real against a scratch
+  directory.
+
+### Upgrade notes
+
+- Nothing to do. Without the key, modes stay 0640 and 0750, the same as
+  before, on every host.
+
 ## [0.6.12] - 2026-09-19
 
 ### Fixed

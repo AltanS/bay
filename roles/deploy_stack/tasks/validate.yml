@@ -413,6 +413,25 @@
     - (log_retention_disk_bytes | int) > 0
     - (_budget_total | int) > (_budget_ceiling | int)
 
+# ── config_files_mode ─────────────────────────────────────────────────
+# `bin/bay validate` refuses other values through the schema enum. This is
+# the deploy-time twin: an unknown value must never fall back to either mode
+# silently, since one reading exposes files and the other locks a container
+# out of them.
+
+- name: Validate config_files_mode value
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' sets config_files_mode={{ item.value.config_files_mode | to_json }}.
+      Only 'private' (the default, files 0640) and 'public' (files 0644,
+      their directories 0755) are supported.
+  loop: "{{ (active_services | combine(active_accessories)) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - item.value.config_files_mode is defined
+    - item.value.config_files_mode not in ['private', 'public']
+
 # ── basicauth $$ escape detection ─────────────────────────────────────────
 # The bay_traefik_labels Python filter passes label values directly to the
 # Docker API via community.docker.docker_container — NO Compose interpolation

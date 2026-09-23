@@ -117,6 +117,11 @@
           "items": { "type": "string" },
           "description": "Config files to copy into the stack directory."
         },
+        "config_files_mode": {
+          "type": "string",
+          "enum": ["private", "public"],
+          "description": "Permissions for this definition's config_files. 'private' (default): files 0640, directories 0750, readable by the deploy user and the docker group only. 'public': files 0644, and config/ plus every directory on the way to them 0755, so a container that runs as a uid outside the docker group can read them. Only for files that hold no secret."
+        },
         "public_routes": {
           "type": "array",
           "items": { "type": "string", "pattern": "^/[A-Za-z0-9._~%+/*-]*$" },
@@ -271,6 +276,11 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Config files to copy."
+        },
+        "config_files_mode": {
+          "type": "string",
+          "enum": ["private", "public"],
+          "description": "Permissions for this definition's config_files. 'private' (default): files 0640, directories 0750, readable by the deploy user and the docker group only. 'public': files 0644, and config/ plus every directory on the way to them 0755, so a container that runs as a uid outside the docker group can read them. Only for files that hold no secret."
         },
         "database": {
           "$ref": "#/$defs/database_block"

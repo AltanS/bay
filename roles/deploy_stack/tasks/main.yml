@@ -139,48 +139,10 @@
 
     # ── Config Files ─────────────────────────────────────────────────
 
-    - name: Collect config files from all definitions
-      ansible.builtin.set_fact:
-        docker_compose_config_files: >-
-          {{
-            ((active_services | default({})) | dict2items | selectattr('value.config_files', 'defined')
-              | map(attribute='value.config_files') | flatten)
-            +
-            ((active_accessories | default({})) | dict2items | selectattr('value.config_files', 'defined')
-              | map(attribute='value.config_files') | flatten)
-          }}
-
-    - name: Ensure config directory exists
-      ansible.builtin.file:
-        path: "{{ stack_dir }}/config"
-        state: directory
-        owner: "{{ app_user }}"
-        group: docker
-        mode: "0750"
-      when: docker_compose_config_files | length > 0
-
-    - name: Ensure config subdirectories exist
-      ansible.builtin.file:
-        path: "{{ stack_dir }}/config/{{ item }}"
-        state: directory
-        owner: "{{ app_user }}"
-        group: docker
-        mode: "0750"
-      loop: "{{ docker_compose_config_files | map('dirname') | unique }}"
-      loop_control:
-        label: "config/{{ item }}"
-
+    # Modes depend on `config_files_mode`; see config_files.yml.
     - name: Deploy config files
-      ansible.builtin.copy:
-        src: "{{ playbook_dir | dirname }}/files/{{ item }}"
-        dest: "{{ stack_dir }}/config/{{ item }}"
-        owner: "{{ app_user }}"
-        group: docker
-        mode: "0640"
-      loop: "{{ docker_compose_config_files }}"
-      loop_control:
-        label: "config/{{ item }}"
-      register: docker_compose_config_result
+      ansible.builtin.include_tasks: config_files.yml
+      tags: [deploy_stack]
 
     # ── Compose File (documentation only) ──────────────────────────────
 

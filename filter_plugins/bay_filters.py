@@ -2,6 +2,7 @@
 
 import hashlib
 import importlib.util
+import posixpath
 import re
 from pathlib import Path
 
@@ -230,7 +231,37 @@ class FilterModule:
             "bay_env_name": bay_env_name,
             "bay_env_value": bay_env_value,
             "bay_alert_env_value": bay_alert_env_value,
+            "bay_config_dirs": bay_config_dirs,
         }
+
+
+def bay_config_dirs(paths):
+    """Every directory a process must traverse to reach the given config files.
+
+    Paths are relative to {{ stack_dir }}/config/, and so is the result. The
+    empty string stands for config/ itself and comes first whenever there is
+    at least one path. Parents come before children, each directory once.
+
+    ["legal/en/terms.md", "legal/de/terms.md", "top.conf"]
+        -> ["", "legal", "legal/en", "legal/de"]
+    []  -> []
+
+    deploy_stack uses it for `config_files_mode: public`: a 0644 file behind a
+    0750 parent is still unreadable to a uid outside the docker group.
+    """
+    dirs = []
+    for path in paths or []:
+        # posixpath.dirname is what Ansible's `dirname` filter calls, so each
+        # entry here is spelled exactly like the loop item it must match.
+        chain = []
+        current = posixpath.dirname(str(path))
+        while current and current not in chain:
+            chain.append(current)
+            current = posixpath.dirname(current)
+        for d in [""] + chain[::-1]:
+            if d not in dirs:
+                dirs.append(d)
+    return dirs
 
 
 # ── Port-drift detection helpers ──────────────────────────────────────────

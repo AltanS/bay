@@ -56,6 +56,8 @@ services:
 
     config_files:                    # Config files to deploy
       - gatus/config.yaml            #   source: files/<path>, dest: config/<path>
+    config_files_mode: private       # private (default: 0640 files, 0750 dirs) | public (0644, 0755)
+                                     #   see "Config Files" below
 
     volumes:                         # Bind mounts or named volumes
       - ./config:/config:ro
@@ -199,6 +201,7 @@ accessories:
 
     config_files:                    # Config files to deploy
       - redis/redis.conf             #   source: files/<path>, dest: config/<path>
+    config_files_mode: private       # private (default) | public, same as services
 
     env:                             # Same clear/secret split as services
       clear:
@@ -537,6 +540,68 @@ services:
         include:
           - "apps/web/**"
           - "packages/shared/**"
+```
+
+## Config Files
+
+`config_files` lists files under the consumer's `files/`. Each deploy copies
+`files/<path>` to `<stack_dir>/config/<path>` on the host, and `bin/bay
+validate` refuses an entry with no file behind it. Mount what you need with
+`volumes:`, for example
+`"{{ stack_dir }}/config/legal:/app/legal:ro"`. A changed file
+restarts the container that lists it (one owner per file: if two definitions
+list the same file, the last one wins the restart).
+
+By default the files are private: 0640 for files and 0750 for the directories
+Bay creates for them, owner the deploy user, group `docker`. A container whose
+process runs as root, or as a member of that group, can read them. A container
+that runs as any other uid cannot. A `node` image, for example, runs as uid
+1000, and the mount fails with "permission denied" inside the container.
+
+`config_files_mode: public` is the opt-in for files that hold no secret, such
+as markdown pages or a public key. It applies to the one service or accessory
+that sets it:
+
+| | `private` (default) | `public` |
+|---|---|---|
+| Each listed file | 0640 | 0644 |
+| Each directory on the way to a listed file | 0750 | 0755 |
+| `<stack_dir>/config` itself | 0750 | 0755 |
+
+What that means in practice:
+
+- **Parent directories widen too.** A readable file behind a 0750 directory is
+  still unreadable, so every directory between `config/` and a public file
+  becomes 0755, `config/` included. That holds whether you mount the file's
+  own folder or a folder higher up.
+- **Only names leak, never contents.** A directory shared by public and
+  private files becomes 0755, so a host user can list the private file names.
+  The private files themselves stay 0640. Keep public files in their own
+  folder if the names matter.
+- **Public wins for a shared file.** A file listed by a public and a private
+  definition is 0644: one of them already declared it non-secret.
+- **Hosts without a public definition are unchanged.** Bay computes the modes
+  per host from the definitions active there, so only hosts that run a public
+  service see the wider modes. Remove the key and the next deploy narrows the
+  files back to 0640, and `config/` and each file's own folder back to 0750.
+  A folder that holds only other folders (`legal/` in the example below) is
+  not managed in private mode, so it stays 0755 until you `chmod` it.
+- **Never for secrets.** Any user on the host can read a public file. Use
+  `env.secret` for credentials, not a public config file.
+
+Any other value is refused, both by `bin/bay validate` and at deploy time,
+before anything is written.
+
+```yaml
+services:
+  docs:
+    image: ghcr.io/example/docs:1.0.0     # runs as uid 1000
+    config_files:
+      - legal/en/terms.md
+      - legal/de/terms.md
+    config_files_mode: public
+    volumes:
+      - "{{ stack_dir }}/config/legal:/app/legal:ro"
 ```
 
 ## Access Modes

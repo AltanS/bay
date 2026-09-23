@@ -1,0 +1,80 @@
+---
+# Config files: copy each service's and accessory's `config_files` from the
+# consumer's files/ to {{ stack_dir }}/config/, same relative path.
+#
+# Default mode (`config_files_mode` absent or `private`): files 0640 and
+# directories 0750, owner app_user, group docker. Only root, the deploy user
+# and the docker group can read them, which is right for anything that may
+# hold a credential.
+#
+# `config_files_mode: public` is for non-secret files read by a container
+# whose process runs as a uid outside the docker group (a node image runs as
+# uid 1000, for example). That definition's files become 0644, and every
+# directory on the way to them, config/ itself included, becomes 0755. A
+# file listed by a public and a private definition is public: the public one
+# already declared it non-secret. A directory shared with private files turns
+# 0755 too, which exposes their names but not their contents (still 0640).
+#
+# Split out of main.yml so tests/test_config_files_mode.py can run exactly
+# these tasks against a scratch directory with a real ansible-playbook.
+
+- name: Collect config files from all definitions
+  ansible.builtin.set_fact:
+    docker_compose_config_files: >-
+      {{
+        ((active_services | default({})) | dict2items | selectattr('value.config_files', 'defined')
+          | map(attribute='value.config_files') | flatten)
+        +
+        ((active_accessories | default({})) | dict2items | selectattr('value.config_files', 'defined')
+          | map(attribute='value.config_files') | flatten)
+      }}
+    docker_compose_config_public_files: >-
+      {{
+        ((active_services | default({})) | dict2items | selectattr('value.config_files', 'defined')
+          | selectattr('value.config_files_mode', 'defined')
+          | selectattr('value.config_files_mode', 'equalto', 'public')
+          | map(attribute='value.config_files') | flatten)
+        +
+        ((active_accessories | default({})) | dict2items | selectattr('value.config_files', 'defined')
+          | selectattr('value.config_files_mode', 'defined')
+          | selectattr('value.config_files_mode', 'equalto', 'public')
+          | map(attribute='value.config_files') | flatten)
+      }}
+
+# Relative to config/, parents included; '' is config/ itself. Empty when no
+# definition on this host is public, so the default loops are unchanged.
+- name: Collect directories on the path to public config files
+  ansible.builtin.set_fact:
+    docker_compose_config_public_dirs: "{{ docker_compose_config_public_files | bay_config_dirs }}"
+
+- name: Ensure config directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/config"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "{{ '0755' if '' in docker_compose_config_public_dirs else '0750' }}"
+  when: docker_compose_config_files | length > 0
+
+- name: Ensure config subdirectories exist
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/config/{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "{{ '0755' if item in docker_compose_config_public_dirs else '0750' }}"
+  loop: "{{ (docker_compose_config_files | map('dirname') | list + docker_compose_config_public_dirs) | unique }}"
+  loop_control:
+    label: "config/{{ item }}"
+
+- name: Deploy config files
+  ansible.builtin.copy:
+    src: "{{ playbook_dir | dirname }}/files/{{ item }}"
+    dest: "{{ stack_dir }}/config/{{ item }}"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "{{ '0644' if item in docker_compose_config_public_files else '0640' }}"
+  loop: "{{ docker_compose_config_files }}"
+  loop_control:
+    label: "config/{{ item }}"
+  register: docker_compose_config_result
