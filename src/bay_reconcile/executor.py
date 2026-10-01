@@ -177,11 +177,13 @@ def _canary_swap(spec: ContainerSpec, client: DockerClient, cfg: ReconcilerConfi
         return f"canary-swapped {spec.name}"
     except Exception as exc:
         # Rescue: tear down the canary, fall back to a standard recreate.
-        # The canary is the new copy that failed its health gate, so a plain
-        # force remove is enough. The old container is still the live
-        # workload, so it gets the graceful stop. It may already be stopped or
-        # gone if the swap failed after its stop; both calls tolerate that.
-        client.remove(canary)
+        # Both containers get the graceful stop. The swap can fail after the
+        # old container was already stopped and removed (for example `rename`
+        # raised), and then the canary is the only live copy of the workload.
+        # A force remove would SIGKILL it. A canary that failed its health gate
+        # is stopped just the same, which costs nothing. Both calls tolerate a
+        # container that is already stopped or gone.
+        _stop_then_remove(client, canary, cfg)
         _stop_then_remove(client, spec.name, cfg)
         client.create(spec)
         return f"recreated {spec.name} (canary fallback: {type(exc).__name__})"

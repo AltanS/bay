@@ -130,11 +130,13 @@ class TestCanary:
 
         client = Crash({"web": ContainerState("web", exists=True, config_hash="old")})
         _run(client)
-        # The failed canary is torn down with a plain remove. The old container
-        # is the live workload, so it gets a graceful stop first.
+        # Both containers get a graceful stop before the remove. The canary may
+        # be the only live copy (see the rename test below), so it is never
+        # force-killed.
         assert client.calls == [
             ("pull", "web:latest"),
             ("create", "web-new"),
+            ("stop", "web-new", FAST.stop_timeout),
             ("remove", "web-new"),
             ("stop", "web", FAST.stop_timeout),
             ("remove", "web"),
@@ -161,8 +163,23 @@ class TestCanary:
         assert "canary fallback: RuntimeError" in report.results[0].detail
         assert [c for c in client.calls if c[0] == "stop"] == [
             ("stop", "web", FAST.stop_timeout),
+            ("stop", "web-new", FAST.stop_timeout),
             ("stop", "web", FAST.stop_timeout),
         ]
+
+    def test_rescue_stops_a_live_canary_before_removing_it(self):
+        # The old container is already gone and the healthy canary is the only
+        # live copy when `rename` raises. The rescue must stop it gracefully
+        # (SIGTERM, then SIGKILL after the timeout), never remove it bare.
+        class RenameFails(FakeDocker):
+            def rename(self, old, new):
+                raise RuntimeError("rename refused")
+
+        client = RenameFails({"web": ContainerState("web", exists=True, config_hash="old")})
+        _run(client)
+        canary_ops = [c[0] for c in client.calls if c[1] == "web-new"]
+        assert canary_ops.index("stop") < canary_ops.index("remove")
+        assert ("stop", "web-new", FAST.stop_timeout) in client.calls
         assert client.observe("bay.managed")["web"].config_hash == "new"
 
     def test_transient_unhealthy_then_healthy_swaps(self):
