@@ -23,6 +23,13 @@ before upgrading — anything needing manual action is called out under
   (`<svc>-vpn@docker` or `<proxy>-tailnet@file`). An app's own 403, any other
   status, and every public router are still detected. To turn it off, set
   `crowdsec_ignore_vpn_refusals: false`. See docs/crowdsec.md.
+- `bin/bay deploy <env> -- --check --diff` now prints the container plan
+  (GH#2). Check mode skipped the reconciler, so a dry run showed no plan for
+  containers. The reconciler now runs in plan-only mode from a temporary
+  directory on the host, with the new bundle and package, and the directory
+  is removed afterwards. Plan-only mode makes no change to any container. The
+  plan uses the images and env files on the host now, so a pending rebuild or
+  secret change shows as NoOp. See "Check mode" in docs/reconciler.md.
 
 ### Upgrade notes
 
