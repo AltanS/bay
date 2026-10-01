@@ -74,3 +74,168 @@ def test_reconciler_report_still_parses_stdout_as_json() -> None:
     report = _task("Reconciler report")
     msg = report["ansible.builtin.debug"]["msg"]
     assert "_reconcile_result.stdout" in msg and "from_json" in msg
+
+
+# ── The container plan under --check (GH #2) ─────────────────────────────
+#
+# Check mode skips the real reconciler run, so a dry run printed no plan. The
+# fix runs the reconciler with --plan-only in check mode. The trap: check mode
+# also skips the bundle write and the package ship, so planning from
+# stack_dir would read what the LAST real deploy left. The plan must come from
+# a per-run temporary directory that holds the NEW bundle and package.
+#
+# Structural assertions over the task file. The repo has no ansible-runner or
+# molecule harness that runs this role against a live docker daemon.
+
+_CHECK_BLOCK = "Plan the container changes in check mode"
+_REAL_RUN = "Run server-side reconciler"
+_TMP = "_reconcile_check_dir.path"
+
+
+def _check_block() -> dict:
+    return _task(_CHECK_BLOCK)
+
+
+def _block_tasks() -> list[dict]:
+    block = _check_block()
+    return list(block["block"]) + list(block.get("always", []))
+
+
+def _module(task: dict) -> tuple[str, dict]:
+    for key, value in task.items():
+        if key.startswith("ansible.builtin."):
+            return key, value
+    raise AssertionError(f"no module in task {task.get('name')!r}")
+
+
+def _in_block(name: str) -> dict:
+    for task in _block_tasks():
+        if task.get("name") == name:
+            return task
+    raise AssertionError(f"task {name!r} not in the check-mode block")
+
+
+def test_check_mode_plan_block_is_gated_on_check_mode() -> None:
+    assert _check_block()["when"] == "ansible_check_mode"
+
+
+def test_check_mode_plan_block_is_the_only_new_top_level_task() -> None:
+    """Outside check mode the task list is the one the real deploy always ran.
+
+    Every top-level task except the check block is free of check-mode logic,
+    and the real run keeps no `when` and no `check_mode` key, so --check still
+    skips it and a real deploy still runs it.
+    """
+    for task in _tasks():
+        if task.get("name") == _CHECK_BLOCK:
+            continue
+        text = yaml.safe_dump(task)
+        assert "ansible_check_mode" not in text, task.get("name")
+        assert "_reconcile_check_" not in text, task.get("name")
+    real = _task(_REAL_RUN)
+    assert "when" not in real
+    assert "check_mode" not in real
+    names = [t.get("name") for t in _tasks()]
+    assert names.index(_CHECK_BLOCK) == names.index(_REAL_RUN) + 1
+
+
+def test_every_check_mode_step_really_runs_under_check() -> None:
+    """A step skipped by check mode would leave the plan reading nothing."""
+    for task in _block_tasks():
+        if "ansible.builtin.debug" in task:
+            continue
+        assert task.get("check_mode") is False, task.get("name")
+
+
+def test_check_mode_plan_uses_a_temp_dir_never_stack_dir() -> None:
+    tmp = _in_block("Create a temporary directory for the check-mode plan")
+    assert tmp["ansible.builtin.tempfile"]["state"] == "directory"
+    assert tmp["register"] == "_reconcile_check_dir"
+
+    for task in _block_tasks():
+        if task.get("delegate_to") == "localhost":
+            continue  # controller-side package cache, never the host
+        assert "stack_dir" not in yaml.safe_dump(task), task.get("name")
+        _, args = _module(task)
+        for key in ("dest", "path"):
+            if key in args:
+                assert _TMP in args[key], f"{task['name']}: {key}={args[key]}"
+
+
+def test_check_mode_plan_writes_the_same_bundle_a_real_run_writes() -> None:
+    """The temp bundle is the real bundle expression, not a hand-kept copy."""
+    real = _task("Write reconcile bundle (resolved env — mode 0600, removed after run)")
+    check = _in_block("Write the check-mode plan bundle into the temporary directory")
+    assert (
+        check["ansible.builtin.copy"]["content"]
+        == real["ansible.builtin.copy"]["content"]
+    )
+    assert check["ansible.builtin.copy"]["mode"] == "0600"
+    assert check["no_log"] is True
+    assert check["diff"] is False
+
+
+def test_check_mode_plan_ships_the_new_package_into_the_temp_dir() -> None:
+    ship = _task("Ship the bay_reconcile package")
+    assert _check_block()["vars"] == ship["vars"], "same tar as the real ship"
+    unpack = _in_block("Unpack bay_reconcile into the temporary directory")
+    assert unpack["ansible.builtin.unarchive"]["src"] == "{{ _pkg_tar }}"
+    pack = _in_block("Pack bay_reconcile for the check-mode plan")
+    real_pack = _task_nested("Pack bay_reconcile without __pycache__")
+    assert pack["ansible.builtin.command"] == real_pack["ansible.builtin.command"]
+
+
+def _task_nested(name: str) -> dict:
+    def walk(items: list[dict]):
+        for task in items:
+            yield task
+            for key in ("block", "rescue", "always"):
+                yield from walk(task.get(key, []))
+
+    for task in walk(_tasks()):
+        if task.get("name") == name:
+            return task
+    raise AssertionError(f"task {name!r} not found")
+
+
+def test_check_mode_run_is_plan_only_from_the_temp_dir() -> None:
+    run = _in_block("Run the reconciler in plan-only mode")
+    argv = run["ansible.builtin.command"]["argv"]
+    assert argv[:3] == ["python3", "-m", "bay_reconcile"]
+    assert "--plan-only" in argv, "--plan-only must be forced, not optional"
+    assert _TMP in argv[3]
+    assert _TMP in run["environment"]["PYTHONPATH"]
+    assert run["register"] == "_reconcile_check_result", (
+        "must not reuse _reconcile_result — the CLI hand-off would then run "
+        "under --check and the post-deploy summary would read a plan as a deploy"
+    )
+    assert run["failed_when"] == "_reconcile_check_result.rc != 0"
+
+
+def test_check_mode_changed_means_the_plan_has_work() -> None:
+    changed = " ".join(_in_block("Run the reconciler in plan-only mode")["changed_when"].split())
+    assert "reject('equalto', 'NoOp')" in changed
+    assert "length > 0" in changed
+    assert changed.startswith("_reconcile_check_result.rc == 0 and")
+
+
+def test_check_mode_report_says_the_plan_uses_images_on_the_host() -> None:
+    report = _in_block("Reconciler check-mode plan")
+    when = report.get("when", "")
+    assert "_reconcile_check_result is not skipped" in when
+    assert "rc is defined" not in when
+    msg = report["ansible.builtin.debug"]["msg"]
+    note = " ".join(msg["note"].split())
+    assert "images" in note and "on the host now" in note
+    assert "rebuild" in note and "NoOp" in note
+    assert "_reconcile_check_result.stdout" in msg["plan"]
+
+
+def test_check_mode_temp_dir_is_always_removed() -> None:
+    always = _check_block().get("always", [])
+    assert always, "cleanup must sit in `always:` so a failed plan still cleans up"
+    rm = always[0]
+    assert rm["ansible.builtin.file"]["state"] == "absent"
+    assert rm["ansible.builtin.file"]["path"] == "{{ " + _TMP + " }}"
+    assert rm["check_mode"] is False
+    assert "path is defined" in rm["when"]

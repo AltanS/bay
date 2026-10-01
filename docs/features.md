@@ -113,7 +113,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 - **Framework versioning** -- consumers pin to semver tags via `.bay-version`; `install`/`update`/`status` commands manage the lifecycle
 - **`dev-link` / `dev-unlink`** -- symlink `.bay/` to a local framework checkout for rapid iteration without commit+push+tag cycles
 - **Config change detection** -- only redeploy services whose configuration has actually changed
-- **Dry runs** -- `bin/bay deploy production -- --check --diff` passes extra args through to Ansible
+- **Dry runs** -- `bin/bay deploy production -- --check --diff` passes extra args through to Ansible and prints the reconciler's container plan (see [reconciler.md](reconciler.md#check-mode----check---diff))
 
 ## Infrastructure as Code
 

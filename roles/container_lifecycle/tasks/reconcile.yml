@@ -114,7 +114,10 @@
 - name: Write reconcile bundle (resolved env — mode 0600, removed after run)
   ansible.builtin.copy:
     dest: "{{ stack_dir }}/.reconcile-bundle.json"
-    content: >-
+    # Anchored: the check-mode plan below writes this exact expression into
+    # its temporary directory, so the dry run plans the bundle a real run
+    # would write, never a hand-kept copy that drifted.
+    content: &reconcile_bundle_content >-
       {{ {
         'stack': stack_name | default('bay'),
         'managed_label': container_lifecycle_managed_label | default('bay.managed'),
@@ -168,7 +171,8 @@
   when: >-
     (_reconcile_marker_on_host.stdout | default('') | trim)
     != (_reconcile_pkg_marker | trim)
-  vars:
+  # Anchored: the check-mode plan below packs the same tar.
+  vars: &reconcile_pkg_vars
     _pkg_cache: >-
       {{ lookup('ansible.builtin.env', 'XDG_CACHE_HOME')
          | default(lookup('ansible.builtin.env', 'HOME') ~ '/.cache', true) }}/bay
@@ -246,6 +250,134 @@
   register: _reconcile_result
   changed_when: "(_reconcile_result.stdout | from_json).changed | default(false)"
   failed_when: _reconcile_result.rc != 0
+
+# ── The container plan under --check ────────────────────────────────────
+# Check mode skips the command task above, so a dry run used to print no
+# container plan at all. This block runs the reconciler in plan-only mode
+# instead. It is gated on `ansible_check_mode`, so a real deploy skips the
+# whole block and runs exactly the tasks it ran before.
+#
+# The trap: check mode ALSO skips the bundle write and the package ship
+# above. The bundle and package on the host are the ones the LAST real deploy
+# left. A plan computed from them would be confident and wrong. So every
+# step here writes into a per-run temporary directory on the host, never
+# into stack_dir: the new bundle (same anchored expression as the real one)
+# and the new package (same tar as the real ship). Each task carries
+# `check_mode: false`, because a check-mode-skipped step would leave the
+# reconciler planning against nothing.
+#
+# `--plan-only` is passed unconditionally. In that mode the reconciler only
+# lists containers and looks up local images. It makes no mutating docker
+# call (src/bay_reconcile/__main__.py, reconcile()).
+#
+# What the plan does NOT see: images and env files are read as they are on
+# the host now. Builds, pulls and env-file renders are skipped in check mode,
+# so a pending rebuild or an undeployed secret change shows as NoOp.
+#
+# `changed` is true when the plan holds any action other than NoOp, so the
+# --check recap counts the containers a real deploy would touch.
+#
+# The result registers under its own name. `_reconcile_result` stays the
+# skipped one, so the CLI report hand-off below still skips under --check.
+- name: Plan the container changes in check mode
+  when: ansible_check_mode
+  vars: *reconcile_pkg_vars
+  block:
+    - name: Create a temporary directory for the check-mode plan
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: bay-reconcile-check.
+      register: _reconcile_check_dir
+      check_mode: false
+      changed_when: false
+
+    # Same controller-side steps as the real ship above. `creates:` makes the
+    # pack a no-op when the tar for this marker already exists.
+    - name: Ensure the controller-side package cache exists for the check-mode plan
+      ansible.builtin.file:
+        path: "{{ _pkg_cache }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      changed_when: false
+
+    - name: Pack bay_reconcile for the check-mode plan
+      ansible.builtin.command:
+        argv:
+          - tar
+          - --exclude=__pycache__
+          - --exclude=*.pyc
+          - -czf
+          - "{{ _pkg_tar }}"
+          - -C
+          - "{{ playbook_dir }}/src"
+          - bay_reconcile
+        creates: "{{ _pkg_tar }}"
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      changed_when: false
+
+    - name: Unpack bay_reconcile into the temporary directory
+      ansible.builtin.unarchive:
+        src: "{{ _pkg_tar }}"
+        dest: "{{ _reconcile_check_dir.path }}/"
+      check_mode: false
+      changed_when: false
+
+    - name: Write the check-mode plan bundle into the temporary directory
+      ansible.builtin.copy:
+        dest: "{{ _reconcile_check_dir.path }}/bundle.json"
+        content: *reconcile_bundle_content
+        mode: "0600"
+      check_mode: false
+      changed_when: false
+      diff: false
+      no_log: true
+
+    - name: Run the reconciler in plan-only mode
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -m
+          - bay_reconcile
+          - "{{ _reconcile_check_dir.path }}/bundle.json"
+          - --plan-only
+      environment:
+        PYTHONPATH: "{{ _reconcile_check_dir.path }}"
+      register: _reconcile_check_result
+      check_mode: false
+      # `rc == 0 and` first: Jinja short-circuits, so a failed run reaches
+      # failed_when instead of dying on from_json of a non-JSON stdout.
+      changed_when: >-
+        _reconcile_check_result.rc == 0 and
+        ((_reconcile_check_result.stdout | from_json).actions
+         | reject('equalto', 'NoOp') | list | length > 0)
+      failed_when: _reconcile_check_result.rc != 0
+
+    - name: Reconciler check-mode plan
+      ansible.builtin.debug:
+        msg:
+          note: >-
+            Check mode: this is a plan only, nothing was changed. The plan
+            uses the images and env files present on the host now. Builds,
+            pulls and env-file renders are skipped in check mode, so a
+            pending rebuild or secret change shows as NoOp.
+          plan: "{{ (_reconcile_check_result.stdout | from_json).plan }}"
+          actions: "{{ (_reconcile_check_result.stdout | from_json).actions }}"
+      when: _reconcile_check_result is not skipped
+
+  always:
+    # The bundle holds resolved env (secrets). Remove it on every path.
+    - name: Remove the check-mode plan directory
+      ansible.builtin.file:
+        path: "{{ _reconcile_check_dir.path }}"
+        state: absent
+      check_mode: false
+      changed_when: false
+      when: _reconcile_check_dir.path is defined
 
 # In --check mode the command task above is skipped, so `stdout` is empty and
 # `from_json` raises (exit 2, the whole play dies). Guard on `is not skipped`,

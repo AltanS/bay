@@ -99,6 +99,43 @@ Dry-run any deploy (safe — mutates nothing) to preview the plan:
 bin/bay deploy <env> -- -e bay_reconciler_plan_only=true
 ```
 
+### Check mode (`-- --check --diff`)
+
+Ansible check mode skips the real reconciler run. So the role runs the
+reconciler a second way, in plan-only mode, and prints the result as the
+`Reconciler check-mode plan` task:
+
+```bash
+bin/bay deploy <env> -- --check --diff
+```
+
+Check mode also skips the bundle write and the package ship. The bundle and
+package in `stack_dir` are the ones the last real deploy left, so the plan
+never reads them. Each dry run makes a temporary directory on the host, writes
+the new bundle and unpacks the new package there, runs
+`python -m bay_reconcile <tmp>/bundle.json --plan-only`, and removes the
+directory in an `always:` block, also when the plan fails. Nothing is written
+to `stack_dir`. Plan-only mode only lists containers and reads local image ids.
+It makes no docker call that changes state.
+
+The reconciler task reports `changed` when the plan has any action other than
+`NoOp`. The `--check` recap then counts the containers a real deploy would
+touch.
+
+Limits of the dry run:
+
+- **Images and env files are read as they are on the host now.** Check mode
+  skips builds, pulls and env-file renders. A pending rebuild, a new image
+  under the same tag, or an undeployed secret change shows as `NoOp`.
+- **The plan lists action kinds, not container names.** The plan-only report
+  has counts and action types only.
+- **No CLI hand-off.** The touched-container report for the post-deploy
+  summary is not written, and the CLI skips the post-deploy healthcheck
+  under `--check`.
+- **A host that never had a real deploy** fails the dry run earlier, at
+  `Unpack bay_reconcile on the host`, because `stack_dir/.reconcile/` does not
+  exist yet. Run the first deploy for real.
+
 ### Config-hash dependency (one-time restamp)
 
 The NoOp decision depends on the `com.bay.config-hash` label the S1 gate
