@@ -57,6 +57,48 @@ class TestDevLinkTargetGuard:
         assert not (consumer / ".bay").is_symlink()
         assert not (consumer / ".bay-dev").exists()
 
+    def test_refuses_the_consumer_by_absolute_path_through_a_symlink(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        consumer = _make_consumer(tmp_path / "workspace-client" / "bay")
+        (tmp_path / "workspace-dev").mkdir()
+        link = tmp_path / "workspace-dev" / "client"
+        link.symlink_to(consumer)
+        monkeypatch.chdir(consumer)
+
+        with pytest.raises(BayError, match="this consumer"):
+            dev_link(path=str(link))
+
+        assert not (consumer / ".bay").is_symlink()
+
+    def test_refuses_the_pinned_bay_clone(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """.bay/ is a framework checkout, so it passes every other check."""
+        consumer = _make_consumer(tmp_path / "consumer")
+        (consumer / ".bay" / ".git").mkdir()
+        monkeypatch.chdir(consumer)
+
+        with pytest.raises(BayError, match="own .bay/ clone"):
+            dev_link(path=".bay")
+
+        assert (consumer / ".bay" / "version.yml").is_file()
+        assert not (consumer / ".bay").is_symlink()
+
+    def test_rerun_while_linked_still_works(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Re-running dev-link is the group_vars repair path; the .bay guard
+        must not block it once .bay/ is the symlink."""
+        consumer = _make_consumer(tmp_path / "consumer")
+        framework = _make_framework(tmp_path / "bay")
+        monkeypatch.chdir(consumer)
+
+        dev_link(path="../bay")
+        dev_link(path="../bay")
+
+        assert os.path.realpath(consumer / ".bay") == str(framework.resolve())
+
     def test_refuses_a_git_repo_without_version_yml(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

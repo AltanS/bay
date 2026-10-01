@@ -165,3 +165,21 @@ class TestComposeTemplateAgrees:
             "traefik.http.routers.app-vpn.rule"
         ]
         assert rule == expected
+
+    @pytest.mark.parametrize(
+        ("health", "chain"),
+        [("/Admin/health", "vpn-chain"), ("/administrator", "vpn-chain"), ("/healthz", "public-chain")],
+    )
+    def test_template_health_chain_agrees_with_the_filter(self, health, chain):
+        svc = _public_svc(
+            ["/admin"],
+            healthcheck_path=health,
+            middleware={"basic_auth": {"users": ["user:hash"]}},
+        )
+        rendered = _render_service(
+            "app", svc, public_mw="public-chain", vpn_mw="vpn-chain"
+        )
+        line = next(
+            ln for ln in rendered.splitlines() if "routers.app-health.middlewares=" in ln
+        )
+        assert chain in line

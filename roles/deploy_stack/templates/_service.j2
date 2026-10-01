@@ -171,7 +171,10 @@
 {# Path(), never PathPrefix: /healthcheck must not open /healthcheck-admin.    #}
 {% if svc.middleware is defined and svc.middleware.basic_auth is defined and svc.healthcheck_path is defined %}
 {% set _hp = svc.healthcheck_path %}
-{% set _health_mw = (vpn_mw if (svc.access == 'public' and svc.vpn_routes is defined and svc.vpn_routes | select('in', [_hp]) | list | length > 0) else public_mw) if svc.access == 'public' else vpn_mw %}
+{# Same question as the VPN router: case-insensitive prefix (_vpn_route_covers). #}
+{% set _vpn_hit = namespace(v=false) %}
+{% for _r in svc.vpn_routes | default([]) %}{% if (_hp | lower).startswith(_r | lower) %}{% set _vpn_hit.v = true %}{% endif %}{% endfor %}
+{% set _health_mw = (vpn_mw if _vpn_hit.v else public_mw) if svc.access == 'public' else vpn_mw %}
       # Health probe: same chain, minus this service's basicauth
       - "traefik.http.routers.{{ name }}-health.rule={{ _sec_host }} && Path(`{{ _hp }}`)"
       - "traefik.http.routers.{{ name }}-health.service={{ name if svc.access == 'public' or svc.public_routes is defined else name ~ '-vpn' }}"

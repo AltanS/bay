@@ -30,7 +30,9 @@ before upgrading — anything needing manual action is called out under
   too. `Path.cwd()` gives the physical path, so from a consumer reached
   through a symlink the default `../bay` can resolve to the consumer itself.
   dev-link then deleted `.bay/` and linked the consumer into itself. The
-  target must now hold `version.yml`, and it must not be the consumer.
+  target must now hold `version.yml`, and it must be neither the consumer nor
+  the consumer's own pinned `.bay/` clone (`bin/bay dev-link .bay` used to
+  delete the clone and link `.bay` to itself).
 
 ### Upgrade notes
 

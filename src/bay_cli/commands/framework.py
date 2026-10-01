@@ -882,9 +882,11 @@ def dev_link(
     bay_dir = root / ".bay"
     framework_path = Path(path)
 
-    # Resolve framework path
+    # Resolve framework path. Always resolve, so the identity checks below
+    # also see through an absolute path that runs via a symlink.
     if not framework_path.is_absolute():
-        framework_path = (root / framework_path).resolve()
+        framework_path = root / framework_path
+    framework_path = framework_path.resolve()
 
     if not framework_path.is_dir():
         raise BayError(
@@ -907,6 +909,16 @@ def dev_link(
         raise BayError(
             f"Framework path is this consumer, not the framework: {framework_path}",
             hint="Pass the path to your local bay checkout explicitly.",
+        )
+
+    # The pinned clone in .bay/ is a framework checkout, so it passes every
+    # other check, and dev-link would then delete it and link .bay to itself.
+    # Once dev-linked, .bay/ is a symlink to the framework, and re-running
+    # dev-link with that same target is the supported repair path.
+    if not bay_dir.is_symlink() and framework_path == bay_dir.resolve():
+        raise BayError(
+            f"Framework path is this consumer's own .bay/ clone: {framework_path}",
+            hint="Pass the path to your local bay checkout, not .bay/.",
         )
 
     if not (framework_path / "version.yml").is_file():
