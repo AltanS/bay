@@ -7,6 +7,30 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.7.4] - 2026-10-01
+
+### Fixed
+
+- CrowdSec no longer bans a client for requests that Bay's VPN allowlist
+  refused. The `vpn-only` middleware answers 403 to a client outside the VPN,
+  and no backend sees the request. The Hub HTTP scenarios could not tell that
+  403 from an app's own 403. `crowdsecurity/http-admin-interface-probing`
+  banned an operator for 24 hours after three requests to `/admin`, `/Admin`
+  and `/ADMIN/x` from outside the VPN. The bouncer drops before the SSH rule,
+  so SSH stopped too. The crowdsec role now installs a whitelist parser that
+  drops an event before any scenario sees it, when all three are true: the
+  status is 403, no backend was reached, and the router carries the VPN chain
+  (`<svc>-vpn@docker` or `<proxy>-tailnet@file`). An app's own 403, any other
+  status, and every public router are still detected. To turn it off, set
+  `crowdsec_ignore_vpn_refusals: false`. See docs/crowdsec.md.
+
+### Upgrade notes
+
+- The crowdsec role runs from `provision.yml`, so a deploy does not apply
+  this fix. Run `bin/bay provision <env> --tags crowdsec` on each environment.
+- A ban that already exists stays. Remove it with
+  `sudo cscli decisions delete --ip <ip>` on the server.
+
 ## [0.7.3] - 2026-10-01
 
 ### Fixed
