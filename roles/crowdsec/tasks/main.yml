@@ -395,30 +395,6 @@
     - crowdsec_enabled | bool
     - crowdsec_custom_parsers | length > 0
 
-# Defense in depth — fail fast with the offending file path if any rendered
-# parser is invalid YAML, instead of letting `cscli hub update` (or the agent
-# reload) fail with a cryptic error that requires SSH-level inspection.
-- name: List rendered custom parser files
-  ansible.builtin.find:
-    paths: /etc/crowdsec/parsers
-    patterns: 'custom-*.yaml'
-    recurse: true
-  register: _rendered_parsers
-  when: crowdsec_enabled | bool
-
-- name: Validate rendered custom parser YAML
-  ansible.builtin.command:
-    cmd: python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" "{{ item.path }}"
-  register: _parser_yaml_check
-  changed_when: false
-  failed_when: _parser_yaml_check.rc != 0
-  loop: "{{ _rendered_parsers.files | default([]) }}"
-  loop_control:
-    label: "{{ item.path | basename }}"
-  when:
-    - crowdsec_enabled | bool
-    - _rendered_parsers.files is defined
-
 # A 403 from Bay's own `vpn-only` middleware is access control, not a probe.
 # The Hub HTTP scenarios cannot tell it from an app's 403, so an operator who
 # tests a VPN path from outside the VPN gets banned (alert 24144). This
@@ -455,6 +431,36 @@
   when:
     - crowdsec_enabled | bool
     - not (crowdsec_ignore_vpn_refusals | bool)
+
+# Defense in depth — fail fast with the offending file path if any rendered
+# parser is invalid YAML, instead of letting `cscli hub update` (or the agent
+# reload) fail with a cryptic error that requires SSH-level inspection.
+# This covers every parser Bay renders: `custom-*.yaml` (crowdsec_custom_parsers)
+# and `bay-*.yaml` (Bay's own, such as the VPN refusal whitelist). Hub-managed
+# parsers use neither prefix and stay out. It runs after the Bay parser is
+# deployed, so a bad render is caught on the same run.
+- name: List rendered parser files
+  ansible.builtin.find:
+    paths: /etc/crowdsec/parsers
+    patterns:
+      - 'custom-*.yaml'
+      - 'bay-*.yaml'
+    recurse: true
+  register: _rendered_parsers
+  when: crowdsec_enabled | bool
+
+- name: Validate rendered parser YAML
+  ansible.builtin.command:
+    cmd: python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" "{{ item.path }}"
+  register: _parser_yaml_check
+  changed_when: false
+  failed_when: _parser_yaml_check.rc != 0
+  loop: "{{ _rendered_parsers.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path | basename }}"
+  when:
+    - crowdsec_enabled | bool
+    - _rendered_parsers.files is defined
 
 # =============================================================================
 # Hub Collections and Scenarios
