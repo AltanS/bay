@@ -379,6 +379,27 @@ ip_whitelist:
   - 127.0.0.0/8
 
 # =============================================================================
+# Requests Refused by the VPN Allowlist
+# =============================================================================
+# Bay's `vpn-only` middleware answers 403 to a client outside the VPN before
+# the request reaches any backend. The Hub HTTP scenarios cannot tell that 403
+# from an app's own 403. crowdsecurity/http-admin-interface-probing banned an
+# operator for 24h after three off-VPN requests to /admin, /Admin and /ADMIN/x,
+# and the nftables bouncer drops before the SSH rule, so SSH went too.
+# `crowdsec_trusted_ips` does not help here: it only exempts IPs from the
+# bouncer, the alert still fires.
+#
+# When true, the role renders a whitelist parser (s02-enrich) that drops an
+# event before any scenario sees it when ALL of these hold: status 403, no
+# backend reached (Traefik logs "-" as the server URL), and a router that
+# carries the VPN chain (`<svc>-vpn@docker` or `<proxy>-tailnet@file`). An
+# app's own 403, a 404 on a VPN path, and every public router are still
+# detected. Set to false to let the VPN 403s count again; the next
+# `bin/bay provision <env> --tags crowdsec` removes the file.
+# See docs/crowdsec.md ("Requests refused by the VPN allowlist").
+crowdsec_ignore_vpn_refusals: true
+
+# =============================================================================
 # Blocked IPs Import
 # =============================================================================
 

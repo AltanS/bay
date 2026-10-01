@@ -67,6 +67,54 @@ If you're locked out by CrowdSec:
    Confirm your own IP does not show up in `cscli decisions list`, and that
    the bouncer service is `active (running)`, not just enabled.
 
+## Requests refused by the VPN allowlist
+
+A client outside the VPN that asks for a VPN path gets a 403 from Bay's
+`vpn-only` middleware. Traefik answers it, and no backend sees the request.
+The Hub HTTP scenarios cannot tell that 403 from an app's own 403. For
+example, `crowdsecurity/http-admin-interface-probing` bans after three
+different admin paths answer 403 or 404. An operator who tried `/admin`,
+`/Admin` and `/ADMIN/x` from outside the VPN got a 24h ban. The bouncer drops
+before the SSH rule, so SSH went too. `crowdsec_trusted_ips` does not prevent
+this, because it only exempts an IP from the bouncer, and the alert still
+fires.
+
+So the role installs a whitelist parser,
+`/etc/crowdsec/parsers/s02-enrich/bay-vpn-allowlist-refusals.yaml`. It drops
+an event before any scenario sees it when all of these are true:
+
+- the status is 403,
+- no backend was reached (Traefik logs `-` as the server URL when a
+  middleware answered),
+- the router carries the VPN chain: `<svc>-vpn@docker` (a VPN service, or the
+  `vpn_routes` router of a public service) or `<proxy>-tailnet@file`
+  (`tailnet_proxies`).
+
+Everything else is still detected: a 403 that the app itself sends, any other
+status, and every public router. A `<svc>-health@docker` router is not
+covered. It can carry the VPN chain, but it matches one exact path, so it
+cannot fill a scenario that counts distinct paths. If you set
+`traefik_error_pages_enabled` and a service uses a custom chain, the `errors`
+middleware wraps `vpn-only`. That 403 may then log the error-pages URL as its
+server URL and still count, which is the old behaviour.
+
+To make these 403s count again, set `crowdsec_ignore_vpn_refusals: false`. The
+next `bin/bay provision <env> --tags crowdsec` removes the file.
+
+**Operator rule:** test VPN paths only from a trusted host or from the
+tailnet. After a ban, the server drops your IP on every port, so unban through
+a jump host that is not banned:
+
+```bash
+# Find the ban (use your public IP)
+ssh -J <user>@<jump-host> <admin-user>@<server> 'sudo cscli decisions list --ip <your-ip>'
+# Remove it
+ssh -J <user>@<jump-host> <admin-user>@<server> 'sudo cscli decisions delete --ip <your-ip>'
+```
+
+`-J` keeps authentication and the host-key check on your own machine. The
+jump host only forwards the connection.
+
 ## Collections
 
 Default collections (configured in `group_vars/all/security.yml`):

@@ -419,6 +419,43 @@
     - crowdsec_enabled | bool
     - _rendered_parsers.files is defined
 
+# A 403 from Bay's own `vpn-only` middleware is access control, not a probe.
+# The Hub HTTP scenarios cannot tell it from an app's 403, so an operator who
+# tests a VPN path from outside the VPN gets banned (alert 24144). This
+# whitelist parser drops those events before any scenario sees them. See the
+# header of crowdsec_ignore_vpn_refusals in defaults/main.yml.
+- name: Ensure CrowdSec s02-enrich parser directory exists
+  ansible.builtin.file:
+    path: /etc/crowdsec/parsers/s02-enrich
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_ignore_vpn_refusals | bool
+
+- name: Deploy VPN allowlist refusal whitelist
+  ansible.builtin.template:
+    src: parsers/vpn-refusals-whitelist.yaml.j2
+    dest: /etc/crowdsec/parsers/s02-enrich/bay-vpn-allowlist-refusals.yaml
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Reload crowdsec
+  when:
+    - crowdsec_enabled | bool
+    - crowdsec_ignore_vpn_refusals | bool
+
+- name: Remove VPN allowlist refusal whitelist when disabled
+  ansible.builtin.file:
+    path: /etc/crowdsec/parsers/s02-enrich/bay-vpn-allowlist-refusals.yaml
+    state: absent
+  notify: Reload crowdsec
+  when:
+    - crowdsec_enabled | bool
+    - not (crowdsec_ignore_vpn_refusals | bool)
+
 # =============================================================================
 # Hub Collections and Scenarios
 # =============================================================================

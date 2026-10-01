@@ -1,0 +1,26 @@
+# CrowdSec Whitelist: requests refused by Bay's VPN allowlist
+# Managed by Ansible - do not edit manually
+#
+# Bay's `vpn-only` IPAllowList middleware answers 403 for a client outside the
+# VPN, before any backend sees the request. That 403 is access control working,
+# not a probe that failed, but the Hub HTTP scenarios cannot tell the two apart:
+# http-admin-interface-probing banned an operator after three off-VPN requests
+# to /admin. Dropping the event here, in s02-enrich, keeps it out of EVERY
+# scenario at once.
+#
+# All three conditions must hold, so an app's own 403 still counts:
+#   - status 403
+#   - no backend reached: Traefik logs "-" as the server URL when a middleware
+#     answered (an app's 403 carries http://<container>:<port>)
+#   - a router that carries the VPN chain: `<svc>-vpn@docker` (VPN services,
+#     and the vpn_routes router of a public service) or `<proxy>-tailnet@file`
+#     (tailnet_proxies)
+# See docs/crowdsec.md ("Requests refused by the VPN allowlist").
+
+name: bay/vpn-allowlist-refusals
+description: "Ignore requests Traefik refused at Bay's VPN allowlist"
+filter: "evt.Meta.log_type == 'http_access-log' && evt.Parsed.program == 'traefik'"
+whitelist:
+  reason: "Refused by Bay's VPN allowlist before reaching a backend"
+  expression:
+    - "evt.Meta.http_status == '403' && evt.Parsed.traefik_server_url == '-' && (evt.Parsed.traefik_router_name endsWith '-vpn@docker' || evt.Parsed.traefik_router_name endsWith '-tailnet@file')"

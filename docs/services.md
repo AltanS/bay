@@ -1130,6 +1130,10 @@ Both lists are **prefixes**: `/admin` also covers `/admin/users` and
 - **Accessories** → no Traefik labels, no external routing
 - **Per-service opt-out:** setting `security_headers: false` or `compress: false` creates a custom `{name}-chain` with only the enabled globals
 
+CrowdSec ignores the 403 that a VPN router sends to a client outside the VPN,
+so those refusals alone do not get you banned. Still test VPN paths from a
+trusted host or the tailnet; see [CrowdSec](crowdsec.md#requests-refused-by-the-vpn-allowlist).
+
 Every listed domain is matched by every router the service gets — single- and
 dual-router alike. Multiple domains are joined into one `Host(...) || Host(...)`
 expression, and on the path-matched router that OR-group is parenthesised before
