@@ -2521,15 +2521,12 @@ def _validate_identifier_safety(
 _RESERVED_NAME_SUFFIXES: dict[str, str] = {
     "-vpn": (
         "Bay names the VPN router '<service>-vpn', and the CrowdSec whitelist "
-        "trusts routers with that ending, so a public service with this name "
-        "would have its own 403 responses ignored"
+        "trusts routers with that ending, so on a public service with this "
+        "name a 403 answered by Traefik middleware would be ignored"
     ),
     "-public": "Bay names the public-route router '<service>-public'",
     "-health": "Bay names the health-check router '<service>-health'",
-    "-tailnet": (
-        "Bay names the tailnet proxy router '<name>-tailnet', and the CrowdSec "
-        "whitelist trusts routers with that ending"
-    ),
+    "-tailnet": "Bay names the tailnet proxy router '<name>-tailnet'",
 }
 
 # Suffix of the zero-downtime canary container. This mirrors the

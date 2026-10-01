@@ -14,8 +14,9 @@ before upgrading — anything needing manual action is called out under
 - `bin/bay validate` now refuses a service name that collides with a name Bay
   derives. A service name must not end in `-vpn`, `-public`, `-health` or
   `-tailnet`. Bay builds its Traefik router names from these endings, and the
-  v0.7.4 CrowdSec whitelist trusts routers ending in `-vpn@docker`. A public
-  service named `foo-vpn` would have had its own 403 responses ignored. A
+  v0.7.4 CrowdSec whitelist trusts routers ending in `-vpn@docker`. On a
+  public service named `foo-vpn`, a 403 that a Traefik middleware answers
+  (for example a ForwardAuth deny) would have been ignored. A
   service or accessory named `X-new` is also an error when a service `X`
   exists, because `X-new` is the canary container of `X` during a zero-downtime
   deploy.
