@@ -166,6 +166,7 @@ class TestCanary:
             ("stop", "web-new", FAST.stop_timeout),
             ("stop", "web", FAST.stop_timeout),
         ]
+        assert client.observe("bay.managed")["web"].config_hash == "new"
 
     def test_rescue_stops_a_live_canary_before_removing_it(self):
         # The old container is already gone and the healthy canary is the only
