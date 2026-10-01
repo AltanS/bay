@@ -7,6 +7,34 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.7.3] - 2026-10-01
+
+### Fixed
+
+- A canary swap that falls back no longer force-kills the canary. If the
+  swap failed after the old container was already stopped and removed (for
+  example `rename` raised), the healthy canary was the only live copy. The
+  fallback removed it with a force remove, and Docker sends SIGKILL for that.
+  It now stops the canary first, like every other removal.
+- The stop and healthcheck settings in the `container_lifecycle` defaults now
+  reach the reconciler. Before, the reconciler ignored them and used its
+  built-in values, so a consumer override in `group_vars` had no effect. The
+  variables are `container_lifecycle_stop_timeout`,
+  `container_lifecycle_healthcheck_timeout` and
+  `container_lifecycle_healthcheck_poll`. The bundle now carries them in an
+  optional `config` object. An unknown key or a value that is not a positive
+  number stops the run before it touches any container.
+
+### Upgrade notes
+
+- Nothing to do. The defaults give the same values that deploys already used:
+  stop timeout 30, healthcheck timeout 120, healthcheck poll 1.
+- The poll default in the role file changed from 5 to 1. The old 5 was never
+  applied. The new 1 matches what deploys already did, so live behaviour does
+  not change.
+- A consumer that set one of the three variables above in `group_vars` will now
+  see it take effect. Check those values before you deploy.
+
 ## [0.7.2] - 2026-10-01
 
 ### Fixed
