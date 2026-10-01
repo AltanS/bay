@@ -135,7 +135,12 @@ class SdkDockerClient:
         self._c.containers.run(**kwargs)
 
     def stop(self, name: str, *, timeout: int = 10) -> None:
-        self._c.containers.get(name).stop(timeout=timeout)
+        # Absent is as stopped as it gets; an exited container answers 304,
+        # which the SDK does not raise on.
+        try:
+            self._c.containers.get(name).stop(timeout=timeout)
+        except docker.errors.NotFound:
+            pass
 
     def remove(self, name: str) -> None:
         try:

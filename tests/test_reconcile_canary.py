@@ -53,7 +53,7 @@ class FakeDocker:
 
     def stop(self, name, *, timeout=10):
         with self._lock:
-            self.calls.append(("stop", name))
+            self.calls.append(("stop", name, timeout))
 
     def remove(self, name):
         with self._lock:
@@ -122,6 +122,48 @@ class TestCanary:
         state = client.observe("bay.managed")
         assert "web-new" not in state
         assert state["web"].config_hash == "new"
+
+    def test_fallback_stops_old_before_removing_it(self):
+        class Crash(FakeDocker):
+            def inspect(self, name):
+                return ContainerState(name=name, exists=True, status="running", restart_count=3)
+
+        client = Crash({"web": ContainerState("web", exists=True, config_hash="old")})
+        _run(client)
+        # The failed canary is torn down with a plain remove. The old container
+        # is the live workload, so it gets a graceful stop first.
+        assert client.calls == [
+            ("pull", "web:latest"),
+            ("create", "web-new"),
+            ("remove", "web-new"),
+            ("stop", "web", FAST.stop_timeout),
+            ("remove", "web"),
+            ("create", "web"),
+        ]
+
+    def test_fallback_after_old_already_stopped_still_recreates(self):
+        # The swap fails after the old container was stopped and removed. The
+        # fallback stops a container that is gone; that must not abort it.
+        class RenameFails(FakeDocker):
+            def stop(self, name, *, timeout=10):
+                super().stop(name, timeout=timeout)
+                if name not in self._state:
+                    return
+                with self._lock:
+                    self._state[name] = ContainerState(name=name, exists=True, status="exited")
+
+            def rename(self, old, new):
+                raise RuntimeError("rename refused")
+
+        client = RenameFails({"web": ContainerState("web", exists=True, config_hash="old")})
+        report = _run(client)
+        assert report.ok
+        assert "canary fallback: RuntimeError" in report.results[0].detail
+        assert [c for c in client.calls if c[0] == "stop"] == [
+            ("stop", "web", FAST.stop_timeout),
+            ("stop", "web", FAST.stop_timeout),
+        ]
+        assert client.observe("bay.managed")["web"].config_hash == "new"
 
     def test_transient_unhealthy_then_healthy_swaps(self):
         class Flaky(FakeDocker):

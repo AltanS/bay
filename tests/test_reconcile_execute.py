@@ -17,6 +17,7 @@ from bay_reconcile import (  # noqa: E402
     Create,
     NoOp,
     Plan,
+    ReconcilerConfig,
     Recreate,
     Remove,
     execute,
@@ -30,7 +31,7 @@ MANAGED = "bay.managed"
 class FakeDockerClient:
     def __init__(self, initial: dict[str, ContainerState] | None = None) -> None:
         self._state: dict[str, ContainerState] = dict(initial or {})
-        self.calls: list[tuple[str, ...]] = []
+        self.calls: list[tuple[object, ...]] = []
         self._lock = threading.Lock()
 
     def observe(self, managed_label: str) -> dict[str, ContainerState]:
@@ -54,7 +55,7 @@ class FakeDockerClient:
 
     def stop(self, name: str, *, timeout: int = 10) -> None:
         with self._lock:
-            self.calls.append(("stop", name))
+            self.calls.append(("stop", name, timeout))
 
     def remove(self, name: str) -> None:
         with self._lock:
@@ -75,7 +76,7 @@ class FakeDockerClient:
         with self._lock:
             self.calls.append(("pull", image))
 
-    def create_names(self) -> list[str]:
+    def create_names(self) -> list[object]:
         return [c[1] for c in self.calls if c[0] == "create"]
 
 
@@ -115,6 +116,42 @@ class TestExecute:
         client = FakeDockerClient({"old": ContainerState("old", exists=True, managed=True)})
         execute(Plan((Remove("old", "orphan"),)), client)
         assert "old" not in client.observe(MANAGED)
+
+
+class TestGracefulStop:
+    """A container that may run the real workload is stopped before removal.
+
+    ``remove`` is a force remove, and Docker SIGKILLs the process. A recreate
+    did that to a running postgres on 2026-10-01; Redis or Valkey would have
+    lost every write since its last snapshot.
+    """
+
+    CFG = ReconcilerConfig(stop_timeout=17)
+
+    def test_recreate_pulls_then_stops_old_then_removes_then_creates(self) -> None:
+        client = FakeDockerClient({"web": ContainerState("web", exists=True, config_hash="old")})
+        report = execute(
+            Plan((Recreate(_spec("web", config_hash="new"), "changed"),)), client, config=self.CFG
+        )
+        assert report.ok
+        # The pull comes first so the download does not lengthen the downtime.
+        assert client.calls == [
+            ("pull", "web:latest"),
+            ("stop", "web", 17),
+            ("remove", "web"),
+            ("create", "web"),
+        ]
+
+    def test_remove_orphan_stops_then_removes(self) -> None:
+        client = FakeDockerClient({"old": ContainerState("old", exists=True, managed=True)})
+        report = execute(Plan((Remove("old", "orphan"),)), client, config=self.CFG)
+        assert report.ok
+        assert client.calls == [("stop", "old", 17), ("remove", "old")]
+
+    def test_default_stop_timeout_reaches_the_stop(self) -> None:
+        client = FakeDockerClient({"old": ContainerState("old", exists=True, managed=True)})
+        execute(Plan((Remove("old", "orphan"),)), client)
+        assert ("stop", "old", ReconcilerConfig().stop_timeout) in client.calls
 
     def test_accessory_runs_before_service(self) -> None:
         client = FakeDockerClient()

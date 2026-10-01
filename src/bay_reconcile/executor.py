@@ -136,15 +136,32 @@ def _apply(action: Action, client: DockerClient, cfg: ReconcilerConfig) -> str:
     if isinstance(action, CanarySwap):
         return _canary_swap(action.spec, client, cfg)
     if isinstance(action, Recreate):
+        # Pull first: the old container keeps serving while the image downloads.
         if not action.spec.build:
             client.pull(action.spec.image)
-        client.remove(action.spec.name)
+        _stop_then_remove(client, action.spec.name, cfg)
         client.create(action.spec)
         return f"recreated {action.spec.name}"
     if isinstance(action, Remove):
-        client.remove(action.name)
+        _stop_then_remove(client, action.name, cfg)
         return f"removed {action.name}"
     return "noop"
+
+
+def _stop_then_remove(client: DockerClient, name: str, cfg: ReconcilerConfig) -> None:
+    """Stop ``name`` gracefully, then remove it.
+
+    A bare ``remove`` is a force remove, and Docker SIGKILLs the process. On
+    2026-10-01 a recreate killed a running postgres that way and it came back
+    with "database system was not properly shut down; automatic recovery in
+    progress". Postgres replays its WAL; Redis or Valkey would lose every write
+    since its last snapshot. ``stop`` sends the image's STOPSIGNAL (SIGINT for
+    postgres) and waits ``stop_timeout`` seconds before Docker kills it anyway,
+    so a hung process still goes. The remove stays forced for that case. Both
+    calls are no-ops for a container that is already stopped or gone.
+    """
+    client.stop(name, timeout=cfg.stop_timeout)
+    client.remove(name)
 
 
 def _canary_swap(spec: ContainerSpec, client: DockerClient, cfg: ReconcilerConfig) -> str:
@@ -155,14 +172,17 @@ def _canary_swap(spec: ContainerSpec, client: DockerClient, cfg: ReconcilerConfi
     try:
         if not _wait_healthy(client, canary, cfg):
             raise _CanaryUnhealthy(f"{canary} did not become healthy")
-        client.stop(spec.name, timeout=cfg.stop_timeout)
-        client.remove(spec.name)
+        _stop_then_remove(client, spec.name, cfg)
         client.rename(canary, spec.name)
         return f"canary-swapped {spec.name}"
     except Exception as exc:
         # Rescue: tear down the canary, fall back to a standard recreate.
+        # The canary is the new copy that failed its health gate, so a plain
+        # force remove is enough. The old container is still the live
+        # workload, so it gets the graceful stop. It may already be stopped or
+        # gone if the swap failed after its stop; both calls tolerate that.
         client.remove(canary)
-        client.remove(spec.name)
+        _stop_then_remove(client, spec.name, cfg)
         client.create(spec)
         return f"recreated {spec.name} (canary fallback: {type(exc).__name__})"
 
