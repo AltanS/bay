@@ -7,6 +7,39 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.7.5] - 2026-10-01
+
+### Fixed
+
+- `bin/bay validate` now refuses a service name that collides with a name Bay
+  derives. A service name must not end in `-vpn`, `-public`, `-health` or
+  `-tailnet`. Bay builds its Traefik router names from these endings, and the
+  v0.7.4 CrowdSec whitelist trusts routers ending in `-vpn@docker`. A public
+  service named `foo-vpn` would have had its own 403 responses ignored. A
+  service or accessory named `X-new` is also an error when a service `X`
+  exists, because `X-new` is the canary container of `X` during a zero-downtime
+  deploy.
+- The CrowdSec YAML check now covers Bay's own parser files too. It matched
+  only `custom-*.yaml`, so a bad render of
+  `bay-vpn-allowlist-refusals.yaml` was not caught. It now matches
+  `custom-*.yaml` and `bay-*.yaml`, and still skips Hub-managed files. The
+  check runs after Bay deploys its parser.
+- The reconciler tar is now packed atomically. With forks, two hosts could pack
+  the same file on the controller at once, and a third host could then ship a
+  half-written tar. Each host now packs into its own temporary file and renames
+  it onto the final path. The temporary file is removed if the pack fails.
+
+### Upgrade notes
+
+- `bin/bay validate` may now reject a service name. Rename any service whose
+  name ends in `-vpn`, `-public`, `-health` or `-tailnet`, or that is another
+  service's name plus `-new`. Bay did not check `tailnet_proxies` names, which
+  also get a `-tailnet` router, so keep those away from these endings too.
+- The crowdsec role runs from `provision.yml`, so a deploy does not apply the
+  parser check. Run `bin/bay provision <env> --tags crowdsec` on each
+  environment.
+- The tar fix needs no action.
+
 ## [0.7.4] - 2026-10-01
 
 ### Fixed
