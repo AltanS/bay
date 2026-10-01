@@ -7,6 +7,22 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.7.1] - 2026-10-01
+
+### Fixed
+
+- `bin/bay dev-link` refuses a target that is not a framework checkout. It
+  only checked that the target was a git repository, and a consumer is one
+  too. `Path.cwd()` gives the physical path, so from a consumer reached
+  through a symlink the default `../bay` can resolve to the consumer itself.
+  dev-link then deleted `.bay/` and linked the consumer into itself. The
+  target must now hold `version.yml`, and it must not be the consumer.
+
+### Upgrade notes
+
+- Nothing to do. A target that is a real framework checkout links the same
+  as before.
+
 ## [0.7.0] - 2026-09-23
 
 ### Added
