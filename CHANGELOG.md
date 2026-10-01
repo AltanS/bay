@@ -9,6 +9,20 @@ before upgrading — anything needing manual action is called out under
 
 ## [0.7.1] - 2026-10-01
 
+### Security
+
+- `vpn_routes` now ignores letter case (GH#3). Each entry rendered as Traefik
+  `PathPrefix`, which compares case-sensitively. Many backends (Express and
+  React Router by default) route paths without regard to case. So `/Admin` or
+  `/ADMIN/x` missed the VPN router, fell through to the public catch-all and
+  reached the backend from the internet. Each entry now renders as
+  ``PathRegexp(`(?i)^/admin`)``: a prefix match like before, with no case.
+  The health router uses the same match, so a `healthcheck_path` such as
+  `/Admin/health` under a VPN route keeps the VPN chain.
+  `public_routes` stays case-sensitive: there a case variant falls through to
+  the VPN catch-all, which fails closed. See "Traefik Label Generation" in
+  docs/services.md.
+
 ### Fixed
 
 - `bin/bay dev-link` refuses a target that is not a framework checkout. It
@@ -20,8 +34,14 @@ before upgrading — anything needing manual action is called out under
 
 ### Upgrade notes
 
-- Nothing to do. A target that is a real framework checkout links the same
-  as before.
+- Run `bin/bay deploy <env>`. The VPN router rule is a container label, so
+  each service with `vpn_routes` is recreated once on the next deploy. Nothing
+  changes for services without `vpn_routes`.
+- A `vpn_routes` entry may hold `.`, `+` and `*` (the schema allows them).
+  They still match literally. The services schema already refuses any other
+  character with regex meaning.
+- dev-link: nothing to do. A target that is a real framework checkout links
+  the same as before.
 
 ## [0.7.0] - 2026-09-23
 
