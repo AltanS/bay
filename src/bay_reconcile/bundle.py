@@ -110,7 +110,7 @@ def _config(raw: Any) -> ReconcilerConfig:
         raise ValueError(
             f"unknown config key {unknown[0]!r} (known: {', '.join(_CONFIG_KEYS)})"
         )
-    values: dict[str, int | float] = {}
+    values: dict[str, Any] = {}  # each value is checked against _CONFIG_KEYS below
     for key, value in raw.items():
         kind = _CONFIG_KEYS[key]
         if isinstance(value, bool) or not isinstance(value, int | float):
