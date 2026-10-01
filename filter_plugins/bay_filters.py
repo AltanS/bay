@@ -530,6 +530,7 @@ def _add_router_labels(labels, name, svc, public_mw, vpn_mw, config=None):
                 secondary_priority="20",
                 primary_entrypoints=public_ep,
                 secondary_entrypoints=vpn_ep,
+                secondary_path_matcher=_vpn_route_matcher,
             )
         else:
             _add_single_router_labels(
@@ -585,6 +586,52 @@ def _add_router_labels(labels, name, svc, public_mw, vpn_mw, config=None):
     )
 
 
+# Characters the services schema lets into a route that mean something in a
+# regular expression. Each becomes a one-character class instead of a
+# backslash escape, so the rule reads the same in Go, in Python and inside the
+# double-quoted YAML of the compose file. Anything else with regex meaning is
+# refused: the schema already keeps it out, and refusing fails closed.
+_ROUTE_REGEX_CLASSES = {".": "[.]", "+": "[+]", "*": "[*]"}
+_ROUTE_REGEX_REFUSED = frozenset("?()|[]{}^$\\")
+
+
+def _vpn_route_matcher(route):
+    """Render one `vpn_routes` entry as a case-insensitive prefix match.
+
+    PathPrefix compares case-sensitively, and many backends (Express, React
+    Router) route case-insensitively. So /Admin missed the VPN router, fell
+    through to the public catch-all and reached the backend from the internet
+    (GH#3). Otherwise this keeps PathPrefix semantics on purpose: anchored at
+    the start, with no boundary, so /admin still covers /administrator.
+    Over-matching a VPN route fails closed; narrowing it now would open paths
+    that consumers have relied on being covered.
+
+    `public_routes` keeps PathPrefix: there a case variant falls through to
+    the VPN catch-all, which fails closed.
+    """
+    text = _rule_literal(route)
+    out = []
+    for ch in text:
+        if ch in _ROUTE_REGEX_REFUSED:
+            raise ValueError(
+                f"cannot build a Traefik router rule: {ch!r} in vpn route "
+                f"{text!r} has regular-expression meaning"
+            )
+        out.append(_ROUTE_REGEX_CLASSES.get(ch, ch))
+    return f"PathRegexp(`(?i)^{''.join(out)}`)"
+
+
+def _vpn_route_covers(path, routes):
+    """True iff the VPN router's rule (see `_vpn_route_matcher`) matches `path`.
+
+    Deliberately not `_path_under`: that one stops at a `/` boundary and
+    compares case-sensitively, and Traefik does neither here. The health
+    router must agree with the router that would otherwise take the path, or
+    it serves a VPN-only path publicly."""
+    lowered = str(path).lower()
+    return any(lowered.startswith(str(r).lower()) for r in routes or [])
+
+
 def _path_under(path, routes):
     """True iff `path` falls under any PathPrefix in `routes`.
 
@@ -626,7 +673,7 @@ def _add_health_router_labels(
     # entrypoints does it inherit?
     if access == "public":
         vpn_routes = svc.get("vpn_routes", [])
-        if vpn_routes and _path_under(path, vpn_routes):
+        if vpn_routes and _vpn_route_covers(path, vpn_routes):
             base_mw, entrypoints = vpn_mw, vpn_entrypoints
         else:
             base_mw, entrypoints = public_mw, public_entrypoints
@@ -726,6 +773,7 @@ def _add_dual_router_labels(
     primary_suffix, secondary_suffix,
     primary_priority, secondary_priority,
     primary_entrypoints="websecure", secondary_entrypoints="websecure",
+    secondary_path_matcher=None,
 ):
     """Add labels for a dual-router service (public + vpn split).
 
@@ -747,9 +795,10 @@ def _add_dual_router_labels(
 
     # Secondary router (higher priority, path-matched)
     sec = f"{name}{secondary_suffix}"
-    path_rules = " || ".join(
-        f"PathPrefix(`{_rule_literal(r)}`)" for r in secondary_routes
-    )
+    if secondary_path_matcher is None:
+        def secondary_path_matcher(r):
+            return f"PathPrefix(`{_rule_literal(r)}`)"
+    path_rules = " || ".join(secondary_path_matcher(r) for r in secondary_routes)
     labels[f"traefik.http.routers.{sec}.rule"] = (
         f"{sec_host} && ({path_rules})"
     )

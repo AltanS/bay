@@ -145,8 +145,8 @@ class TestTraefikLabelsPublic:
         assert labels["traefik.http.routers.app-vpn.priority"] == "20"
         assert "vpn-chain" in labels["traefik.http.routers.app-vpn.middlewares"]
         rule = labels["traefik.http.routers.app-vpn.rule"]
-        assert "PathPrefix(`/admin`)" in rule
-        assert "PathPrefix(`/api/internal`)" in rule
+        assert "PathRegexp(`(?i)^/admin`)" in rule
+        assert "PathRegexp(`(?i)^/api/internal`)" in rule
         # Shared service backend
         assert labels["traefik.http.services.app.loadbalancer.server.port"] == "8080"
 
@@ -200,7 +200,7 @@ class TestTraefikLabelsDualRouterMultiDomain:
         assert labels["traefik.http.routers.app.rule"] == "Host(`app.example.com`)"
         assert (
             labels["traefik.http.routers.app-vpn.rule"]
-            == "Host(`app.example.com`) && (PathPrefix(`/admin`))"
+            == "Host(`app.example.com`) && (PathRegexp(`(?i)^/admin`))"
         )
 
     def test_public_vpn_routes_all_domains_routed(self) -> None:
@@ -217,7 +217,7 @@ class TestTraefikLabelsDualRouterMultiDomain:
         # Secondary path-matched router does too — OR-group parenthesised
         assert (
             labels["traefik.http.routers.blogco-vpn.rule"]
-            == f"({host_expr}) && (PathPrefix(`/super`))"
+            == f"({host_expr}) && (PathRegexp(`(?i)^/super`))"
         )
 
     def test_vpn_public_routes_all_domains_routed(self) -> None:

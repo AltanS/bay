@@ -1116,6 +1116,17 @@ The compose templates automatically generate Traefik labels from the service def
 - **VPN service with `public_routes`** → two routers:
   - High-priority router for `public_routes` paths with `public-chain`
   - Low-priority catch-all with `vpn-chain`
+
+Both lists are **prefixes**: `/admin` also covers `/admin/users` and
+`/administrator`. They differ in letter case:
+
+- A `vpn_routes` entry ignores case. `/admin` renders as
+  ``PathRegexp(`(?i)^/admin`)``, so `/Admin` and `/ADMIN/x` also need the VPN.
+  Many backends (Express and React Router by default) route paths without
+  regard to case. A case-sensitive match let those variants skip the VPN router
+  and reach the backend from the internet. Fixed in v0.7.1 (GH#3).
+- A `public_routes` entry stays case-sensitive (``PathPrefix(`/webhook`)``).
+  A case variant falls through to the VPN catch-all, which fails closed.
 - **Accessories** → no Traefik labels, no external routing
 - **Per-service opt-out:** setting `security_headers: false` or `compress: false` creates a custom `{name}-chain` with only the enabled globals
 

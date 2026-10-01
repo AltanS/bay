@@ -104,8 +104,8 @@
 {% if svc.vpn_routes is defined and svc.vpn_routes | length > 0 %}
       # Public service with VPN-protected routes
       - "traefik.http.services.{{ name }}.loadbalancer.server.port={{ svc.ports.internal }}"
-      # VPN routes — higher priority
-      - "traefik.http.routers.{{ name }}-vpn.rule={{ _sec_host }} && ({{ svc.vpn_routes | map('regex_replace', '^(.+)$', 'PathPrefix(`\\1`)') | join(' || ') }})"
+      # VPN routes — higher priority. Case-insensitive prefix (GH#3), same as _vpn_route_matcher in bay_filters.py
+      - "traefik.http.routers.{{ name }}-vpn.rule={{ _sec_host }} && ({{ svc.vpn_routes | map('regex_replace', '([.+*])', '[\\1]') | map('regex_replace', '^(.+)$', 'PathRegexp(`(?i)^\\1`)') | join(' || ') }})"
       - "traefik.http.routers.{{ name }}-vpn.service={{ name }}"
       - "traefik.http.routers.{{ name }}-vpn.priority=20"
       - "traefik.http.routers.{{ name }}-vpn.entrypoints={{ vpn_entrypoints | default('websecure') }}"
