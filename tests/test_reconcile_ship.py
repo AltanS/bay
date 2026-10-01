@@ -97,14 +97,14 @@ def test_the_marker_carries_the_framework_version_and_a_content_digest():
 
 def test_the_package_ships_as_a_tar_without_pycache():
     pack = _by_name("Pack bay_reconcile without __pycache__")
-    argv = pack["ansible.builtin.command"]["argv"]
-    assert argv[0] == "tar"
-    assert "--exclude=__pycache__" in argv
-    assert "--exclude=*.pyc" in argv
+    script = pack["ansible.builtin.shell"]["cmd"]
+    assert "tar " in script
+    assert "--exclude=__pycache__" in script
+    assert "--exclude=*.pyc" in script
     # Packed on the controller, and only once per marker.
     assert pack["delegate_to"] == "localhost"
     assert pack["become"] is False
-    assert pack["ansible.builtin.command"]["creates"]
+    assert pack["ansible.builtin.shell"]["creates"]
 
     unpack = _by_name("Unpack bay_reconcile on the host")
     assert unpack["ansible.builtin.unarchive"]["src"] == "{{ _pkg_tar }}"
@@ -121,7 +121,7 @@ def test_the_recursive_directory_copy_is_gone():
 def test_the_controller_side_pack_runs_in_check_mode():
     """`--check` must not fail on a tar the dry run itself refused to build.
 
-    The pack is a `command` with `creates:`, so check mode SKIPS it, and the
+    The pack is a `shell` with `creates:`, so check mode SKIPS it, and the
     `unarchive` below then reports a missing source. Both controller-side
     steps write only to the operator's own cache directory — nothing on a
     managed host — so both run for real in check mode, and neither counts as

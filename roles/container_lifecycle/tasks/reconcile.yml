@@ -197,18 +197,21 @@
       changed_when: false
 
     # `creates:` makes this a no-op once the tar for this exact marker exists,
-    # so a multi-host deploy packs once and ships N times.
+    # so a multi-host deploy packs once and ships N times. `creates:` is a
+    # check-then-act, though: with forks, two hosts can both see no tar and
+    # both pack. Each host packs into its own temp file and `mv` renames it
+    # onto the final path, which is atomic, so no host ever unpacks a
+    # half-written tar. The trap removes the temp file if tar or mv fails.
     - name: Pack bay_reconcile without __pycache__
-      ansible.builtin.command:
-        argv:
-          - tar
-          - --exclude=__pycache__
-          - --exclude=*.pyc
-          - -czf
-          - "{{ _pkg_tar }}"
-          - -C
-          - "{{ playbook_dir }}/src"
-          - bay_reconcile
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          tmp={{ (_pkg_tar ~ '.' ~ inventory_hostname ~ '.tmp') | quote }}
+          trap 'rm -f "$tmp"' EXIT
+          tar '--exclude=__pycache__' '--exclude=*.pyc' -czf "$tmp" \
+            -C {{ (playbook_dir ~ '/src') | quote }} bay_reconcile
+          mv -f "$tmp" {{ _pkg_tar | quote }}
         creates: "{{ _pkg_tar }}"
       delegate_to: localhost
       become: false
@@ -291,8 +294,9 @@
       check_mode: false
       changed_when: false
 
-    # Same controller-side steps as the real ship above. `creates:` makes the
-    # pack a no-op when the tar for this marker already exists.
+    # Same controller-side steps as the real ship above, including the
+    # temp-file-then-rename pack. `creates:` makes the pack a no-op when the
+    # tar for this marker already exists.
     - name: Ensure the controller-side package cache exists for the check-mode plan
       ansible.builtin.file:
         path: "{{ _pkg_cache }}"
@@ -304,16 +308,15 @@
       changed_when: false
 
     - name: Pack bay_reconcile for the check-mode plan
-      ansible.builtin.command:
-        argv:
-          - tar
-          - --exclude=__pycache__
-          - --exclude=*.pyc
-          - -czf
-          - "{{ _pkg_tar }}"
-          - -C
-          - "{{ playbook_dir }}/src"
-          - bay_reconcile
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: |
+          set -euo pipefail
+          tmp={{ (_pkg_tar ~ '.' ~ inventory_hostname ~ '.tmp') | quote }}
+          trap 'rm -f "$tmp"' EXIT
+          tar '--exclude=__pycache__' '--exclude=*.pyc' -czf "$tmp" \
+            -C {{ (playbook_dir ~ '/src') | quote }} bay_reconcile
+          mv -f "$tmp" {{ _pkg_tar | quote }}
         creates: "{{ _pkg_tar }}"
       delegate_to: localhost
       become: false

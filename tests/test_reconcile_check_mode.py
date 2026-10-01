@@ -182,7 +182,7 @@ def test_check_mode_plan_ships_the_new_package_into_the_temp_dir() -> None:
     assert unpack["ansible.builtin.unarchive"]["src"] == "{{ _pkg_tar }}"
     pack = _in_block("Pack bay_reconcile for the check-mode plan")
     real_pack = _task_nested("Pack bay_reconcile without __pycache__")
-    assert pack["ansible.builtin.command"] == real_pack["ansible.builtin.command"]
+    assert pack["ansible.builtin.shell"] == real_pack["ansible.builtin.shell"]
 
 
 def _task_nested(name: str) -> dict:
