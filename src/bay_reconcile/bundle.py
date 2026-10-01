@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from .models import ContainerSpec, healthcheck_to_sdk
+from .models import ContainerSpec, ReconcilerConfig, healthcheck_to_sdk
 from .observe import MANAGED_LABEL
 
 _VALID_TYPES = ("service", "accessory", "infra")
@@ -79,6 +79,48 @@ class Bundle:
     managed_label: str
     containers: tuple[ContainerSpec, ...]
     remove_orphans: bool = False
+    config: ReconcilerConfig = ReconcilerConfig()
+
+
+# The tunables a bundle may carry, each with the type it is parsed as. An
+# unknown key is an error, not ignored: a typo (`stop_timout`) would otherwise
+# leave the default in force while the operator believes the override applied.
+_CONFIG_KEYS: Mapping[str, type] = {
+    "stop_timeout": int,
+    "healthcheck_timeout": float,
+    "healthcheck_poll": float,
+}
+
+
+def _config(raw: Any) -> ReconcilerConfig:
+    """Build the ReconcilerConfig from the optional bundle ``config`` object.
+
+    A missing object keeps every default, so a bundle from an older CLI stays
+    valid. Every value must be a positive number; a bool is refused even
+    though Python counts it as an int. ``stop_timeout`` must be a whole number
+    because Docker takes it in whole seconds. The check runs at load time,
+    before anything is observed or removed, like the healthcheck durations.
+    """
+    if raw is None:
+        return ReconcilerConfig()
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"config must be an object, got {type(raw).__name__}")
+    unknown = sorted(set(raw) - set(_CONFIG_KEYS))
+    if unknown:
+        raise ValueError(
+            f"unknown config key {unknown[0]!r} (known: {', '.join(_CONFIG_KEYS)})"
+        )
+    values: dict[str, int | float] = {}
+    for key, value in raw.items():
+        kind = _CONFIG_KEYS[key]
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError(f"config {key!r} must be a positive number, got {value!r}")
+        if kind is int and not isinstance(value, int):
+            raise ValueError(f"config {key!r} must be a positive whole number, got {value!r}")
+        if not value > 0 or value == float("inf"):
+            raise ValueError(f"config {key!r} must be a positive number, got {value!r}")
+        values[key] = kind(value)
+    return ReconcilerConfig(**values)
 
 
 def load_bundle(data: Mapping[str, Any]) -> Bundle:
@@ -91,4 +133,5 @@ def load_bundle(data: Mapping[str, Any]) -> Bundle:
         ),
         containers=tuple(spec_from_dict(c) for c in raw),
         remove_orphans=bool(data.get("remove_orphans", False)),
+        config=_config(data.get("config")),
     )

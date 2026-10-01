@@ -33,7 +33,7 @@ def reconcile(
             "actions": [type(a).__name__ for a in the_plan.actions],
         }
 
-    report = execute(the_plan, client)
+    report = execute(the_plan, client, config=bundle.config)
     return (0 if report.ok else 1), {"plan": the_plan.summary(), **report.to_dict()}
 
 

@@ -119,6 +119,11 @@
         'stack': stack_name | default('bay'),
         'managed_label': container_lifecycle_managed_label | default('bay.managed'),
         'remove_orphans': bay_reconciler_remove_orphans | default(container_lifecycle_cleanup | default(true)) | bool,
+        'config': {
+          'stop_timeout': container_lifecycle_stop_timeout | int,
+          'healthcheck_timeout': container_lifecycle_healthcheck_timeout | float,
+          'healthcheck_poll': container_lifecycle_healthcheck_poll | float
+        },
         'containers': _reconcile_entries | default([])
       } | to_nice_json }}
     owner: "{{ app_user }}"

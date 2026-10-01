@@ -6,13 +6,23 @@
 bay_host_label: ""
 bay_alert_host: "{% set _n = (bay_host_label | default('', true)) or (ansible_hostname | default('', true)) or inventory_hostname %}{{ _n }}{% if _n != inventory_hostname %} ({{ inventory_hostname }}){% endif %}"
 
+# The three values below reach the reconciler through the bundle that
+# tasks/reconcile.yml writes, so a consumer can override them in group_vars.
+# Until 0.7.3 they were ignored and the reconciler used its own built-in
+# defaults. Each default here equals that built-in value.
+
 # How long to wait for a canary container to become healthy (seconds)
 container_lifecycle_healthcheck_timeout: 120
 
-# How often to poll canary health status (seconds)
-container_lifecycle_healthcheck_poll: 5
+# How often to poll canary health status (seconds). This is only how fast Bay
+# notices a healthy canary, not a safety limit; the timeout above is the limit.
+# The value is 1 to match the reconciler's live default, which was chosen on
+# purpose (a54b50d). The old value 5 was never applied, and would add up to 5
+# seconds to every canary swap if it were.
+container_lifecycle_healthcheck_poll: 1
 
-# Grace period for SIGTERM before SIGKILL when stopping containers (seconds)
+# Grace period for the stop signal before SIGKILL when stopping containers
+# (seconds). Docker waits this long for the process to exit on its own.
 container_lifecycle_stop_timeout: 30
 
 # Suffix appended to canary containers during zero-downtime deploy

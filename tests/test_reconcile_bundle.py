@@ -9,7 +9,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from bay_reconcile import ContainerState, load_bundle, spec_from_dict  # noqa: E402
+from bay_reconcile import (  # noqa: E402
+    ContainerState,
+    ReconcilerConfig,
+    load_bundle,
+    spec_from_dict,
+)
 from bay_reconcile.__main__ import reconcile  # noqa: E402
 
 
@@ -136,3 +141,107 @@ class TestReconcileEntrypoint:
         assert code == 0
         assert out["plan_only"] is True
         assert client.calls == []
+
+
+class TestBundleConfig:
+    """The optional `config` object carries the reconciler's tunables."""
+
+    def test_absent_keeps_the_defaults(self):
+        assert load_bundle({"containers": []}).config == ReconcilerConfig()
+
+    def test_present_values_are_used(self):
+        b = load_bundle(
+            {
+                "config": {
+                    "stop_timeout": 45,
+                    "healthcheck_timeout": 90,
+                    "healthcheck_poll": 0.5,
+                }
+            }
+        )
+        assert b.config.stop_timeout == 45
+        assert b.config.healthcheck_timeout == 90.0
+        assert isinstance(b.config.healthcheck_timeout, float)
+        assert b.config.healthcheck_poll == 0.5
+
+    def test_a_partial_object_keeps_the_other_defaults(self):
+        b = load_bundle({"config": {"stop_timeout": 5}})
+        assert b.config == ReconcilerConfig(stop_timeout=5)
+
+    def test_unknown_key_is_an_error(self):
+        with pytest.raises(ValueError, match="stop_timout"):
+            load_bundle({"config": {"stop_timout": 5}})
+
+    def test_canary_suffix_is_not_a_bundle_key(self):
+        with pytest.raises(ValueError, match="canary_suffix"):
+            load_bundle({"config": {"canary_suffix": "-x"}})
+
+    @pytest.mark.parametrize("key", ["stop_timeout", "healthcheck_timeout", "healthcheck_poll"])
+    @pytest.mark.parametrize("bad", [0, -1, -0.5, True, False, "30", None, float("nan")])
+    def test_bad_value_is_an_error_naming_the_key(self, key, bad):
+        with pytest.raises(ValueError, match=key):
+            load_bundle({"config": {key: bad}})
+
+    def test_stop_timeout_must_be_whole(self):
+        with pytest.raises(ValueError, match="stop_timeout"):
+            load_bundle({"config": {"stop_timeout": 2.5}})
+
+    def test_config_must_be_an_object(self):
+        with pytest.raises(ValueError, match="config"):
+            load_bundle({"config": [1, 2]})
+
+
+class TestMainPassesConfigToExecute:
+    def test_execute_receives_the_bundle_config(self, monkeypatch, tmp_path):
+        import json
+
+        import bay_reconcile.__main__ as entry
+        import bay_reconcile.sdk_client as sdk
+
+        seen = {}
+
+        class _Report:
+            ok = True
+
+            def to_dict(self):
+                return {"ok": True}
+
+        def fake_execute(the_plan, client, *, config=None, **kw):
+            seen["config"] = config
+            return _Report()
+
+        monkeypatch.setattr(entry, "execute", fake_execute)
+        monkeypatch.setattr(sdk, "SdkDockerClient", lambda **kw: _Fake())
+        path = tmp_path / "bundle.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "containers": [_entry()],
+                    "config": {
+                        "stop_timeout": 77,
+                        "healthcheck_timeout": 33.0,
+                        "healthcheck_poll": 2.0,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert entry.main([str(path)]) == 0
+        assert seen["config"] == ReconcilerConfig(
+            stop_timeout=77, healthcheck_timeout=33.0, healthcheck_poll=2.0
+        )
+
+    def test_a_bad_config_exits_before_docker_is_touched(self, monkeypatch, tmp_path, capsys):
+        import json
+
+        import bay_reconcile.__main__ as entry
+        import bay_reconcile.sdk_client as sdk
+
+        def boom(**kw):
+            raise AssertionError("client built for a bad bundle")
+
+        monkeypatch.setattr(sdk, "SdkDockerClient", boom)
+        path = tmp_path / "bundle.json"
+        path.write_text(json.dumps({"config": {"stop_timeout": 0}}), encoding="utf-8")
+        assert entry.main([str(path)]) == 2
+        assert "stop_timeout" in capsys.readouterr().out
