@@ -7,6 +7,30 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.7.2] - 2026-10-01
+
+### Fixed
+
+- A deploy no longer kills a running container without warning. To recreate
+  a container, or to remove one that left `services.yml`, the reconciler
+  force-removed it, and Docker sends SIGKILL to a force-removed container.
+  The process got no chance to shut down. A recreated PostgreSQL accessory
+  came back with "database system was not properly shut down; automatic
+  recovery in progress". Postgres recovers from its write-ahead log, but
+  Redis or Valkey loses every write since its last snapshot. The reconciler
+  now stops the container first and removes it after. Docker sends the
+  image's own stop signal (SIGINT for postgres) and waits up to 30 seconds
+  before it kills the process. This applies to a recreate, to an orphan
+  removal, and to the old container when a canary swap falls back to a
+  recreate. A recreate still pulls the new image before it stops the old
+  container, so the download adds no downtime.
+
+### Upgrade notes
+
+- Nothing to do. A recreate or an orphan removal can now take up to 30
+  seconds longer while the container shuts down. A container that stops
+  quickly costs no extra time.
+
 ## [0.7.1] - 2026-10-01
 
 ### Security
