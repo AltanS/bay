@@ -2515,6 +2515,88 @@ def _validate_identifier_safety(
         )
 
 
+# Router-name endings Bay appends itself (filter_plugins/bay_filters.py and
+# the tailnet-proxies template). A service name ending in one of these would
+# produce a router name that looks like Bay's own.
+_RESERVED_NAME_SUFFIXES: dict[str, str] = {
+    "-vpn": (
+        "Bay names the VPN router '<service>-vpn', and the CrowdSec whitelist "
+        "trusts routers with that ending, so a public service with this name "
+        "would have its own 403 responses ignored"
+    ),
+    "-public": "Bay names the public-route router '<service>-public'",
+    "-health": "Bay names the health-check router '<service>-health'",
+    "-tailnet": (
+        "Bay names the tailnet proxy router '<name>-tailnet', and the CrowdSec "
+        "whitelist trusts routers with that ending"
+    ),
+}
+
+# Suffix of the zero-downtime canary container. This mirrors the
+# container_lifecycle_canary_suffix role default.
+_CANARY_SUFFIX = "-new"
+
+
+def _validate_reserved_names(
+    services_data: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Service names that collide with names Bay derives from other names.
+
+    Two collisions, both silent:
+
+      * Router names. Bay derives ``<svc>``, ``<svc>-vpn``, ``<svc>-public``
+        and ``<svc>-health`` from the service name. A service that is itself
+        named ``foo-vpn`` gets the router ``foo-vpn@docker``, which is the name
+        the CrowdSec VPN-refusal whitelist trusts.
+      * Canary containers. A zero-downtime deploy of ``foo`` starts a container
+        named ``foo-new``. A service or accessory named ``foo-new`` owns that
+        container name already.
+
+    ``tailnet_proxies`` names get the router ``<name>-tailnet``, but validate
+    does not read that variable, so they are not checked here.
+    """
+    console.header("Reserved Names")
+
+    issues = 0
+    services = services_data.get("services") or {}
+    accessories = services_data.get("accessories") or {}
+    if not isinstance(services, dict):
+        return
+    if not isinstance(accessories, dict):
+        accessories = {}
+
+    service_names = [str(n) for n in services if not str(n).startswith("_")]
+    all_names = service_names + [
+        str(n) for n in accessories if not str(n).startswith("_")
+    ]
+
+    for name in service_names:
+        for suffix, why in _RESERVED_NAME_SUFFIXES.items():
+            if name.endswith(suffix):
+                issues += 1
+                result.fail(
+                    f"services.{name}: a service name must not end in "
+                    f"'{suffix}'. {why}. Rename the service."
+                )
+
+    for name in all_names:
+        if not name.endswith(_CANARY_SUFFIX):
+            continue
+        base = name[: -len(_CANARY_SUFFIX)]
+        if base in service_names:
+            kind = "services" if name in service_names else "accessories"
+            issues += 1
+            result.fail(
+                f"{kind}.{name}: this name is the canary container of service "
+                f"'{base}' ('{base}{_CANARY_SUFFIX}'). A zero-downtime deploy "
+                f"of '{base}' would collide with it. Rename '{name}'."
+            )
+
+    if issues == 0:
+        result.ok("Reserved names  no service name collides with a router or canary name")
+
+
 def _validate_config_files(
     root: Path,
     services_data: dict[str, Any],
@@ -2725,6 +2807,7 @@ def run_validation(
     # 3b. Identifier safety (names that reach SQL and shells)
     if services_data is not None:
         _validate_identifier_safety(services_data, result)
+        _validate_reserved_names(services_data, result)
 
     # 3c. Declared config files exist in the consumer's files/
     if services_data is not None:
