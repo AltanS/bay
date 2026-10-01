@@ -898,6 +898,23 @@ def dev_link(
             hint="The framework path must be a git repository.",
         )
 
+    # A consumer is a git repository too, so the check above accepts one.
+    # Path.cwd() is the physical path, so from a consumer reached through a
+    # symlink the default ../bay can resolve to the consumer itself. Without
+    # these checks dev-link would delete .bay/ and link the consumer into
+    # itself.
+    if framework_path == root.resolve():
+        raise BayError(
+            f"Framework path is this consumer, not the framework: {framework_path}",
+            hint="Pass the path to your local bay checkout explicitly.",
+        )
+
+    if not (framework_path / "version.yml").is_file():
+        raise BayError(
+            f"Not a bay framework checkout (no version.yml): {framework_path}",
+            hint="Pass the path to your local bay checkout.",
+        )
+
     already_linked = paths.is_dev_linked(root)
     if already_linked:
         console.warning("Already in dev-link mode")
