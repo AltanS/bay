@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+#
+# Print the name of the buildx builder the next build should use.
+#
+# One implementation, two callers: rebuild.sh (webhook auto-builds) and
+# remote_build.yml (`bin/bay deploy`). Contract:
+#   stdout  exactly one line, the builder name
+#   stderr  exactly one line, the reason for the choice
+#   exit    0 in every handled case; a caller never has to treat a probe
+#           failure as a build failure
+#
+# Probe choice: `timeout N docker buildx inspect --bootstrap <remote>`, not a
+# bare TCP connect. A TCP connect proves only that a port is open. The
+# bootstrap dials the endpoint with the builder's own mTLS files and waits for
+# BuildKit to answer a gRPC call, so it also catches a wrong or expired cert,
+# and a port that is open but not BuildKit. It also fails fast when the
+# builder was never registered on this host. buildx waits up to 20 s for a
+# remote connection by itself; `timeout` is the bound that keeps an offline
+# remote cheap.
+set -uo pipefail
+
+LOCAL_BUILDER={{ bay_buildx_builder | quote }}
+REMOTE_BUILDER={{ git_deploy_remote_builder_name | default('bay-remote') | quote }}
+REMOTE_ENDPOINT={{ _select_builder_endpoint | default('') | quote }}
+PROBE_TIMEOUT={{ git_deploy_remote_builder_probe_timeout | default(5) | int }}
+
+if [[ -z "${REMOTE_ENDPOINT}" ]]; then
+  echo "select-builder: no remote builder configured, using ${LOCAL_BUILDER}" >&2
+  echo "${LOCAL_BUILDER}"
+  exit 0
+fi
+
+probe_err=$(timeout --kill-after=2 "${PROBE_TIMEOUT}" \
+  docker buildx inspect --bootstrap "${REMOTE_BUILDER}" 2>&1 >/dev/null)
+rc=$?
+
+if [[ ${rc} -eq 0 ]]; then
+  echo "select-builder: ${REMOTE_BUILDER} at ${REMOTE_ENDPOINT} answered, using it" >&2
+  echo "${REMOTE_BUILDER}"
+  exit 0
+fi
+
+if [[ ${rc} -eq 124 || ${rc} -eq 137 ]]; then
+  reason="no answer within ${PROBE_TIMEOUT}s"
+else
+  # Last non-empty line of the buildx error, flattened to one line.
+  reason=$(printf '%s\n' "${probe_err}" \
+    | awk 'NF { last = $0 } END { gsub(/[[:space:]]+/, " ", last); sub(/^ /, "", last); sub(/ $/, "", last); print last }')
+  reason="probe failed (rc=${rc}): ${reason:-no output}"
+fi
+echo "select-builder: ${REMOTE_BUILDER} at ${REMOTE_ENDPOINT} unreachable, ${reason}, using ${LOCAL_BUILDER}" >&2
+echo "${LOCAL_BUILDER}"
+exit 0

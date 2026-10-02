@@ -127,6 +127,13 @@ build.fanout_failed:
   enabled_by_default: true
   rate_limited: false
 
+build.remote_fallback:
+  level: debug
+  source: git_deploy/rebuild.sh.j2
+  summary: The remote BuildKit builder dropped out mid-build; the build is retried once on the local builder.
+  enabled_by_default: false
+  rate_limited: false
+
 build.killed:
   level: warn
   source: git_deploy/build-alert.sh.j2

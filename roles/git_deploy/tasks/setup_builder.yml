@@ -5,6 +5,10 @@
 #
 # Idempotent: checks for existing builder before creating.
 # Called once from main.yml after strategy resolution, before any builds.
+#
+# On the build server it also registers the optional remote BuildKit builder
+# (remote_builder.yml). The local builder stays the fallback, so it is always
+# provisioned, whether or not a remote one is configured.
 
 - name: Check if buildx builder exists
   ansible.builtin.command:
@@ -41,3 +45,12 @@
   failed_when:
     - _buildx_mem_update.rc != 0
     - "'No such container' not in (_buildx_mem_update.stderr | default(''))"
+
+# Optional remote BuildKit builder. Same task file as main.yml uses, gated the
+# same way: build server only, endpoint set, at most once per run.
+- name: Provision the remote buildx builder (build server, local strategy)
+  ansible.builtin.include_tasks: remote_builder.yml
+  when:
+    - _is_build_server | default(false) | bool
+    - git_deploy_remote_builder_endpoint | default('') | length > 0
+    - not (_bay_remote_builder_done | default(false) | bool)

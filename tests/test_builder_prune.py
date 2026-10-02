@@ -266,3 +266,40 @@ def test_build_server_prunes_the_builder_more_than_once_a_day() -> None:
             f"prune every {step}h is outside the useful band: below 2h keeps "
             "builds permanently cold, above 12h stops bounding the cache"
         )
+
+
+# --- the optional remote builder is never pruned from here -------------------
+#
+# git_deploy can register a second builder that uses the buildx `remote` driver
+# to reach a BuildKit daemon over the tailnet. Its cache and GC live on that
+# remote host. Pruning it from a build server would reach across the network,
+# and would stall the prune while the remote is offline.
+
+
+def test_prune_list_never_names_the_remote_builder() -> None:
+    builders = _defaults(_CRONJOBS_DEFAULTS)["docker_prune_builders"]
+    remote_name = _defaults(_GIT_DEPLOY_DEFAULTS)["git_deploy_remote_builder_name"]
+    for entry in builders:
+        assert "git_deploy_remote_builder" not in entry, entry
+        assert entry != remote_name, entry
+    assert remote_name not in _render(), "the rendered prune script names the remote builder"
+
+
+def test_prune_list_carries_the_remote_builder_guard() -> None:
+    text = _CRONJOBS_DEFAULTS.read_text()
+    idx = text.index("docker_prune_builders:")
+    assert "git_deploy_remote_builder_name" in text[max(0, idx - 900) : idx], (
+        "the guard comment above docker_prune_builders must name the remote "
+        "builder, so nobody adds it to the sweep"
+    )
+
+
+def test_both_build_paths_fall_back_to_the_shared_local_builder() -> None:
+    """The local builder name reaches the build only through the helper (and
+    rebuild.sh's fallback). Both must read bay_buildx_builder, or a renamed
+    builder is built with but never pruned (GH#34)."""
+    templates = _REPO_ROOT / "roles" / "git_deploy" / "templates"
+    for name in ("select-builder.sh.j2", "rebuild.sh.j2"):
+        assert "LOCAL_BUILDER={{ bay_buildx_builder | quote }}" in (templates / name).read_text(), name
+    remote_build = (_REPO_ROOT / "roles" / "git_deploy" / "tasks" / "remote_build.yml").read_text()
+    assert "default(bay_buildx_builder, true)" in remote_build

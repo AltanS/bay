@@ -23,6 +23,13 @@ bay_buildx_builder: "argo-builder"  # legacy-argo: live buildx builder name on h
 # framework actually creates grew unbounded: a deployment host reached
 # 41 GB of stale cache while every prune logged "Total reclaimed space: 0B"
 # (GH#34). Names that do not resolve to an existing builder are skipped.
+#
+# GUARD: local builders only. Never add git_deploy_remote_builder_name (the
+# optional `remote`-driver BuildKit over the tailnet, default `bay-remote`).
+# Its cache lives on the remote host and its GC is configured there
+# (BuildKit gc keepstorage). A prune from here would reach across the tailnet,
+# wipe the cache other build servers may share, and stall every build while
+# the remote is offline. tests/test_builder_prune.py pins this.
 docker_prune_builders:
   - default
   - "{{ bay_buildx_builder }}"

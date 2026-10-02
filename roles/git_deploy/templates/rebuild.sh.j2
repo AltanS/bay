@@ -824,6 +824,56 @@ if [[ "${BUILD_STRATEGY}" == "pull_only" ]]; then
   exit 0
 fi
 
+# ── Builder selection (optional remote BuildKit over the tailnet) ──
+# select-builder.sh is the ONE implementation of the probe; remote_build.yml
+# (`bin/bay deploy`) calls the same script. It prints a builder name on stdout,
+# its reason on stderr, and exits 0 in every handled case.
+SELECT_BUILDER="${STACK_DIR}/bin/select-builder.sh"
+LOCAL_BUILDER={{ bay_buildx_builder | quote }}
+REMOTE_BUILDER={{ git_deploy_remote_builder_name | default('bay-remote') | quote }}
+
+_select_builder() {
+  local chosen=""
+  if [[ -x "${SELECT_BUILDER}" ]]; then
+    chosen=$("${SELECT_BUILDER}") || chosen=""
+  else
+    _log "select-builder: ${SELECT_BUILDER} missing, using ${LOCAL_BUILDER}" >&2
+  fi
+  printf '%s\n' "${chosen:-${LOCAL_BUILDER}}"
+}
+
+# Run one build through the selected builder.
+#   $1  name of a function that runs the build; it takes the builder name.
+# Retry policy. A build that fails on the REMOTE builder re-runs the probe:
+#   - remote now unreachable: send build.remote_fallback and retry ONCE on the
+#     local builder;
+#   - remote still answers: the failure is the build's own, so no retry.
+# A failure on the local builder is never retried. Only the last attempt's
+# status reaches the caller, and only the caller calls _record_failure, so a
+# fallback is never counted against the circuit breaker. A probe that picks
+# the local builder before the build is silent: just the builder= line.
+_build_with_fallback() {
+  local build_fn="$1"
+  local builder reprobe
+  builder=$(_select_builder)
+  _log "builder=${builder}"
+  if "${build_fn}" "${builder}"; then
+    return 0
+  fi
+  if [[ "${builder}" != "${REMOTE_BUILDER}" ]]; then
+    return 1
+  fi
+  reprobe=$(_select_builder)
+  if [[ "${reprobe}" == "${REMOTE_BUILDER}" ]]; then
+    _log "Remote builder ${REMOTE_BUILDER} still answers; build failure is real, no retry"
+    return 1
+  fi
+  _log "Remote builder ${REMOTE_BUILDER} lost mid-build; retrying once on ${LOCAL_BUILDER}"
+  notify_build build.remote_fallback "${SERVICE}: remote builder lost mid-build, retrying on ${LOCAL_BUILDER}"
+  _log "builder=${LOCAL_BUILDER}"
+  "${build_fn}" "${LOCAL_BUILDER}"
+}
+
 # ── Strategy routing ──
 if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
   # ── Remote strategy: fetch, build, push to registry ──
@@ -895,20 +945,25 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
     _log "Building ${IMAGE_REPO}:${SHA} (CONTEXT=${CONTEXT} REPO_DIR=${REPO_DIR} PWD=$(pwd))"
     ls -la "${CONTEXT}" 2>&1 | head -5 || _log "WARNING: build context '${CONTEXT}' not found"
     BUILD_OUTPUT=$(mktemp)
-    if ! docker buildx build \
-      --builder {{ bay_buildx_builder }} \
-      --provenance=false \
-      --push \
+    # $1 = builder. Each attempt overwrites BUILD_OUTPUT, so the failure tail
+    # below always comes from the last attempt.
+    _remote_buildx() {
+      docker buildx build \
+        --builder "$1" \
+        --provenance=false \
+        --push \
 {% if git_deploy_registry_cache | default(false) %}
-      --cache-from "type=registry,ref=${IMAGE_REPO}:buildcache" \
-      --cache-to "type=registry,ref=${IMAGE_REPO}:buildcache,mode=max" \
+        --cache-from "type=registry,ref=${IMAGE_REPO}:buildcache" \
+        --cache-to "type=registry,ref=${IMAGE_REPO}:buildcache,mode=max" \
 {% endif %}
-      -t "${IMAGE_REPO}:${SHA}" \
-      -t "${IMAGE_REF}" \
-      -f "${DOCKERFILE}" \
-      "${BUILD_ARGS[@]}" \
-      ${SECRET_FLAGS} \
-      "${CONTEXT}" 2>&1 | tee "${BUILD_OUTPUT}"; then
+        -t "${IMAGE_REPO}:${SHA}" \
+        -t "${IMAGE_REF}" \
+        -f "${DOCKERFILE}" \
+        "${BUILD_ARGS[@]}" \
+        ${SECRET_FLAGS} \
+        "${CONTEXT}" 2>&1 | tee "${BUILD_OUTPUT}"
+    }
+    if ! _build_with_fallback _remote_buildx; then
       TAIL_OUTPUT=$(tail -c 500 "${BUILD_OUTPUT}")
       _record_failure "${SHA}" "Remote build" "${TAIL_OUTPUT}"
       rm -f "${BUILD_OUTPUT}"
@@ -1083,14 +1138,18 @@ else
   _log "Building ${IMAGE_NAME}:${SHA} (CONTEXT=${CONTEXT} REPO_DIR=${REPO_DIR} PWD=$(pwd))"
   ls -la "${CONTEXT}" 2>&1 | head -5 || _log "WARNING: build context '${CONTEXT}' not found"
   BUILD_OUTPUT=$(mktemp)
-  if ! docker buildx build \
-    --builder {{ bay_buildx_builder }} \
-    --load \
-    -t "${IMAGE_NAME}:${SHA}" \
-    -f "${DOCKERFILE}" \
-    "${BUILD_ARGS[@]}" \
-    ${SECRET_FLAGS} \
-    "${CONTEXT}" 2>&1 | tee "${BUILD_OUTPUT}"; then
+  # $1 = builder. See _remote_buildx above for the BUILD_OUTPUT contract.
+  _local_buildx() {
+    docker buildx build \
+      --builder "$1" \
+      --load \
+      -t "${IMAGE_NAME}:${SHA}" \
+      -f "${DOCKERFILE}" \
+      "${BUILD_ARGS[@]}" \
+      ${SECRET_FLAGS} \
+      "${CONTEXT}" 2>&1 | tee "${BUILD_OUTPUT}"
+  }
+  if ! _build_with_fallback _local_buildx; then
     TAIL_OUTPUT=$(tail -c 500 "${BUILD_OUTPUT}")
     _record_failure "${SHA}" "Build" "${TAIL_OUTPUT}"
     rm -f "${BUILD_OUTPUT}"

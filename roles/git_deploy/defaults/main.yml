@@ -86,6 +86,41 @@ git_deploy_build_keep_tags: 3
 # are layer-heavy and slow. Default off: it is a registry-storage trade.
 git_deploy_registry_cache: false
 
+# ── Remote BuildKit builder over the tailnet (optional) ─────────────────
+# A second buildx builder that uses the `remote` driver to reach a BuildKit
+# daemon on another machine, with mutual TLS. The build server picks a builder
+# per build: the remote one when it answers, the local docker-container
+# builder (bay_buildx_builder) when it does not. One script makes that choice,
+# {{ stack_dir }}/bin/select-builder.sh, and both build paths call it:
+# rebuild.sh (webhook auto-builds) and remote_build.yml (`bin/bay deploy`).
+#
+# Endpoint. Empty turns the feature off: no cert files, no remote builder,
+# and select-builder.sh always prints the local builder name. Example:
+#   git_deploy_remote_builder_endpoint: "tcp://100.64.0.8:1234"
+# Set these in group_vars/all, not per host. remote_build.yml renders the
+# helper onto the build server from whichever host runs the build.
+git_deploy_remote_builder_endpoint: ""
+
+# buildx name of the remote builder, registered to app_user on the build
+# server. Must differ from bay_buildx_builder (the role asserts it): an
+# endpoint change removes and recreates the builder under this name.
+git_deploy_remote_builder_name: bay-remote
+
+# Seconds the probe waits for the remote BuildKit to answer before the build
+# falls back to the local builder. buildx itself waits up to 20 s for a remote
+# connection, so this bound is what keeps an offline remote cheap.
+git_deploy_remote_builder_probe_timeout: 5
+
+# mTLS material for the remote builder, as PEM strings. Put them in the vault
+# with LOWERCASE keys (they are role vars, not container env), for example:
+#   git_deploy_remote_builder_ca: "{{ secrets.git_deploy_remote_builder_ca }}"
+# The role writes them to {{ stack_dir }}/.buildkit/{ca,cert,key}.pem on the
+# build server, as app_user, mode 0600. When the endpoint is set, all three
+# must be non-empty or the role fails before it touches the builder.
+git_deploy_remote_builder_ca: ""
+git_deploy_remote_builder_cert: ""
+git_deploy_remote_builder_key: ""
+
 # Telegram notifications (reuse docker_monitor vars)
 docker_monitor_telegram_bot_token: ""
 docker_monitor_telegram_chat_id: ""

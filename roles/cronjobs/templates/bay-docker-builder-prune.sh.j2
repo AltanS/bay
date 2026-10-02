@@ -23,6 +23,11 @@
 #     tried as the current user first, then as each user in
 #     PRUNE_AS_USERS.
 #
+#  3. **Local builders only.** The optional remote BuildKit builder
+#     (git_deploy_remote_builder_name) is never in this list. Its cache and GC
+#     live on the remote host; see the guard on docker_prune_builders in
+#     roles/cronjobs/defaults/main.yml.
+#
 # Anything that cannot be reached is reported, not swallowed: a prune that
 # quietly does nothing is the whole bug.
 set -u

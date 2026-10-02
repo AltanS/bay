@@ -25,6 +25,20 @@
     owner: "{{ app_user }}"
     mode: "0700"
 
+# rebuild.sh asks this helper which buildx builder to use. Only the build
+# server registers the remote builder, so every other host renders it with an
+# empty endpoint and it always prints the local builder name.
+- name: Deploy the builder selection helper
+  ansible.builtin.template:
+    src: select-builder.sh.j2
+    dest: "{{ stack_dir }}/bin/select-builder.sh"
+    owner: "{{ app_user }}"
+    mode: "0700"
+  vars:
+    _select_builder_endpoint: >-
+      {{ git_deploy_remote_builder_endpoint | default('')
+         if (_is_build_server | default(false) | bool) else '' }}
+
 - name: Ensure systemd unit directory exists
   ansible.builtin.file:
     path: /etc/systemd/system

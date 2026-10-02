@@ -159,6 +159,20 @@
   become: true
   become_user: "{{ app_user }}"
   block:
+    # The same helper rebuild.sh calls (templates/select-builder.sh.j2). It
+    # prints the remote builder when its probe answers and the local one
+    # otherwise, and always exits 0. No retry here: a failed deploy-time
+    # build is in front of the operator already.
+    - name: "{{ _svc_name }} — Select buildx builder"
+      ansible.builtin.command:
+        cmd: "{{ stack_dir }}/bin/select-builder.sh"
+      register: _selected_builder
+      changed_when: false
+
+    - name: "{{ _svc_name }} — Report selected builder"
+      ansible.builtin.debug:
+        msg: "builder={{ _selected_builder.stdout | trim }} ({{ _selected_builder.stderr | trim }})"
+
     - name: "{{ _svc_name }} — Ensure secrets directory exists"
       ansible.builtin.file:
         path: "{{ git_deploy_remote_build_dir }}/.secrets"
@@ -184,7 +198,7 @@
       ansible.builtin.command:
         cmd: >-
           docker buildx build
-          --builder {{ bay_buildx_builder }}
+          --builder {{ _selected_builder.stdout | trim | default(bay_buildx_builder, true) }}
           --provenance=false
           --push
           {% if git_deploy_registry_cache | default(false) %}

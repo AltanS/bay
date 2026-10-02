@@ -1,0 +1,95 @@
+---
+# Register the optional remote BuildKit builder (buildx `remote` driver, mTLS
+# over the tailnet) on the build server.
+#
+# Included from main.yml (remote-strategy build servers) and from
+# setup_builder.yml (build servers with local-strategy services). Both
+# includes run only when this host IS the build server and
+# git_deploy_remote_builder_endpoint is set. The `_bay_remote_builder_done`
+# fact makes the second include a no-op on a host that reaches both.
+#
+# No `--bootstrap` at creation: the remote host may be offline during a
+# deploy, and a registration does not need it. select-builder.sh probes the
+# builder before every build and falls back to the local one.
+#
+# No entitlements, no --allow-insecure-entitlement: builds on the remote get
+# the same default sandbox as builds on the local builder.
+
+- name: Ensure the remote builder cert directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/.buildkit"
+    state: directory
+    owner: "{{ app_user }}"
+    mode: "0700"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: Write the remote builder mTLS files
+  ansible.builtin.copy:
+    content: "{{ item.pem | trim }}\n"
+    dest: "{{ stack_dir }}/.buildkit/{{ item.name }}.pem"
+    owner: "{{ app_user }}"
+    mode: "0600"
+  loop:
+    - { name: ca, pem: "{{ git_deploy_remote_builder_ca }}" }
+    - { name: cert, pem: "{{ git_deploy_remote_builder_cert }}" }
+    - { name: key, pem: "{{ git_deploy_remote_builder_key }}" }
+  loop_control:
+    label: "{{ item.name }}"
+  become: true
+  become_user: "{{ app_user }}"
+  no_log: true
+
+# Without --bootstrap, inspect still prints the registered endpoint. It tries
+# to read node status, which costs up to 20 s while the remote is offline;
+# the outer timeout bounds that. A missing builder fails fast (rc 1).
+- name: Inspect the remote buildx builder registration
+  ansible.builtin.command:
+    cmd: >-
+      timeout 30 docker buildx inspect {{ git_deploy_remote_builder_name }}
+  register: _remote_builder_inspect
+  become: true
+  become_user: "{{ app_user }}"
+  failed_when: false
+  changed_when: false
+
+- name: Read the registered remote builder endpoint
+  ansible.builtin.set_fact:
+    _remote_builder_registered_endpoint: >-
+      {{ (_remote_builder_inspect.stdout | default('')
+          | regex_findall('(?m)^Endpoint: *([^ ]+) *$')) | first | default('') }}
+
+# An inspect that timed out (rc 124) printed nothing, so its empty endpoint
+# would read as "changed". Leave such a builder alone; the next deploy, or the
+# probe before each build, sees the real state. Any other non-zero rc (no such
+# builder, or an error) goes to create, which either registers the builder or
+# fails loudly with the real error.
+- name: Remove the remote buildx builder (endpoint changed)
+  ansible.builtin.command:
+    cmd: docker buildx rm {{ git_deploy_remote_builder_name }}
+  become: true
+  become_user: "{{ app_user }}"
+  when:
+    - _remote_builder_inspect.rc == 0
+    - _remote_builder_registered_endpoint != git_deploy_remote_builder_endpoint
+  changed_when: true
+
+- name: Create the remote buildx builder
+  ansible.builtin.command:
+    cmd: >-
+      docker buildx create
+      --name {{ git_deploy_remote_builder_name }}
+      --driver remote
+      {{ git_deploy_remote_builder_endpoint }}
+      --driver-opt cacert={{ stack_dir }}/.buildkit/ca.pem,cert={{ stack_dir }}/.buildkit/cert.pem,key={{ stack_dir }}/.buildkit/key.pem
+  become: true
+  become_user: "{{ app_user }}"
+  when: >-
+    _remote_builder_inspect.rc not in [0, 124]
+    or (_remote_builder_inspect.rc == 0
+        and _remote_builder_registered_endpoint != git_deploy_remote_builder_endpoint)
+  changed_when: true
+
+- name: Mark the remote buildx builder as provisioned for this run
+  ansible.builtin.set_fact:
+    _bay_remote_builder_done: true

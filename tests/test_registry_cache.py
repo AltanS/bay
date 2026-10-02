@@ -61,6 +61,10 @@ def _ansible_build_cmd(*, registry_cache: bool) -> str:
         _context=".",
         _svc_name="storefront",
         _build={},
+        # select-builder.sh's stdout, registered by the task before the build.
+        # Deliberately not the local builder name, so a test can tell the
+        # selected builder from the fallback default.
+        _selected_builder={"stdout": "bay-remote\n"},
     )
     return " ".join(rendered.split())
 
@@ -75,6 +79,14 @@ def test_ansible_remote_build_pushes_from_buildx():
     assert "-t registry.example.com/acme/storefront:abc123def456" in cmd
     assert "-t registry.example.com/acme/storefront:latest" in cmd
     assert "--provenance=false" in cmd
+
+
+def test_ansible_remote_build_uses_the_selected_builder():
+    """The deploy path builds with whatever select-builder.sh printed."""
+    cmd = _ansible_build_cmd(registry_cache=False)
+    assert cmd.startswith(
+        "docker buildx build --builder bay-remote --provenance=false --push"
+    ), cmd
 
 
 def test_ansible_remote_build_has_no_separate_push_task():
@@ -115,7 +127,7 @@ def _remote_build_block(rendered: str) -> str:
     re-maps these lines on every change, and a line-pinned slice here would
     silently start testing the local build instead.
     """
-    marker = 'if ! docker buildx build \\\n      --builder'
+    marker = '_remote_buildx() {\n      docker buildx build \\\n        --builder "$1"'
     start = rendered.index(marker)
     end = rendered.index('"${CONTEXT}"', start)
     return " ".join(rendered[start:end].replace("\\\n", " ").split())
@@ -123,6 +135,11 @@ def _remote_build_block(rendered: str) -> str:
 
 def test_webhook_remote_build_pushes_from_buildx():
     block = _remote_build_block(_render_rebuild(registry_cache=False))
+    # The builder is an argument now: _build_with_fallback passes the one
+    # select-builder.sh chose, or the local one on a fallback retry.
+    assert block.startswith(
+        '_remote_buildx() { docker buildx build --builder "$1" --provenance=false --push'
+    ), block
     assert block.count("--push") == 1
     assert "--load" not in block
     assert '-t "${IMAGE_REPO}:${SHA}"' in block

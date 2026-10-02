@@ -7,6 +7,52 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.8.0] - 2026-10-02
+
+### Added
+
+- Optional remote BuildKit builder over the tailnet. Set
+  `git_deploy_remote_builder_endpoint` (for example `tcp://100.64.0.8:1234`)
+  and the build server registers a second buildx builder, `bay-remote`, with
+  the `remote` driver and mutual TLS. The PEM files come from
+  `git_deploy_remote_builder_ca`, `_cert` and `_key` (vault, lowercase keys).
+  They go to `<stack_dir>/.buildkit/` on the build server, mode `0600`. When
+  the endpoint is set and a PEM value is empty, the role stops the deploy.
+- `<stack_dir>/bin/select-builder.sh` picks the builder for each build. It
+  probes the remote builder (`timeout 5 docker buildx inspect --bootstrap`)
+  and prints `bay-remote` when it answers, or the local builder when it does
+  not. Webhook auto-builds and `bin/bay deploy` remote builds both use it.
+  Each webhook build logs one `builder=<name>` line.
+- When a webhook build fails on the remote builder and the remote then does
+  not answer, `rebuild.sh` retries the build one time on the local builder. It
+  sends the new `build.remote_fallback` alert (`debug`, off by default). When
+  the remote still answers, the failure is real and there is no retry. Only
+  the last attempt counts for the circuit breaker.
+- Docs: "Remote builder over the tailnet" in `docs/build-strategies.md`. It
+  covers the remote BuildKit container, mTLS, GC, the ACL rule and how to
+  verify.
+
+### Changed
+
+- The builder prune (`roles/cronjobs`) still prunes the local builders only.
+  A guard comment and a test keep the remote builder out of the list. Its GC
+  is configured on the remote host.
+
+### Upgrade notes
+
+- Nothing changes until you set `git_deploy_remote_builder_endpoint`. With
+  the default (`""`), every build uses the local builder as before.
+- The builder is registered by the `git_deploy` role. After you set the
+  variables, run `bin/bay deploy production --tags git_deploy` one time. That
+  writes the certificate files, registers `bay-remote` and installs
+  `select-builder.sh` on the build server.
+- Set the variables in `group_vars/all`. Other hosts install the helper on
+  the build server during remote builds.
+- Under a default-deny Headscale ACL, add a rule from the build server to the
+  remote BuildKit port, for example
+  `{ action: accept, src: [infra], dst: ["buildbox:1234"] }`, and deploy it
+  with `--tags headscale`.
+
 ## [0.7.5] - 2026-10-01
 
 ### Fixed

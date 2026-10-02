@@ -567,6 +567,29 @@ def _rebuild_sh_build_fields_remote(payload: str) -> str:
     )
 
 
+def _select_builder(payload: str) -> str:
+    """The remote-builder helper: both builder names and the endpoint are
+    group_vars strings that land in shell assignments."""
+    return _render(
+        "roles/git_deploy/templates/select-builder.sh.j2",
+        ansible_managed="test",
+        bay_buildx_builder=payload,
+        git_deploy_remote_builder_name=payload,
+        git_deploy_remote_builder_probe_timeout=payload,
+        _select_builder_endpoint=payload,
+    )
+
+
+def _rebuild_sh_builder_names(payload: str) -> str:
+    """rebuild.sh's own copies of the builder names (the fallback path)."""
+    from test_observability_contract import _ansible_env, _minimal_render_context
+
+    ctx = _minimal_render_context()
+    ctx["bay_buildx_builder"] = payload
+    ctx["git_deploy_remote_builder_name"] = payload
+    return _ansible_env().get_template("rebuild.sh.j2").render(**ctx)
+
+
 _CASES: list[Case] = [
     Case("roles/backup/templates/backup.sh.j2", _backup_sh),
     Case("roles/backup/templates/backup.sh.j2", _backup_sh_mysql),
@@ -612,6 +635,8 @@ _CASES: list[Case] = [
     Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_build_fields),
     Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_build_fields_token),
     Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_build_fields_remote),
+    Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_builder_names),
+    Case("roles/git_deploy/templates/select-builder.sh.j2", _select_builder),
 ]
 
 _CASE_IDS = [f"{Path(c.template).name}-{c.render.__name__}" for c in _CASES]

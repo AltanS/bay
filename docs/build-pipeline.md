@@ -225,6 +225,12 @@ rollback poll down can never make the probe stricter than baseline. See
 - **Registry layer cache is opt-in** — `git_deploy_registry_cache: true` adds
   `--cache-to`/`--cache-from type=registry,ref=<repo>:buildcache`. Default is
   off. See `docs/build-strategies.md` → "Registry layer cache (opt-in)".
+- **Remote builder over the tailnet is opt-in.** Set
+  `git_deploy_remote_builder_endpoint` and the build server sends builds to a
+  remote BuildKit over mTLS. When the remote does not answer, builds use the
+  local builder. Each build logs one `builder=<name>` line in
+  `journalctl -u bay-build@<svc>`. See
+  [build-strategies.md](build-strategies.md#remote-builder-over-the-tailnet).
 - **`build_server` must be in the inventory** — The host must be
   SSH-reachable from the controller and have `app_user` in the docker
   group. For demo, this is the infra host (203.0.113.14) which

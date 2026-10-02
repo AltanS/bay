@@ -372,6 +372,7 @@ Generated from `alerts/registry.yml` — do not hand-edit. Run `make docs-alerts
 | `build.pipeline_stalled` | `warn` | on | `git_deploy/bay-trigger-watchdog.sh.j2` | Build triggers are older than the stall threshold — the pipeline is stuck. |
 | `build.push_blocked` | `warn` | on | `git_deploy/rebuild.sh.j2` | A push was rejected because the circuit breaker is open. |
 | `build.remote_complete` | `info` | **off** | `git_deploy/rebuild.sh.j2` | A remote build finished and deployment servers were notified to pull. |
+| `build.remote_fallback` | `debug` | **off** | `git_deploy/rebuild.sh.j2` | The remote BuildKit builder dropped out mid-build; the build is retried once on the local builder. |
 | `build.rollback_failed` | `critical` | on | `git_deploy/rebuild.sh.j2` | Rollback failed — the previous image would not start or was unhealthy. |
 | `build.rolled_back` | `warn` | on | `git_deploy/rebuild.sh.j2` | Health check failed; the service was rolled back to the previous image. |
 | `build.unknown_service` | `warn` | on | `git_deploy/rebuild.sh.j2` | A build trigger fired for a service not declared in services.yml. |

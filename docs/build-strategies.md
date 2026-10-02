@@ -281,6 +281,183 @@ External CI/CD (GitHub Actions, etc.)
 
 ---
 
+## Remote builder over the tailnet
+
+### Purpose
+
+The build server can send builds to a BuildKit daemon on another machine. That
+machine can have more CPU, more RAM or a warmer cache than the build server.
+Bay uses the buildx `remote` driver for this, with mutual TLS (mTLS: both
+sides prove their identity with a certificate). The connection runs over the
+tailnet only.
+
+The remote builder is optional. When it does not answer, the build uses the
+local builder. Builds do not stop because the remote machine is offline.
+
+The feature applies to every build that runs on the build server. That
+includes webhook auto-builds (`rebuild.sh`) and `bin/bay deploy` remote builds
+(`remote_build.yml`). Hosts that are not the build server always use their
+local builder.
+
+### Variables
+
+Set these in `group_vars/all`, not per host:
+
+```yaml
+# group_vars/all/main.yml
+git_deploy_remote_builder_endpoint: "tcp://100.64.0.8:1234"   # empty = off (default)
+git_deploy_remote_builder_name: bay-remote                    # default
+git_deploy_remote_builder_probe_timeout: 5                    # seconds, default
+git_deploy_remote_builder_ca: "{{ secrets.git_deploy_remote_builder_ca }}"
+git_deploy_remote_builder_cert: "{{ secrets.git_deploy_remote_builder_cert }}"
+git_deploy_remote_builder_key: "{{ secrets.git_deploy_remote_builder_key }}"
+```
+
+- `git_deploy_remote_builder_endpoint`: the BuildKit address on the tailnet.
+  An empty value turns the feature off.
+- `git_deploy_remote_builder_name`: the buildx name of the remote builder. It
+  must differ from `bay_buildx_builder`.
+- `git_deploy_remote_builder_probe_timeout`: how long the probe waits for an
+  answer before the build uses the local builder.
+- `git_deploy_remote_builder_ca`, `_cert`, `_key`: PEM strings. Keep them in
+  the vault. Use lowercase keys, because they are role variables and not
+  container environment variables.
+
+When the endpoint is set, all three PEM values must be set. If one is empty,
+the `git_deploy` role stops the deploy with an error.
+
+On the build server, the role does these steps:
+
+1. It writes the PEM files to `/opt/<stack>/.buildkit/{ca,cert,key}.pem`. The
+   owner is the app user, and the mode is `0600`.
+2. It registers the builder for the app user:
+   `docker buildx create --name bay-remote --driver remote <endpoint> --driver-opt cacert=...,cert=...,key=...`.
+   It does not boot the builder, because the remote machine can be offline
+   during a deploy. If the registered endpoint is different, the role removes
+   the builder and creates it again.
+3. It installs `/opt/<stack>/bin/select-builder.sh`, the script that picks the
+   builder for each build.
+
+To turn the feature off, set the endpoint to `""` and deploy. The script then
+always picks the local builder. The `bay-remote` registration stays, but
+nothing uses it. To remove it, run `docker buildx rm bay-remote` as the app
+user on the build server.
+
+### Pairing on the remote host
+
+Run BuildKit as a rootless container. Publish its port on the tailnet address
+only, never on a public address:
+
+```bash
+docker run -d --name buildkitd --restart unless-stopped \
+  --security-opt seccomp=unconfined \
+  --security-opt apparmor=unconfined \
+  -p 100.64.0.8:1234:1234 \
+  -v /etc/buildkit/certs:/certs:ro \
+  -v /etc/buildkit/buildkitd.toml:/home/user/.config/buildkit/buildkitd.toml:ro \
+  -v buildkit-state:/home/user/.local/share/buildkit \
+  moby/buildkit:rootless \
+  --oci-worker-no-process-sandbox \
+  --addr tcp://0.0.0.0:1234 \
+  --tlscacert /certs/ca.pem \
+  --tlscert /certs/cert.pem \
+  --tlskey /certs/key.pem
+```
+
+- `--addr tcp://0.0.0.0:1234` binds inside the container. The `-p` flag
+  limits the host side to the tailnet address.
+- `--tlscacert` makes BuildKit require a client certificate signed by your CA.
+  A client without one cannot connect.
+- Use one CA for both sides. The server certificate must contain the tailnet
+  IP of the remote host as a subject alternative name (SAN). The client
+  certificate goes into the vault for the build server.
+- The certificate files must be readable by the rootless user in the container
+  (uid 1000).
+
+Bay does not prune the remote cache. Configure garbage collection (GC) on the
+remote host instead, in `buildkitd.toml`:
+
+```toml
+[worker.oci]
+  gc = true
+  gckeepstorage = "20GB"
+```
+
+Newer BuildKit releases also accept `reservedSpace` for the same limit. The
+cronjobs prune on the build server touches only its local builders.
+
+### ACL rule
+
+Under a default-deny Headscale ACL, the build server needs a rule to reach the
+remote BuildKit port. Rules are directional. The build server opens the
+connection, so it is the `src`:
+
+```yaml
+# group_vars/all/headscale_acl.yml (consumer)
+headscale_acl_policy:
+  hosts:
+    infra: 100.64.0.5/32       # the build server
+    buildbox: 100.64.0.8/32    # the remote BuildKit host
+  acls:
+    - { action: accept, src: [infra], dst: ["buildbox:1234"] }
+```
+
+No rule is necessary in the other direction. Tailscale allows the return
+traffic of an accepted connection. Run `bin/bay validate`, then
+`bin/bay deploy production --tags headscale`.
+
+### Selection and fallback
+
+Before each build, `select-builder.sh` runs
+`timeout <probe_timeout> docker buildx inspect --bootstrap bay-remote`. This
+probe dials the endpoint with the mTLS files and waits for BuildKit to answer.
+A plain TCP check would also pass on a wrong certificate, so Bay does not use
+one.
+
+- If the probe succeeds, the build uses `bay-remote`.
+- If the probe fails or times out, the build uses the local builder. This is
+  silent: there is a log line, but no alert.
+- If the endpoint is empty, the build uses the local builder and the probe
+  does not run.
+
+In webhook auto-builds (`rebuild.sh`), a build that fails on the remote
+builder gets one more check:
+
+- The script runs the probe again.
+- If the remote now does not answer, the remote was lost during the build.
+  The script logs this, sends the `build.remote_fallback` alert, and runs the
+  build again, one time, on the local builder.
+- If the remote still answers, the failure comes from the build itself. The
+  script does not retry.
+
+Only the result of the last attempt counts for the circuit breaker. A
+fallback is never counted as a failure. `build.remote_fallback` has the
+lowest severity (`debug`) and is off by default, because the build continues.
+
+In `bin/bay deploy`, there is no retry. The deploy uses the builder that the
+probe picked. A failed deploy-time build is visible to the operator already.
+
+### Verify
+
+On the build server, every build logs one `builder=` line for each attempt:
+
+```bash
+journalctl -u bay-build@<svc> --since "1 hour ago" | grep 'builder='
+# [rebuild] [<corr-id>] builder=bay-remote
+```
+
+The probe writes its reason to the same journal, in one line that starts with
+`select-builder:`. To run the probe by hand, as the app user:
+
+```bash
+sudo -u <app_user> /opt/<stack>/bin/select-builder.sh
+```
+
+In `bin/bay deploy`, the output shows a `Report selected builder` task with
+the same information.
+
+---
+
 ## Comparison
 
 |                        | Local              | Remote                        | Registry             |

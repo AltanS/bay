@@ -75,6 +75,28 @@
   ansible.builtin.set_fact:
     _is_build_server: "{{ (build_server | default('')) == inventory_hostname }}"
 
+# The remote builder is optional. Once its endpoint is set, a missing PEM
+# would register a builder that can never answer, and every build would pay
+# the probe timeout before it falls back. Fail at deploy time instead.
+- name: Validate the remote BuildKit builder settings
+  ansible.builtin.assert:
+    that:
+      - git_deploy_remote_builder_ca | default('') | length > 0
+      - git_deploy_remote_builder_cert | default('') | length > 0
+      - git_deploy_remote_builder_key | default('') | length > 0
+      - git_deploy_remote_builder_name != bay_buildx_builder
+    fail_msg: >-
+      git_deploy_remote_builder_endpoint is set to
+      '{{ git_deploy_remote_builder_endpoint }}', so the remote BuildKit
+      builder needs mTLS material. Set git_deploy_remote_builder_ca,
+      git_deploy_remote_builder_cert and git_deploy_remote_builder_key (PEM
+      strings, from vault secrets with lowercase keys), and keep
+      git_deploy_remote_builder_name ('{{ git_deploy_remote_builder_name }}')
+      different from bay_buildx_builder ('{{ bay_buildx_builder }}'). Or set
+      the endpoint to "" to turn the remote builder off.
+    quiet: true
+  when: git_deploy_remote_builder_endpoint | default('') | length > 0
+
 - name: Skip git_deploy when no build services and not build server
   ansible.builtin.debug:
     msg: "No services with build: blocks and not build server — skipping git_deploy"
@@ -170,6 +192,42 @@
           failed_when:
             - _remote_buildx_mem_update.rc != 0
             - '"No such container" not in _remote_buildx_mem_update.stderr'
+
+        # select-builder.sh picks the builder for every remote-strategy build
+        # (see templates/select-builder.sh.j2). remote_build.yml runs it on
+        # the build server, from whichever host owns the service, so it is
+        # rendered here, on the delegation target. The endpoint is read from
+        # the build server's own vars when they reach hostvars (group_vars,
+        # host_vars), so a host that does not set it cannot blank it there.
+        - name: Ensure bin directory exists on the build server
+          ansible.builtin.file:
+            path: "{{ stack_dir }}/bin"
+            state: directory
+            owner: "{{ app_user }}"
+            group: "{{ app_user_group }}"
+            # 0750 app_user, see the first "Ensure bin directory exists".
+            mode: "0750"
+
+        - name: Deploy the builder selection helper on the build server
+          ansible.builtin.template:
+            src: select-builder.sh.j2
+            dest: "{{ stack_dir }}/bin/select-builder.sh"
+            owner: "{{ app_user }}"
+            mode: "0700"
+          vars:
+            _select_builder_endpoint: >-
+              {{ hostvars[build_server | default(inventory_hostname)].git_deploy_remote_builder_endpoint
+                 | default(git_deploy_remote_builder_endpoint) }}
+
+    # Optional remote BuildKit builder, registered on the build server only.
+    # Not delegated: only the build server's own run registers it, so two
+    # hosts never race to remove and recreate the same builder.
+    - name: Provision the remote buildx builder (build server)
+      ansible.builtin.include_tasks: remote_builder.yml
+      when:
+        - _is_build_server | bool
+        - git_deploy_remote_builder_endpoint | default('') | length > 0
+        - not (_bay_remote_builder_done | default(false) | bool)
 
     - name: Log in to Docker registries on build server
       community.docker.docker_login:

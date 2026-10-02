@@ -83,6 +83,7 @@ Categorized stdout markers (one of):
 - `[rebuild] Container healthy`
 - `[rebuild] Container unhealthy`
 - `[rebuild] Rolled back ...`
+- `[rebuild] builder=<name>` (not terminal; one per build attempt, see below)
 
 Absence of one of these on an invocation is a framework bug (see Phase 1
 CI enforcement task).
@@ -107,10 +108,10 @@ between the template and this table fails CI.
 | 9 | 728   | 1    | `docker pull` failed                            | `_record_failure("","Image pull")` stdout             | 🚨 "Image pull failed (N/MAX)" via `_record_failure` dedup; 🛑 CB OPEN at trip | `Telegram-warn` → `-critical` at trip | ✅        | `_record_failure` already fires first-SHA and CB-trip correctly. No change needed if Phase 3 tests confirm.            | build.failed                 |
 | 10| 816   | 0    | Pull deploy completed (pull-only or remote-pull)| `[rebuild] Pull deploy complete for ${SERVICE}`       | ✅ Pull deploy complete                                 | `Telegram-info`              | ✅        | Correct                                                                                                                | deploy.pull_complete         |
 | 11| 824   | 0    | Pull-only guard, no pull signal present         | `[rebuild] Service ${SERVICE} is pull-only but no pull signal detected — skipping` | NONE                    | `log-only-debug`             | ✅        | Benign skip — pull-only services should not receive plain push webhooks; the guard exists for safety.                  | —                            |
-| 12| 920   | 1    | Remote build failed                             | `_record_failure("${SHA}","Remote build",TAIL)`        | 🚨 Remote build failed (N/MAX) with 500-char tail      | `Telegram-warn` → `-critical` at trip | ✅        | Correct                                                                                                                | build.failed                 |
-| 13| 1041   | 0    | Remote build succeeded (+ fan-out)              | `[rebuild] Completed remote build`                    | ✅ Remote build complete (+ per-peer ⚠ if fan-out fails) | `Telegram-info` (success) / `Telegram-warn` (per-peer fan-out fail) | ✅        | Correct. A follow-up change inserted a post-push local-image prune block (~44 lines) above this row, shifting it from 846 → 890. Issue #9 added the cross-service flock block above, shifting again from 890 → 921. The registry-cache change (remote strategy builds with `buildx --push`, optional `--cache-to`/`--cache-from` behind `git_deploy_registry_cache`) shifted 1010 → 1013. The 0.3.3 `_write_state` group-write fix shifted every row by +4 (1037 → 1041). | build.remote_complete        |
-| 14| 1103  | 1    | Local build failed                              | `_record_failure("${SHA}","Build",TAIL)`               | 🚨 Build failed (N/MAX) with 500-char tail             | `Telegram-warn` → `-critical` at trip | ✅        | Correct                                                                                                                | build.failed                 |
-| 15| 1218  | 0    | Local build succeeded                           | `[rebuild] Completed rebuild for ${SERVICE}`          | ✅ Webhook deploy complete                              | `Telegram-info`              | ✅        | Trailing `exit 0` added so this terminal state is captured by the CI contract test. v0.82.6 shifted 1053 → 1066; issue #9 shifted 1066 → 1093; the lock-open guard then shifted 1093 → 1097; the 0.3.3 `_write_state` group-write fix shifted every row by +4 (1214 → 1218). | deploy.webhook_complete      |
+| 12| 975   | 1    | Remote build failed                             | `_record_failure("${SHA}","Remote build",TAIL)`        | 🚨 Remote build failed (N/MAX) with 500-char tail      | `Telegram-warn` → `-critical` at trip | ✅        | Correct. Reached only after `_build_with_fallback` returns non-zero, so a remote-builder fallback that then succeeds is never recorded as a failure. The optional remote-builder fallback (v0.8.0) added `_build_with_fallback` above the strategy routing and wrapped each build in a function, shifting 920 → 975. | build.failed                 |
+| 13| 1096   | 0    | Remote build succeeded (+ fan-out)              | `[rebuild] Completed remote build`                    | ✅ Remote build complete (+ per-peer ⚠ if fan-out fails) | `Telegram-info` (success) / `Telegram-warn` (per-peer fan-out fail) | ✅        | Correct. A follow-up change inserted a post-push local-image prune block (~44 lines) above this row, shifting it from 846 → 890. Issue #9 added the cross-service flock block above, shifting again from 890 → 921. The registry-cache change (remote strategy builds with `buildx --push`, optional `--cache-to`/`--cache-from` behind `git_deploy_registry_cache`) shifted 1010 → 1013. The 0.3.3 `_write_state` group-write fix shifted every row by +4 (1037 → 1041). The optional remote-builder fallback (v0.8.0) added `_build_with_fallback` above the strategy routing and wrapped each build in a function, shifting 1041 → 1096. | build.remote_complete        |
+| 14| 1162  | 1    | Local build failed                              | `_record_failure("${SHA}","Build",TAIL)`               | 🚨 Build failed (N/MAX) with 500-char tail             | `Telegram-warn` → `-critical` at trip | ✅        | Correct. Same fallback rule as row 12. The optional remote-builder fallback (v0.8.0) added `_build_with_fallback` above the strategy routing and wrapped each build in a function, shifting 1103 → 1162. | build.failed                 |
+| 15| 1277  | 0    | Local build succeeded                           | `[rebuild] Completed rebuild for ${SERVICE}`          | ✅ Webhook deploy complete                              | `Telegram-info`              | ✅        | Trailing `exit 0` added so this terminal state is captured by the CI contract test. v0.82.6 shifted 1053 → 1066; issue #9 shifted 1066 → 1093; the lock-open guard then shifted 1093 → 1097; the 0.3.3 `_write_state` group-write fix shifted every row by +4 (1214 → 1218). The optional remote-builder fallback (v0.8.0) added `_build_with_fallback` above the strategy routing and wrapped each build in a function, shifting 1218 → 1277. | deploy.webhook_complete      |
 | 16| ERR trap | 1 | Unhandled shell error (via `set -e` trap)       | `_deploy_failed` → `_record_failure("${SHA}","Webhook deploy")` | 🚨 Webhook deploy failed (N/MAX)                      | `Telegram-warn` → `-critical` at trip | ✅        | Catches unexpected failures. Remote and local build paths explicitly `trap - ERR` before their own `exit 1` to avoid duplicate notification. | build.failed                 |
 
 ## External failure channel: `bay-build-alert@.service`
@@ -163,6 +164,25 @@ scoped to `rebuild.sh.j2`); its single terminal state is always
 `Telegram-warn` — a stall alert — with rate-limiting keyed on the set of
 stale services plus `git_deploy_stall_watchdog_repeat_sec` (default
 1800 s).
+
+## Builder selection and the remote-builder fallback (not a terminal state)
+
+Every build in `rebuild.sh` runs through `_build_with_fallback`, which asks
+`{{ stack_dir }}/bin/select-builder.sh` for a builder and logs one
+`[rebuild] builder=<name>` line per attempt. The fallback adds **no** exit
+path. It only decides how many attempts a build gets before rows 12 and 14:
+
+| Situation                                                  | Retry          | Alert                               | Feeds the circuit breaker      |
+| ---------------------------------------------------------- | -------------- | ----------------------------------- | ------------------------------ |
+| Probe picks the local builder before the build             | none           | none (log line only)                | only if the build then fails   |
+| Remote build fails, re-probe: remote still answers         | none           | none here; row 12/14 reports it     | yes, as one failure            |
+| Remote build fails, re-probe: remote unreachable           | once, on local | `build.remote_fallback` (`debug`)   | only the retry's outcome       |
+| Local build fails                                          | none           | none here; row 12/14 reports it     | yes, as one failure            |
+
+`build.remote_fallback` sits at the bottom of the ladder on purpose: the
+build continues, and its final outcome is reported by the usual row. A
+fallback is never counted as a failure. The full operator view is in
+`docs/build-strategies.md` → "Remote builder over the tailnet".
 
 ## `_record_failure()` semantics
 
