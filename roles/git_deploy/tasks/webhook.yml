@@ -105,7 +105,55 @@
     mode: "0644"
   register: _webhook_files
 
+# The image can be missing while the files are unchanged (pruned, or a host
+# that has the files from an earlier deploy but never built). Build then too.
+- name: Check whether the webhook receiver image exists
+  ansible.builtin.command:
+    cmd: docker image inspect bay-webhook:latest
+  register: _webhook_image_inspect
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
 - name: Build webhook receiver image
   ansible.builtin.command:
     cmd: "docker build -t bay-webhook:latest {{ git_deploy_build_dir }}/webhook/"
-  when: _webhook_files.changed
+  when: _webhook_files.changed or _webhook_image_inspect.rc != 0
+
+# Building the image does not change the running container: it keeps the image
+# it was created from. Reconcile the receiver through the same spec and the
+# same reconciler deploy_stack uses, so env, volumes, labels, user and
+# networks stay identical and the next deploy_stack sees no drift. The
+# reconciler compares the running container's image ID with the local
+# `bay-webhook:latest` on EVERY run, so a receiver left stale by an earlier
+# deploy heals here too, and a matching one is a NoOp (no restart).
+#
+# Only the receiver is in the bundle, so orphan removal is off.
+#
+# The receiver's env file is rendered by deploy_stack. A host that has not had
+# a deploy_stack run yet has no container to fix, and deploy_stack creates the
+# receiver on its first run, so skip instead of failing.
+- name: Check that deploy_stack has rendered the webhook receiver env file
+  ansible.builtin.stat:
+    path: "{{ stack_dir }}/env/bay-webhook.env"
+  register: _webhook_env_stat
+
+- name: Bring the webhook receiver onto the current image
+  ansible.builtin.include_role:
+    name: container_lifecycle
+  vars:
+    container_lifecycle_only: [bay-webhook]
+    bay_reconciler_remove_orphans: false
+  when: _webhook_env_stat.stat.exists
+
+# Tells the "Restart bay-webhook" handler that the receiver was just
+# reconciled against the current image-map.json, so a restart would be a
+# second, pointless one.
+- name: Record whether the reconciler changed the webhook receiver
+  ansible.builtin.set_fact:
+    _bay_webhook_reconciled: >-
+      {{ (_reconcile_result.stdout | default('{}') | from_json).changed | default(false)
+         if (_reconcile_result is defined and _reconcile_result is not skipped
+             and (_reconcile_result.stdout | default('')) | length > 0)
+         else false }}
+  when: _webhook_env_stat.stat.exists

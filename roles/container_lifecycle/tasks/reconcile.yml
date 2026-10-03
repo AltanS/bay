@@ -15,6 +15,15 @@
 # bundle holds resolved env (secrets) at mode 0600 on
 # the host — same posture as the env files — and is removed after the run.
 
+# `_reconcile_specs` is the list to reconcile. main.yml sets it per include:
+# the full `container_specs`, or only the containers named in
+# `container_lifecycle_only`. `_reconcile_entries` is reset here because it is
+# a host fact: a second reconcile in the same play (the git_deploy webhook
+# pass, then deploy_stack) would otherwise append to the first run's entries.
+- name: Reset the reconcile bundle entries
+  ansible.builtin.set_fact:
+    _reconcile_entries: []
+
 # One read for every env file, instead of one slurp per container. The digest
 # formula is unchanged (sha256 over the file's bytes), so an unchanged fleet
 # keeps its config_hash and nothing recreates on upgrade.
@@ -49,7 +58,7 @@
                 missing.append(path)
         print(json.dumps({"files": out, "missing": missing}))
       - >-
-        {{ container_specs | selectattr('env_file', 'defined')
+        {{ _reconcile_specs | selectattr('env_file', 'defined')
            | map(attribute='env_file') | list | to_json }}
   register: _reconcile_env_read
   changed_when: false
@@ -74,7 +83,7 @@
 - name: Build reconcile bundle entries
   ansible.builtin.set_fact:
     _reconcile_entries: "{{ (_reconcile_entries | default([])) + [_entry] }}"
-  loop: "{{ container_specs }}"
+  loop: "{{ _reconcile_specs }}"
   loop_control:
     loop_var: _spec
     label: "{{ _spec.name }}"

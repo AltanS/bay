@@ -13,13 +13,24 @@
 #
 # Idempotence: Ansible's template task only reports `changed` when content
 # differs, so this handler only runs when the image-map actually changed.
-# Safe in check mode (community.docker.docker_container respects --check).
+#
+# A restart is enough here: it re-reads the bind-mounted map, and the image
+# is already current because webhook.yml reconciles the receiver (build +
+# recreate on image drift) before handlers run. When that reconcile just
+# recreated the container it read the new map already, so the restart is
+# skipped. A host with no receiver yet (fresh host, deploy_stack creates it)
+# is not an error. In check mode the command is skipped.
 #
 # Container name `bay-webhook` is the framework-fixed identity used by
-# roles/deploy_stack/templates/_webhook_receiver.j2:17 and
-# roles/container_lifecycle/tasks/build_specs.yml:288 — not consumer-overridable.
+# roles/deploy_stack/templates/_webhook_receiver.j2 and
+# roles/container_lifecycle/tasks/build_specs.yml (`_webhook_spec`) — not
+# consumer-overridable.
 - name: Restart bay-webhook
-  community.docker.docker_container:
-    name: bay-webhook
-    state: started
-    restart: true
+  ansible.builtin.command:
+    cmd: docker restart bay-webhook
+  register: _bay_webhook_restart
+  changed_when: _bay_webhook_restart.rc == 0
+  failed_when:
+    - _bay_webhook_restart.rc != 0
+    - "'No such container' not in _bay_webhook_restart.stderr"
+  when: not (_bay_webhook_reconciled | default(false) | bool)

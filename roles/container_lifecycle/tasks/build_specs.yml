@@ -499,3 +499,13 @@
 - name: Assemble container_specs
   ansible.builtin.set_fact:
     container_specs: "{{ _infra_specs + _accessory_specs + _service_specs }}"
+  when: container_lifecycle_only | default([]) | length == 0
+
+# Partial mode (see main.yml): keep only the named containers and leave
+# `container_specs` unset, so deploy_stack's own run still builds the full list.
+- name: Assemble the partial container spec list
+  ansible.builtin.set_fact:
+    _container_lifecycle_partial_specs: >-
+      {{ (_infra_specs + _accessory_specs + _service_specs)
+         | selectattr('name', 'in', container_lifecycle_only) | list }}
+  when: container_lifecycle_only | default([]) | length > 0

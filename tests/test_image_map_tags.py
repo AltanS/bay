@@ -141,15 +141,13 @@ def test_webhook_restart_handler_exists_M90_GH_13():
 
     # The handler must actually restart the bay-webhook container,
     # not just any container.
+    # The handler is a `docker restart bay-webhook` command (not the
+    # docker_container module): a module restart on a host with no receiver yet
+    # would try to create one and fail, while the command tolerates it.
     matched = False
     for handler in webhook_handlers:
-        container_block = handler.get("community.docker.docker_container", {})
-        if container_block.get("name") == "bay-webhook":
-            assert container_block.get("restart") is True, (
-                f"GH-13: handler '{handler['name']}' targets bay-webhook "
-                f"but does not set restart: true. A no-op handler defeats "
-                f"the purpose."
-            )
+        command = handler.get("ansible.builtin.command", {})
+        if "docker restart bay-webhook" in str(command.get("cmd", "")):
             matched = True
             break
     assert matched, (

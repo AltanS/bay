@@ -12,10 +12,24 @@
 #
 # Input: container_specs (list of container spec dicts). If not provided,
 #        auto-builds from active_services / active_accessories.
+#
+#        container_lifecycle_only (optional list of container names). When
+#        set, the full spec set is still built, so a container's spec has ONE
+#        definition, but only the named containers are reconciled and
+#        `container_specs` is NOT set, so a later full run in the same play
+#        still builds its own. Callers must also pass
+#        bay_reconciler_remove_orphans: false, because a partial bundle does
+#        not list every managed container. git_deploy uses this to bring the
+#        webhook receiver onto its current image.
 
 - name: Build container specs from services.yml
   ansible.builtin.include_tasks: build_specs.yml
-  when: container_specs is not defined
+  when: container_specs is not defined or (container_lifecycle_only | default([]) | length > 0)
 
 - name: Reconcile via server-side reconciler
   ansible.builtin.include_tasks: reconcile.yml
+  vars:
+    _reconcile_specs: >-
+      {{ _container_lifecycle_partial_specs | default([])
+         if (container_lifecycle_only | default([]) | length > 0)
+         else container_specs }}
