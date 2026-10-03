@@ -17,6 +17,14 @@ before upgrading — anything needing manual action is called out under
   build host, which reach Zot through this entrypoint. The public
   entrypoint is unchanged. Set the variable to `""` to keep the Traefik
   default.
+- `rebuild.sh` consumes the build trigger at the start of a run (moved to
+  `<service>.trigger.running`) instead of `bay-build@.service` deleting it
+  afterwards. A trigger written while a build runs is no longer lost: it
+  fires the path unit again once the run ends. `ExecStartPost` is replaced by
+  an `ExecStopPost` that removes only the `.running` leftover, and
+  `_record_failure` and `bay-build-alert` no longer delete the live trigger.
+  The trigger file may now carry two optional extra lines (revision,
+  `built_at`); old triggers still work.
 
 ## [0.8.0] - 2026-10-02
 

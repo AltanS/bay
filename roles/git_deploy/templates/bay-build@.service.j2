@@ -21,4 +21,7 @@ TimeoutStartSec={{ git_deploy_build_timeout }}
 # unit. `-` tolerates a host that has not been re-provisioned yet.
 EnvironmentFile=-{{ alert_env_path | default('/etc/bay/alert.env') }}
 ExecStart={{ stack_dir }}/bin/rebuild.sh %i
-ExecStartPost=/usr/bin/rm -f {{ stack_dir }}/triggers/%i.trigger
+# rebuild.sh consumes the trigger (moves it to %i.trigger.running) at the start
+# of a run, so a trigger written mid-run is kept and fires the path unit again.
+# Only the .running leftover of a killed run is removed here.
+ExecStopPost=/usr/bin/rm -f {{ stack_dir }}/triggers/%i.trigger.running

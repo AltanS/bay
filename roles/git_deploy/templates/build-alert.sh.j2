@@ -50,5 +50,6 @@ esac
 echo "[build-alert] ${SERVICE}: systemd result=${RESULT} — sending alert"
 bay_notify build.killed "${MSG}"
 
-# Also clean up the trigger file (ExecStartPost may not have run)
-rm -f "${STACK_DIR}/triggers/${SERVICE}.trigger"
+# Also clean up the consumed trigger (ExecStopPost may not have run). Never the
+# live ${SERVICE}.trigger: one written during the failed run must still fire.
+rm -f "${STACK_DIR}/triggers/${SERVICE}.trigger.running"

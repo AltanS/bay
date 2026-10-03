@@ -239,7 +239,10 @@ _record_failure() {
   fi
   printf '%s' "${new_state}" | _write_state
 
-  rm -f "${STACK_DIR}/triggers/${SERVICE}.trigger"
+  # The trigger was consumed (moved to ${SERVICE}.trigger.running) at the start
+  # of this run, so there is nothing to remove here. A ${SERVICE}.trigger that
+  # exists now was written DURING this run and must survive: it re-fires the
+  # path unit once this run ends.
 
   # Circuit breaker OPEN — notify exactly once per open event.
   # `alerts.opened_sent` is the once-only guard (Phase 3): the very
@@ -447,16 +450,35 @@ trap '_deploy_failed' ERR
 BUILD_START="${EPOCHSECONDS}"
 
 # ── Read correlation ID and detect pull signal from trigger file ──
-# Trigger file format (v2): line 1 = corr_id (UUID4), line 2 = signal ("pull" or empty)
+# Trigger file format (v2): line 1 = corr_id (UUID4), line 2 = signal ("pull" or empty),
+# optional line 3 = revision, optional line 4 = built_at (epoch seconds)
 # Legacy format (v1): single line "pull" or empty — CORR_ID set to "unknown"
 # Manual trigger (no trigger file): CORR_ID set to "manual-<epoch>"
+# Lines 3 and 4 (optional, pull signals only): the commit the build server
+# pushed (EXPECTED_REVISION) and the epoch second its build finished
+# (BUILT_AT). Triggers without them still work; the revision check is skipped.
+#
+# The trigger is CONSUMED here: moved atomically to <trigger>.running. The
+# path unit watches <trigger> with PathExists, so a trigger written while this
+# run is busy lands on a free name and fires the unit again after this run
+# ends. The old flow deleted the trigger in ExecStartPost, which also deleted
+# any trigger written mid-run. The .running file is removed on exit (EXIT trap
+# here, ExecStopPost in bay-build@.service for a SIGKILL or timeout).
 TRIGGER_FILE="${STACK_DIR}/triggers/${SERVICE}.trigger"
+RUNNING_FILE="${TRIGGER_FILE}.running"
 CORR_ID="unknown"
 PULL_SIGNAL=0
-if [[ -f "${TRIGGER_FILE}" ]]; then
-  CORR_ID=$(sed -n '1p' "${TRIGGER_FILE}" 2>/dev/null || echo "unknown")
+EXPECTED_REVISION=""
+BUILT_AT=""
+if [[ -f "${TRIGGER_FILE}" ]] && mv -f "${TRIGGER_FILE}" "${RUNNING_FILE}" 2>/dev/null; then
+  trap 'rm -f "${RUNNING_FILE}"' EXIT
+  CORR_ID=$(sed -n '1p' "${RUNNING_FILE}" 2>/dev/null || echo "unknown")
   [[ -z "${CORR_ID}" ]] && CORR_ID="unknown"
-  PULL_SIGNAL_RAW=$(sed -n '2p' "${TRIGGER_FILE}" 2>/dev/null || echo "")
+  PULL_SIGNAL_RAW=$(sed -n '2p' "${RUNNING_FILE}" 2>/dev/null || echo "")
+  EXPECTED_REVISION=$(sed -n '3p' "${RUNNING_FILE}" 2>/dev/null | tr -d '\r' || true)
+  BUILT_AT=$(sed -n '4p' "${RUNNING_FILE}" 2>/dev/null | tr -d '\r' || true)
+  [[ "${EXPECTED_REVISION}" =~ ^[0-9a-fA-F]{7,64}$ ]] || EXPECTED_REVISION=""
+  [[ "${BUILT_AT}" =~ ^[0-9]{1,12}$ ]] || BUILT_AT=""
   # Legacy 1-line format: line 1 was "pull" — detect and handle
   if [[ "${CORR_ID}" == "pull" && -z "${PULL_SIGNAL_RAW}" ]]; then
     CORR_ID="unknown"

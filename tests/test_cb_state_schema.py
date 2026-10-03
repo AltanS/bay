@@ -339,8 +339,12 @@ class TestRecordFailure:
         data = json.loads((tmp_state / "svc.json").read_text())
         assert data["consecutive_failures"] == 2
 
-    def test_trigger_file_removed(self, rendered, tmp_state):
-        """_record_failure removes the service's trigger file."""
+    def test_trigger_file_left_alone(self, rendered, tmp_state):
+        """_record_failure must NOT remove ``<svc>.trigger``.
+
+        rebuild.sh consumes the trigger at the start of a run, so one present
+        at failure time was written mid-run and has to fire the path unit again.
+        """
         triggers_dir = tmp_state.parent / "triggers"
         triggers_dir.mkdir(parents=True, exist_ok=True)
         trigger = triggers_dir / "svc.trigger"
@@ -348,7 +352,7 @@ class TestRecordFailure:
         script = '_record_failure "sha" "Build" "err"'
         proc = _run_bash(rendered, script, state_dir=tmp_state)
         assert proc.returncode == 0, proc.stderr
-        assert not trigger.exists()
+        assert trigger.exists()
 
 
 class TestResetCb:

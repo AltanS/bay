@@ -1033,10 +1033,11 @@ class TestBuildTimeout:
         rendered = _render_systemd_unit("build-alert.sh.j2")
         assert "BUILD_TIMEOUT=1200" in rendered
 
-    def test_alert_script_cleans_trigger(self):
-        """build-alert.sh cleans up trigger file."""
+    def test_alert_script_cleans_running_trigger_only(self):
+        """build-alert.sh removes the consumed trigger, never a queued one."""
         rendered = _render_systemd_unit("build-alert.sh.j2")
-        assert "triggers/${SERVICE}.trigger" in rendered
+        assert 'rm -f "${STACK_DIR}/triggers/${SERVICE}.trigger.running"' in rendered
+        assert 'rm -f "${STACK_DIR}/triggers/${SERVICE}.trigger"' not in rendered
 
 
 class TestBuildDuration:
