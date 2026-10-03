@@ -181,8 +181,9 @@ _write_state() {
 
 # Record a build failure and decide whether to notify.
 # Sends at most 2 notifications per incident: one on first failure,
-# one when the circuit breaker trips. Subsequent failures for the
-# same commit SHA are silently counted.
+# one when the circuit breaker trips. Subsequent failures with the same
+# commit SHA, stage and (digit-insensitive) reason are silently counted;
+# a different stage or error on the same commit still notifies.
 #   $1 — commit SHA (empty = always notify, no dedup)
 #   $2 — context label / stage (e.g. "Build", "Remote build", "Image pull")
 #   $3 — optional detail / reason (e.g. build output tail, shown in <pre> block)
@@ -191,11 +192,13 @@ _record_failure() {
   local context="${2:-Deploy}"
   local detail="${3:-}"
 
-  local state notified_sha current new_count now opened_sent
+  local state notified_sha prev_stage prev_reason current new_count now opened_sent
   state=$(_read_state)
   current=$(printf '%s' "${state}" | jq -r '.consecutive_failures // 0')
   current=${current:-0}
   notified_sha=$(printf '%s' "${state}" | jq -r '.last_failure.sha // ""')
+  prev_stage=$(printf '%s' "${state}" | jq -r '.last_failure.stage // ""')
+  prev_reason=$(printf '%s' "${state}" | jq -r '.last_failure.reason // ""')
   opened_sent=$(printf '%s' "${state}" | jq -r '.alerts.opened_sent // false')
   new_count=$((current + 1))
   now=$(date -Iseconds)
@@ -265,13 +268,22 @@ _record_failure() {
     return
   fi
 
-  # Same commit already notified — suppress duplicate
-  if [[ -n "${sha}" && "${sha}" == "${notified_sha}" ]]; then
-    _log "Failure #${new_count} for ${SERVICE} — notification suppressed (same commit ${sha})"
+  # Same commit AND same failure already notified — suppress duplicate. A
+  # different stage or a different error on the same commit is new information
+  # and must notify (2026-10-02: four distinct registry push failures on one
+  # commit were collapsed into a single alert). Reasons are build-output tails,
+  # so digits are stripped and whitespace squeezed before comparing: a changing
+  # duration or port must not defeat the suppression.
+  local fp_new fp_prev
+  fp_new=$(printf '%s' "${detail}" | tr -d '0-9' | tr -s '[:space:]' ' ')
+  fp_prev=$(printf '%s' "${prev_reason}" | tr -d '0-9' | tr -s '[:space:]' ' ')
+  if [[ -n "${sha}" && "${sha}" == "${notified_sha}" \
+     && "${context}" == "${prev_stage}" && "${fp_new}" == "${fp_prev}" ]]; then
+    _log "Failure #${new_count} for ${SERVICE} — notification suppressed (same commit ${sha}, same failure)"
     return
   fi
 
-  # First failure for this commit — send notification
+  # First failure for this commit, or a different failure — send notification
   local msg
   msg="$(printf '\U0001f6a8 <b>%s failed</b> (%d/%d)\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>' \
     "${context}" "${new_count}" "${CB_MAX_FAILURES}" "${HOSTNAME}" "${SERVICE}")"
@@ -864,6 +876,36 @@ _select_builder() {
   printf '%s\n' "${chosen:-${LOCAL_BUILDER}}"
 }
 
+# Transient registry push failures: blob PUTs cut by a proxy timeout, resets,
+# 499/502/503/504 from the registry front door. Layers are cached in the
+# builder, so a retry re-does only the push. Compile errors never match.
+BAY_PUSH_RETRY_PATTERN='blob upload invalid|unexpected EOF|status code 499|status code 50[234]|i/o timeout|connection reset'
+# Seconds to sleep before each extra attempt (overridable for tests).
+BAY_PUSH_RETRY_DELAYS="${BAY_PUSH_RETRY_DELAYS:-15 45}"
+
+# Run one build attempt; on a transient push failure re-run it on the SAME
+# builder, once per delay in BAY_PUSH_RETRY_DELAYS.
+#   $1  build function   $2  builder name
+# The failure text is read from ${BUILD_OUTPUT}, which each attempt overwrites.
+_build_with_push_retry() {
+  local build_fn="$1" builder="$2" delay attempt=1
+  if "${build_fn}" "${builder}"; then
+    return 0
+  fi
+  for delay in ${BAY_PUSH_RETRY_DELAYS}; do
+    if [[ -z "${BUILD_OUTPUT:-}" ]] || ! grep -Eq "${BAY_PUSH_RETRY_PATTERN}" "${BUILD_OUTPUT}" 2>/dev/null; then
+      return 1
+    fi
+    attempt=$(( attempt + 1 ))
+    _log "Transient registry push error on builder ${builder}; retry ${attempt} in ${delay}s"
+    sleep "${delay}"
+    if "${build_fn}" "${builder}"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Run one build through the selected builder.
 #   $1  name of a function that runs the build; it takes the builder name.
 # Retry policy. A build that fails on the REMOTE builder re-runs the probe:
@@ -879,7 +921,7 @@ _build_with_fallback() {
   local builder reprobe
   builder=$(_select_builder)
   _log "builder=${builder}"
-  if "${build_fn}" "${builder}"; then
+  if _build_with_push_retry "${build_fn}" "${builder}"; then
     return 0
   fi
   if [[ "${builder}" != "${REMOTE_BUILDER}" ]]; then
@@ -893,7 +935,7 @@ _build_with_fallback() {
   _log "Remote builder ${REMOTE_BUILDER} lost mid-build; retrying once on ${LOCAL_BUILDER}"
   notify_build build.remote_fallback "${SERVICE}: remote builder lost mid-build, retrying on ${LOCAL_BUILDER}"
   _log "builder=${LOCAL_BUILDER}"
-  "${build_fn}" "${LOCAL_BUILDER}"
+  _build_with_push_retry "${build_fn}" "${LOCAL_BUILDER}"
 }
 
 # ── Strategy routing ──

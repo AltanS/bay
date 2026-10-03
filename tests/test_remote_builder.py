@@ -424,6 +424,8 @@ SERVICE=svc-remote
 SELECT_BUILDER={helper_path}
 LOCAL_BUILDER={_LOCAL}
 REMOTE_BUILDER={_REMOTE}
+BAY_PUSH_RETRY_DELAYS=""  # same-builder push retry has its own tests
+BAY_PUSH_RETRY_PATTERN=x
 _log() {{ echo "[rebuild] $*"; }}
 notify_build() {{ echo "NOTIFY $1 $2"; }}
 _fake_build() {{
@@ -433,6 +435,7 @@ _fake_build() {{
   esac
 }}
 {_function(rendered, "_select_builder")}
+{_function(rendered, "_build_with_push_retry")}
 {_function(rendered, "_build_with_fallback")}
 if _build_with_fallback _fake_build; then echo "FINAL 0"; else echo "FINAL 1"; fi
 """

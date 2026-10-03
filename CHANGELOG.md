@@ -25,6 +25,13 @@ before upgrading — anything needing manual action is called out under
   `_record_failure` and `bay-build-alert` no longer delete the live trigger.
   The trigger file may now carry two optional extra lines (revision,
   `built_at`); old triggers still work.
+- Registry push failures: `rebuild.sh` retries a build that failed with a
+  transient registry error (`blob upload invalid`, `unexpected EOF`, 499,
+  502, 503, 504, `i/o timeout`, `connection reset`) up to two more times on
+  the same builder, after 15 s and 45 s. Compile errors are not retried.
+- Failure alerts are suppressed only when the commit, the stage and the
+  error all match the previous failure. A different error on the same commit
+  now notifies.
 
 ## [0.8.0] - 2026-10-02
 

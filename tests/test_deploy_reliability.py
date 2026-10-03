@@ -120,3 +120,119 @@ class TestTriggerConsumption:
         assert "PathExists=/opt/teststack/triggers/%i.trigger\n" in env_unit
 
 
+# ── R4: push retry and honest alert suppression ─────────────────────────
+
+
+def _run_retry(rendered: str, outputs: list[str], tmp_path: Path) -> subprocess.CompletedProcess:
+    """Run _build_with_push_retry; the i-th attempt writes outputs[i] and fails
+    (an empty string means that attempt succeeds)."""
+    for i, text in enumerate(outputs):
+        (tmp_path / f"out{i}").write_text(text)
+    pattern = re.search(r"^BAY_PUSH_RETRY_PATTERN=.*$", rendered, re.MULTILINE).group(0)
+    delays = re.search(r"^BAY_PUSH_RETRY_DELAYS=.*$", rendered, re.MULTILINE).group(0)
+    script = f"""set -uo pipefail
+{pattern}
+{delays}
+{_extract_helper(rendered, "_build_with_push_retry")}
+_log() {{ echo "LOG: $*"; }}
+sleep() {{ echo "SLEEP: $1"; }}
+BUILD_OUTPUT={tmp_path}/current
+n=0
+attempt() {{
+  cp {tmp_path}/out$n "$BUILD_OUTPUT"
+  local rc=0; [[ -s "$BUILD_OUTPUT" ]] && rc=1
+  n=$((n+1)); echo "ATTEMPT on $1"
+  return $rc
+}}
+_build_with_push_retry attempt bay-remote; echo "RC=$?"
+"""
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
+class TestPushRetry:
+    @pytest.mark.parametrize(
+        "err",
+        [
+            "blob upload invalid",
+            "unexpected EOF",
+            "unexpected status code 499",
+            "received unexpected HTTP status: 504 Gateway Timeout; status code 504",
+            "status code 502",
+            "dial tcp: i/o timeout",
+            "read: connection reset by peer",
+        ],
+    )
+    def test_transient_error_is_retried_with_backoff_then_succeeds(self, rendered, tmp_path, err):
+        proc = _run_retry(rendered, [err, err, ""], tmp_path)
+        assert proc.stdout.count("ATTEMPT on bay-remote") == 3
+        assert proc.stdout.index("SLEEP: 15") < proc.stdout.index("SLEEP: 45")
+        assert proc.stdout.count("retry") == 2
+        assert "RC=0" in proc.stdout
+
+    def test_gives_up_after_two_retries(self, rendered, tmp_path):
+        proc = _run_retry(rendered, ["status code 504"] * 4, tmp_path)
+        assert proc.stdout.count("ATTEMPT") == 3
+        assert "RC=1" in proc.stdout
+
+    def test_compile_error_is_not_retried(self, rendered, tmp_path):
+        proc = _run_retry(rendered, ["error TS2322: Type 'x' is not assignable"], tmp_path)
+        assert proc.stdout.count("ATTEMPT") == 1
+        assert "SLEEP" not in proc.stdout
+        assert "RC=1" in proc.stdout
+
+    def test_both_builder_paths_use_the_retry(self, rendered):
+        body = _extract_helper(rendered, "_build_with_fallback")
+        assert body.count("_build_with_push_retry") == 2
+
+
+class TestAlertSuppression:
+    def _failures(self, rendered: str, calls: list[tuple[str, str, str]], tmp_path: Path) -> list[str]:
+        state = tmp_path / "state"
+        state.mkdir()
+        sf = state / "svc.json"
+        lines = "\n".join(
+            f"_record_failure {sha!r} {ctx!r} {detail!r}" for sha, ctx, detail in calls
+        )
+        script = f"""set -uo pipefail
+STATE_DIR={str(state)!r}; STATE_FILE={str(sf)!r}; STACK_DIR={str(tmp_path)!r}
+CB_MAX_FAILURES=99; SERVICE=svc; HOSTNAME=h
+notify_build() {{ echo NOTIFY; }}
+format_timestamp() {{ echo now; }}
+{_helpers_bash(rendered)}
+{lines}
+"""
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        return [ln for ln in proc.stdout.splitlines() if ln == "NOTIFY"]
+
+    def test_same_sha_same_failure_is_suppressed(self, rendered, tmp_path):
+        out = self._failures(
+            rendered,
+            [("c1", "Remote build", "PUT 504 60001ms"), ("c1", "Remote build", "PUT 504 60012ms")],
+            tmp_path,
+        )
+        assert out == ["NOTIFY"]
+
+    def test_same_sha_different_error_notifies(self, rendered, tmp_path):
+        out = self._failures(
+            rendered,
+            [("c1", "Remote build", "PUT status code 504"), ("c1", "Remote build", "blob upload invalid")],
+            tmp_path,
+        )
+        assert out == ["NOTIFY", "NOTIFY"]
+
+    def test_same_sha_different_stage_notifies(self, rendered, tmp_path):
+        out = self._failures(
+            rendered, [("c1", "Remote build", "x"), ("c1", "Build", "x")], tmp_path
+        )
+        assert out == ["NOTIFY", "NOTIFY"]
+
+    def test_new_sha_notifies(self, rendered, tmp_path):
+        out = self._failures(rendered, [("c1", "Build", "x"), ("c2", "Build", "x")], tmp_path)
+        assert out == ["NOTIFY", "NOTIFY"]
+
+    def test_empty_sha_always_notifies(self, rendered, tmp_path):
+        out = self._failures(
+            rendered, [("", "Revision check", "x"), ("", "Revision check", "x")], tmp_path
+        )
+        assert out == ["NOTIFY", "NOTIFY"]
