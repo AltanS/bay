@@ -7,7 +7,7 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
-## [Unreleased]
+## [0.9.0] - 2026-10-03
 
 ### Fixed
 
@@ -47,6 +47,14 @@ before upgrading — anything needing manual action is called out under
   label. If the build server skips a build because that image already exists
   in the registry, the app host's first check reports it as missing. Rebuild
   once (push a commit) to clear it.
+
+### Upgrade notes
+
+- Run `bin/bay deploy production --tags git_deploy` on every host. `rebuild.sh`
+  runs on both the build server and the app hosts, and the revision check needs
+  the new script on both sides.
+- The Traefik read timeout is static config. Deploy it with
+  `--tags traefik` on the host that runs Zot. Traefik restarts.
 
 ## [0.8.0] - 2026-10-02
 
