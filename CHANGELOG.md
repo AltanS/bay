@@ -7,6 +7,33 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [Unreleased]
+
+### Fixed
+
+- `git_deploy` now brings the webhook receiver onto its current image. Before,
+  it rebuilt `bay-webhook:latest` when `app.py` changed, but the running
+  container kept the old image: the `Restart bay-webhook` handler only
+  restarts, and only `--tags deploy_stack` recreated it. After a release that
+  changed the receiver, `bin/bay deploy <env> --tags git_deploy` left every
+  host on a stale receiver that silently dropped new pull-signal fields.
+  Every `git_deploy` run now reconciles the receiver alone, through the same
+  spec and reconciler as `deploy_stack`. The reconciler compares the running
+  container's image ID with the local `bay-webhook:latest` on every run, so
+  existing drift heals too, and a matching container is left alone (no
+  restart). Hosts that have no receiver yet are skipped; `deploy_stack`
+  creates it. The image is also rebuilt when it is missing and the files are
+  unchanged. `--check` plans the change and writes nothing.
+- The `Restart bay-webhook` handler is now `docker restart bay-webhook`. It no
+  longer fails on a host with no receiver, and it is skipped when the
+  receiver was just recreated in the same run.
+
+**Upgrade notes**
+
+- Run `bin/bay deploy <env> --tags git_deploy` once per host after updating.
+  It now also brings a receiver left stale by earlier releases up to date. A
+  receiver that is already current is not touched.
+
 ## [0.9.0] - 2026-10-03
 
 ### Fixed

@@ -275,6 +275,13 @@ the receiver's in-memory `IMAGE_MAP` table on process start
   handler is a no-op when the rendered content matches what's already on
   disk. Operators do **not** need to run `docker restart bay-webhook`
   manually after a normal deploy — the framework handles it.
+  The handler only restarts. A new receiver *image* is applied separately:
+  `git_deploy` (`roles/git_deploy/tasks/webhook.yml`) rebuilds
+  `bay-webhook:latest` and then reconciles the receiver alone through
+  the same spec and reconciler as `deploy_stack`. The reconciler recreates the
+  container when its image ID differs from `bay-webhook:latest`, so
+  `--tags git_deploy` alone is enough after a release that changed the
+  receiver.
 
 - **Local-strategy producers sharing an image with siblings** —
   Cross-host fan-out for this topology is a separate latent gap (the
