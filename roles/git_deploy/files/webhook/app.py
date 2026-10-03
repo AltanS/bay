@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import threading
 import urllib.request
@@ -727,12 +728,30 @@ class WebhookHandler(BaseHTTPRequestHandler):
             })
             return
 
+        # Optional build metadata from the build server. Validated before it
+        # reaches the trigger file: a newline in a value would forge extra
+        # lines. Invalid or absent values are dropped (old build servers send
+        # neither), and rebuild.sh then skips its revision check.
+        revision = payload.get("revision", "")
+        if not (isinstance(revision, str) and re.fullmatch(r"[0-9a-fA-F]{7,64}", revision)):
+            revision = ""
+        built_at = payload.get("built_at")
+        if isinstance(built_at, bool) or not isinstance(built_at, int) or built_at < 0:
+            built_at = None
+
+        # Trigger format: corr_id, "pull", then (optional) revision, built_at.
+        trigger_text = f"{corr_id}\npull"
+        if revision:
+            trigger_text += f"\n{revision}"
+            if built_at is not None:
+                trigger_text += f"\n{built_at}"
+
         # Write "pull" trigger for each local service
         TRIGGER_DIR.mkdir(parents=True, exist_ok=True)
         triggered = []
         for svc_name in local_services:
             trigger_path = TRIGGER_DIR / f"{svc_name}.trigger"
-            trigger_path.write_text(f"{corr_id}\npull")
+            trigger_path.write_text(trigger_text)
             triggered.append(svc_name)
 
         print(

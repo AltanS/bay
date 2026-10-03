@@ -395,7 +395,7 @@ def test_exit_path_map_rows_all_carry_an_alert_id_cell():
         for ln in lines
         if re.match(r"^\|\s*\d+\s*\|\s*(?:\d+|ERR trap)\s*\|", ln)
     ]
-    assert len(rows) == 16, f"Expected 16 exit-path rows, found {len(rows)}"
+    assert len(rows) == 17, f"Expected 17 exit-path rows, found {len(rows)}"
 
     malformed: list[str] = []
     for row in rows:

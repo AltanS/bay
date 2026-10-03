@@ -120,6 +120,79 @@ class TestTriggerConsumption:
         assert "PathExists=/opt/teststack/triggers/%i.trigger\n" in env_unit
 
 
+# ── R3: revision label, pull-signal body, post-pull check ───────────────
+
+
+class TestRevision:
+    def test_buildx_sets_label_and_build_arg_from_the_tag_sha(self, rendered_remote):
+        assert '--label "org.opencontainers.image.revision=${SHA}"' in rendered_remote
+        assert '--build-arg "BAY_GIT_SHA=${SHA}"' in rendered_remote
+        assert '-t "${IMAGE_REPO}:${SHA}"' in rendered_remote
+
+    def test_pull_signal_body_carries_revision_and_built_at(self, rendered_remote):
+        assert "--arg revision \"${SHA}\"" in rendered_remote
+        assert "{image: $image, revision: $revision, built_at: $built_at}" in rendered_remote
+        # the HMAC is computed over the same variable that is POSTed
+        assert "printf '%s' \"${PULL_BODY}\" | openssl dgst" in rendered_remote
+        assert '-d "${PULL_BODY}"' in rendered_remote
+
+    def test_pull_body_is_valid_json(self, rendered_remote):
+        m = re.search(r"PULL_BODY=\$\(jq -cn.*?\)\n", rendered_remote, re.DOTALL)
+        assert m, "PULL_BODY assignment not found"
+        script = f'IMAGE_REF="r/x:latest"; SHA=abcdef123456; BUILT_AT_EPOCH=1760000000\n{m.group(0)}echo "$PULL_BODY"'
+        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == '{"image":"r/x:latest","revision":"abcdef123456","built_at":1760000000}'
+
+    def test_revision_check_runs_after_health_and_before_reset(self, rendered):
+        health = rendered.index('if ! _wait_healthy "${SERVICE}" "${HEALTH_CHECK_TIMEOUT}"; then\n    _handle_rollback')
+        check = rendered.index("Revision check failed for")
+        reset = rendered.index("_reset_cb", check)
+        assert health < check < reset
+        assert '_record_failure "" "Revision check"' in rendered
+        assert 'org.opencontainers.image.revision' in rendered
+        assert "live ${EXPECTED_REVISION} in" in rendered
+
+    def _run_check(self, rendered: str, live: str, expected: str, tmp_path: Path):
+        m = re.search(
+            r"  if \[\[ -n \"\$\{EXPECTED_REVISION\}\" \]\]; then.*?\n  fi\n", rendered, re.DOTALL
+        )
+        assert m, "revision check block not found"
+        script = f"""set -uo pipefail
+SERVICE=svc; EXPECTED_REVISION={expected!r}; BUILT_AT=$(( $(date +%s) - 7 ))
+_log() {{ echo "LOG: $*"; }}
+docker() {{ printf '%s' {live!r}; }}
+_record_failure() {{ echo "FAIL: [$1] [$2] [$3]"; }}
+for _ in 1; do
+{m.group(0)}
+echo reached-end
+done
+"""
+        # `exit 1` inside the block ends the shell; reached-end means success.
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    def test_match_logs_live_line(self, rendered, tmp_path):
+        proc = self._run_check(rendered, "abcdef123456", "abcdef123456", tmp_path)
+        assert "reached-end" in proc.stdout
+        assert re.search(r"LOG: live abcdef123456 in [78]s", proc.stdout)
+        assert "FAIL" not in proc.stdout
+
+    def test_mismatch_fails_with_empty_sha_so_it_always_notifies(self, rendered, tmp_path):
+        proc = self._run_check(rendered, "111111111111", "abcdef123456", tmp_path)
+        assert proc.returncode == 1
+        assert "FAIL: [] [Revision check] [Revision check: running 111111111111, expected abcdef123456]" in proc.stdout
+
+    def test_missing_label_fails(self, rendered, tmp_path):
+        proc = self._run_check(rendered, "", "abcdef123456", tmp_path)
+        assert proc.returncode == 1
+        assert "running <none>, expected abcdef123456" in proc.stdout
+
+    def test_no_expected_revision_skips_the_check(self, rendered, tmp_path):
+        proc = self._run_check(rendered, "whatever", "", tmp_path)
+        assert "reached-end" in proc.stdout
+        assert "LOG" not in proc.stdout
+
+
 # ── R4: push retry and honest alert suppression ─────────────────────────
 
 

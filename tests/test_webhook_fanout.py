@@ -747,6 +747,52 @@ class TestImageLevelPullSignal:
                 f"Trigger for {svc} should end with '\\npull' (v2 format), got: {trigger_content!r}"
             )
 
+    def _pull_trigger(self, webhook_env, payload: dict) -> str:
+        webhook_app.SERVICE_CONFIG = {"animals": {"branch": "main"}}
+        webhook_app.IMAGE_MAP = {"registry.example.com/animals:latest": ["animals"]}
+        server = HTTPServer(("127.0.0.1", 0), webhook_app.WebhookHandler)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            body = json.dumps(
+                {"image": "registry.example.com/animals:latest", **payload}
+            ).encode()
+            status, _ = self._post(
+                f"{base}/webhook/pull-image", body, extra_headers={"X-Bay-Pull-Signal": "1"}
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert status == 200
+        return (webhook_env / "animals.trigger").read_text()
+
+    def test_revision_and_built_at_are_written_to_the_trigger(self, webhook_env):
+        """The signed body's revision/built_at become trigger lines 3 and 4."""
+        lines = self._pull_trigger(
+            webhook_env, {"revision": "abcdef123456", "built_at": 1760000000}
+        ).split("\n")
+        assert lines[1] == "pull"
+        assert lines[2:] == ["abcdef123456", "1760000000"]
+
+    def test_body_without_revision_keeps_the_old_trigger_format(self, webhook_env):
+        content = self._pull_trigger(webhook_env, {})
+        assert len(content.split("\n")) == 2
+        assert content.endswith("\npull")
+
+    def test_hostile_revision_is_dropped(self, webhook_env):
+        """A newline-bearing revision must not forge extra trigger lines."""
+        content = self._pull_trigger(
+            webhook_env, {"revision": "abcdef1\nrm -rf", "built_at": 1760000000}
+        )
+        assert len(content.split("\n")) == 2
+
+    def test_non_integer_built_at_is_dropped(self, webhook_env):
+        content = self._pull_trigger(
+            webhook_env, {"revision": "abcdef123456", "built_at": "soon"}
+        )
+        assert content.split("\n")[2:] == ["abcdef123456"]
+
     def test_image_pull_unknown_image_returns_ignored(self, webhook_env):
         """Image-level pull signal for unmapped image returns ignored."""
         config = {"animals": {"branch": "main"}}

@@ -842,6 +842,26 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
     _handle_rollback "${SERVICE}" "${IMAGE_REPO}:previous" "${IMAGE_REF}"
   fi
 
+  # Revision check: the running container must be the commit the build server
+  # announced. Skipped for triggers without a revision (old build servers,
+  # manual triggers). The label comes from the image, so an image built before
+  # the label existed reports "" and fails the check on purpose.
+  if [[ -n "${EXPECTED_REVISION}" ]]; then
+    _live_rev=$(docker inspect --format '{% raw %}{{index .Config.Labels "org.opencontainers.image.revision"}}{% endraw %}' "${SERVICE}" 2>/dev/null || true)
+    if [[ "${_live_rev}" != "${EXPECTED_REVISION}" ]]; then
+      _log "Revision check failed for ${SERVICE}: running ${_live_rev:-<none>}, expected ${EXPECTED_REVISION}"
+      # Empty SHA: _record_failure always notifies when there is no SHA to dedup on.
+      _record_failure "" "Revision check" "Revision check: running ${_live_rev:-<none>}, expected ${EXPECTED_REVISION}"
+      trap - ERR
+      exit 1
+    fi
+    if [[ -n "${BUILT_AT}" ]]; then
+      _log "live ${EXPECTED_REVISION} in $(( $(date +%s) - BUILT_AT ))s"
+    else
+      _log "live ${EXPECTED_REVISION}"
+    fi
+  fi
+
   _reset_cb
 
   _log "Pull deploy complete for ${SERVICE} at $(date -Iseconds)"
@@ -1022,6 +1042,8 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
 {% endif %}
         -t "${IMAGE_REPO}:${SHA}" \
         -t "${IMAGE_REF}" \
+        --label "org.opencontainers.image.revision=${SHA}" \
+        --build-arg "BAY_GIT_SHA=${SHA}" \
         -f "${DOCKERFILE}" \
         "${BUILD_ARGS[@]}" \
         ${SECRET_FLAGS} \
@@ -1099,6 +1121,8 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
   exec 200>&-
 
   _reset_cb
+  # Build finished (or was skipped: image already in the registry).
+  BUILT_AT_EPOCH=$(date +%s)
 
   _log "Completed remote build for ${SERVICE} at $(date -Iseconds)"
   notify_build build.remote_complete "$(printf '\u2705 <b>Remote build complete</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Commit:     <code>%s</code>\n\u25b8 Image:      <code>%s</code>\n\u25b8 Duration:   %s\n\u25b8 Time:       %s\n\nNotifying deployment servers to pull.' \
@@ -1131,7 +1155,12 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
     for region in ${IMAGE_REGIONS[${IMAGE_REF}]}; do
       if [[ -n "${PEER_URLS[${region}]+_}" ]]; then
         PULL_URL="${PEER_URLS[${region}]}/webhook/pull-image"
-        PULL_BODY='{"image":"'"${IMAGE_REF}"'"}'
+        # revision is the same 12-char SHA that names the :<sha> tag and sits in
+        # the image's org.opencontainers.image.revision label; the app host
+        # checks the running container against it. built_at is epoch seconds.
+        PULL_BODY=$(jq -cn --arg image "${IMAGE_REF}" --arg revision "${SHA}" \
+          --argjson built_at "${BUILT_AT_EPOCH}" \
+          '{image: $image, revision: $revision, built_at: $built_at}')
         _log "Sending image-level pull signal to ${region} for ${IMAGE_REF}"
         # The MAC key comes out of a 0600 file, hex-encoded. The raw webhook
         # secret used to be rendered into this script as an openssl argument.

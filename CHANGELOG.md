@@ -33,6 +33,21 @@ before upgrading — anything needing manual action is called out under
   error all match the previous failure. A different error on the same commit
   now notifies.
 
+### Added
+
+- Revision check. Builds set the `org.opencontainers.image.revision` label
+  and the `BAY_GIT_SHA` build argument to the 12-char commit SHA. The pull
+  signal body gains `revision` and `built_at`; the webhook writes them as
+  optional trigger lines 3 and 4 (old triggers still work). After a pull
+  deploy turns healthy, `rebuild.sh` compares the running container's label
+  with the expected revision and raises a `Revision check` failure on a
+  mismatch, or logs `live <sha> in <N>s` on a match.
+
+  **Upgrade notes:** an image built before this release has no revision
+  label. If the build server skips a build because that image already exists
+  in the registry, the app host's first check reports it as missing. Rebuild
+  once (push a commit) to clear it.
+
 ## [0.8.0] - 2026-10-02
 
 ### Added
