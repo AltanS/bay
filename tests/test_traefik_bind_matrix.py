@@ -107,6 +107,38 @@ class TestSplitOnWithIp:
         assert eps["websecure"]["address"] != eps["websecure_tailnet"]["address"]
 
 
+class TestTailnetReadTimeout:
+    """Registry blob PUTs arrive on websecure_tailnet; Traefik's 60s default
+    readTimeout cut them (504/499), so only that entrypoint gets a longer one."""
+
+    _SPLIT = dict(
+        traefik_split_entrypoints=True,
+        traefik_public_bind_ip="203.0.113.10",
+        gateway_bind_ip="100.64.0.5",
+    )
+
+    def test_default_is_set_in_role_defaults(self):
+        defaults = yaml.safe_load((ROOT / "roles" / "traefik" / "defaults" / "main.yml").read_text())
+        assert defaults["traefik_tailnet_read_timeout"] == "600s"
+
+    def test_tailnet_entrypoint_gets_the_timeout(self):
+        eps = _render(traefik_tailnet_read_timeout="600s", **self._SPLIT)["entryPoints"]
+        assert eps["websecure_tailnet"]["transport"]["respondingTimeouts"]["readTimeout"] == "600s"
+
+    def test_public_entrypoints_keep_the_traefik_default(self):
+        eps = _render(traefik_tailnet_read_timeout="600s", **self._SPLIT)["entryPoints"]
+        assert "transport" not in eps["websecure"]
+        assert "transport" not in eps["web"]
+
+    def test_empty_value_renders_nothing(self):
+        eps = _render(traefik_tailnet_read_timeout="", **self._SPLIT)["entryPoints"]
+        assert "transport" not in eps["websecure_tailnet"]
+
+    def test_unset_value_renders_nothing(self):
+        eps = _render(**self._SPLIT)["entryPoints"]
+        assert "transport" not in eps["websecure_tailnet"]
+
+
 class TestSplitOnWithBlankIp:
     """The combination the deploy must refuse."""
 

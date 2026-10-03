@@ -19,6 +19,11 @@ entryPoints:
 {%   if gateway_bind_ip | default('', true) | trim | length > 0 %}
   websecure_tailnet:
     address: "{{ gateway_bind_ip }}:443"
+{%     if traefik_tailnet_read_timeout | default('', true) | string | trim | length > 0 %}
+    transport:
+      respondingTimeouts:
+        readTimeout: "{{ traefik_tailnet_read_timeout }}"
+{%     endif %}
 {%   endif %}
 {% else %}
   web:

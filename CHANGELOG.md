@@ -7,6 +7,17 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [Unreleased]
+
+### Fixed
+
+- Traefik: the tailnet entrypoint (`websecure_tailnet`) now has a
+  `readTimeout` of `600s`, set by the new `traefik_tailnet_read_timeout`
+  role default. Traefik v3's 60 s default cut registry blob PUTs from the
+  build host, which reach Zot through this entrypoint. The public
+  entrypoint is unchanged. Set the variable to `""` to keep the Traefik
+  default.
+
 ## [0.8.0] - 2026-10-02
 
 ### Added

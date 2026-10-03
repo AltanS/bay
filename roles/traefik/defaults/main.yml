@@ -12,6 +12,16 @@ traefik_access_log_path: "{{ stack_dir }}/logs/traefik/access.log"
 # Docker network for app containers
 traefik_docker_network: services
 
+# Read timeout for the tailnet entrypoint (websecure_tailnet) only. Traefik v3
+# defaults entryPoints.<name>.transport.respondingTimeouts.readTimeout to 60s,
+# which cuts large registry blob PUTs: the build host reaches Zot through this
+# entrypoint via the /etc/hosts pin in roles/zot/tasks/main.yml, and a slow
+# layer upload past 60s came back as 504/499 and then "blob upload invalid".
+# The public entrypoint keeps the Traefik default. Set to "" to render nothing
+# (Traefik default). Only applies when traefik_split_entrypoints is true and
+# gateway_bind_ip is set.
+traefik_tailnet_read_timeout: "600s"
+
 # Prometheus metrics
 traefik_metrics_enabled: true
 traefik_metrics_port: 8082
