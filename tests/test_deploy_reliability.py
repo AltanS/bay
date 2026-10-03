@@ -153,15 +153,29 @@ class TestRevision:
         assert 'org.opencontainers.image.revision' in rendered
         assert "live ${EXPECTED_REVISION} in" in rendered
 
-    def _run_check(self, rendered: str, live: str, expected: str, tmp_path: Path):
+    def _run_check(
+        self,
+        rendered: str,
+        live: str,
+        expected: str,
+        tmp_path: Path,
+        live_img: str = "sha256:aaa",
+        pulled_img: str = "sha256:bbb",
+    ):
         m = re.search(
             r"  if \[\[ -n \"\$\{EXPECTED_REVISION\}\" \]\]; then.*?\n  fi\n", rendered, re.DOTALL
         )
         assert m, "revision check block not found"
         script = f"""set -uo pipefail
-SERVICE=svc; EXPECTED_REVISION={expected!r}; BUILT_AT=$(( $(date +%s) - 7 ))
+SERVICE=svc; IMAGE_REF=r/svc:latest; EXPECTED_REVISION={expected!r}; BUILT_AT=$(( $(date +%s) - 7 ))
 _log() {{ echo "LOG: $*"; }}
-docker() {{ printf '%s' {live!r}; }}
+docker() {{
+  case "$*" in
+    *"image inspect"*) printf '%s' {pulled_img!r} ;;
+    *".Image}}"*) printf '%s' {live_img!r} ;;
+    *) printf '%s' {live!r} ;;
+  esac
+}}
 _record_failure() {{ echo "FAIL: [$1] [$2] [$3]"; }}
 for _ in 1; do
 {m.group(0)}
@@ -184,6 +198,24 @@ done
 
     def test_missing_label_fails(self, rendered, tmp_path):
         proc = self._run_check(rendered, "", "abcdef123456", tmp_path)
+        assert proc.returncode == 1
+        assert "running <none>, expected abcdef123456" in proc.stdout
+
+    def test_unlabeled_image_matching_the_pulled_image_passes(self, rendered, tmp_path):
+        # An image built before the label existed, re-announced because its
+        # :<sha> tag was already in the registry.
+        proc = self._run_check(
+            rendered, "", "abcdef123456", tmp_path, live_img="sha256:same", pulled_img="sha256:same"
+        )
+        assert "reached-end" in proc.stdout
+        assert "no revision label" in proc.stdout
+        assert re.search(r"LOG: live abcdef123456 in [78]s", proc.stdout)
+        assert "FAIL" not in proc.stdout
+
+    def test_unlabeled_stale_container_still_fails(self, rendered, tmp_path):
+        proc = self._run_check(
+            rendered, "", "abcdef123456", tmp_path, live_img="sha256:old", pulled_img="sha256:new"
+        )
         assert proc.returncode == 1
         assert "running <none>, expected abcdef123456" in proc.stdout
 

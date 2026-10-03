@@ -7,6 +7,18 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.9.2] - 2026-10-03
+
+### Fixed
+
+- The revision check no longer raises a false alert for an image built
+  before the revision label existed. The build server skips the build when
+  the `:<sha>` tag is already in the registry, so the first pull after an
+  upgrade can announce such an image. When the running image has no label,
+  the check now compares the container's image ID with the image the pull
+  fetched, and passes when they match. A stale container still fails,
+  because its image ID differs.
+
 ## [0.9.1] - 2026-10-03
 
 ### Fixed

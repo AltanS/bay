@@ -844,10 +844,23 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
 
   # Revision check: the running container must be the commit the build server
   # announced. Skipped for triggers without a revision (old build servers,
-  # manual triggers). The label comes from the image, so an image built before
-  # the label existed reports "" and fails the check on purpose.
+  # manual triggers).
+  #
+  # An image built before the label existed reports "". The build server can
+  # still announce it: it skips the build when the :<sha> tag is already in the
+  # registry. For that case only, fall back to the image ID: the container must
+  # run exactly the image this pull fetched. A stale container (dockerd kept the
+  # old image) still fails, because its image ID differs.
   if [[ -n "${EXPECTED_REVISION}" ]]; then
     _live_rev=$(docker inspect --format '{% raw %}{{index .Config.Labels "org.opencontainers.image.revision"}}{% endraw %}' "${SERVICE}" 2>/dev/null || true)
+    if [[ -z "${_live_rev}" ]]; then
+      _live_img=$(docker inspect --format '{% raw %}{{.Image}}{% endraw %}' "${SERVICE}" 2>/dev/null || true)
+      _pulled_img=$(docker image inspect --format '{% raw %}{{.Id}}{% endraw %}' "${IMAGE_REF}" 2>/dev/null || true)
+      if [[ -n "${_live_img}" && "${_live_img}" == "${_pulled_img}" ]]; then
+        _log "Revision check: ${SERVICE} image has no revision label (built before the label existed); image ID matches the pulled ${IMAGE_REF}, accepting it as ${EXPECTED_REVISION}"
+        _live_rev="${EXPECTED_REVISION}"
+      fi
+    fi
     if [[ "${_live_rev}" != "${EXPECTED_REVISION}" ]]; then
       _log "Revision check failed for ${SERVICE}: running ${_live_rev:-<none>}, expected ${EXPECTED_REVISION}"
       # Empty SHA: _record_failure always notifies when there is no SHA to dedup on.
