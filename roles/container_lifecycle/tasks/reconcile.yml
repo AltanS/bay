@@ -111,6 +111,7 @@
         'user': _spec.user | default(None),
         'restart_policy': _spec.restart_policy | default('unless-stopped'),
         'mem_limit': _spec.mem_limit | default(None),
+        'memswap_limit': _spec.memswap_limit | default(None),
         'labels': _spec.labels | default({}),
         'healthcheck': _spec.healthcheck | default(None),
         'log_driver': _spec.log_driver | default(None),

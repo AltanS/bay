@@ -99,7 +99,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 - **SSH hardening** -- key-only auth, no root login, `MaxStartups 10:30:60` rate limiting, 30s `LoginGraceTime` (via `sshd_hardening` role supplementing geerlingguy.security)
 - **Swap provisioning** -- configurable swap file (default 2G, swappiness 10) prevents OOM-kills on memory-constrained servers
 - **CrowdSec bouncer binding** -- systemd drop-in auto-restarts the nftables bouncer when the CrowdSec agent restarts, preventing stale/empty blocklist sets after OOM recovery
-- **Container memory limits** -- optional `mem_limit` per service/accessory prevents runaway containers from OOM-killing the host
+- **Container memory limits** -- optional `mem_limit` per service/accessory prevents runaway containers from OOM-killing the host. Optional `memswap_limit` set equal to `mem_limit` gives one container no swap, so its memory pages never reach disk
 - **Deploy lock** -- file-based mutex prevents concurrent deploys; stale locks (>1 hour) are automatically ignored
 - **Deploy privilege separation** -- root bootstrap creates directories, then all deployment runs as unprivileged `app` user with Docker group membership
 

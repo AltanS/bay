@@ -82,6 +82,7 @@ services:
     ports:
       internal: 3000
     mem_limit: 512m
+    # memswap_limit: 512m   # equal to mem_limit = this container gets no swap
     healthcheck_path: /health
     env:
       clear:

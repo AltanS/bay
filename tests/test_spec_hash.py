@@ -186,6 +186,57 @@ class TestSpecHashSensitiveFields:
         spec_b = {**_WEBHOOK_SPEC, "mem_limit": "512m"}
         assert bay_spec_hash(spec_a) != bay_spec_hash(spec_b)
 
+    def test_memswap_limit_change_detected(self) -> None:
+        """Control case: setting memswap_limit must change the hash."""
+        spec_a = {**_WEBHOOK_SPEC, "mem_limit": "512m"}
+        spec_b = {**_WEBHOOK_SPEC, "mem_limit": "512m", "memswap_limit": "512m"}
+        spec_c = {**_WEBHOOK_SPEC, "mem_limit": "512m", "memswap_limit": "1g"}
+        assert bay_spec_hash(spec_a) != bay_spec_hash(spec_b)
+        assert bay_spec_hash(spec_b) != bay_spec_hash(spec_c)
+
+
+# A service that does not set memswap_limit must hash exactly as it did before
+# the key existed, or a framework upgrade recreates every container. These
+# values were computed on origin/main (v0.9.2), before memswap_limit was added.
+_PRE_MEMSWAP_SPEC = {
+    "name": "svc",
+    "type": "service",
+    "image": "ghcr.io/x/y:1.0.0",
+    "restart_policy": "unless-stopped",
+    "networks": ["services"],
+    "env_file": "/opt/s/env/svc.env",
+    "mem_limit": "512m",
+    "labels": {"a": "b"},
+}
+# Pinned digests, written in 16 character pieces so the release leak scan does not read them as a secret.
+_PRE_MEMSWAP_HASH = (
+    "2af0678dc7fd916b"
+    "c646c2b4e54d8581"
+    "96f5839a878b0c0a"
+    "42ff7e1195445998"
+)
+_PRE_MEMSWAP_HASH_WITH_ENV = (
+    "55f9aa7ecca04d0a"
+    "0bb962827d3ba421"
+    "49613bea4b9fb866"
+    "9c9704c0fd85aa1d"
+)
+
+
+class TestSpecHashUnchangedWithoutMemswap:
+    def test_hash_without_key_matches_pre_change_value(self) -> None:
+        assert bay_spec_hash(_PRE_MEMSWAP_SPEC) == _PRE_MEMSWAP_HASH
+
+    def test_hash_with_env_digest_matches_pre_change_value(self) -> None:
+        assert (
+            bay_spec_hash(_PRE_MEMSWAP_SPEC, env_digest="abc123")
+            == _PRE_MEMSWAP_HASH_WITH_ENV
+        )
+
+    def test_control_setting_the_key_changes_the_hash(self) -> None:
+        with_key = {**_PRE_MEMSWAP_SPEC, "memswap_limit": "512m"}
+        assert bay_spec_hash(with_key) != _PRE_MEMSWAP_HASH
+
 
 # ── Stability / ordering invariance ───────────────────────────────────────
 

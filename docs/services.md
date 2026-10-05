@@ -82,6 +82,7 @@ services:
         region: eu                   #   Region where target is deployed
 
     mem_limit: 512m                  # Docker memory limit (e.g., 256m, 1g)
+    memswap_limit: 512m              # Memory plus swap. Equal to mem_limit = no swap. Needs mem_limit, never smaller
 
     log_rotation:                    # Per-service docker log retention (overrides log_rotation_defaults)
       driver: json-file              #   json-file | local | none
@@ -218,6 +219,7 @@ accessories:
       - eu                           #   Absent or empty = deploy everywhere
 
     mem_limit: 512m                  # Docker memory limit (e.g., 256m, 1g)
+    memswap_limit: 512m              # Memory plus swap. Equal to mem_limit = no swap. Needs mem_limit, never smaller
 
     log_rotation:                    # Per-accessory docker log retention (same shape as services)
       driver: json-file              #   json-file | local | none

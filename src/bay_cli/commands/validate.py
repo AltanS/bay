@@ -2594,6 +2594,70 @@ def _validate_reserved_names(
         result.ok("Reserved names  no service name collides with a router or canary name")
 
 
+_MEM_UNITS = {"b": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
+_MEM_RE = re.compile(r"^(\d+)([bkmg]?)$", re.IGNORECASE)
+
+
+def _parse_mem_bytes(value: Any) -> int | None:
+    """Bytes in a Docker memory string such as ``512m`` or ``1g``, else None.
+
+    Docker reads a bare number as bytes and ``k``, ``m``, ``g`` as powers of
+    1024. ``-1`` and anything this cannot read return None, and the caller
+    skips the size comparison for them.
+    """
+    match = _MEM_RE.match(str(value).strip())
+    if match is None:
+        return None
+    return int(match.group(1)) * _MEM_UNITS[(match.group(2) or "b").lower()]
+
+
+def _validate_memswap_limits(
+    services_data: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """``memswap_limit`` needs ``mem_limit`` and must not be smaller than it.
+
+    Docker refuses to create a container that has a swap limit and no memory
+    limit, and one whose memory-plus-swap limit is below its memory limit.
+    The reconciler would hit that error mid-deploy, so say it here.
+    """
+    console.header("Memory Limits")
+
+    issues = 0
+    checked = 0
+    for kind in ("services", "accessories"):
+        block = services_data.get(kind) or {}
+        if not isinstance(block, dict):
+            continue
+        for name, cfg in block.items():
+            if str(name).startswith("_") or not isinstance(cfg, dict):
+                continue
+            if cfg.get("memswap_limit") is None:
+                continue
+            checked += 1
+            if cfg.get("mem_limit") is None:
+                issues += 1
+                result.fail(
+                    f"{kind}.{name}: memswap_limit is set without mem_limit. "
+                    f"Docker rejects a swap limit with no memory limit. "
+                    f"Set mem_limit, and set memswap_limit equal to it for no swap."
+                )
+                continue
+            mem = _parse_mem_bytes(cfg["mem_limit"])
+            swap = _parse_mem_bytes(cfg["memswap_limit"])
+            if mem is not None and swap is not None and swap < mem:
+                issues += 1
+                result.fail(
+                    f"{kind}.{name}: memswap_limit ({cfg['memswap_limit']}) is "
+                    f"smaller than mem_limit ({cfg['mem_limit']}). It counts "
+                    f"memory plus swap, so set it equal to mem_limit for no "
+                    f"swap, or larger to allow some."
+                )
+
+    if issues == 0:
+        result.ok(f"Memory limits  {checked} memswap_limit setting(s) consistent with mem_limit")
+
+
 def _validate_config_files(
     root: Path,
     services_data: dict[str, Any],
@@ -2805,6 +2869,7 @@ def run_validation(
     if services_data is not None:
         _validate_identifier_safety(services_data, result)
         _validate_reserved_names(services_data, result)
+        _validate_memswap_limits(services_data, result)
 
     # 3c. Declared config files exist in the consumer's files/
     if services_data is not None:

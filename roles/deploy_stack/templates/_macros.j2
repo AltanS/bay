@@ -54,6 +54,9 @@
 {% if cfg.mem_limit is defined %}
     mem_limit: {{ cfg.mem_limit }}
 {% endif %}
+{% if cfg.memswap_limit is defined %}
+    memswap_limit: {{ cfg.memswap_limit }}
+{% endif %}
 {#- command/entrypoint live here, not in _service.j2, so accessories get them  #}
 {#- too. Both are accepted on accessories by services.schema.json but were     #}
 {#- never emitted, so an accessory relying on `command:` to stay alive ran the #}

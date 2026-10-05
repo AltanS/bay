@@ -173,6 +173,10 @@
           "type": "string",
           "description": "Container runtime memory limit (e.g., '512m', '1g')."
         },
+        "memswap_limit": {
+          "type": "string",
+          "description": "Container memory plus swap limit (e.g., '512m'). Set it equal to mem_limit to give the container no swap, so its pages never reach disk. Requires mem_limit and must not be smaller than it. '-1' means unlimited swap."
+        },
         "log_rotation": {
           "$ref": "#/$defs/log_rotation"
         },
@@ -288,6 +292,10 @@
         "mem_limit": {
           "type": "string",
           "description": "Container runtime memory limit (e.g., '512m', '1g')."
+        },
+        "memswap_limit": {
+          "type": "string",
+          "description": "Container memory plus swap limit (e.g., '512m'). Set it equal to mem_limit to give the container no swap, so its pages never reach disk. Requires mem_limit and must not be smaller than it. '-1' means unlimited swap."
         },
         "log_rotation": {
           "$ref": "#/$defs/log_rotation"

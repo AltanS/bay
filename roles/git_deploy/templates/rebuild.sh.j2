@@ -818,6 +818,9 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
 {% if svc.mem_limit is defined %}
       --memory "{{ svc.mem_limit }}" \
 {% endif %}
+{% if svc.memswap_limit is defined %}
+      --memory-swap "{{ svc.memswap_limit }}" \
+{% endif %}
 {% for k, v in (svc | bay_traefik_labels(svc_name, _tc)).items() %}
       -l '{{ k }}={{ v }}' \
 {% endfor %}
@@ -1323,6 +1326,9 @@ docker rm "${SERVICE}"   2>/dev/null || true
 {% endfor %}
 {% if svc.mem_limit is defined %}
       --memory "{{ svc.mem_limit }}" \
+{% endif %}
+{% if svc.memswap_limit is defined %}
+      --memory-swap "{{ svc.memswap_limit }}" \
 {% endif %}
 {% for k, v in (svc | bay_traefik_labels(svc_name, _tc)).items() %}
       -l '{{ k }}={{ v }}' \

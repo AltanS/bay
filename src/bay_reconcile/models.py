@@ -120,6 +120,7 @@ class ContainerSpec:
     user: str | None = None  # "<uid>:<gid>" — see the webhook receiver spec
     restart_policy: str = "unless-stopped"
     mem_limit: str | None = None
+    memswap_limit: str | None = None
     labels: Mapping[str, str] = field(default_factory=dict)
     healthcheck: Mapping[str, object] | None = None
     log_driver: str | None = None

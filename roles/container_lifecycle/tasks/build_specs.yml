@@ -89,6 +89,9 @@
          | combine({'mem_limit': _svc.mem_limit}
                    if _svc.mem_limit is defined
                    else {})
+         | combine({'memswap_limit': _svc.memswap_limit}
+                   if _svc.memswap_limit is defined
+                   else {})
          | combine({'command': _svc.command}
                    if _svc.command is defined
                    else {})
@@ -162,6 +165,9 @@
                    else {})
          | combine({'mem_limit': _acc.mem_limit}
                    if _acc.mem_limit is defined
+                   else {})
+         | combine({'memswap_limit': _acc.memswap_limit}
+                   if _acc.memswap_limit is defined
                    else {})
          | combine({'command': _acc.command}
                    if _acc.command is defined

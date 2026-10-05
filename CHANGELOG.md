@@ -7,6 +7,18 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [0.10.0] - 2026-10-05
+
+### Added
+
+- `memswap_limit` per service and accessory, next to `mem_limit`. Set it
+  equal to `mem_limit` and Docker gives that container no swap, so its
+  memory pages never reach disk. The host can keep its swap file for
+  everything else. `bay validate` rejects `memswap_limit` without
+  `mem_limit`, and a `memswap_limit` smaller than `mem_limit`. A service
+  that does not set the key gets the same config hash as before, so
+  upgrading recreates no container.
+
 ## [0.9.2] - 2026-10-03
 
 ### Fixed

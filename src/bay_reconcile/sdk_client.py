@@ -126,6 +126,8 @@ class SdkDockerClient:
             kwargs["user"] = spec.user
         if spec.mem_limit:
             kwargs["mem_limit"] = spec.mem_limit
+        if spec.memswap_limit:
+            kwargs["memswap_limit"] = spec.memswap_limit
         if spec.ports:
             kwargs["ports"] = _ports_to_sdk(spec.ports)
         if spec.healthcheck:

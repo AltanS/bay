@@ -62,6 +62,7 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         user=d.get("user"),
         restart_policy=d.get("restart_policy") or "unless-stopped",
         mem_limit=d.get("mem_limit"),
+        memswap_limit=d.get("memswap_limit"),
         labels=dict(d.get("labels") or {}),
         healthcheck=_healthcheck(d),
         log_driver=d.get("log_driver"),
