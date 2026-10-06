@@ -240,7 +240,10 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    `last_receipt_sha256`, and commits again: `bay: receipt <name> <env>`.
 8. When the fleet repo has a remote, Bay pushes it. `--no-push` skips this.
    A failed push is a warning, never a failed deploy. The JSON result says
-   `pushed: true|false` and `push_error`.
+   `pushed: true|false` and `push_error`. Bay pushes only when the fleet
+   directory is the root of its git repo. A fleet inside a larger repo is
+   committed but not pushed: the push would publish the other work in that
+   repo too. Bay prints a warning, and `push_skipped` says why.
 
 When the deploy fails, the lock keeps the new pin and records
 `result: failed`. Bay still commits and pushes that record. `bay show` then

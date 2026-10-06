@@ -14,7 +14,8 @@
 6. Read the receipt back, record ``result``, ``deployed_at`` and
    ``last_receipt_sha256``, and commit again: ``bay: receipt <name> <env>``.
 7. Push the fleet repo when it has a remote (not with ``--no-push``). A
-   failed push is a warning.
+   failed push is a warning. A fleet that is a subdirectory of a larger repo
+   is committed but never pushed (``push_skipped`` says why).
 
 A failed deploy keeps the new pin and records ``result: failed``, so
 ``bay show`` says HALF. ``bay rollback`` runs the same steps with the
@@ -244,9 +245,20 @@ def up(
         "error": failure,
         "pushed": False,
         "push_error": None,
+        "push_skipped": None,
         "steps": plan["steps"],
     }
-    if push:
+    if push and not gitrepo.is_toplevel(cx.fleet_root):
+        # A fleet that is a directory inside a bigger repo (a workspace with
+        # several fleets) shares that repo's remote and branch. Pushing it
+        # would publish everything else committed there too, so bay commits
+        # and leaves the push to the operator.
+        top = gitrepo.toplevel(cx.fleet_root)
+        result["push_skipped"] = (
+            f"the fleet lives inside a larger repo ({top}); it was committed, not pushed"
+        )
+        say(f"warning: {result['push_skipped']}")
+    elif push:
         pushed, problem = gitrepo.push(cx.fleet_root)
         result["pushed"], result["push_error"] = pushed, problem
         if problem:

@@ -1172,3 +1172,50 @@ def test_default_box_check_reads_the_per_box_files(
     assert entries is not None
     assert [(e["box"], e["error"] is None) for e in entries] == [("box-1", True), ("box-2", False)]
     assert entries[0]["report"]["containers"][0]["name"] == "webapp"
+
+
+# ── bay up pushes only a fleet that is its own repo ─────────────────────────
+
+
+def test_fleet_root_is_toplevel_is_pushed(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    from bay_cli import gitrepo
+
+    _with_remote(world, tmp_path)
+    assert gitrepo.is_toplevel(world["fleet"])
+    doc = json.loads(cli(world, "up", "--json").stdout)
+    assert doc["pushed"] is True and doc["push_skipped"] is None
+
+
+def test_fleet_inside_a_larger_repo_is_committed_not_pushed(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    import shutil
+
+    from bay_cli import gitrepo
+
+    outer = tmp_path / "workspace"
+    outer.mkdir()
+    fleet = outer / "fleet"
+    shutil.move(str(world["fleet"]), str(fleet))
+    shutil.rmtree(fleet / ".git")
+    (outer / "README").write_text("other work\n")
+    git(outer, "init", "-q")
+    commit_all(outer, "workspace")
+    remote = tmp_path / "workspace-remote.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    git(outer, "remote", "add", "origin", str(remote))
+    git(outer, "push", "-q", "-u", "origin", "main")
+    before = git(remote, "rev-parse", "main")
+    moved = {**world, "fleet": fleet}
+    assert not gitrepo.is_toplevel(fleet)
+
+    result = cli(moved, "up", "--json")
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert doc["pushed"] is False and doc["push_error"] is None
+    assert "inside a larger repo" in doc["push_skipped"]
+    assert "inside a larger repo" in result.stderr
+    assert git(outer, "rev-parse", "HEAD") == doc["receipt_commit"]  # committed
+    assert git(remote, "rev-parse", "main") == before  # not pushed

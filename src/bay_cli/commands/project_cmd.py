@@ -353,6 +353,8 @@ def _apply(
     )
     if result["push_error"]:
         console.warning(f"the fleet repo was not pushed: {result['push_error']}")
+    if result.get("push_skipped"):
+        console.warning(str(result["push_skipped"]))
 
 
 def up(

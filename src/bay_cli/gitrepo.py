@@ -126,6 +126,18 @@ def dirty(repo: Path, *, exclude: tuple[str, ...] = ()) -> bool | None:
     return bool(out)
 
 
+def toplevel(repo: Path) -> Path | None:
+    """The work tree root that holds ``repo`` (``git rev-parse --show-toplevel``)."""
+    out = _out(repo, "rev-parse", "--show-toplevel")
+    return Path(out) if out else None
+
+
+def is_toplevel(repo: Path) -> bool:
+    """True when ``repo`` is the root of its own git work tree, not a subdirectory."""
+    top = toplevel(repo)
+    return top is not None and top.resolve() == repo.resolve()
+
+
 def remote_url(repo: Path, name: str = "origin") -> str | None:
     return _out(repo, "remote", "get-url", name) or None
 
