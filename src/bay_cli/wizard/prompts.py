@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 import urllib.request
 import urllib.error
@@ -16,12 +17,11 @@ from rich.table import Table
 from bay_cli import console
 from bay_cli.catalog import (
     CatalogEntry,
-    _package_framework_root,
     load_catalog,
     resolve_dependencies,
 )
+from bay_cli.context import Context, context_or_cwd
 from bay_cli.errors import BayError
-from bay_cli.paths import find_bay_dir, consumer_root
 from bay_cli.utils.secret_gen import generate_password
 from bay_cli.wizard.models import (
     RegionConfig,
@@ -42,24 +42,22 @@ _ExistingConfig = WizardResult | None
 
 _REGION_SUGGESTIONS = ["eu", "na", "ap"]
 
-# ── Catalog loader (lazy, cached) ─────────────────────────────────────
-
-_catalog_cache: dict[str, CatalogEntry] | None = None
+# ── Catalog loader (lazy, cached per Context) ─────────────────────────
 
 
-def _get_catalog() -> dict[str, CatalogEntry]:
-    """Load and cache the service/accessory catalog."""
-    global _catalog_cache
-    if _catalog_cache is not None:
-        return _catalog_cache
-    try:
-        bay_dir = find_bay_dir()
-        _catalog_cache = load_catalog(bay_dir, consumer_root(bay_dir))
-    except BayError:
-        # Fallback: load from package location (framework dev / tests)
-        fw_root = _package_framework_root()
-        _catalog_cache = load_catalog(fw_root, Path.cwd())
-    return _catalog_cache
+@functools.cache
+def _load_catalog_for(cx: Context) -> dict[str, CatalogEntry]:
+    return load_catalog(cx.framework_root, cx.fleet_root)
+
+
+def _get_catalog(cx: Context | None = None) -> dict[str, CatalogEntry]:
+    """Load and cache the service/accessory catalog.
+
+    Without a Context, falls back to discovery and then the working directory
+    (framework dev / tests).
+    """
+    return _load_catalog_for(cx if cx is not None else context_or_cwd(None))
+
 
 # ── Questionary Helpers ────────────────────────────────────────────────
 
@@ -132,13 +130,15 @@ def _prompt_confirm(prompt_text: str, default: bool = False) -> bool:
     return result  # type: ignore[return-value]
 
 
-def _prompt_services(existing_selected: list[str] | None = None) -> list[str]:
+def _prompt_services(
+    existing_selected: list[str] | None = None, cx: Context | None = None
+) -> list[str]:
     """Display a checkbox picker for service/accessory selection.
 
     Pre-checks items from *existing_selected* (edit mode).
     Returns the list of selected service IDs.
     """
-    catalog = _get_catalog()
+    catalog = _get_catalog(cx)
     existing = existing_selected or []
     q_choices = []
     services = [e for e in catalog.values() if e.category == "service"]
@@ -306,7 +306,7 @@ def _prompt_regions() -> list[RegionConfig]:
 # ── Summary Display ─────────────────────────────────────────────────────
 
 
-def _show_summary(result: WizardResult) -> None:
+def _show_summary(result: WizardResult, cx: Context | None = None) -> None:
     """Render a summary panel of all collected values."""
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("Key", style="dim")
@@ -349,7 +349,7 @@ def _show_summary(result: WizardResult) -> None:
         table.add_row("Access Gateway", "[dim]none (all services public)[/dim]")
 
     if result.selected_services:
-        catalog = _get_catalog()
+        catalog = _get_catalog(cx)
         svc_labels = [
             catalog[s_id].name if s_id in catalog else s_id
             for s_id in result.selected_services
@@ -366,7 +366,9 @@ def _show_summary(result: WizardResult) -> None:
 # ── Main Wizard Entry Point ─────────────────────────────────────────────
 
 
-def run_wizard(existing: _ExistingConfig = None) -> WizardResult:
+def run_wizard(
+    existing: _ExistingConfig = None, cx: Context | None = None
+) -> WizardResult:
     """Run the interactive onboarding wizard and return collected values.
 
     When *existing* is provided, pre-fills prompts with current values
@@ -528,10 +530,10 @@ def run_wizard(existing: _ExistingConfig = None) -> WizardResult:
     console.header("Services")
 
     existing_services = existing.selected_services if existing else None
-    selected_services = _prompt_services(existing_services)
+    selected_services = _prompt_services(existing_services, cx)
 
     # Auto-select required accessories
-    catalog = _get_catalog()
+    catalog = _get_catalog(cx)
     auto_added = resolve_dependencies(selected_services, catalog, [])
     for dep_id in auto_added:
         if dep_id not in selected_services:
@@ -601,7 +603,7 @@ def run_wizard(existing: _ExistingConfig = None) -> WizardResult:
         selected_services=selected_services,
     )
 
-    _show_summary(result)
+    _show_summary(result, cx)
 
     if not _prompt_confirm("  Generate project scaffold?", default=True):
         raise BayError("Scaffold generation cancelled")

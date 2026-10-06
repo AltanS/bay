@@ -12,6 +12,7 @@ import typer
 from rich.panel import Panel
 
 from bay_cli import ansible, console, git, paths
+from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
 if TYPE_CHECKING:
@@ -25,6 +26,7 @@ _VALID_GATEWAYS = ("headscale", "wireguard", "none")
 
 @app.command()
 def setup(
+    ctx: typer.Context,
     no_interactive: bool = typer.Option(
         False,
         "--no-interactive",
@@ -81,10 +83,10 @@ def setup(
             --domain example.com --gateway headscale \\
             --headscale-domain hs.example.com --services gatus,postgres
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
-    console.show_banner(subtitle="Setup Wizard")
+    console.show_banner(cx, subtitle="Setup Wizard")
 
     # Guard first, before a single file is written: the built-in defaults were
     # 0.0.0.0 and example.com, which scaffold a project that can never deploy.
@@ -119,20 +121,20 @@ def setup(
         # --defaults never falls back to the example copy, TTY or not.
         from bay_cli.wizard.scaffold import scaffold
 
-        result = _build_result_from_defaults(flags, root)
+        result = _build_result_from_defaults(flags, root, cx)
         scaffold(result, root, force=force)
     elif flags.has_all_required():
         # All required flags → build result directly, skip wizard
-        result = _build_result_from_flags(flags)
+        result = _build_result_from_flags(flags, cx)
         from bay_cli.wizard.scaffold import scaffold
         scaffold(result, root, force=force)
     elif flags.has_any():
         # Partial flags → pre-fill wizard
         prefill = _flags_to_prefill(flags)
-        result = _scaffold_project(root, bay_dir, flags, no_interactive=no_interactive, force=force, prefill=prefill)
+        result = _scaffold_project(root, bay_dir, flags, no_interactive=no_interactive, force=force, prefill=prefill, cx=cx)
     else:
         # No flags → existing flow
-        result = _scaffold_project(root, bay_dir, flags, no_interactive=no_interactive, force=force)
+        result = _scaffold_project(root, bay_dir, flags, no_interactive=no_interactive, force=force, cx=cx)
 
     console.console.print()
     console.success("Setup complete")
@@ -196,7 +198,7 @@ def _has_any_flag(*values: object) -> bool:
     return any(v is not None for v in values)
 
 
-def _build_result_from_flags(flags: _SetupFlags) -> WizardResult:
+def _build_result_from_flags(flags: _SetupFlags, cx: Context | None = None) -> WizardResult:
     """Build a WizardResult directly from CLI flags (no wizard)."""
     from bay_cli.wizard.models import (
         WizardResult,
@@ -226,7 +228,7 @@ def _build_result_from_flags(flags: _SetupFlags) -> WizardResult:
         headscale_domain = validate_domain(flags.headscale_domain)
 
     # Parse and validate services
-    catalog = _get_catalog()
+    catalog = _get_catalog(cx)
     service_ids = flags.parse_services()
     valid_ids = set(catalog.keys())
     for s_id in service_ids:
@@ -256,7 +258,9 @@ def _build_result_from_flags(flags: _SetupFlags) -> WizardResult:
     )
 
 
-def _build_result_from_defaults(flags: _SetupFlags, root: Path) -> WizardResult:
+def _build_result_from_defaults(
+    flags: _SetupFlags, root: Path, cx: Context | None = None
+) -> WizardResult:
     """Build the --defaults WizardResult, with CLI flags taking precedence.
 
     ``--defaults`` used to be reachable only from a TTY: the non-TTY guard
@@ -298,7 +302,7 @@ def _build_result_from_defaults(flags: _SetupFlags, root: Path) -> WizardResult:
     if flags.letsencrypt_email:
         result.letsencrypt_email = flags.letsencrypt_email
     if flags.services:
-        catalog = _get_catalog()
+        catalog = _get_catalog(cx)
         service_ids = flags.parse_services()
         for s_id in service_ids:
             if s_id not in catalog:
@@ -535,6 +539,7 @@ def _scaffold_project(
     no_interactive: bool,
     force: bool = False,
     prefill: WizardResult | None = None,
+    cx: Context | None = None,
 ) -> WizardResult | None:
     """Generate project scaffold files using wizard or example copy.
 
@@ -564,7 +569,7 @@ def _scaffold_project(
 
         # Prefer CLI prefill, then existing config (edit mode)
         existing = prefill or (load_existing_config(root) if force else None)
-        result = run_wizard(existing=existing)
+        result = run_wizard(existing=existing, cx=cx)
 
         scaffold(result, root, force=force)
         return result
@@ -605,17 +610,17 @@ def _resolve_letsencrypt_email(flags: _SetupFlags) -> str | None:
 
 
 @app.command()
-def guide() -> None:
+def guide(ctx: typer.Context) -> None:
     """Show tailored next steps for this project's current state.
 
     Examples:
 
         bin/bay guide
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    root = cx.fleet_root
 
-    console.show_banner(subtitle="Setup Guide")
+    console.show_banner(cx, subtitle="Setup Guide")
 
     from bay_cli.wizard.models import load_existing_config
 
@@ -624,7 +629,7 @@ def guide() -> None:
 
 
 @app.command()
-def install() -> None:
+def install(ctx: typer.Context) -> None:
     """Install the framework version pinned in .bay-version.
 
     Checks out the pinned tag inside .bay/, links group_vars into the
@@ -635,8 +640,8 @@ def install() -> None:
 
         bin/bay install
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     if paths.is_dev_linked(root):
         raise BayError(
@@ -644,7 +649,7 @@ def install() -> None:
             hint="Run 'bin/bay dev-unlink' first to restore normal mode.",
         )
 
-    console.show_banner(subtitle="Install")
+    console.show_banner(cx, subtitle="Install")
 
     git.fetch_tags(bay_dir)
 
@@ -690,7 +695,7 @@ def install() -> None:
 
 
 @app.command()
-def update() -> None:
+def update(ctx: typer.Context) -> None:
     """Update to the latest framework release (bumps .bay-version).
 
     Fetches tags, checks out the newest one, rewrites .bay-version, and
@@ -700,8 +705,8 @@ def update() -> None:
 
         bin/bay update
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     if paths.is_dev_linked(root):
         raise BayError(
@@ -709,7 +714,7 @@ def update() -> None:
             hint="Run 'bin/bay dev-unlink' first to restore normal mode.",
         )
 
-    console.show_banner(subtitle="Update")
+    console.show_banner(cx, subtitle="Update")
 
     git.fetch_tags(bay_dir)
 
@@ -932,7 +937,7 @@ def dev_link(
         console.warning("Already in dev-link mode")
         console.info(f"Linked to: {bay_dir.resolve()}")
     else:
-        console.show_banner(subtitle="Dev Link")
+        console.show_banner(Context.for_fleet_root(root, bay_dir), subtitle="Dev Link")
 
         # Remove existing .bay/ (git clone)
         if bay_dir.is_dir():
@@ -1018,7 +1023,7 @@ def dev_unlink() -> None:
         console.info("Not in dev-link mode — nothing to do")
         return
 
-    console.show_banner(subtitle="Dev Unlink")
+    console.show_banner(Context.for_fleet_root(root, bay_dir), subtitle="Dev Unlink")
 
     # Clean up group_vars symlink inside the framework dir before removing .bay/
     if bay_dir.is_symlink():
@@ -1070,21 +1075,21 @@ def dev_unlink() -> None:
 
 
 @app.command()
-def status() -> None:
+def status(ctx: typer.Context) -> None:
     """Show the pinned framework version, update status, and feature flags.
 
     Examples:
 
         bin/bay status
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     pinned = paths.read_pinned_version(root)
     checkout = git.current_ref(bay_dir)
     latest = git.latest_tag(bay_dir)
 
-    console.show_banner(subtitle="Status")
+    console.show_banner(cx, subtitle="Status")
 
     if pinned:
         console.console.print(f"  Version: [bold]{pinned}[/bold]")
