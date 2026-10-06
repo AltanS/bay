@@ -127,6 +127,13 @@ class ContainerSpec:
     log_options: Mapping[str, str] | None = None
     zero_downtime: bool = False
     build: bool = False
+    #: Only in a check-mode plan, and only when the env file the deploy would
+    #: write differs from the one on the box: ``{"live", "added", "removed",
+    #: "changed", "reordered"}``. KEY NAMES and booleans only, never a value.
+    #: ``live`` is false when the box has no env file yet. Not hashed: the
+    #: config hash already folds in the env file bytes. The planner turns it
+    #: into the ``env_file`` reason.
+    env_file_change: Mapping[str, object] | None = None
 
 
 @dataclass(frozen=True)

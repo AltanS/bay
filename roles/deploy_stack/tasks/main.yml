@@ -137,6 +137,15 @@
         mode: "0640"
       no_log: true
 
+    # Check mode skips the four renders above, so the plan would hash the
+    # env files the last deploy left. This renders them into a scratch
+    # directory instead; the reconciler's check-mode plan reads them from
+    # there. The live files are never touched. See env_scratch.yml.
+    - name: Render the env files into a scratch directory for the check-mode plan
+      ansible.builtin.include_tasks: env_scratch.yml
+      when: ansible_check_mode
+      tags: [deploy_stack]
+
     # ── Config Files ─────────────────────────────────────────────────
 
     # Modes depend on `config_files_mode`; see config_files.yml.
@@ -360,3 +369,12 @@
       ansible.builtin.file:
         path: "{{ deploy_lock_path }}"
         state: absent
+
+    # The scratch env files hold secrets. Remove them on every path.
+    - name: Remove the check-mode env scratch directory
+      ansible.builtin.file:
+        path: "{{ _deploy_stack_env_scratch.path }}"
+        state: absent
+      check_mode: false
+      changed_when: false
+      when: _deploy_stack_env_scratch.path is defined

@@ -170,12 +170,62 @@ def test_orphan_is_a_remove() -> None:
     assert _codes(out[0]) == {"orphan"}
 
 
+def test_env_file_reordered_is_named_as_order() -> None:
+    change = {"live": True, "added": [], "removed": [], "changed": [], "reordered": True}
+    entry = _one(_spec(env_file_change=change), _state())
+    assert entry["action"] == "recreate"
+    assert "env_file: the env file bytes differ (same variables, different order)" in (
+        entry["reasons"]  # type: ignore[operator]
+    )
+    # A named cause: no "not readable from docker inspect" guess any more.
+    assert not any("not readable" in str(r) for r in entry["reasons"])  # type: ignore[union-attr]
+
+
+def test_env_file_change_names_keys_never_values() -> None:
+    change = {
+        "live": True,
+        "added": ["NEW_KEY"],
+        "removed": ["OLD_KEY"],
+        "changed": ["TOKEN"],
+        "reordered": False,
+    }
+    entry = _one(_spec(env_file_change=change), _state())
+    (reason,) = [r for r in entry["reasons"] if str(r).startswith("env_file:")]  # type: ignore[union-attr]
+    assert "NEW_KEY" in reason and "OLD_KEY" in reason and "TOKEN" in reason
+    assert "different order" not in reason and SECRET not in json.dumps(entry)
+
+
+def test_env_file_without_a_live_copy_and_comment_only_changes() -> None:
+    new = _one(_spec(env_file_change={"live": False}), _state())
+    assert "env_file: the box has no env file for it yet" in new["reasons"]  # type: ignore[operator]
+    same = {"live": True, "added": [], "removed": [], "changed": [], "reordered": False}
+    entry = _one(_spec(env_file_change=same), _state())
+    assert any("only comments or blank lines differ" in str(r) for r in entry["reasons"])  # type: ignore[union-attr]
+
+
+def test_bundle_carries_the_env_file_change() -> None:
+    change = {"live": True, "added": [], "removed": [], "changed": [], "reordered": True}
+    bundle = load_bundle(
+        {
+            "containers": [
+                {"name": "a", "image": "a:1", "type": "service", "config_hash": "h",
+                 "env_file_change": change},
+                {"name": "b", "image": "b:1", "type": "service", "config_hash": "h",
+                 "env_file_change": None},
+            ]
+        }
+    )
+    assert bundle.containers[0].env_file_change == change
+    assert bundle.containers[1].env_file_change is None
+
+
 def test_every_reason_code_is_known() -> None:
     entries = [
         _one(_spec(), None),
         _one(_spec(), _state(image="x", labels={}, port_bindings=("0.0.0.0:1",))),
         _one(_spec(), _state()),
         _one(_spec(config_hash="h1"), _state(status="exited")),
+        _one(_spec(env_file_change={"live": False}), _state()),
     ]
     codes = set().union(*(_codes(e) for e in entries))
     assert codes <= set(REASON_CODES) | {"zero_downtime"}

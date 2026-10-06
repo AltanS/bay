@@ -40,26 +40,85 @@
 # with nothing on screen but "MODULE FAILURE". The paths come back in their
 # own key so the assert below can name them without printing a byte of
 # content.
+#
+# Check mode: deploy_stack skips the live renders and writes every env file
+# into a scratch directory instead (deploy_stack/tasks/env_scratch.yml,
+# `_deploy_stack_env_scratch`). For a path under stack_dir the read then takes
+# the scratch copy, `<scratch>/<path below stack_dir>`, so the config hash is
+# the one a real deploy would compute. It also compares the scratch file with
+# the live one and returns, per path, only KEY NAMES and booleans (`changes`):
+# variables added, removed or with another value, and whether the line order
+# moved. The bundle entry carries that as `env_file_change`, and the planner
+# names it in the `env_file` reason. An env file no deploy_stack template
+# writes (a rig role's, such as traefik.env) has no scratch copy and is read
+# live, as before. `_deploy_stack_env_scratch` exists only in check mode
+# (main.yml includes env_scratch.yml under `when: ansible_check_mode`), so a
+# real deploy passes no scratch directory and reads exactly what it read
+# before.
 - name: Read the rendered env files in one pass
   ansible.builtin.command:
     argv:
       - python3
       - -c
       - |
-        import base64, json, sys
-        paths = json.loads(sys.argv[1])
-        out = {}
-        missing = []
-        for path in paths:
+        import base64, json, os, sys
+        request = json.loads(sys.argv[1])
+        stack = (request.get("stack_dir") or "").rstrip("/")
+        scratch = request.get("scratch") or ""
+
+        def read(path):
             try:
                 with open(path, "rb") as handle:
-                    out[path] = base64.b64encode(handle.read()).decode("ascii")
+                    return handle.read()
             except OSError:
+                return None
+
+        def pairs(data):
+            out = []
+            for line in data.decode("utf-8", "replace").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    out.append((key.strip(), value))
+            return out
+
+        out = {}
+        missing = []
+        changes = {}
+        for path in request["paths"]:
+            live = read(path)
+            new = None
+            if scratch and stack and path.startswith(stack + "/"):
+                new = read(os.path.join(scratch, path[len(stack) + 1:]))
+            data = new if new is not None else live
+            if data is None:
                 missing.append(path)
-        print(json.dumps({"files": out, "missing": missing}))
+                continue
+            out[path] = base64.b64encode(data).decode("ascii")
+            if new is None or new == live:
+                continue
+            if live is None:
+                changes[path] = {"live": False}
+                continue
+            old_pairs, new_pairs = pairs(live), pairs(new)
+            old_map, new_map = dict(old_pairs), dict(new_pairs)
+            changes[path] = {
+                "live": True,
+                "added": sorted(set(new_map) - set(old_map)),
+                "removed": sorted(set(old_map) - set(new_map)),
+                "changed": sorted(
+                    k for k in set(old_map) & set(new_map) if old_map[k] != new_map[k]
+                ),
+                "reordered": [k for k, _ in old_pairs] != [k for k, _ in new_pairs],
+            }
+        print(json.dumps({"files": out, "missing": missing, "changes": changes}))
       - >-
-        {{ _reconcile_specs | selectattr('env_file', 'defined')
-           | map(attribute='env_file') | list | to_json }}
+        {{ {
+          'paths': _reconcile_specs | selectattr('env_file', 'defined')
+                   | map(attribute='env_file') | list,
+          'stack_dir': stack_dir | default(''),
+          'scratch': _deploy_stack_env_scratch.path | default('')
+        } | to_json }}
   register: _reconcile_env_read
   changed_when: false
   check_mode: false
@@ -96,6 +155,9 @@
          and _spec.env_file in _env_map) else '' }}
     _env_file_dict: "{{ (_env_b64 | b64decode | parse_env_file) if _env_b64 else {} }}"
     _env_digest: "{{ (_env_b64 | b64decode | hash('sha256')) if _env_b64 else '' }}"
+    _env_changes: >-
+      {{ (_reconcile_env_read.stdout | default('{}') | from_json)
+         .get('changes', {}) }}
     _entry: >-
       {{ {
         'name': _spec.name,
@@ -117,7 +179,10 @@
         'log_driver': _spec.log_driver | default(None),
         'log_options': _spec.log_options | default(None),
         'zero_downtime': _spec.zero_downtime | default(false),
-        'build': _spec.build | default(false)
+        'build': _spec.build | default(false),
+        'env_file_change': (_env_changes[_spec.env_file]
+                            if (_spec.env_file is defined and _spec.env_file in _env_changes)
+                            else none)
       } }}
   no_log: true
 
@@ -299,9 +364,15 @@
     # lists containers and looks up local images. It makes no mutating docker
     # call (src/bay_reconcile/__main__.py, reconcile()).
     #
-    # What the plan does NOT see: images and env files are read as they are on
-    # the host now. Builds, pulls and env-file renders are skipped in check mode,
-    # so a pending rebuild or an undeployed secret change shows as NoOp.
+    # Env files: the plan sees the env files a real deploy would write.
+    # deploy_stack renders them into a scratch directory in check mode, and the
+    # env read above hashes those (and names an `env_file` change against the
+    # live file). The live env files are never written.
+    #
+    # What the plan does NOT see: images are read as they are on the host now.
+    # Builds and pulls are skipped in check mode, so a pending rebuild shows as
+    # NoOp. An env file that a rig role writes (outside deploy_stack) is read
+    # live.
     #
     # `changed` is true when the plan holds any action other than NoOp, so the
     # --check recap counts the containers a real deploy would touch.
@@ -390,10 +461,11 @@
           ansible.builtin.debug:
             msg:
               note: >-
-                Check mode: this is a plan only, nothing was changed. The plan
-                uses the images and env files present on the host now. Builds,
-                pulls and env-file renders are skipped in check mode, so a
-                pending rebuild or secret change shows as NoOp.
+                Check mode: this is a plan only, nothing was changed. The env
+                files were rendered into a scratch directory, so the plan
+                hashes what a real deploy would write. The images are the ones
+                on the host now: builds and pulls are skipped in check mode, so a
+                pending rebuild shows as NoOp.
               plan: "{{ (_reconcile_check_result.stdout | from_json).plan }}"
               actions: "{{ (_reconcile_check_result.stdout | from_json).actions }}"
           when: _reconcile_check_result is not skipped

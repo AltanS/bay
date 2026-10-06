@@ -90,6 +90,7 @@ REASON_CODES = (
     "config_hash",
     "image",
     "env",
+    "env_file",
     "labels",
     "ports",
     "volumes",
@@ -126,10 +127,14 @@ def describe(
     value), labels, ports, volumes and the memory caps (``memory``). When the
     hash changed and none of those differ, the reason is ``config_hash`` alone.
     The hash folds in the env FILE bytes and other settings (command,
-    healthcheck, networks, log options) that docker inspect does not report,
-    so the cause is not observable and the report does not guess one. In
-    particular it never says the env file changed in line order: the old file
-    is not on the box to compare.
+    healthcheck, networks, log options) that docker inspect does not report.
+
+    The env file is the one cause that can be named: in a check-mode plan the
+    deploy renders every env file into a scratch directory on the box and
+    compares it with the live file (``roles/container_lifecycle/tasks/
+    reconcile.yml``). A difference arrives as ``spec.env_file_change`` and
+    becomes the ``env_file`` reason, with "same variables, different order"
+    when only the line order moved.
     """
     by_name = {spec.name: spec for spec in desired}
     out: list[dict[str, object]] = []
@@ -186,6 +191,9 @@ def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
     memory = _memory_reason(spec, state)
     if memory:
         detail.append(memory)
+    env_file = env_file_reason(spec.env_file_change)
+    if env_file:
+        detail.append(env_file)
     if not state.config_hash:
         reasons.append("config_hash: the container has no config-hash label")
     elif hash_changed:
@@ -199,6 +207,39 @@ def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
         reasons.append(text)
     reasons.extend(detail)
     return reasons
+
+
+def _names(value: object) -> list[str]:
+    return sorted(str(v) for v in value) if isinstance(value, list | tuple) else []
+
+
+def env_file_reason(change: Mapping[str, object] | None) -> str | None:
+    """``env_file: <detail>`` from a check-mode env file comparison, or None.
+
+    Names keys only. ``reordered`` with nothing added, removed or changed is
+    the case a key-set check alone cannot explain: the same variables with the
+    same values, written in another order. The bytes differ, so the config
+    hash differs, so the deploy recreates the container.
+    """
+    if not change:
+        return None
+    if not change.get("live", True):
+        return "env_file: the box has no env file for it yet"
+    added, removed, changed = (_names(change.get(k)) for k in ("added", "removed", "changed"))
+    parts: list[str] = []
+    if added:
+        parts.append(f"new variables {_keys(added)}")
+    if removed:
+        parts.append(f"variables removed: {_keys(removed)}")
+    if changed:
+        parts.append(f"values differ for {_keys(changed)}")
+    if not parts:
+        parts.append(
+            "same variables, different order"
+            if change.get("reordered")
+            else "same variables and values; only comments or blank lines differ"
+        )
+    return "env_file: the env file bytes differ (" + "; ".join(parts) + ")"
 
 
 _SIZE = re.compile(r"^(\d+)([bkmg]?)b?$", re.IGNORECASE)

@@ -56,6 +56,14 @@ repo, the `.bay/` clone and the `bin/bay` wrapper are gone.
   cause of a bare hash change is not observable and the reason stays
   `config_hash`. The `env_order_recreates` plan field is gone.
   `bay import --check` still names env files that only changed in line order.
+- `bay plan --remote` now predicts env file changes. The check-mode deploy
+  renders every env file into a scratch directory on the box, never over the
+  live files, and hashes those. A container whose env file bytes change is a
+  `recreate` with the reason `env_file`, which names the added, removed and
+  changed keys, or says "same variables, different order". Before, the plan
+  hashed the old env files and said `noop`, so a deploy could recreate more
+  containers than the plan listed. A new service with env no longer fails the
+  check for a missing env file.
 
 ### Removed
 

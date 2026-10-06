@@ -28,10 +28,13 @@ How a plan is made:
    the data it touches (the risk table is in ``docs/plan.md``).
 4. Read the box receipt (skip with ``--no-remote``).
 5. Only with ``--remote``: run today's deploy in check mode with the plan-only
-   switch against the compiled file. Each box hands back its prediction (one
-   entry per container: action and reasons). A predicted change the diff does
-   not explain becomes a step with ``source: box`` (:func:`box_steps`).
-   Without it, the steps come from the diff alone and ``box_checked`` is false.
+   switch against the compiled file. Each box renders the env files it would
+   write into a scratch directory (never the live ones), hashes those, and
+   hands back its prediction (one entry per container: action and reasons,
+   ``env_file`` when the env file bytes would change). A predicted change the
+   diff does not explain becomes a step with ``source: box``
+   (:func:`box_steps`). Without it, the steps come from the diff alone and
+   ``box_checked`` is false.
 
 The plan JSON is ``schemas/plan.schema.json``. A plan is saved to
 ``<fleet>/plans/<plan_id>.json``. ``plan_id`` is the first 12 hex digits of
@@ -930,6 +933,11 @@ def default_box_check(
 
     ``-e @file`` puts the compiled services, accessories and webhook above
     the fleet's own file, so the box is asked about WANTED, not PINNED.
+
+    Check mode writes nothing live. Each box renders its env files into a
+    scratch directory and plans against those
+    (``roles/deploy_stack/tasks/env_scratch.yml``), so a container whose env
+    file bytes change is predicted as a recreate, reason ``env_file``.
 
     Each box writes its plan-only JSON into a temporary directory on this
     machine (``bay_reconciler_plan_report_dir``, see

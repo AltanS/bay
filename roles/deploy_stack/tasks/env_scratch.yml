@@ -1,0 +1,97 @@
+---
+# Check mode only: render every env file into a scratch directory on the box.
+#
+# Why: check mode skips the env file templates in main.yml, so the
+# reconciler's plan used to hash the env files the LAST deploy left. An env
+# file whose bytes the next deploy changes (new values, or the same variables
+# in a new order) then showed as noop, and the deploy recreated more than the
+# plan said. This file renders the same templates, with the same variables,
+# into `<tmp>/env/<name>.env`, so the check-mode plan hashes what a real deploy
+# would write. container_lifecycle/tasks/reconcile.yml reads the scratch file
+# in place of the live one and compares the two.
+#
+# Never live: every `dest` is under the scratch directory, never stack_dir.
+# The tasks carry `check_mode: false` because a check-mode-skipped template
+# writes nothing, and the plan would read nothing. The files hold secrets, so
+# the directory is 0700 (tempfile's default), the files 0600, and every
+# render is `no_log` and `diff: false`. main.yml removes the directory in its
+# `always:` section, on every path.
+#
+# The `loop`, `when` and `vars` of each render below must equal the live task
+# in main.yml it mirrors. tests/test_plan_up.py compares them.
+
+- name: Create the scratch directory for the check-mode env files
+  ansible.builtin.tempfile:
+    state: directory
+    prefix: bay-env-check.
+  register: _deploy_stack_env_scratch
+  check_mode: false
+  changed_when: false
+
+- name: Create the env directory in the scratch directory
+  ansible.builtin.file:
+    path: "{{ _deploy_stack_env_scratch.path }}/env"
+    state: directory
+    mode: "0700"
+  check_mode: false
+  changed_when: false
+
+- name: Render the service env files into the scratch directory
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ _deploy_stack_env_scratch.path }}/env/{{ item.key }}.env"
+    mode: "0600"
+  loop: "{{ active_services | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    env_service_name: "{{ item.key }}"
+    # .get() required: env['clear'] falls back to dict.clear method on KeyError, defeating | default({})
+    env_clear: "{{ item.value.env.get('clear', {}) }}"
+    env_secrets: "{{ item.value.env.get('secret', []) }}"
+    env_database: "{{ item.value.database | default(false) }}"
+  when: item.value.env is defined or item.value.database is defined
+  check_mode: false
+  changed_when: false
+  diff: false
+  no_log: true
+
+- name: Render the accessory env files into the scratch directory
+  ansible.builtin.template:
+    src: env.j2
+    dest: "{{ _deploy_stack_env_scratch.path }}/env/{{ item.key }}.env"
+    mode: "0600"
+  loop: "{{ active_accessories | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    env_service_name: "{{ item.key }}"
+    # .get() required: env['clear'] falls back to dict.clear method on KeyError, defeating | default({})
+    env_clear: "{{ item.value.env.get('clear', {}) }}"
+    env_secrets: "{{ item.value.env.get('secret', []) }}"
+    env_database: false
+  when: item.value.env is defined
+  check_mode: false
+  changed_when: false
+  diff: false
+  no_log: true
+
+- name: Render the webhook receiver env file into the scratch directory
+  ansible.builtin.template:
+    src: webhook.env.j2
+    dest: "{{ _deploy_stack_env_scratch.path }}/env/bay-webhook.env"
+    mode: "0600"
+  check_mode: false
+  changed_when: false
+  diff: false
+  no_log: true
+
+- name: Render the watchtower env file into the scratch directory
+  ansible.builtin.template:
+    src: watchtower.env.j2
+    dest: "{{ _deploy_stack_env_scratch.path }}/env/watchtower.env"
+    mode: "0600"
+  check_mode: false
+  changed_when: false
+  diff: false
+  no_log: true

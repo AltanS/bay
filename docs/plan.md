@@ -103,6 +103,24 @@ leave it out.
    with the compiled file given as extra variables. Without `--remote`, the
    steps come from the compiled files alone and `box_checked` is `false`.
 
+### What the check-mode run touches
+
+Check mode changes nothing live. It writes only to temporary places:
+
+- On each box, the deploy renders every env file it would write (services,
+  resources, the webhook receiver, the update watcher) into a scratch
+  directory (`/tmp/bay-env-check.*`, mode 0700, files 0600). The live env
+  files stay as they are. The scratch directory is removed at the end of the
+  run, also when the run fails.
+- On each box, the plan bundle and the reconciler package go to a second
+  temporary directory, which is also removed.
+- On this machine, each box writes its report into a temporary directory
+  outside every working tree. Bay reads it and removes it.
+
+So the plan hashes the env files that a real deploy would write. An env file
+that a fleet-level role writes outside the deploy (for example the proxy's
+DNS credentials) is read as it is on the box.
+
 ### The box prediction (`--remote`)
 
 The check-mode run asks each box what it would do to every container. The
@@ -123,6 +141,7 @@ Each reason is `<code>: <detail>`:
 | `config_hash` | The settings hash differs, or the container has none. |
 | `image` | The image name changed, or a new image arrived under the same name. |
 | `env` | Env values differ. The reason names the keys, never a value. |
+| `env_file` | The env file that the deploy would write differs from the one on the box. The detail names added, removed and changed keys, never a value. When only the line order moved, the detail is "same variables, different order". |
 | `labels`, `ports`, `volumes` | That part of the settings differs. |
 | `memory` | `mem_limit` or `memswap_limit` differs. Bay sets both to the `memory` value, so swap is never allowed. |
 | `stopped` | The container does not run. The deploy leaves it as it is. |
@@ -139,11 +158,12 @@ Bay merges the prediction into `steps`:
   the compiled step sets the risk.
 - `noop` adds no step.
 
-When the hash changed and nothing above differs, the reason is `config_hash`
-alone. The hash covers the env file bytes and other settings that
-`docker inspect` does not report, and the old env file is not on the box, so
-Bay does not guess a cause. `bay import --check` can still name env files
-that only changed in line order, because it renders both files.
+A changed env file recreates the container, also when only the line order
+moved: the hash covers the env file bytes. The box compares the new file with
+the live one and gives the `env_file` reason. When the hash changed and no
+reason above applies, the reason is `config_hash` alone: the cause is another
+setting that `docker inspect` does not report (command, health check,
+networks, log options).
 
 When the check runs but a box returns no report, or a report with no
 container list (an older Bay on the box), the plan is blocked.
@@ -309,7 +329,8 @@ know.
     "checked": true,
     "containers": [
       {"box": "box-1", "name": "webapp", "action": "recreate",
-       "reasons": ["config_hash: changed (1a2b3c4d5e6f -> 6f5e4d3c2b1a)"]},
+       "reasons": ["config_hash: changed (1a2b3c4d5e6f -> 6f5e4d3c2b1a)",
+                   "env_file: the env file bytes differ (same variables, different order)"]},
       {"box": "box-1", "name": "postgres", "action": "recreate",
        "reasons": ["config_hash: changed (...)", "memory: memswap_limit 1g -> 512m"]}
     ],

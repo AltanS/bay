@@ -69,7 +69,18 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         log_options=d.get("log_options"),
         zero_downtime=bool(d.get("zero_downtime", False)),
         build=bool(d.get("build", False)),
+        env_file_change=_env_file_change(d),
     )
+
+
+def _env_file_change(d: Mapping[str, Any]) -> Mapping[str, object] | None:
+    """The check-mode env file comparison, or None (a real deploy never sends one)."""
+    raw = d.get("env_file_change")
+    if raw is None:
+        return None
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"{d.get('name')!r}: env_file_change must be an object")
+    return dict(raw)
 
 
 @dataclass(frozen=True)

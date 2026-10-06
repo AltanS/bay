@@ -1259,3 +1259,268 @@ def test_log_file_takes_an_inheriting_child(
     assert "progress" in text and "CHILD-STDERR-LINE" in text and "CHILD-STDOUT-LINE" in text
     assert "CHILD" not in out + err
     assert "after-stdout" in out and "after-stderr" in err  # both descriptors restored
+
+
+# ── plan fidelity: the check-mode plan hashes the env files a deploy writes ──
+
+_DEPLOY_STACK = ROOT / "roles" / "deploy_stack" / "tasks"
+_RECONCILE_YML = ROOT / "roles" / "container_lifecycle" / "tasks" / "reconcile.yml"
+#: The reconcile.yml tasks that read the env files and build the bundle entries.
+_ENTRY_TASKS = (
+    "Reset the reconcile bundle entries",
+    "Read the rendered env files in one pass",
+    "Fail with the list of env files that could not be read",
+    "Build reconcile bundle entries",
+)
+#: Live render in deploy_stack/tasks/main.yml -> its scratch twin in env_scratch.yml.
+_MIRRORS = {
+    "Generate service env files": "Render the service env files into the scratch directory",
+    "Generate accessory env files": "Render the accessory env files into the scratch directory",
+    "Generate webhook receiver env file": (
+        "Render the webhook receiver env file into the scratch directory"
+    ),
+    "Generate watchtower env file": "Render the watchtower env file into the scratch directory",
+}
+
+
+def _flat(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for task in tasks:
+        out.append(task)
+        for key in ("block", "rescue", "always"):
+            out.extend(_flat(task.get(key) or []))
+    return out
+
+
+def _named(path: Path) -> dict[str, dict[str, Any]]:
+    return {t["name"]: t for t in _flat(yaml.safe_load(path.read_text())) if "name" in t}
+
+
+def test_the_scratch_renders_mirror_the_live_ones_and_never_write_live() -> None:
+    live = _named(_DEPLOY_STACK / "main.yml")
+    scratch = _named(_DEPLOY_STACK / "env_scratch.yml")
+    for live_name, scratch_name in _MIRRORS.items():
+        a, b = live[live_name], scratch[scratch_name]
+        for key in ("loop", "when", "vars", "loop_control"):
+            assert a.get(key) == b.get(key), f"{scratch_name}: {key} drifted from {live_name}"
+        ta, tb = a["ansible.builtin.template"], b["ansible.builtin.template"]
+        assert ta["src"] == tb["src"]
+        assert ta["dest"].startswith("{{ stack_dir }}/env/")
+        assert tb["dest"].startswith("{{ _deploy_stack_env_scratch.path }}/env/")
+        assert ta["dest"].removeprefix("{{ stack_dir }}") == tb["dest"].removeprefix(
+            "{{ _deploy_stack_env_scratch.path }}"
+        )
+        assert b["check_mode"] is False and b["no_log"] is True and b["diff"] is False
+    for task in scratch.values():
+        assert task["check_mode"] is False, task["name"]
+        assert "stack_dir" not in json.dumps(task), f"{task['name']} names a live path"
+    include = live["Render the env files into a scratch directory for the check-mode plan"]
+    assert include["when"] == "ansible_check_mode"
+    assert include["ansible.builtin.include_tasks"] == "env_scratch.yml"
+    cleanup = live["Remove the check-mode env scratch directory"]
+    assert cleanup["check_mode"] is False
+    assert cleanup["ansible.builtin.file"] == {
+        "path": "{{ _deploy_stack_env_scratch.path }}",
+        "state": "absent",
+    }
+    main = yaml.safe_load((_DEPLOY_STACK / "main.yml").read_text())
+    stack = next(t for t in main if t.get("name") == "Deploy stack")
+    assert cleanup in stack["always"], "the scratch secrets must go on every path"
+
+
+_LIVE_ENV = "# Ansible managed\n# Environment file for webapp\nLOG_LEVEL=info\nAPP_MODE=web\n"
+
+
+def _run_check_mode_entries(tmp_path: Path) -> dict[str, Any]:
+    """Run the real scratch render and the real entry build with --check on localhost.
+
+    The fake box: ``stack/env/webapp.env`` holds the same two variables as the
+    compiled service, in the other order. Returns what the run saw.
+    """
+    stack = tmp_path / "stack"
+    (stack / "env").mkdir(parents=True)
+    live = stack / "env" / "webapp.env"
+    live.write_text(_LIVE_ENV)
+    os.utime(live, (1_000_000_000, 1_000_000_000))
+    out = tmp_path / "out"
+    out.mkdir()
+    spec = {
+        "name": "webapp",
+        "image": "ghcr.io/acme/webapp:1",
+        "type": "service",
+        "env_file": str(live),
+        "labels": {},
+    }
+    extra = {
+        "stack_dir": str(stack),
+        "active_services": {"webapp": {"env": {"clear": {"APP_MODE": "web", "LOG_LEVEL": "info"}}}},
+        "active_accessories": {},
+        "secrets": {},
+        "webhook": {},
+        "_reconcile_specs": [spec],
+        "out_dir": str(out),
+    }
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "vars.json").write_text(json.dumps(extra))
+    (run / "ansible.cfg").write_text("[defaults]\n")
+    entries = [_named(_RECONCILE_YML)[n] for n in _ENTRY_TASKS]
+    (run / "entries.yml").write_text(yaml.safe_dump(entries, sort_keys=False))
+    (run / "play.yml").write_text(
+        yaml.safe_dump(
+            [
+                {
+                    "hosts": "localhost",
+                    "connection": "local",
+                    "gather_facts": False,
+                    "tasks": [
+                        {
+                            "name": "Render the env files into a scratch directory",
+                            "ansible.builtin.include_role": {
+                                "name": "deploy_stack",
+                                "tasks_from": "env_scratch",
+                            },
+                        },
+                        {
+                            "name": "Build the entries",
+                            "ansible.builtin.include_tasks": str(run / "entries.yml"),
+                        },
+                        {
+                            "name": "Save the entries",
+                            "ansible.builtin.copy": {
+                                "content": "{{ _reconcile_entries | to_json }}",
+                                "dest": "{{ out_dir }}/entries.json",
+                            },
+                            "check_mode": False,
+                        },
+                        {
+                            "name": "Save the scratch file and its directory name",
+                            "ansible.builtin.copy": {
+                                "src": "{{ _deploy_stack_env_scratch.path }}/env/webapp.env",
+                                "remote_src": True,
+                                "dest": "{{ out_dir }}/scratch-webapp.env",
+                            },
+                            "check_mode": False,
+                        },
+                        {
+                            "name": "Save the scratch directory name",
+                            "ansible.builtin.copy": {
+                                "content": "{{ _deploy_stack_env_scratch.path }}",
+                                "dest": "{{ out_dir }}/scratch-path",
+                            },
+                            "check_mode": False,
+                        },
+                        # deploy_stack/tasks/main.yml, always:
+                        _named(_DEPLOY_STACK / "main.yml")[
+                            "Remove the check-mode env scratch directory"
+                        ],
+                    ],
+                }
+            ],
+            sort_keys=False,
+        )
+    )
+    env = {
+        **os.environ,
+        "ANSIBLE_ROLES_PATH": str(ROOT / "roles"),
+        "ANSIBLE_FILTER_PLUGINS": str(ROOT / "filter_plugins"),
+        "ANSIBLE_CONFIG": str(run / "ansible.cfg"),
+        "ANSIBLE_NOCOLOR": "1",
+        "ANSIBLE_LOCALHOST_WARNING": "0",
+        "ANSIBLE_INVENTORY_UNPARSED_WARNING": "0",
+    }
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "ansible.cli.playbook",
+            "-i", "localhost,",
+            "--check",
+            "-e", f"@{run / 'vars.json'}",
+            str(run / "play.yml"),
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    return {
+        "spec": spec,
+        "live": live,
+        "stack": stack,
+        "entries": json.loads((out / "entries.json").read_text()),
+        "scratch_bytes": (out / "scratch-webapp.env").read_bytes(),
+        "scratch_path": Path((out / "scratch-path").read_text()),
+    }
+
+
+def test_check_mode_plan_sees_an_env_file_that_only_changed_order(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    sys.path.insert(0, str(ROOT / "filter_plugins"))
+    from bay_filters import bay_spec_hash
+
+    from bay_reconcile import ContainerState, load_bundle
+    from bay_reconcile.__main__ import reconcile
+
+    seen = _run_check_mode_entries(tmp_path)
+    live: Path = seen["live"]
+
+    # Check mode changed nothing live, and the scratch secrets are gone.
+    assert live.read_text() == _LIVE_ENV and live.stat().st_mtime == 1_000_000_000
+    assert sorted(p.relative_to(seen["stack"]).as_posix() for p in seen["stack"].rglob("*")) == [
+        "env",
+        "env/webapp.env",
+    ]
+    assert not seen["scratch_path"].exists()
+
+    # The fake box: same variables, other order.
+    new = seen["scratch_bytes"]
+    old = live.read_bytes()
+    assert new != old
+    assert sorted(new.decode().splitlines()) == sorted(old.decode().splitlines())
+
+    (entry,) = seen["entries"]
+    assert entry["env_file_change"] == {
+        "live": True,
+        "added": [],
+        "removed": [],
+        "changed": [],
+        "reordered": True,
+    }
+    old_hash = bay_spec_hash(seen["spec"], env_digest=hashlib.sha256(old).hexdigest())
+    new_hash = bay_spec_hash(seen["spec"], env_digest=hashlib.sha256(new).hexdigest())
+    assert entry["config_hash"] == new_hash != old_hash
+
+    # The box runs the container the last deploy made, from the live file.
+    class Box:
+        def observe(self, managed_label: str) -> dict[str, ContainerState]:
+            return {
+                "webapp": ContainerState(
+                    name="webapp",
+                    exists=True,
+                    image=entry["image"],
+                    config_hash=old_hash,
+                    status="running",
+                    managed=True,
+                    env={"APP_MODE": "web", "LOG_LEVEL": "info"},
+                    labels={},
+                    volumes=(),
+                )
+            }
+
+    code, report = reconcile(load_bundle({"containers": [entry]}), Box(), plan_only=True)  # type: ignore[arg-type]
+    assert code == 0
+    (predicted,) = report["containers"]  # type: ignore[misc]
+    assert predicted["action"] == "recreate"
+    assert "env_file: the env file bytes differ (same variables, different order)" in (
+        predicted["reasons"]
+    )
+
+    # bay plan --remote turns it into a step.
+    do_up(world)
+    plan = _remote(world, [{"box": "box-1", "error": None, "report": report}])
+    (step,) = plan["steps"]
+    assert (step["container"], step["action"], step["source"]) == ("webapp", "recreate", "box")
+    assert "same variables, different order" in step["reason"]
+    assert step["reason"].startswith("box box-1 predicts recreate: config_hash: changed")
