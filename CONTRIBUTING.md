@@ -38,13 +38,17 @@ Bay is a Python + Ansible project managed with [uv](https://docs.astral.sh/uv/).
    `make install` also wires up git hooks (`core.hooksPath = .githooks`), so
    do this once per clone even if you already ran `uv sync` manually.
 
+3. To try a change without a release, make a fleet with `bay fleet init <name>`,
+   or point any command at one with `bay --fleet <path> <command>`. Run the
+   tests with `make test`.
+
 ## Running tests and lint
 
 ```bash
 make test         # Full test suite: framework, bootstrap, and Python tests
 make test-python   # Python unit tests only (pytest)
 make test-framework # Playbook syntax, role structure, ansible-lint, YAML validity
-make test-bootstrap # End-to-end bootstrap test against a temp consumer project
+make test-bootstrap # End-to-end test of bootstrap.sh into throwaway directories
 make lint          # mypy + ruff (typecheck) and ansible-lint
 make typecheck      # mypy + ruff only
 ```
@@ -87,7 +91,7 @@ Bug reports and feature requests are welcome via GitHub issues. Please
 include:
 
 - What you expected to happen and what happened instead
-- Steps to reproduce (Bay version, consumer config shape if relevant)
+- Steps to reproduce (Bay version, fleet config shape if relevant)
 - Relevant logs or error output
 
 Do not include real credentials, IP addresses, hostnames, or other
@@ -114,7 +118,7 @@ pass before merge:
   end-to-end test)
 - **Lint & typecheck** — `make typecheck` (mypy + ruff) and `ansible-lint`
 - **Identity leak scan** — a guard that fails the build if real operator
-  IPs, consumer names, or private hostnames are reintroduced into the
+  IPs, fleet names, or private hostnames are reintroduced into the
   framework repo. Use RFC 5737 addresses and `example.com` in any docs or
   test fixtures you add.
 
@@ -123,13 +127,13 @@ rather than skip or silence the check.
 
 ## Cutting a release (maintainers only)
 
-Consumers pin to git tags via `.bay-version`, so an untagged commit is
-invisible to them. Releases go out through one command:
+Machines move between releases with `bay self update`, which only sees git
+tags, so an untagged commit is invisible to them. Releases go out through one command:
 
 1. Land your change on `main`.
 2. Add a `## [X.Y.Z] — <date>` section to `CHANGELOG.md` and commit it.
    `make release` refuses to tag a version that has no entry — the changelog
-   is how a consumer learns what a version bump brings. Add an **Upgrade
+   is how a user learns what a version bump brings. Add an **Upgrade
    notes** subsection for anything manual.
 3. Run:
 

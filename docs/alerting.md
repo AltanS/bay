@@ -6,7 +6,7 @@ A recipient is an adapter plus its configuration, with its own severity floor,
 so criticals can page an on-call sink while chat keeps taking everything.
 
 Every alert has a stable ID and a severity. `alerts/registry.yml` is the single
-source of truth; `bin/bay alerts list` prints it with the effective
+source of truth; `bay alerts list` prints it with the effective
 per-recipient state.
 
 Alerts are **best-effort by design**: a dead recipient can never fail a deploy,
@@ -15,10 +15,10 @@ a backup, or a build.
 ## Quick start
 
 ```bash
-bin/bay alerts list                 # every alert, and who currently gets it
-bin/bay alerts doctor               # duplicate targets, dead config, live mutes
-bin/bay alerts disable 'log.*' --for 24h
-bin/bay alerts test deploy.failed   # dry run: where would this land?
+bay alerts list                 # every alert, and who currently gets it
+bay alerts doctor               # duplicate targets, dead config, live mutes
+bay alerts disable 'log.*' --for 24h
+bay alerts test deploy.failed   # dry run: where would this land?
 ```
 
 ## Recipients
@@ -137,7 +137,7 @@ Adding a recipient type that speaks HTTP requires **no framework code**:
 | `slack` | `application/json` | `{"text": "...mrkdwn..."}` |
 | `raw` | `text/plain` | tags stripped, entities decoded |
 
-Consumer-supplied adapter **code** is deliberately out of scope. Any code
+Fleet-supplied adapter **code** is deliberately out of scope. Any code
 extension point would have to ship both a bash and a Python half and pass the
 byte-parity test in `tests/test_alert_channel.py` — which is precisely where
 that guarantee dies. A declarative adapter that cannot drift beats an extension
@@ -205,7 +205,7 @@ alerts_disabled:
   - log.retention_prune
 ```
 
-**Operator mute with a TTL** — `bin/bay alerts disable` records the mute
+**Operator mute with a TTL** — `bay alerts disable` records the mute
 locally (in `group_vars/all/alerts.yml`, the same file every `bay alerts`
 command reads); it does not reach the hosts until you deploy. That deploy
 only re-renders `roles/alert_policy`'s `alert-overrides.j2` — the file every
@@ -213,9 +213,9 @@ only re-renders `roles/alert_policy`'s `alert-overrides.j2` — the file every
 scripts themselves, so it's a small, fast apply:
 
 ```bash
-bin/bay alerts disable 'host.disk_warn' --for 24h
-bin/bay deploy production --tags alert_policy
-bin/bay provision production --tags alert_policy   # provision-only emitters (e.g. disk/outbound checks)
+bay alerts disable 'host.disk_warn' --for 24h
+bay deploy production --tags alert_policy
+bay provision production --tags alert_policy   # provision-only emitters (e.g. disk/outbound checks)
 ```
 
 Both commands are needed because `alert_policy` runs in `provision.yml` as
@@ -239,7 +239,7 @@ alerts_enabled:
 recipient's `min_level`. The `min_level` override is deliberate: naming an ID
 here is unambiguous intent, and an opt-in that silently did nothing on a `warn`
 recipient would be the more surprising behaviour. Without this list, default-off
-would be a one-way door — no consumer setting could bring `deploy.complete`
+would be a one-way door — no fleet setting could bring `deploy.complete`
 back.
 
 Precedence, when the same ID appears in more than one place:
@@ -273,7 +273,7 @@ everywhere else.
 **This is the reason to migrate.** The two legacy senders fire unconditionally
 inside `bay_notify()` and inside the `send_alert()` of docker-monitor and the
 webhook receiver; they never consult the registry, so
-`enabled_by_default: false` does not reach them. A consumer still on
+`enabled_by_default: false` does not reach them. A fleet still on
 `alert_webhook_url` keeps getting `webhook.received` on every push no matter
 what the registry says. Only mutes apply to them, because a mute has to be
 absolute.
@@ -284,19 +284,19 @@ messages land, and everything about which ones are sent.
 One asymmetry to know: `deploy.complete` and `deploy.failed` are emitted from
 the **control node**, not the host (see [How it works](#how-it-works)), and
 those two are routed through the registry for legacy and explicit recipients
-alike. So a legacy consumer loses `deploy.complete` but keeps
+alike. So a legacy fleet loses `deploy.complete` but keeps
 `webhook.received` — which reads as inconsistent until you know that only the
 host-side senders are grandfathered. The legacy pair is scheduled for removal;
 migrating settles it.
 
-Two traps, both caught by `bin/bay validate`:
+Two traps, both caught by `bay validate`:
 
 **Duplicate delivery.** If you keep `alert_webhook_url` *and* add an explicit
 recipient pointing at the same URL, every alert arrives twice. Either remove the
 legacy variable or point the new recipient somewhere else.
 
 **`group_vars` precedence.** `alert_webhook_url` usually lives in
-`group_vars/<env>/main.yml`, while `bin/bay alerts` writes
+`group_vars/<env>/main.yml`, while `bay alerts` writes
 `group_vars/all/alerts.yml`. Ansible precedence puts env **above** all, so the
 legacy sink keeps firing alongside the new list. Validation warns; resolve it by
 moving both to the same level.
@@ -329,12 +329,12 @@ inventory address:
 
 So an unlabelled host is never anonymous — it just gets a less pretty name.
 The label and the address collapse to one field when they are already the
-same string, so a consumer that configures nothing sees no change.
+same string, so a fleet that configures nothing sees no change.
 
 ### Why this is one variable and not a convention
 
 Bay used to let each emitter answer "which host?" for itself, and they
-disagreed. Most printed `inventory_hostname` — a bare IP for any consumer
+disagreed. Most printed `inventory_hostname` — a bare IP for any fleet
 whose inventory lists addresses. `log_archive` shelled out to `hostname -f`.
 `outbound_monitor` printed `region`, which names a region, not a machine: two
 boxes in one region produced identical alerts.
@@ -408,8 +408,8 @@ bash cannot import Python and the webhook container cannot source bash:
   every shell emitter. It is **symlinked** into each consuming role's
   `templates/` directory, because Ansible's template loader searches only the
   current role's `templates/` — there is no cross-role include path. Git stores
-  the links as mode `120000`, and `bin/bay install` is a `git clone` +
-  `git checkout`, so they survive installation intact.
+  the links as mode `120000`. Bay is installed with `git clone` and updated with
+  `git checkout`, so they survive both intact.
 - `roles/alert_channel/files/bay_alert.py` does the same for Python: included
   verbatim into `docker-monitor.py.j2`, imported by the webhook receiver, and
   loaded by path in `filter_plugins/bay_filters.py` and by the CLI.
@@ -426,7 +426,7 @@ routes exactly like `bay_notify()`, in the same order:
    `tests/test_docker_monitor_routing.py` checks the two agree on the same
    files.
 2. The legacy pair fires unconditionally, as in the shell emitters. So a
-   legacy consumer still gets `container.recovered`, which is default-off,
+   legacy fleet still gets `container.recovered`, which is default-off,
    and `alerts_disabled` does not reach it. Migrate to `alert_recipients` to
    change that.
 3. Each explicit recipient gets the alert if its ID set contains it. The sets
@@ -441,7 +441,7 @@ routes exactly like `bay_notify()`, in the same order:
 
 Because the routing is baked in, a change to `alert_recipients`,
 `alerts_enabled` or `alerts_disabled` reaches the monitor only when it is
-re-rendered: `bin/bay deploy <env> --tags monitoring`.
+re-rendered: `bay deploy <env> --tags monitoring`.
 
 The webhook receiver (`roles/git_deploy/files/webhook/app.py`, container
 `bay-webhook`) routes the same way, in the same order, with the same shared
@@ -453,7 +453,7 @@ three inputs reach it differently:
   holds the table from the same `bay_alert_routing` filter the monitor uses:
   per recipient, the alert IDs it receives and its non-secret config. It holds
   no credential and no headers. It is written only when `alert_recipients` is
-  set, so a legacy consumer's env file does not change.
+  set, so a legacy fleet's env file does not change.
 - **Credentials.** The same env file holds `BAY_RC_<n>_TOKEN` and
   `BAY_RC_<n>_URL`, from the same values and under the same 1-based index as
   `/etc/bay/alert.env`. Declarative webhook `headers` can carry a bearer
@@ -474,7 +474,7 @@ three inputs reach it differently:
 A change to `alert_recipients`, `alerts_enabled` or `alerts_disabled` reaches
 the receiver when deploy_stack re-renders its env file. The reconciler hashes
 that file, so the container is recreated in the same run:
-`bin/bay deploy <env> --tags deploy_stack`. A mute set with
+`bay deploy <env> --tags deploy_stack`. A mute set with
 `--tags alert_policy` reaches it without a container restart.
 
 `container.restart_loop` has a per-container cooldown,
@@ -527,7 +527,7 @@ Before that file existed, the deploy alerts were hard-coded POSTs to the legacy
 variables, guarded only by "is the URL set". They were unroutable and
 **unmutable**: `_bay_alert_id` was set beside them purely to satisfy the
 registry drift test, and nothing read it, so
-`bin/bay alerts disable deploy.complete` silently did nothing. If you are
+`bay alerts disable deploy.complete` silently did nothing. If you are
 reading this because a deploy alert ignored your config, that was the bug.
 
 ### Call sites pass a literal ID
@@ -584,7 +584,7 @@ not run. That is the structural fix for the GH#33 class of bug.
 - **No container churn.** The webhook receiver's `ALERT_WEBHOOK_*` env keys use
   Ansible's `omit` when the feature is off, and `BAY_ALERT_ROUTING` and the
   `BAY_RC_<n>_*` lines are written only when `alert_recipients` is set, so the
-  container spec and its `config_hash` do not change for consumers who never
+  container spec and its `config_hash` do not change for fleets that never
   enable them. The one exception is the upgrade to 0.6.12, which adds the
   read-only mute mount for everyone; that release also rebuilds the receiver
   image, which recreates the container anyway.
@@ -625,9 +625,9 @@ templating fights Campfire's `text/html` body.
 **Start here:**
 
 ```bash
-bin/bay alerts doctor
-bin/bay alerts list --recipient <name>
-bin/bay alerts test <alert.id>
+bay alerts doctor
+bay alerts list --recipient <name>
+bay alerts test <alert.id>
 ```
 
 **Nothing arrives.** Check the URL is non-empty and the vault key is lowercase
@@ -636,20 +636,20 @@ bin/bay alerts test <alert.id>
 failures land in `${stack_dir}/state/telegram-failures.log`.
 
 **One alert never arrives, others do.** It is probably below that recipient's
-`min_level`, or muted. `bin/bay alerts test <id>` says exactly where it would
+`min_level`, or muted. `bay alerts test <id>` says exactly where it would
 land.
 
 **Some alerts arrive, disk-pressure and outbound ones do not.** `outbound_monitor`
-lives in `provision.yml`, so `bin/bay deploy` never re-renders it (GH#33). The
+lives in `provision.yml`, so `bay deploy` never re-renders it (GH#33). The
 `alert_policy` role is in **both** playbooks precisely to stop mutes being
 stranded this way, but the emitter itself still needs:
 
 ```bash
-bin/bay provision production --tags outbound_monitor
+bay provision production --tags outbound_monitor
 ```
 
 **Alerts arrive twice.** An explicit recipient points at the same target as the
-legacy `alert_webhook_url`. `bin/bay validate` and `alerts doctor` both flag it.
+legacy `alert_webhook_url`. `bay validate` and `alerts doctor` both flag it.
 
 **A muted alert is still firing.** Its TTL expired — an expired mute is inert,
 by design. Re-mute with a new `--for`.

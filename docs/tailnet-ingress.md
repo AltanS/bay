@@ -131,16 +131,16 @@ headscale_oidc_allowed_groups: ['engineering']       # IdP group claim values
 ```
 
 Each list renders into the `oidc:` block of `config.yaml` only when it is non-empty.
-`bin/bay validate` **fails** when the issuer is set and all three are empty, because a
+`bay validate` **fails** when the issuer is set and all three are empty, because a
 mis-set allowlist and an absent one look identical at runtime. Apply a change with
-`bin/bay deploy <env> --tags headscale`, and validate first — an invalid config
+`bay deploy <env> --tags headscale`, and validate first — an invalid config
 crash-loops Headscale.
 
 An allowlist decides **who may enrol**. It does not decide what an enrolled node may
 reach: that is the ACL policy. Bay ships no default `headscale_acl_policy`, so a
 tailnet without one is in Headscale's default **allow-all** mode and any node that
 does enrol reaches every node and port, including every `access: vpn` service.
-`bin/bay validate` **warns** on that pairing (OIDC on, no ACL). Adopting a policy is a
+`bay validate` **warns** on that pairing (OIDC on, no ACL). Adopting a policy is a
 deliberate migration with real blast radius — see
 [Locking the upstream](#locking-the-upstream-headscale-acl-headscale_acl_policy).
 
@@ -169,7 +169,7 @@ services:
       expose_host_ack: true
 ```
 
-`bin/bay validate` **fails** on any `expose: host` without `expose_host_ack: true`, on
+`bay validate` **fails** on any `expose: host` without `expose_host_ack: true`, on
 both the accessory and the service `ports` form. The flag changes nothing about the
 rendered binding. Prefer `expose: gateway` (tailnet-only) or letting Traefik front the
 service; reach for `host` only when the port genuinely must be public.
@@ -223,7 +223,7 @@ upstream.
 > — a denied flow times out (curl exit 28) rather than refusing.
 
 Hosts that leave these unset render **byte-identically** to before. Deploy with
-`bin/bay deploy production --tags traefik,headscale`, then verify: from a tailnet
+`bay deploy production --tags traefik,headscale`, then verify: from a tailnet
 device *other than the ingress host* `https://homelab-app.ts.example.com` is a
 trusted, secure context; from off the tailnet `nmap -p443 <ingress-public-ip>` shows
 the hostname unreachable.
@@ -248,7 +248,7 @@ once. After that:
   [Adding a proxy under default-deny](#adding-a-proxy-under-default-deny).
 
 **Why the token is in the vault, not a `.env`:** the deploy loads `secrets.*` from
-the encrypted `group_vars/<env>/secrets.yml` (nothing in `bin/bay` sources a
+the encrypted `group_vars/<env>/secrets.yml` (nothing in `bay` sources a
 project-root `.env`) and renders it into `{{ stack_dir }}/env/traefik.env` (0600)
 on the host. The vault is encrypted, committed, and portable — any deploy host (CI,
 build server, another laptop) decrypts it with `.vault_pass`; a `.env` is gitignored
@@ -305,7 +305,7 @@ and exists only on the machine that made it.
   build host pins `registry.<domain>` to its own tailnet IP (to avoid a
   public-IP hairpin on large layer pushes), so a registry router on `websecure`
   alone 404s every infra-originated `docker push`. The framework binds the Zot
-  router to both entrypoints automatically under split mode — no per-consumer
+  router to both entrypoints automatically under split mode — no per-fleet
   config (GitHub #27). The `/etc/hosts` pin that points `registry.<domain>` at
   the tailnet IP is likewise framework-managed, via `zot_tailnet_pin_ip`
   (defaults to `headscale_server_tailnet_ip`; set `''` to disable). If you add
@@ -342,7 +342,7 @@ headscale_acl_policy:
 > (cross-region service links, rig/monitoring, operator SSH, per-peer SSH) or you
 > will cut production traffic. Validate the rendered `policy.hujson`
 > (`python3 -m json.tool`), stage it, and cut over with a rollback ready
-> (`git revert` the policy commit → `bin/bay deploy --tags headscale`). **Do not
+> (`git revert` the policy commit → `bay deploy --tags headscale`). **Do not
 > roll back by deleting the var** — that reverts the tailnet to allow-all, a far
 > larger blast radius than the change being undone, and it strips the only source
 > restriction left on any host whose sshd pins the ACL replaced. In file mode an
@@ -361,7 +361,7 @@ policy until the container actually dies, so a crash-loop surfaces long after th
 deploy that caused it. Validation is skipped, with a warning, when the headscale
 image isn't present locally to run the check.
 
-Enrolling a device that lives outside the Ansible inventory (e.g. via `bin/bay
+Enrolling a device that lives outside the Ansible inventory (e.g. via `bay
 gateway enroll`) under a default-deny policy like this one needs the same treatment
 as any other node — an alias in `hosts:` plus an `accept` rule naming it as `dst`
 before anything can reach it. See
@@ -408,7 +408,7 @@ bug, and the symptom misleads: an ungranted peer is **absent from `tailscale sta
 entirely**, so a policy gap looks exactly like a failed enrollment. Check the policy
 before debugging the connection.
 
-`bin/bay gateway acl audit` flags nodes that no accept rule can reach, but it
+`bay gateway acl audit` flags nodes that no accept rule can reach, but it
 **only checks the inbound (`dst`) side** — it catches dead-on-arrival, and will
 happily report a half-listed node as `reachable` when it still cannot initiate
 outbound. Check the `src` side by eye.
@@ -480,7 +480,7 @@ owning user. Two consequences the framework cannot check for you:
   downstream allowlist keyed on the device name must be updated in the *same*
   operation as the rename. If that config lives outside Bay's deploy path (a
   user-managed `.env`, a separate config manager, another repo), nothing in
-  `bin/bay deploy` will carry the change — and the typical failure is **silent**:
+  `bay deploy` will carry the change — and the typical failure is **silent**:
   the app still serves the now-unrecognised device, just with reduced privileges.
   A `curl` returning `200` does **not** prove the rename was clean; exercise a
   privileged action, or read the app's own identity audit line.

@@ -38,7 +38,7 @@ Add `backup_enabled: true` to `group_vars/all/main.yml`.
 ### 2. Add credentials to vault
 
 ```bash
-bin/bay vault edit production
+bay vault edit production
 ```
 
 Add these variables inside the `secrets:` dict:
@@ -51,7 +51,7 @@ secrets:
   S3_ACCESS_KEY_ID: "AKIA..."
   S3_SECRET_ACCESS_KEY: "your-secret-key"
 
-  # Restic encryption (generate with: bin/bay secret)
+  # Restic encryption (generate with: bay secret)
   backup_restic_password: "a-strong-random-password"
 ```
 
@@ -110,7 +110,7 @@ accessories:
 ### 5. Deploy
 
 ```bash
-bin/bay deploy production
+bay deploy production
 ```
 
 This installs restic, initializes per-accessory repos, generates backup scripts, and enables systemd timers.
@@ -159,14 +159,14 @@ and Telegram alerting like every other target. Tune via `backup_headscale_*` (se
 or disable with `backup_headscale_state: false`.
 
 ```bash
-bin/bay backup list headscale        # snapshots
-bin/bay backup run headscale         # back up now
-bin/bay backup status                # headscale appears alongside accessories
+bay backup list headscale        # snapshots
+bay backup run headscale         # back up now
+bay backup status                # headscale appears alongside accessories
 ```
 
 ### Restoring Headscale (file-method restore)
 
-`bin/bay backup restore` is database-oriented (it streams into a container and runs
+`bay backup restore` is database-oriented (it streams into a container and runs
 pg/redis validation), so restore the `file`-method headscale snapshot manually. On the
 control host, with the restic env loaded from `/opt/<stack>/backup/restic.env`:
 
@@ -178,7 +178,7 @@ restic snapshots                                   # pick the snapshot to restor
 docker compose -f /opt/<stack>/docker-compose.yml stop headscale
 restic dump latest headscale.tar | tar -x -C /opt/headscale/data --strip-components=1
 docker compose -f /opt/<stack>/docker-compose.yml start headscale
-bin/bay gateway nodes                             # confirm nodes + IPs came back
+bay gateway nodes                             # confirm nodes + IPs came back
 ```
 
 (`--strip-components=1` drops the leading `headscale/` directory that `docker cp` puts in
@@ -211,7 +211,7 @@ Retention runs after each successful backup. If pruning fails, the backup is sti
 
 ## CLI commands
 
-`bin/bay backup --help` is the command reference (list, run, restore, status, check — each subcommand's `--help` carries examples).
+`bay backup --help` is the command reference (list, run, restore, status, check — each subcommand's `--help` carries examples).
 
 ## Restore
 

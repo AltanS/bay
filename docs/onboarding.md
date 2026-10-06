@@ -2,96 +2,57 @@
 
 ## Quick start
 
-There is one entry path. From an empty project directory:
+Your first project takes three steps.
 
 ```bash
-mkdir my-infra && cd my-infra
-git clone https://github.com/AltanS/bay.git .bay
-.bay/bootstrap.sh
-bin/bay setup
+# 1. Install Bay once on this machine
+git clone https://github.com/AltanS/bay ~/.local/share/bay/framework
+~/.local/share/bay/framework/bootstrap.sh
+
+# 2. Make a fleet
+bay fleet init prod
+
+# 3. In your app repo, write bay.toml
+cd my-app
+bay init --fleet prod
 ```
 
-`.bay/bootstrap.sh` pins the framework version, installs the Python and Ansible
-dependencies, and creates the `bin/bay` wrapper. `bin/bay setup` runs the
-wizard and writes the scaffold.
+Step 1 is covered in full in **[install.md](install.md)**. It also shows how to update Bay
+and how Bay picks a fleet.
 
-`make bay:setup` is equivalent, if you already have a scaffold's `Makefile` —
-it clones the framework and then calls `.bay/bootstrap.sh`. Override
-`BAY_REPO` to clone over SSH instead of HTTPS.
+A *fleet* is the repo that holds your boxes, their config and their secrets. Bay keeps it
+at `~/.config/bay/fleets/<name>`. To clone a fleet you already have, use
+`bay fleet init prod --from <git url>`. To list the fleets on this machine, use
+`bay fleet ls`.
 
-## Interactive Setup Wizard
+## Your first project
 
-The `bin/bay setup` command includes an interactive wizard that walks you through project configuration and generates a tailored scaffold.
+Run `bay init` inside the app repo. It drafts a `bay.toml` there and registers the app in
+the fleet. By default it names the project after the repo directory. Use `--name`, `--box`
+and `--domain` to set them. The file format is in **[bay-toml.md](bay-toml.md)**.
 
-### Running the wizard
-
-After `.bay/bootstrap.sh` has run, start the wizard:
+Then:
 
 ```bash
-bin/bay setup
+bay plan      # compare WANTED (bay.toml), PINNED (the lock) and RUNNING (the box)
+bay up        # pin this commit in the fleet and deploy it
 ```
 
-The wizard uses arrow-key selection for choices and checkbox pickers for services. It asks:
+`bay plan` prints the steps, the risk of each, and a verdict. `bay up` refuses a plan that
+needs approval until you run `bay approve`. See **[plan.md](plan.md)**.
 
-1. **Project name** — used as `stack_name` and the stack directory under `/opt/`. Must be lowercase alphanumeric with hyphens (DNS-safe, max 63 chars).
+If you already have a fleet in the older YAML layout, `bay import --fleet <path> --out
+<new path>` writes the new files without changing the old ones. `bay compile` turns
+`bay.fleet.toml` and every `bay.toml` into `services.yml`. Both commands list their flags
+with `--help`.
 
-2. **Single server or multi-region?** — determines inventory structure and domain strategy.
-
-3. **Server address** — for single-server: one IP or hostname. For multi-region: a name and IP for each region (minimum 2).
-
-4. **Base domain** — e.g., `example.com`. Used for service subdomains (`status.example.com`). In multi-region mode, each region gets a prefix (`eu.example.com`, `na.example.com`).
-
-5. **Let's Encrypt email** — for automatic SSL certificates. Defaults to `admin@<domain>`.
-
-6. **SSH keys** — fetch from GitHub (by username) or paste a public key. You can add multiple keys. Skip if you prefer to add them later.
-
-7. **Access gateway** — how VPN-protected services are secured. The default is **None**, which keeps the first deploy to one DNS record and no client install:
-   - **None** (default) — no VPN, all services are publicly accessible
-   - **Headscale** — self-hosted Tailscale, automatic device enrollment. Adds a DNS record, a Tailscale client install, and four post-deploy steps.
-   - **WireGuard** — manual peer configuration with static IPs
-
-   You can add a gateway later by re-running `bin/bay setup --gateway headscale`. That re-opens the wizard pre-filled, so you confirm the other answers as you go.
-
-8. **Services** — pick from the catalog using checkbox selection (space to toggle):
-   - **Services**: Gatus, Vaultwarden, n8n, Plausible, Umami
-   - **Accessories**: PostgreSQL, Redis, MariaDB
-   - Dependencies are auto-selected (e.g., Plausible → PostgreSQL)
-
-9. **Vault password** — choose to generate, enter manually, or skip.
-
-A summary panel shows all collected values before generating files. Existing files are never overwritten (unless using `--force`).
-
-### CLI Flags
-
-All wizard steps can be pre-filled or fully automated with CLI flags; partial flags pre-fill the wizard, a complete set skips it entirely (for agent and script automation). `bin/bay setup --help` is the flag reference and carries copy-pasteable examples.
-
-### Non-TTY detection
-
-If `bin/bay setup` detects a non-interactive terminal (e.g., piped input, CI environment), it automatically falls back to `--no-interactive` mode with a warning. No explicit flag needed.
-
-### Edit / Resume Mode
-
-Running `bin/bay setup` on an existing project enters **edit mode**:
-
-- Current values are loaded from the existing config files
-- Each wizard step shows the current value as the default
-- Press Enter to keep a value, or type a new one to change it
-- Modified files are backed up with `.bak` suffix before overwriting
-- Only changed sections are re-rendered
-
-This is useful for changing your gateway type, adding services, or updating your domain without regenerating everything from scratch.
-
-```bash
-# Edit existing project — current values shown as defaults
-bin/bay setup
-
-# Force overwrite without edit mode detection
-bin/bay setup --force
-```
+Fleet config that Bay does not write for you (the boxes, domains, secrets and the access
+gateway) lives in the fleet's `group_vars/` and `hosts/` files. The sections below cover
+them.
 
 ## Pre-flight Doctor Check
 
-Before your first deploy, run `bin/bay doctor` to validate your environment (DNS, vault password, SSH connectivity, gateway config — `bin/bay doctor --help` lists the checks). Then run `bin/bay validate` to check your config files (YAML syntax, the services schema, inventory, vault keys) — this also runs automatically before every deploy, so running it here just lets you fix issues before the provision step. Fix any reported issues before running `bin/bay provision` and `bin/bay deploy`.
+Before your first deploy, run `bay doctor` to validate your environment (DNS, vault password, SSH connectivity, gateway config — `bay doctor --help` lists the checks). Then run `bay validate` to check your config files (YAML syntax, the services schema, inventory, vault keys) — this also runs automatically before every deploy, so running it here just lets you fix issues before the provision step. Fix any reported issues before running `bay provision` and `bay deploy`.
 
 For the very first provision, the target server usually only has a `root`
 account — `ansible_user` in `group_vars/all/main.yml` defaults to
@@ -99,7 +60,7 @@ account — `ansible_user` in `group_vars/all/main.yml` defaults to
 for that one run:
 
 ```bash
-bin/bay provision production -- -u root
+bay provision production -- -u root
 ```
 
 Subsequent provisions/deploys use `bay-admin` as normal.
@@ -114,17 +75,17 @@ Headscale is a self-hosted Tailscale coordination server. Devices join your priv
 
 **Setup walkthrough**:
 
-1. The wizard asks for a Headscale domain (e.g., `hs.example.com`)
+1. Set `headscale_domain` (e.g., `hs.example.com`) in `group_vars/all/access_gateway.yml`
 2. Create a DNS A record: `hs.example.com → your-server-ip`
-3. Run `bin/bay provision production && bin/bay deploy production`
+3. Run `bay provision production && bay deploy production`
 4. After first deploy, a panel shows enrollment steps:
-   - Enroll a device: `bin/bay gateway enroll` (creates the user, mints a key, prints the join command)
+   - Enroll a device: `bay gateway enroll` (creates the user, mints a key, prints the join command)
    - On your device: `tailscale up --login-server=https://hs.example.com --authkey=KEY`
-5. Manage nodes/users/keys via the CLI: `bin/bay gateway --help`
+5. Manage nodes/users/keys via the CLI: `bay gateway --help`
    (there is no admin web UI; OIDC self-service enrollment is optional). See
    `docs/access-gateways.md`.
 
-**Generated files**:
+**Files involved**:
 - `group_vars/all/access_gateway.yml` — `access_gateway: headscale`, `headscale_domain`
 - `group_vars/all/vpn_access.yml` — tailnet CIDR `100.64.0.0/10`
 - `group_vars/all/security.yml` — UDP ports 41641 (DERP relay) and 3478 (STUN)
@@ -137,11 +98,11 @@ Manual VPN with static peer configuration. You manage peer keys and IPs yourself
 
 **Setup walkthrough**:
 
-1. The wizard asks for peer IPs (your devices' WireGuard addresses)
-2. Peers are added to `group_vars/all/vpn_access.yml`
+1. Collect the peer IPs (your devices' WireGuard addresses)
+2. Add them to `group_vars/all/vpn_access.yml`
 3. Configure your devices with the server's WireGuard public key
 
-**Generated files**:
+**Files involved**:
 - `group_vars/all/access_gateway.yml` — `access_gateway: wireguard`
 - `group_vars/all/vpn_access.yml` — your peer IPs in `vpn_allowed_ips`
 
@@ -151,11 +112,11 @@ All services are publicly accessible. No VPN.
 
 **When to choose**: All your services are public, or you'll add VPN later. This is the default because it is the shortest path to a working first deploy.
 
-**Note**: Services with `access: vpn` in `services.yml` will still be tagged for VPN access, but without a gateway they'll be unreachable. Use `access: public` for all services, or add a gateway later by re-running `bin/bay setup`.
+**Note**: Services with `access: vpn` in `services.yml` will still be tagged for VPN access, but without a gateway they'll be unreachable. Use `access: public` for all services, or add a gateway later by setting `access_gateway` in `group_vars/all/access_gateway.yml`.
 
 ## Service Catalog
 
-The wizard includes a curated catalog of self-hosted services:
+Bay ships a curated catalog of self-hosted services:
 
 | Service | Image | Default Access | Dependencies |
 |---------|-------|---------------|-------------|
@@ -171,11 +132,11 @@ The wizard includes a curated catalog of self-hosted services:
 | Redis | `redis:7-alpine` | In-memory cache |
 | MariaDB | `mariadb:11` | MySQL-compatible database with mysqldump backup |
 
-Dependencies are auto-selected — choosing n8n automatically adds PostgreSQL.
+List the catalog with `bay service catalog`. Add an entry with `bay service add`. You can also edit `group_vars/all/services.yml` directly. See **[services.md](services.md)** for the full schema reference.
 
-You can always add more services later by editing `group_vars/all/services.yml` directly. See **[services.md](services.md)** for the full schema reference.
+## Fleet Files
 
-## What Gets Generated
+The fleet keeps its config in these files. Edit them by hand.
 
 | File | Purpose |
 |------|---------|
@@ -189,20 +150,12 @@ You can always add more services later by editing `group_vars/all/services.yml` 
 | `group_vars/production/main.yml` | Build strategy, registry credentials |
 | `group_vars/production/domains.yml` | Domain and Let's Encrypt email |
 | `group_vars/production/secrets.yml` | Vault-encrypted credentials |
-| `ansible.cfg` | Ansible configuration |
-| `deploy.yml` / `provision.yml` / `restore.yml` | Wrapper playbooks |
-| `Makefile` | Bootstrap aliases |
-| `.gitignore` | Ignores `.bay/`, `.vault_pass`, etc. |
-| `README.md` | Project-specific getting started guide |
-| `tests/test_infra.sh` | Infrastructure test suite |
 
-In multi-region mode, additional files are created:
-- `group_vars/<region>/main.yml` for each region (with `domain_base` override)
-- The inventory uses `[production:children]` grouping
+For a multi-region setup, add `group_vars/<region>/main.yml` for each region (with a
+`domain_base` override). The inventory uses `[production:children]` grouping.
 
-## Manual Setup (Without the Wizard)
-
-If you prefer to configure everything manually, use `bin/bay setup --no-interactive` to copy example files, then edit them:
+The `example/` directory in the framework checkout holds a copy of each file above. Copy
+what you need into the fleet, then edit it. These are the fields to change:
 
 ### `hosts/production`
 
@@ -273,14 +226,7 @@ letsencrypt_email: admin@example.com
 
 ```yaml
 secrets:
-  POSTGRES_PASSWORD: "changeme"   # CHANGE: generate with bin/bay secret
+  POSTGRES_PASSWORD: "changeme"   # CHANGE: generate with bay secret
 ```
 
-Encrypt with: `bin/bay vault encrypt production`
-
-## Bootstrap Script
-
-`.bay/bootstrap.sh` is the only bootstrap implementation. It pins the framework
-to `.bay-version` (or the newest tag), symlinks `group_vars/` into `.bay/`,
-installs the Python and Galaxy dependencies, and writes the `bin/bay` wrapper.
-See [Quick start](#quick-start) above for the commands.
+Encrypt with: `bay vault encrypt production`

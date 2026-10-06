@@ -5,16 +5,16 @@ big picture and **[onboarding.md](onboarding.md)** to stand up your first projec
 the topic you need below.
 
 > New here? The fastest path is the [Quick start in the main README](../README.md#quick-start),
-> then **[onboarding.md](onboarding.md)** for the setup wizard walkthrough.
+> then **[install.md](install.md)** and **[onboarding.md](onboarding.md)** for your first project.
 
 ## Start here
 
 | Doc | What it covers |
 |-----|----------------|
-| [../CHANGELOG.md](../CHANGELOG.md) | What changed in each release, with upgrade notes. Read this before `bin/bay update`. |
+| [../CHANGELOG.md](../CHANGELOG.md) | What changed in each release, with upgrade notes. Read this before `bay self update`. |
 | [install.md](install.md) | Install the `bay` command once per machine, update it with `bay self update`, and make or clone a fleet. |
 | [features.md](features.md) | What Bay is, the full feature set, and how it compares to alternatives. |
-| [onboarding.md](onboarding.md) | The `bin/bay setup` wizard, the files it generates, and your first deploy. |
+| [onboarding.md](onboarding.md) | Your first project: make a fleet, run `bay init`, the files a fleet keeps, and your first deploy. |
 
 ## Configuration
 
@@ -51,7 +51,7 @@ the topic you need below.
 | Doc | What it covers |
 |-----|----------------|
 | [backups.md](backups.md) | restic backups — S3 config, per-accessory repos, retention, restore, and monitoring. |
-| [multi-region.md](multi-region.md) | Deploying one stack to multiple regional servers from a single consumer repo. |
+| [multi-region.md](multi-region.md) | Deploying one stack to multiple regional servers from a single fleet. |
 | [alerting.md](alerting.md) | Where alerts go — Telegram plus an optional generic webhook sink (Campfire/Slack/raw), and the fail-open guarantees. |
 | [debug-agent.md](debug-agent.md) | The `debugbot` limited-permission SSH user for AI-assisted read-only debugging. |
 | [performance.md](performance.md) | How fast a deploy is and why — Mitogen, SSH pipelining, and the `--profile` flag. |
@@ -78,7 +78,7 @@ for the current architecture.
 ## Glossary
 
 - **rig** — The infrastructure layer: Traefik, CrowdSec, Watchtower, Headscale, Zot, the
-  webhook receiver — deployed by dedicated roles, as opposed to consumer-facing apps
+  webhook receiver — deployed by dedicated roles, as opposed to the apps
   declared in `services.yml`. Tracked by a `.rig-state` file on the host; see the main
   README's "Deploy modes: rig vs fast" section.
 - **service vs accessory** — In `services.yml`, a **service** is an app container that gets

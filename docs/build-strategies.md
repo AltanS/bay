@@ -8,7 +8,7 @@ How Docker images get built, distributed, and deployed across servers.
 - **Is the build too heavy for your app server (memory, CPU, slow builds)?** Use `remote` with a dedicated build server.
 - **Single server, builds are fast?** Use `local` (the default).
 
-All three strategies support webhook-triggered auto-deploy except `registry`, which relies on `bin/bay deploy` or Watchtower for updates.
+All three strategies support webhook-triggered auto-deploy except `registry`, which relies on `bay deploy` or Watchtower for updates.
 
 ---
 
@@ -149,7 +149,7 @@ GitHub Push
 - Image built once on build server, shared across regions
 - One pull signal per unique image per region (not per service)
 - Deployment servers expand image ref to container restarts via `image-map.json`
-- `bin/bay deploy` also pulls remote-built images (manual recovery path)
+- `bay deploy` also pulls remote-built images (manual recovery path)
 
 ### Registry layer cache (opt-in)
 
@@ -194,7 +194,7 @@ and pruned hard.
 - A cold cache is the normal first run. BuildKit tolerates a missing
   `:buildcache` ref and simply builds from scratch — `--cache-from` never fails
   the build.
-- The flag applies to the remote strategy only, on both the `bin/bay deploy`
+- The flag applies to the remote strategy only, on both the `bay deploy`
   path and the webhook auto-build path. The local strategy is unaffected.
 
 ### Shared images across services
@@ -234,7 +234,7 @@ When `storefront-de` is pushed:
 
 ## Strategy: Registry
 
-Image built externally (CI/CD pipeline). Pulled during `bin/bay deploy` only.
+Image built externally (CI/CD pipeline). Pulled during `bay deploy` only.
 
 ```yaml
 services:
@@ -260,7 +260,7 @@ External CI/CD (GitHub Actions, etc.)
 | Registry  |  (Docker Hub, GHCR, etc.)
 +-----+-----+
       |
-      |  bin/bay deploy
+      |  bay deploy
       |  (docker pull)
       v
 +---------------------+
@@ -295,7 +295,7 @@ The remote builder is optional. When it does not answer, the build uses the
 local builder. Builds do not stop because the remote machine is offline.
 
 The feature applies to every build that runs on the build server. That
-includes webhook auto-builds (`rebuild.sh`) and `bin/bay deploy` remote builds
+includes webhook auto-builds (`rebuild.sh`) and `bay deploy` remote builds
 (`remote_build.yml`). Hosts that are not the build server always use their
 local builder.
 
@@ -393,7 +393,7 @@ remote BuildKit port. Rules are directional. The build server opens the
 connection, so it is the `src`:
 
 ```yaml
-# group_vars/all/headscale_acl.yml (consumer)
+# group_vars/all/headscale_acl.yml (fleet)
 headscale_acl_policy:
   hosts:
     infra: 100.64.0.5/32       # the build server
@@ -403,8 +403,8 @@ headscale_acl_policy:
 ```
 
 No rule is necessary in the other direction. Tailscale allows the return
-traffic of an accepted connection. Run `bin/bay validate`, then
-`bin/bay deploy production --tags headscale`.
+traffic of an accepted connection. Run `bay validate`, then
+`bay deploy production --tags headscale`.
 
 ### Selection and fallback
 
@@ -434,7 +434,7 @@ Only the result of the last attempt counts for the circuit breaker. A
 fallback is never counted as a failure. `build.remote_fallback` has the
 lowest severity (`debug`) and is off by default, because the build continues.
 
-In `bin/bay deploy`, there is no retry. The deploy uses the builder that the
+In `bay deploy`, there is no retry. The deploy uses the builder that the
 probe picked. A failed deploy-time build is visible to the operator already.
 
 ### Verify
@@ -453,7 +453,7 @@ The probe writes its reason to the same journal, in one line that starts with
 sudo -u <app_user> /opt/<stack>/bin/select-builder.sh
 ```
 
-In `bin/bay deploy`, the output shows a `Report selected builder` task with
+In `bay deploy`, the output shows a `Report selected builder` task with
 the same information.
 
 ---
@@ -486,7 +486,7 @@ Watchtower is complementary to webhook auto-deploy. For `registry` strategy serv
 
 There are two distinct paths for creating/restarting containers:
 
-1. **`bin/bay deploy`** (Ansible) -- Uses the `container_lifecycle` role with `community.docker.docker_container`. Supports zero-downtime canary deploys for services with `zero_downtime: true`. This is the authoritative path.
+1. **`bay deploy`** (Ansible) -- Uses the `container_lifecycle` role with `community.docker.docker_container`. Supports zero-downtime canary deploys for services with `zero_downtime: true`. This is the authoritative path.
 
 2. **Webhook auto-build** (`rebuild.sh`) -- Uses `docker stop/rm/run` directly with all labels, volumes, and env baked in at deploy time. Brief downtime during restart. No canary logic.
 
@@ -518,7 +518,7 @@ docker logs bay-webhook --tail 50
 # Build logs
 journalctl -u bay-build@<service>.service -n 50
 
-# Circuit breaker status (from the consumer: bin/bay build status)
+# Circuit breaker status (from your fleet: bay build status)
 cat /opt/<stack>/state/<service>.json
 
 # Manual build trigger
@@ -533,7 +533,7 @@ cat /opt/<stack>/webhook/image-map.json
 
 ### Circuit breaker
 
-Auto-builds stop after `git_deploy_cb_max_failures` consecutive failures (default: 5). While the breaker is OPEN, pushes are silently ignored by `rebuild.sh` even though the webhook keeps logging "triggered". Inspect and reset from the consumer with `bin/bay build status` / `bin/bay build reset` (see `bin/bay build --help`). The state schema, alert rate-limiting, and manual fallback live in [build-pipeline.md](build-pipeline.md#circuit-breaker-state-rebuildsh).
+Auto-builds stop after `git_deploy_cb_max_failures` consecutive failures (default: 5). While the breaker is OPEN, pushes are silently ignored by `rebuild.sh` even though the webhook keeps logging "triggered". Inspect and reset from your fleet with `bay build status` / `bay build reset` (see `bay build --help`). The state schema, alert rate-limiting, and manual fallback live in [build-pipeline.md](build-pipeline.md#circuit-breaker-state-rebuildsh).
 
 ### Health check and rollback (v0.75.0+)
 
@@ -547,7 +547,7 @@ On failure, automatic rollback to `:previous` image tag. Three Telegram alert ty
 - Rollback image also unhealthy → both images failed
 - Rollback succeeded → service running on previous image
 
-**Configuration:** `git_deploy_health_check_timeout: 30` (seconds, override in consumer group_vars)
+**Configuration:** `git_deploy_health_check_timeout: 30` (seconds, override in the fleet's group_vars)
 
 ### Build timeout (v0.75.0+)
 
@@ -555,7 +555,7 @@ Systemd kills hung builds after `git_deploy_build_timeout` seconds (default 1200
 
 **Alert types:** timeout, OOM-kill (`MemoryMax` exceeded), signal (external SIGKILL)
 
-**Configuration:** `git_deploy_build_timeout: 1200` (seconds, override in consumer group_vars)
+**Configuration:** `git_deploy_build_timeout: 1200` (seconds, override in the fleet's group_vars)
 
 ### Build duration (v0.75.0+)
 

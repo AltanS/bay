@@ -51,7 +51,7 @@ If you're locked out by CrowdSec:
    ```
 3. **Re-provision** with `crowdsec_trusted_ips` set:
    ```bash
-   bin/bay provision production --tags nftables,crowdsec
+   bay provision production --tags nftables,crowdsec
    ```
 4. **Re-enable the bouncer** (you disabled it in step 2, and provisioning
    does not undo that):
@@ -61,7 +61,7 @@ If you're locked out by CrowdSec:
 5. **Verify** — decisions still being made, and your IP allowlisted:
    ```bash
    sudo cscli decisions list
-   sudo cscli allowlists inspect argo-inventory   # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+   sudo cscli allowlists inspect argo-inventory   # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
    sudo systemctl status crowdsec-firewall-bouncer
    ```
    Confirm your own IP does not show up in `cscli decisions list`, and that
@@ -99,7 +99,7 @@ middleware wraps `vpn-only`. That 403 may then log the error-pages URL as its
 server URL and still count, which is the old behaviour.
 
 To make these 403s count again, set `crowdsec_ignore_vpn_refusals: false`. The
-next `bin/bay provision <env> --tags crowdsec` removes the file.
+next `bay provision <env> --tags crowdsec` removes the file.
 
 **Operator rule:** test VPN paths only from a trusted host or from the
 tailnet. After a ban, the server drops your IP on every port, so unban through
@@ -153,7 +153,7 @@ Bay includes 11 custom scenarios. Most are enabled by default; crawl detection i
 | `aggressive-crawl` | Fast scraping (40+ unique paths in bucket) | Modern JS apps load 40+ asset chunks per page view, triggering false positive bans on legitimate users |
 | `sustained-crawl` | Slow persistent scraping (120+ total requests) | Same false positive risk |
 
-To enable crawl detection, set in your consumer's `group_vars/all/security.yml`:
+To enable crawl detection, set in your fleet's `group_vars/all/security.yml`:
 
 ```yaml
 crowdsec_scenario_aggressive_crawl: true
@@ -237,7 +237,7 @@ crowdsec_custom_scenarios:
 ```
 
 Removing an entry from `crowdsec_custom_scenarios`, or renaming one, removes the rendered file
-and flushes that scenario's decisions on the next `bin/bay provision --tags crowdsec`.
+and flushes that scenario's decisions on the next `bay provision --tags crowdsec`.
 
 Validate before deploy with `cscli explain --log '<sample line>' --type <acquisition label type>` — `evt.Meta.source_ip` should be populated and the trigger scenario should overflow into a decision. This replaces the brittle UA-substring `spoofed-googlebot` heuristic (no token list to maintain, no rDNS-whitelist double-negative).
 

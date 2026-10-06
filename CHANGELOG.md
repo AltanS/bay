@@ -2,10 +2,83 @@
 
 Notable changes to Bay, newest first.
 
-Consumers pin a framework version in `.bay-version` and move with
-`bin/bay update`. Read the entries between your pinned version and the latest
-before upgrading — anything needing manual action is called out under
-**Upgrade notes**.
+Machines move between releases with `bay self update`. Read the entries
+between your installed version and the latest before upgrading. Anything
+needing manual action is called out under **Upgrade notes**. Entries for
+1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
+`bin/bay` wrapper, which 2.0 removes.
+
+## [2.0.0] - unreleased
+
+Bay 2.0 is a machine-level tool. You install it once per machine, a fleet
+repo holds your boxes, and each app repo holds a `bay.toml`. The consumer
+repo, the `.bay/` clone and the `bin/bay` wrapper are gone.
+
+### Added
+
+- `bay self update [--to <tag>]` and `bay self version`. The first moves this
+  machine to the newest release or to one tag. It fetches the tags, checks
+  out the tag, syncs the dependencies, installs the command again and prints
+  the old and the new version. It refuses to run when the checkout has edits.
+- `bay fleet init <name> [--from <url>]` and `bay fleet ls`. They make or
+  clone a fleet at `~/.config/bay/fleets/<name>` and list the fleets on this
+  machine.
+- `docs/install.md`: the one install path. `bootstrap.sh` is now the
+  idempotent installer. It clones or updates the checkout, syncs the
+  dependencies and installs the `bay` command.
+- `--fleet <path>`, `BAY_FLEET` and `BAY_FLEET_NAME` pick the fleet, as does
+  the `fleet = "<name>"` line of the `bay.toml` in the app repo you are in.
+- `boxes.<b>.webhook_domain` in `bay.fleet.toml`. It gives one box its own
+  deploy webhook domain. `[webhook] domain` stays the default. `bay import`
+  writes it when the webhook domain differs per box.
+- `bay deploy`, `bay provision` and `bay restore` run from any directory.
+  They read the fleet from `--fleet` and the playbooks from the checkout.
+
+### Changed
+
+- `bay status --json` is `status_version` 2. `framework` holds `version`
+  and `path`. `fleet` holds `root`, `source` (how Bay found the fleet),
+  `commit` and `dirty`. The human output shows the same facts.
+  `docs/deploy-receipt.md` and `status.schema.json` follow.
+- With no fleet selected, a command stops and lists the three ways to pick
+  one.
+- The deploy version gate tells you to run `bay self update`.
+
+### Removed
+
+- The `bin/bay` wrapper and `scripts/bin-bay-wrapper.sh`. Use `bay`.
+- The `.bay/` clone model: `bay setup`, `bay install`, `bay update`,
+  `.bay-version`, `read_pinned_version` and the `group_vars` link into
+  `.bay/`. Use `bay self update`, and `bay fleet init` for a new fleet.
+- `bay dev-link`, `bay dev-unlink`, the `.bay-dev` sentinel file and its
+  banner. Use `bay --fleet <path>` to try changes without a release, and
+  `bay self update --to <tag>` to move between releases.
+- `bay guide` and the interactive setup wizard. Use `bay init` in an app
+  repo, `bay import` to adopt an existing fleet, and `docs/onboarding.md`.
+- The `bay.mk` Makefile aliases and the `make bay:*` targets, and the
+  `example/` consumer files (`Makefile`, `deploy.yml`, `provision.yml`,
+  `restore.yml`, `webhook.yml`, `ansible.cfg`, `tests/test_infra.sh`). Run
+  the `bay` commands directly.
+- The legacy layer: the `argo` command alias, the `.argo` fallback paths,
+  the `ARGO_*` variables and the old-layout warning. The box-side old names
+  that tag themselves `kept-argo` (the `argo-admin` account, `argo-builder`,
+  the `argo-` image tag and the migration role) stay.
+- Discovery by walking up from the working directory (`find_bay_dir`,
+  `consumer_root`). A fleet is picked as `docs/install.md` says.
+
+### Upgrade notes
+
+- Install once per machine, then point Bay at your fleet. See
+  `docs/install.md`. Existing fleet repos keep their `hosts/`,
+  `group_vars/` and `bay.fleet.toml`. Move or clone the repo to
+  `~/.config/bay/fleets/<name>`, or pass `--fleet <path>`.
+- Delete the `.bay/` clone, `.bay-version`, `bin/bay` and the `Makefile`
+  includes from old consumer repos. Nothing on a box depends on them.
+- CI jobs that ran `bin/bay ...` run `bay --fleet <path> ...` after the
+  install step.
+- A script that reads `bay status --json` must handle `status_version` 2:
+  `framework.pinned`, `framework.checkout` and `framework.latest` are gone.
+- `bay test` still runs `tests/test_infra.sh` from the fleet.
 
 ## [1.0.0] - 2026-10-06
 

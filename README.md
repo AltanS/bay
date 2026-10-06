@@ -32,7 +32,7 @@ Full reference lives in **[docs/](docs/README.md)** — the docs index links eve
 |-------|-----|
 | What changed between releases | [CHANGELOG.md](CHANGELOG.md) |
 | Feature overview & comparison | [docs/features.md](docs/features.md) |
-| Setup wizard walkthrough | [docs/onboarding.md](docs/onboarding.md) |
+| First project walkthrough | [docs/onboarding.md](docs/onboarding.md) |
 | `services.yml` schema (the core config) | [docs/services.md](docs/services.md) |
 | Access gateways (none / WireGuard / Headscale) | [docs/access-gateways.md](docs/access-gateways.md) |
 | Tailnet HTTPS ingress, ACL & identity | [docs/tailnet-ingress.md](docs/tailnet-ingress.md) |
@@ -62,97 +62,47 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## Quick start
 
-```bash
-mkdir my-infra && cd my-infra
-git clone https://github.com/AltanS/bay.git .bay
-.bay/bootstrap.sh
-bin/bay setup
-```
-
-`bootstrap.sh` pins the framework version, installs all dependencies, and creates the `bin/bay` wrapper. `bin/bay setup` then runs the interactive wizard and generates the project scaffold.
-
-If you already have a scaffold's `Makefile`, `make bay:setup` is equivalent — it clones the framework and calls `.bay/bootstrap.sh`. Override its `BAY_REPO` variable to clone from somewhere else, over SSH or from a fork.
-
-The wizard walks you through:
-
-1. **Project name** — used as the stack name and `/opt/<name>` directory
-2. **Deployment mode** — single server or multi-region
-3. **Server address** — IP or hostname (or per-region IPs for multi-region)
-4. **Base domain** — e.g. `example.com` → services get subdomains like `status.example.com`
-5. **SSL email** — for Let's Encrypt automatic certificates
-6. **SSH keys** — fetch from GitHub or paste manually
-7. **Access gateway** — Headscale (recommended), WireGuard, or none
-8. **Services** — pick from the catalog (Gatus, Vaultwarden, n8n, Plausible, Umami) and accessories (PostgreSQL, Redis, MariaDB)
-9. **Vault password** — generated or manual, for encrypting secrets
-
-After confirming, the wizard generates all config files under `group_vars/`, `hosts/`, and project root. See **[docs/onboarding.md](docs/onboarding.md)** for the full file list.
-
-#### Non-interactive setup (for agents/scripts)
+Install Bay once per machine. Make a fleet. Then set up an app repo.
 
 ```bash
-# Fully non-interactive — all required flags, no wizard prompts
-bin/bay setup \
-  --name myapp \
-  --server-ip 1.2.3.4 \
-  --domain example.com \
-  --gateway headscale \
-  --headscale-domain hs.example.com \
-  --services gatus,vaultwarden
+git clone https://github.com/AltanS/bay ~/.local/share/bay/framework && ~/.local/share/bay/framework/bootstrap.sh
+bay fleet init prod
+cd my-app && bay init --fleet prod
 ```
 
-Partial flags pre-fill the wizard; `--defaults` skips prompting entirely. `bin/bay setup --help` is the flag reference.
+Read **[docs/install.md](docs/install.md)** for the install steps, updates and how Bay picks a fleet. Read **[docs/onboarding.md](docs/onboarding.md)** for the first project, step by step.
+
+`bay init` writes a `bay.toml` in your app repo. Then `bay plan` shows what will change, and `bay up` pins the commit and deploys it.
 
 #### Pre-flight check and deploy
 
 ```bash
 # Validate DNS, SSH, vault password, gateway config
-bin/bay doctor
+bay doctor
 
 # Validate config files — YAML/schema, inventory, vault keys
-bin/bay validate
+bay validate
 
 # Provision server (first time — hardens SSH, installs Docker, firewall)
-bin/bay provision production
+bay provision production
 # First provision needs root; if ansible_user isn't root yet, override the SSH user:
-bin/bay provision production -- -u root
+bay provision production -- -u root
 
 # Deploy services
-bin/bay deploy production
+bay deploy production
 ```
 
-`bin/bay doctor` checks your **environment** (DNS resolution, SSH reachability,
-vault password present). `bin/bay validate` checks your **config** (YAML
+`bay doctor` checks your **environment** (DNS resolution, SSH reachability,
+vault password present). `bay validate` checks your **config** (YAML
 syntax, the services schema, inventory, vault keys) and also runs
 automatically before every deploy, so running it here is optional — useful
 for iterating on config without waiting for a full deploy.
-
-#### Edit existing config
-
-Re-run `bin/bay setup` on an existing project to modify settings. Current values are shown as defaults — press Enter to keep them. Modified files are backed up with `.bak` suffix.
-
-### Shell alias (optional)
-
-Add an alias so you can run `bay` instead of `bin/bay` from anywhere in the project:
-
-```bash
-# bash (~/.bashrc)
-alias bay='bin/bay'
-
-# zsh (~/.zshrc)
-alias bay='bin/bay'
-
-# fish (~/.config/fish/config.fish)
-alias bay 'bin/bay'
-```
-
-After reloading your shell, you can use `bay deploy production` directly.
 
 ## Project structure
 
 ```
 bay/
-  bootstrap.sh                 # New project scaffolding script
-  bay.mk                     # Thin Makefile aliases (backwards compat)
+  bootstrap.sh                 # Installs the bay command on this machine
   version.yml                  # Framework version declaration (bay_version)
   ansible.cfg                  # Ansible settings (inventory, vault, roles path)
   provision.yml                # Server hardening playbook
@@ -167,25 +117,19 @@ bay/
     git.py                     # Git operations (fetch, checkout, tags)
     ansible.py                 # Ansible operations (galaxy, playbooks, vault)
     guards.py                  # Pre-flight checks (version drift, git health)
-    paths.py                   # Path resolution (.bay/, .bay-version)
+    paths.py                   # Path resolution (framework checkout, fleet)
     console/                   # Rich output, banner, theme
     commands/                  # Subcommand modules
-      framework.py             # setup, install, update, status
+      framework.py             # status
       ops.py                   # deploy, provision, restore
       vault.py                 # vault edit/view/encrypt/decrypt
       secret.py                # secret generation and password hashing
       backup.py                # backup list/run/restore/status/check
       test.py                  # infrastructure tests
       webhook.py               # webhook setup and GitHub instructions
-  example/                     # Consumer project template (copied by `bin/bay setup`)
-    Makefile                   # Sets BAY_REPO, includes .bay/bay.mk
-    ansible.cfg                # Points roles_path to .bay/
-    deploy.yml                 # Wrapper → imports .bay/deploy.yml
-    provision.yml              # Wrapper → imports .bay/provision.yml
-    restore.yml                # Wrapper → imports .bay/restore.yml
-    .bay-version              # Framework version lock (e.g., v0.1.0)
-    .gitignore                 # Ignores .bay/, .vault_pass, etc.
-    README.md                  # Getting started guide
+      self_cmd.py              # self update, self version
+      fleet_cmd.py             # fleet init, fleet ls
+  example/                     # Example fleet files (reference only)
     hosts/
       production               # Example production inventory
     group_vars/
@@ -219,7 +163,7 @@ bay/
     README.md                  # Docs hub: every guide grouped by topic
     features.md                # Feature overview and competitive advantages
     services.md                # services.yml schema reference (the core config)
-    onboarding.md              # Setup wizard walkthrough
+    onboarding.md              # First project walkthrough
     access-gateways.md         # VPN gateways (WireGuard vs Headscale)
     tailnet-ingress.md         # Tailnet HTTPS ingress, ACL, identity
     build-pipeline.md          # Webhook → build → deploy reference
@@ -236,10 +180,10 @@ bay/
 
 | Playbook | Purpose | Usage |
 |---|---|---|
-| `provision.yml` | One-time server hardening: users, SSH, firewall, CrowdSec, Docker | `bin/bay provision production` |
-| `deploy.yml` | Repeatable deployment: build/pull images, deploy containers, write rig state | `bin/bay deploy production` |
-| `webhook.yml` | Webhook setup: deploy keys, receiver container, systemd triggers | `bin/bay webhook production` |
-| `restore.yml` | Restore an accessory from backup | `bin/bay restore production` |
+| `provision.yml` | One-time server hardening: users, SSH, firewall, CrowdSec, Docker | `bay provision production` |
+| `deploy.yml` | Repeatable deployment: build/pull images, deploy containers, write rig state | `bay deploy production` |
+| `webhook.yml` | Webhook setup: deploy keys, receiver container, systemd triggers | `bay webhook production` |
+| `restore.yml` | Restore an accessory from backup | `bay restore production` |
 
 All playbooks require a target environment as the first argument.
 
@@ -247,9 +191,9 @@ All playbooks require a target environment as the first argument.
 
 Deploy separates **infrastructure roles** (nftables, traefik, watchtower, access_gateway, backup, docker_monitor, cronjobs) from **app roles** (build_image, git_deploy, deploy_stack). A rig state file on the server (`{{ stack_dir }}/.rig-state`) tracks when infrastructure was last configured:
 
-- `bin/bay deploy production` — checks rig state. If the framework version or consumer config changed since the last rig, runs a full deploy. Otherwise skips infra roles for a fast app-only deploy.
-- `bin/bay deploy --rig production` — forces all roles to run, including infrastructure. Writes updated rig state on success.
-- `bin/bay deploy production --tags deploy_stack` — manual tag override, bypasses rig logic.
+- `bay deploy production` — checks rig state. If the framework version or fleet config changed since the last rig, runs a full deploy. Otherwise skips infra roles for a fast app-only deploy.
+- `bay deploy --rig production` — forces all roles to run, including infrastructure. Writes updated rig state on success.
+- `bay deploy production --tags deploy_stack` — manual tag override, bypasses rig logic.
 
 The rig state file contains:
 ```json
@@ -279,62 +223,53 @@ See **[docs/services.md](docs/services.md)** for the full schema reference, acce
 
 Secrets are managed with `ansible-vault`. The setup:
 
-1. **`group_vars/production/secrets.yml`** (in your consumer repo) holds all secret values under a `secrets:` dict
+1. **`group_vars/production/secrets.yml`** (in your fleet) holds all secret values under a `secrets:` dict
 2. Services reference secrets by name in `services.yml` → `env.secret: [DB_PASSWORD, ...]`
 3. At deploy time, the `deploy_stack` role resolves secrets and writes per-service `.env` files
 4. The vault password lives in `.vault_pass` (gitignored), configured in `ansible.cfg`
 
-Manage secrets with `bin/bay vault` (edit, view, encrypt, decrypt, set) and generate values with `bin/bay secret` — see `bin/bay vault --help` and `bin/bay secret --help` for examples and the secrets key-casing convention.
+Manage secrets with `bay vault` (edit, view, encrypt, decrypt, set) and generate values with `bay secret` — see `bay vault --help` and `bay secret --help` for examples and the secrets key-casing convention.
 
-## Using Bay as a framework
+## Using Bay
 
-Bay is designed to be used as a framework included by a site-specific consumer repo. The consumer holds real config (inventory, secrets, service definitions) while Bay provides the roles and playbooks. See [Quick start](#quick-start) to scaffold a new consumer project.
+Bay is a command you install once per machine. It does not live inside your project. Your real config (boxes, secrets, service definitions) lives in a **fleet**, a repo that Bay keeps at `~/.config/bay/fleets/<name>`. Bay provides the roles, playbooks and the CLI. See [Quick start](#quick-start) to set up your first fleet.
 
-### Consumer repo structure
+### Fleet structure
 
 ```
-my-infra/
-├── .bay/                   # Framework (cloned by git, set up by .bay/bootstrap.sh, gitignored)
-├── bin/bay                 # CLI wrapper (calls uv run --project .bay bay)
-├── Makefile                 # Bootstrap target + backwards-compat aliases
-├── ansible.cfg              # Points roles_path to .bay/
-├── deploy.yml               # Wrapper → imports .bay/deploy.yml
-├── provision.yml            # Wrapper → imports .bay/provision.yml
-├── restore.yml              # Wrapper → imports .bay/restore.yml
+~/.config/bay/fleets/prod/
+├── bay.fleet.toml           # Fleet settings
 ├── group_vars/              # Real configuration and secrets
 └── hosts/                   # Real inventory
 ```
 
-The primary CLI interface is `bin/bay` — a thin wrapper that calls `uv run --project .bay bay`. The Makefile provides `make bay:*` aliases for backwards compatibility.
+Pick the fleet with `bay --fleet <path> <command>`, with `BAY_FLEET=<path>`, with `BAY_FLEET_NAME=<name>`, or by running inside an app repo whose `bay.toml` names `fleet = "<name>"`. With none of these, the command stops and lists them. To try a change to the framework or to a fleet without a release, point `--fleet` at it: `bay --fleet ./my-fleet deploy production`. See [docs/install.md](docs/install.md).
 
-[SKILL.md](SKILL.md) is the framework's orientation document for an AI agent working in a consumer repo: the rules that bite, the whole command inventory (compiled from the CLI itself), and the doc map. `install` and `update` link it to `.claude/skills/bay/SKILL.md` so a skill router finds it, and the link points through `.bay/` so the content always matches the pinned framework version. `bin/bay --skill` prints it raw for piping anywhere else.
+[SKILL.md](SKILL.md) is the framework's orientation document for an AI agent working in a fleet: the rules that bite, the whole command inventory (compiled from the CLI itself), and the doc map. `bay --skill` prints it raw for piping anywhere else.
 
 ### Versioning
 
-Consumers pin to a specific framework release via `.bay-version` — a single-line file containing a git tag (e.g., `v0.5.0`). Both `setup` and `install` read this file and checkout the pinned ref.
+Bay releases are git tags. The installed copy sits at one tag at a time.
 
 ```bash
-# Install the version pinned in .bay-version
-bin/bay install
+# Show the installed version and where it lives
+bay self version
 
-# Update to the latest framework release (bumps .bay-version)
-bin/bay update
+# Update to the latest release
+bay self update
 
-# See current version status
-bin/bay status
+# Move to one given release
+bay self update --to v2.0.0
+
+# See the version, the fleet and the feature flags
+bay status
 ```
 
-**Before updating, read [CHANGELOG.md](CHANGELOG.md)** — it lists what changed between releases, with an *Upgrade notes* section for anything needing manual action (a provision run, a renamed variable, a migration). `bin/bay update` moves you to the latest tag; the changelog is how you find out what that brings.
-
-If `.bay-version` is missing, setup and install resolve to the latest tag and create the file automatically.
-
-Operational commands (`deploy`, `provision`, `restore`) check for version drift before running — if `.bay-version` doesn't match the checked-out framework, the command fails with a clear error and instructions to run `bin/bay install`.
-
-After operations complete, a notice is shown if a newer framework version is available locally.
+**Before updating, read [CHANGELOG.md](CHANGELOG.md)** — it lists what changed between releases, with an *Upgrade notes* section for anything needing manual action (a provision run, a renamed variable, a migration). `bay self update` moves you to the latest tag; the changelog is how you find out what that brings.
 
 #### Runtime compatibility check
 
-Consumers can optionally set `bay_minimum_version` in their `group_vars` to gate deploys on a minimum framework version:
+A fleet can optionally set `bay_minimum_version` in its `group_vars` to gate deploys on a minimum framework version:
 
 ```yaml
 # group_vars/all/main.yml
@@ -348,12 +283,10 @@ If the framework version is older than the minimum, the playbook aborts with a c
 The CLI help is the command reference — it is kept accurate against the code and every command carries copy-pasteable examples:
 
 ```bash
-bin/bay --help              # all commands, grouped by area
-bin/bay deploy --help       # per-command flags, quirks, and examples
-bin/bay gateway --help      # sub-apps (gateway, vault, backup, build, service, server) list their own commands
+bay --help              # all commands, grouped by area
+bay deploy --help       # per-command flags, quirks, and examples
+bay gateway --help      # sub-apps (gateway, vault, backup, build, service, server) list their own commands
 ```
-
-Make aliases (`make bay:deploy production`, etc.) are still available for backwards compatibility.
 
 ### DNS
 
@@ -369,7 +302,7 @@ Every service in `services.yml` picks a subdomain (e.g., `status.example.com`). 
 
 Traefik uses Let's Encrypt **HTTP-01 challenge** — certs are issued automatically per service on first request. No wildcard certs, no DNS provider API needed.
 
-Set the ACME email in your consumer's `group_vars/production/domains.yml`:
+Set the ACME email in your fleet's `group_vars/production/domains.yml`:
 
 ```yaml
 letsencrypt_email: you@example.com
@@ -401,7 +334,7 @@ See **[docs/backups.md](docs/backups.md)** for full setup instructions, S3 provi
 
 ## Alerting
 
-Bay alerts on container crashes, build failures, deploy outcomes, disk pressure, and backup failures. Telegram is built in; a **generic webhook sink** can fire alongside it so you can route alerts to Campfire, Slack, or anything that accepts an HTTP POST — without patching templates inside `.bay/`.
+Bay alerts on container crashes, build failures, deploy outcomes, disk pressure, and backup failures. Telegram is built in; a **generic webhook sink** can fire alongside it so you can route alerts to Campfire, Slack, or anything that accepts an HTTP POST — without patching the framework's templates.
 
 ```yaml
 # group_vars/production/main.yml
@@ -411,7 +344,7 @@ alert_webhook_format: campfire       # campfire | slack | raw
 
 The vault key must be **lowercase** — it is an Ansible role var, and Bay's convention is that UPPERCASE `secrets:` keys are container env vars. An UPPERCASE spelling silently resolves undefined.
 
-Both sinks are best-effort: a dead alert endpoint can never fail a deploy, a backup, or a build. The webhook is off by default and inert when off — no outbound calls, and no container recreation for consumers who don't enable it.
+Both sinks are best-effort: a dead alert endpoint can never fail a deploy, a backup, or a build. The webhook is off by default and inert when off — no outbound calls, and no container recreation for anyone who does not enable it.
 
 See **[docs/alerting.md](docs/alerting.md)** for the format adapters, the full list of what gets sent, and troubleshooting.
 
@@ -430,12 +363,12 @@ watchtower_cleanup: true              # Remove old images after update (default:
 
 ## Multi-region deployments
 
-Bay supports deploying the same stack to multiple regional servers from a single consumer repo with zero framework changes. Define regions as Ansible inventory groups, override per-region configuration (domains, secrets, VPN peers) via `group_vars/<region>/`, and target individual regions or all at once with the standard CLI commands.
+Bay supports deploying the same stack to multiple regional servers from a single fleet with zero framework changes. Define regions as Ansible inventory groups, override per-region configuration (domains, secrets, VPN peers) via `group_vars/<region>/`, and target individual regions or all at once with the standard CLI commands.
 
 ```bash
-bin/bay deploy eu                 # Deploy to EU region only
-bin/bay deploy na                 # Deploy to NA region only
-bin/bay deploy production         # Deploy to all regions
+bay deploy eu                 # Deploy to EU region only
+bay deploy na                 # Deploy to NA region only
+bay deploy production         # Deploy to all regions
 ```
 
 See **[docs/multi-region.md](docs/multi-region.md)** for the full setup guide — inventory structure, group_vars layering, domain parameterization, per-region secrets, and operational workflows.
@@ -462,13 +395,13 @@ webhook:
 ```
 
 ```bash
-bin/bay webhook production        # Deploy webhook infra + show GitHub setup instructions
-bin/bay webhook production --keys-only  # Just show deploy keys
+bay webhook production        # Deploy webhook infra + show GitHub setup instructions
+bay webhook production --keys-only  # Just show deploy keys
 ```
 
 See **[docs/services.md](docs/services.md#build-from-source)** for the full `build:` schema, image tagging, and webhook configuration.
 
-Auto-builds include a circuit breaker (stops after 3 failures), health checks with rollback, build timeouts, and notification dedup. See **[docs/build-strategies.md](docs/build-strategies.md#circuit-breaker)** for details. Reset with `bin/bay build reset <service>`.
+Auto-builds include a circuit breaker (stops after 3 failures), health checks with rollback, build timeouts, and notification dedup. See **[docs/build-strategies.md](docs/build-strategies.md#circuit-breaker)** for details. Reset with `bay build reset <service>`.
 
 ## Architecture notes
 
@@ -484,10 +417,10 @@ See **[docs/access-gateways.md](docs/access-gateways.md)** for traffic flow diag
 
 1. **Configure** — set `access_gateway: headscale` and `headscale_domain` in `group_vars/all/main.yml`
 2. **DNS** — point `hs.example.com` (A record) to your server IP
-3. **Provision + deploy** — `bin/bay provision production && bin/bay deploy production`
-4. **Create user + pre-auth key** — `bin/bay gateway add-user alice && bin/bay gateway key alice`
+3. **Provision + deploy** — `bay provision production && bay deploy production`
+4. **Create user + pre-auth key** — `bay gateway add-user alice && bay gateway key alice`
 5. **Enroll device** — install the Tailscale app, run `tailscale up --login-server https://hs.example.com --authkey <key>`
-6. **Verify** — `bin/bay gateway nodes` — the device should appear in the node list
+6. **Verify** — `bay gateway nodes` — the device should appear in the node list
 
 See **[docs/access-gateways.md](docs/access-gateways.md#headscale-quick-start)** for the detailed walkthrough.
 
@@ -505,7 +438,7 @@ The `deploy_stack` role acquires a file-based deploy lock before deploying, prev
 
 ## Renaming `stack_name`
 
-The `stack_name` variable (set during `bin/bay setup` or in `group_vars/all/main.yml`) controls more than the project label. Changing it has cascading effects across the deployment:
+The `stack_name` variable (set in `group_vars/all/main.yml`) controls more than the project label. Changing it has cascading effects across the deployment:
 
 - **Container and volume name prefixes** — all containers and volumes are named `{stack_name}-*` / `{stack_name}_*`
 - **Volume name prefixes** — all persistent volumes are named `{stack_name}_*`
@@ -527,7 +460,7 @@ Deploying with a new `stack_name` creates a fresh set of empty volumes (`newname
    ```
 2. **Deploy the new stack** so the new containers and volumes are created:
    ```bash
-   bin/bay deploy production
+   bay deploy production
    ```
 3. **Stop new containers**:
    ```bash
@@ -543,7 +476,7 @@ Deploying with a new `stack_name` creates a fresh set of empty volumes (`newname
    Repeat for every volume (`docker volume ls | grep oldname_`).
 5. **Start new containers**:
    ```bash
-   bin/bay deploy production
+   bay deploy production
    ```
 6. **Verify** services are healthy and data is intact, then clean up:
    ```bash
@@ -553,20 +486,20 @@ Deploying with a new `stack_name` creates a fresh set of empty volumes (`newname
 
 ### Headscale namespace
 
-If using `access_gateway: headscale`, changing `stack_name` also changes the Headscale user namespace. After renaming, run `bin/bay gateway migrate-namespace` to rename the Headscale user and update node hostnames in the tailnet. Without this, enrolled devices lose connectivity to VPN-protected services.
+If using `access_gateway: headscale`, changing `stack_name` also changes the Headscale user namespace. After renaming, run `bay gateway migrate-namespace` to rename the Headscale user and update node hostnames in the tailnet. Without this, enrolled devices lose connectivity to VPN-protected services.
 
 For the default migration from the legacy `server` user (pre-v0.40.0):
 
 ```bash
-bin/bay gateway migrate-namespace --dry-run    # preview
-bin/bay gateway migrate-namespace              # server -> stack_name
+bay gateway migrate-namespace --dry-run    # preview
+bay gateway migrate-namespace              # server -> stack_name
 ```
 
 For custom renames (e.g. after changing `stack_name` from `oldapp` to `newapp`):
 
 ```bash
-bin/bay gateway migrate-namespace --from oldapp --to newapp --dry-run
-bin/bay gateway migrate-namespace --from oldapp --to newapp
+bay gateway migrate-namespace --from oldapp --to newapp --dry-run
+bay gateway migrate-namespace --from oldapp --to newapp
 ```
 
 The command renames the Headscale user and all node hostnames under it. Node hostnames follow the `{user}-{region}` convention. Safe to run multiple times — already-migrated resources are skipped.
@@ -591,15 +524,11 @@ make test                    # Framework + bootstrap + Python suites
 | Command | Script | What it tests |
 |---------|--------|---------------|
 | `make test-framework` | `tests/test_framework.sh` | Playbook syntax, ansible-lint, role structure, YAML validity, Jinja2 templates, Galaxy dependencies, expected files, required variables |
-| `make test-bootstrap` | `tests/test_bootstrap.sh` | End-to-end bootstrap: creates a temp project from `bootstrap.sh` using the local repo, then runs the consumer test suite against it |
+| `make test-bootstrap` | `tests/test_bootstrap.sh` | End-to-end install: runs `bootstrap.sh` from the local repo into throwaway directories, checks `bay` runs and `bay fleet init` and `bay fleet ls` work, then runs the installer a second time |
 | `make test` | Both | Runs framework + bootstrap tests |
 | `make lint` | — | `ansible-lint` with production profile (see `.ansible-lint`) |
 
-The bootstrap test uses `BAY_REPO=<local path>` so it clones from the working tree — no GitHub access needed. It validates the full consumer lifecycle: scaffold files, ansible.cfg paths, wrapper playbook imports, YAML integrity, required variables, and playbook resolution (`--list-tasks` on all three playbooks).
-
-### Consumer test suite
-
-Every bootstrapped consumer ships with `tests/test_infra.sh` (from `example/tests/`). Consumers run it via `bin/bay test`. It validates the same checks as the bootstrap test but against the real consumer project.
+The bootstrap test uses `BAY_REPO=<local path>` so it clones from the working tree — no GitHub access needed.
 
 ### Workflow
 
@@ -610,10 +539,9 @@ make lint                    # Check style
 git commit                   # Commit framework changes
 make release VERSION=0.5.1   # Maintainers only: bump version.yml, tag, push
 
-# In a consumer repo:
-bin/bay update           # Bump to latest release (updates .bay-version)
-bin/bay test             # Verify consumer still works
-git add .bay-version && git commit -m "chore: bump bay to v0.5.1"
+# On a machine that uses Bay:
+bay self update      # Move to the latest release
+bay test             # Check your fleet still works
 ```
 
 Never tag or push a release by hand — `make release` bumps `version.yml`, commits, tags and pushes in one step, and a hand-written tag leaves `version.yml` behind. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup, the checks a change must pass, and the release process.

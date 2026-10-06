@@ -7,7 +7,7 @@ a slow deploy.
 
 ## The strategy line
 
-Every `bin/bay deploy` and `bin/bay provision` prints one line before the playbook
+Every `bay deploy` and `bay provision` prints one line before the playbook
 starts:
 
 ```
@@ -32,7 +32,7 @@ persistent remote interpreter and calls into it, which removes most of the per-t
 cost on a run with hundreds of small tasks.
 
 In Bay it is a **hard dependency** (`mitogen` in `pyproject.toml`), not an optional
-extra. `bin/bay` enables it automatically: the CLI looks for the strategy plugin in
+extra. `bay` enables it automatically: the CLI looks for the strategy plugin in
 the framework venv and, when it is there, sets `ANSIBLE_STRATEGY=mitogen_linear`
 and `ANSIBLE_STRATEGY_PLUGINS` for the playbook run. You do not configure it in
 `ansible.cfg`.
@@ -40,15 +40,15 @@ and `ANSIBLE_STRATEGY_PLUGINS` for the playbook run. You do not configure it in
 If the line says `linear (mitogen unavailable)`, one of two things is true:
 
 1. `BAY_NO_MITOGEN=1` is set (see below), or
-2. the framework venv is stale or was purged. Fix it with `bin/bay install`
-   (or `make install` in the framework repo) and re-run.
+2. the framework venv is stale or was purged. Fix it with `bay self update`
+   (or `make install` in the framework checkout) and re-run.
 
 ### `BAY_NO_MITOGEN=1`
 
 Set this to fall back to Ansible's stock `linear` strategy for one run:
 
 ```bash
-BAY_NO_MITOGEN=1 bin/bay deploy production
+BAY_NO_MITOGEN=1 bay deploy production
 ```
 
 Use it when you suspect Mitogen itself, not your playbook: unexplained
@@ -69,10 +69,8 @@ Pipelining removes one SSH round trip per task: the module is fed to the remote
 interpreter over the existing connection instead of being written to a temporary
 file first. Across ~265 tasks that is hundreds of round trips.
 
-The framework's own `ansible.cfg` sets it, and the setup wizard now writes it into
-the consumer `ansible.cfg` it generates. **Consumers created before this was added
-must add the line by hand** â€” the wizard template is only rendered at scaffold time,
-so an existing consumer keeps its old `[ssh_connection]` block forever.
+The framework's own `ansible.cfg` sets it, and Bay also sets `ANSIBLE_PIPELINING` for
+every run. A fleet needs no extra setting.
 
 One requirement: `requiretty` must be off in the target's sudoers. Bay's own
 provisioning never sets it, but a host hardened outside Bay might. The symptom is
@@ -91,8 +89,8 @@ Defaults    !requiretty
 ## Measuring: `--profile`
 
 ```bash
-bin/bay deploy --profile production
-bin/bay provision --profile production
+bay deploy --profile production
+bay provision --profile production
 ```
 
 `--profile` turns on two vendored `ansible.posix` callbacks for that run:
@@ -122,7 +120,7 @@ is noise. Compare two runs of the same deploy rather than trusting one number â€
 first deploy after a base-image change pulls layers and is not representative.
 
 Note that `--profile` must be placed before the environment argument, like every
-other flag (`bin/bay deploy --profile production`). Placed after it, it is rescued
+other flag (`bay deploy --profile production`). Placed after it, it is rescued
 with a warning rather than forwarded to `ansible-playbook`.
 
 ## What Bay already does
@@ -138,9 +136,9 @@ with a warning rather than forwarded to `ansible-playbook`.
 
 ## Validate's probe cache
 
-Every deploy runs `bin/bay validate` first (unless you pass `--skip-validate`), and
+Every deploy runs `bay validate` first (unless you pass `--skip-validate`), and
 validate reaches the network twice: `git ls-remote` for each build-from-source
-service, and `skopeo inspect` for each image service. On a consumer with a handful
+service, and `skopeo inspect` for each image service. On a fleet with a handful
 of services that is 2-5 seconds of the same answers, every single run.
 
 Successful probes are cached in `<bay_dir>/.validate-probe-cache`, a JSON dotfile
@@ -165,7 +163,7 @@ Three properties are worth knowing:
 Force a full re-probe with:
 
 ```bash
-bin/bay validate --no-probe-cache
+bay validate --no-probe-cache
 ```
 
 which re-runs every probe and refreshes the cache entries. Deleting the file has

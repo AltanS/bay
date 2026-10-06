@@ -94,7 +94,7 @@ services:
       days: 7                        #   Prune archives older than N days (00:00 UTC)
       max_total_size: 2g             #   Size ceiling (oldest-first prune if exceeded)
       compress: true                 #   Default; gzip rotated archives
-      mode: normal                   #   normal (0640 bay:argo-logreaders) | sensitive (0600 root:root)  # legacy-argo: unix group on hosts
+      mode: normal                   #   normal (0640 bay:argo-logreaders) | sensitive (0600 root:root)  # kept-argo: unix group on hosts
 
     update: monitor | auto | false   # Watchtower update policy (default: monitor)
     zero_downtime: true              # Enable canary zero-downtime deploy (default: false)
@@ -290,7 +290,7 @@ Server-level defaults in `group_vars`:
 ```yaml
 git_deploy_build_strategy: local         # default for all build: services
 git_deploy_build_mem_limit: "2G"         # systemd MemoryMax on bay-build@.service (wrapper cgroup; integer-only, uppercase)
-git_deploy_buildkit_memory_max: "2.5G"   # docker --memory cap on buildx_buildkit_argo-builder0 (defaults to the wrapper var when unset)  # legacy-argo: live buildx builder name on hosts, migrate separately
+git_deploy_buildkit_memory_max: "2.5G"   # docker --memory cap on buildx_buildkit_argo-builder0 (defaults to the wrapper var when unset)  # kept-argo: live buildx builder name on hosts, migrate separately
 git_deploy_build_lock_timeout: 3600      # seconds before a queued build aborts waiting for the build lock
 ```
 
@@ -317,7 +317,7 @@ services:
     image: registry.example.com/myapp:latest
 ```
 
-The build server needs Docker and a user matching `app_user` with docker group access. The framework automatically creates a persistent clone directory (`/opt/<stack>/push-builds/`), sets up a buildx builder instance (`argo-builder`), and manages build secrets on the build server.  <!-- legacy-argo: live buildx builder name on hosts, migrate separately -->
+The build server needs Docker and a user matching `app_user` with docker group access. The framework automatically creates a persistent clone directory (`/opt/<stack>/push-builds/`), sets up a buildx builder instance (`argo-builder`), and manages build secrets on the build server.  <!-- kept-argo: live buildx builder name on hosts, migrate separately -->
 
 For operators who want to build on their local machine, set `build_server: localhost`.
 
@@ -348,9 +348,9 @@ Builds run with multiple layers of OOM protection to prevent a runaway build fro
 - **OOMScoreAdjust=-900** on the boot safety service (`bay-infra-boot.service`) -- after an OOM event or hard reboot, infrastructure containers (Traefik, etc.) are recovered automatically.
 - **Scheduled cache prune** -- `/usr/local/bin/bay-docker-builder-prune` (installed by the `cronjobs` role) sweeps every builder in `docker_prune_builders` -- the `default` builder *and* the docker-container-driver builder named by `bay_buildx_builder`, retaining `docker_prune_builder_keep_storage` (default `2G`) of hot cache. `docker system prune` runs alongside it. Weekly by default; daily on the `build_server`. Nothing prunes cache before an individual build.
 
-  Pruning the argo builder specifically is not optional bookkeeping: its cache lives in its own Docker volume (`buildx_buildkit_<builder>0_state`), which `docker builder prune` does not reach and `docker system prune -af --volumes` cannot remove while the buildkit container holds it open. `docker system df` reports only the *default* builder, so an unpruned host reads as healthy until the disk fills. The real number is `docker buildx du --builder argo-builder`. (Fixed in v0.111.2 -- GH#34.)  <!-- legacy-argo: live buildx builder name on hosts, migrate separately -->
+  Pruning the argo builder specifically is not optional bookkeeping: its cache lives in its own Docker volume (`buildx_buildkit_<builder>0_state`), which `docker builder prune` does not reach and `docker system prune -af --volumes` cannot remove while the buildkit container holds it open. `docker system df` reports only the *default* builder, so an unpruned host reads as healthy until the disk fills. The real number is `docker buildx du --builder argo-builder`. (Fixed in v0.111.2 -- GH#34.)  <!-- kept-argo: live buildx builder name on hosts, migrate separately -->
 
-  **buildx builder registrations are per-user.** The builder is created as `app_user`, so it appears in `~<app_user>/.docker/buildx` and `docker buildx ls` **as root shows only the default builder** -- the buildkit container and its cache volume are there, but the name resolves to nothing. Anything pruning or inspecting it from a root context (the cron, `bin/bay prune`, your own SSH session) must switch user first; the prune script resolves the owner from `docker_prune_builder_users` and runs both the probe and the prune as that user. A builder with a live buildkit container that no listed user can reach is logged as a `WARNING`, since a silent skip is indistinguishable from a healthy run. (v0.111.3.)
+  **buildx builder registrations are per-user.** The builder is created as `app_user`, so it appears in `~<app_user>/.docker/buildx` and `docker buildx ls` **as root shows only the default builder** -- the buildkit container and its cache volume are there, but the name resolves to nothing. Anything pruning or inspecting it from a root context (the cron, `bay prune`, your own SSH session) must switch user first; the prune script resolves the owner from `docker_prune_builder_users` and runs both the probe and the prune as that user. A builder with a live buildkit container that no listed user can reach is logged as a `WARNING`, since a silent skip is indistinguishable from a healthy run. (v0.111.3.)
 
 ### Private repositories
 
@@ -381,9 +381,9 @@ build:
   token: "{{ secrets.KEY_NAME }}"
 ```
 
-This is the only supported format. The framework renders the resolved token value into `rebuild.sh` at deploy time. `bin/bay validate` checks the vault for the referenced key at deploy-time — a missing or empty key produces a validation error before any deploy proceeds.
+This is the only supported format. The framework renders the resolved token value into `rebuild.sh` at deploy time. `bay validate` checks the vault for the referenced key at deploy-time — a missing or empty key produces a validation error before any deploy proceeds.
 
-Use `bin/bay service add --build-token KEY_NAME` to set this correctly when adding a new service, or set it manually using the form above.
+Use `bay service add --build-token KEY_NAME` to set this correctly when adding a new service, or set it manually using the form above.
 
 #### PAT scope requirements
 
@@ -400,14 +400,14 @@ The resolved token is rendered into `/opt/<stack>/bin/rebuild.sh` in **plaintext
 
 - Anyone with shell access to the build server can read the token from `rebuild.sh`.
 - Use a minimal-scope PAT dedicated to the specific repository or organization rather than a personal token with broad access.
-- Rotate tokens using `bin/bay vault edit production`, then redeploy (`bin/bay deploy production --tags deploy_stack`) to re-render `rebuild.sh`.
+- Rotate tokens using `bay vault edit production`, then redeploy (`bay deploy production --tags deploy_stack`) to re-render `rebuild.sh`.
 
 #### Per-org pattern
 
 When services span multiple GitHub organizations (e.g. `acmecorp/*` and `widgetco/*`), create one PAT per org and store them under distinct vault keys:
 
 ```bash
-bin/bay vault edit production
+bay vault edit production
 # add:
 #   ACMECORP_GIT_TOKEN: ghp_aaaaaa
 #   WIDGETCO_GIT_TOKEN: ghp_bbbbbb
@@ -428,13 +428,13 @@ services:
 
 #### Validation
 
-`bin/bay validate` checks:
+`bay validate` checks:
 - The vault key referenced by `build.token` exists in the decrypted vault
 - The vault key value is non-empty
 
 If the vault is not decryptable (passphrase missing), token presence is skipped with a visible warning — not silently ignored.
 
-`bin/bay validate --check-token-scope` (opt-in) makes a live GitHub API probe to verify the PAT has sufficient scope for the referenced repository.
+`bay validate --check-token-scope` (opt-in) makes a live GitHub API probe to verify the PAT has sufficient scope for the referenced repository.
 
 ### Image tagging
 
@@ -485,9 +485,9 @@ How webhooks interact with build strategies:
 | `remote` | Webhook on the build server triggers build + push to registry, then notifies deployment servers to pull *(planned — see below)* |
 | `registry` | No build — webhooks are not used (image comes from external CI) |
 
-**Note:** `strategy: remote` webhook support requires the webhook receiver to be deployed on the build server. Until that is configured, pushes to remote-strategy services will trigger a notification but not an automatic build. Use `bin/bay deploy` to build and deploy manually.
+**Note:** `strategy: remote` webhook support requires the webhook receiver to be deployed on the build server. Until that is configured, pushes to remote-strategy services will trigger a notification but not an automatic build. Use `bay deploy` to build and deploy manually.
 
-Run `bin/bay webhook <env>` to deploy the receiver and get setup instructions.
+Run `bay webhook <env>` to deploy the receiver and get setup instructions.
 
 ### Path Filtering
 
@@ -546,8 +546,8 @@ services:
 
 ## Config Files
 
-`config_files` lists files under the consumer's `files/`. Each deploy copies
-`files/<path>` to `<stack_dir>/config/<path>` on the host, and `bin/bay
+`config_files` lists files under the fleet's `files/`. Each deploy copies
+`files/<path>` to `<stack_dir>/config/<path>` on the host, and `bay
 validate` refuses an entry with no file behind it. Mount what you need with
 `volumes:`, for example
 `"{{ stack_dir }}/config/legal:/app/legal:ro"`. A changed file
@@ -591,7 +591,7 @@ What that means in practice:
 - **Never for secrets.** Any user on the host can read a public file. Use
   `env.secret` for credentials, not a public config file.
 
-Any other value is refused, both by `bin/bay validate` and at deploy time,
+Any other value is refused, both by `bay validate` and at deploy time,
 before anything is written.
 
 ```yaml
@@ -615,8 +615,8 @@ services:
 
 **What to run after changes:**
 
-- Changed `access` mode, `public_routes`, or `vpn_routes` → `bin/bay deploy production`
-- Changed `vpn_allowed_ips` → `bin/bay provision production` then `bin/bay deploy production`
+- Changed `access` mode, `public_routes`, or `vpn_routes` → `bay deploy production`
+- Changed `vpn_allowed_ips` → `bay provision production` then `bay deploy production`
 
 ## Environment Variables
 
@@ -645,15 +645,15 @@ The list form auto-prefixes vault keys with the service/accessory name to preven
 
 ### Dollar signs in env values
 
-Docker Compose uses `$` for variable interpolation — `$FOO` would be replaced with the value of `FOO`, silently corrupting secrets that contain `$` (Argon2id hashes, bcrypt hashes, htpasswd entries).  <!-- legacy-argo: unrelated hash algorithm name (Argon2id) -->
+Docker Compose uses `$` for variable interpolation — `$FOO` would be replaced with the value of `FOO`, silently corrupting secrets that contain `$` (Argon2id hashes, bcrypt hashes, htpasswd entries).  <!-- kept-argo: unrelated hash algorithm name (Argon2id) -->
 
 Bay handles this automatically: the `env.j2` template escapes every `$` to `$$` when writing `.env` files. No manual escaping needed.
 
 ### Rotating a secret
 
 ```bash
-bin/bay vault edit production      # edit the value, save, vault re-encrypts on write
-bin/bay deploy production          # re-render env files, apply
+bay vault edit production      # edit the value, save, vault re-encrypts on write
+bay deploy production          # re-render env files, apply
 ```
 
 An env-only change **does recreate the container** — the reconciler's
@@ -668,7 +668,7 @@ never a silent no-op.
 If you ever need to force a recreate outside that path (e.g. the image and
 env are unchanged but you want a fresh container), the reconciler treats a
 missing container as absent state: `docker rm -f <container_name>` on the
-host, then re-run `bin/bay deploy production`.
+host, then re-run `bay deploy production`.
 
 ## Basic Auth
 
@@ -886,13 +886,13 @@ accessories:
 Accessories support the same key. Infrastructure containers (traefik,
 watchtower, bay-webhook) are **out of scope for v1**.
 
-### Required consumer variable
+### Required fleet variable
 
 Any host with at least one `log_retention`-enabled container **must** set
 `log_retention_disk_bytes` in `group_vars/<env>/main.yml` — the sum of every
 service's `max_total_size` on that host is checked against
 `log_retention_budget_fraction` (default `0.30`) of this value at
-`bin/bay validate` time. No default is provided because server disks vary
+`bay validate` time. No default is provided because server disks vary
 too widely for a safe one.
 
 ```yaml
@@ -931,20 +931,20 @@ Two modes, chosen per service:
 
 | Mode | Directory | Files | Group access |
 |---|---|---|---|
-| `normal` (default) | `0750 bay:argo-logreaders` | `0640 bay:argo-logreaders` | members of `argo-logreaders` can read |  <!-- legacy-argo: unix group on hosts -->
-| `sensitive` | `0700 root:root` | `0600 root:root` | `argo-logreaders` is locked out |  <!-- legacy-argo: unix group on hosts -->
+| `normal` (default) | `0750 bay:argo-logreaders` | `0640 bay:argo-logreaders` | members of `argo-logreaders` can read |  <!-- kept-argo: unix group on hosts -->
+| `sensitive` | `0700 root:root` | `0600 root:root` | `argo-logreaders` is locked out |  <!-- kept-argo: unix group on hosts -->
 
 Use `mode: sensitive` for any service that logs detailed PII in clear text
 (full request bodies, email addresses in paths, decoded tokens).
 
-#### `debugbot` is NOT added to `argo-logreaders`  <!-- legacy-argo: unix group on hosts -->
+#### `debugbot` is NOT added to `argo-logreaders`  <!-- kept-argo: unix group on hosts -->
 
-The `argo-logreaders` group is created on first opt-in, and `app_user` is added  <!-- legacy-argo: unix group on hosts -->
+The `argo-logreaders` group is created on first opt-in, and `app_user` is added  <!-- kept-argo: unix group on hosts -->
 to it automatically. **`debugbot` is not**. Operators must `usermod -aG
-argo-logreaders debugbot` manually on hosts where a read-only SSH session  <!-- legacy-argo: unix group on hosts -->
+argo-logreaders debugbot` manually on hosts where a read-only SSH session  <!-- kept-argo: unix group on hosts -->
 should be able to reach archived logs. The default is opt-out because
 `debugbot` is a low-friction read-only credential; auto-adding it would turn
-it into a 7-day PII exfiltration vector on any consumer that enables
+it into a 7-day PII exfiltration vector on any fleet that enables
 `log_retention` on a user-facing service.
 
 ### Daily rotation + prune-with-manifest
@@ -979,15 +979,15 @@ it off. Silently no-ops on filesystems that don't support it.
 
 ### CLI — debug trail
 
-When `bin/bay healthcheck` reports a service FAIL, the next step is
+When `bay healthcheck` reports a service FAIL, the next step is
 typically:
 
 ```bash
 # 1. Go straight to the archive on your local workstation
-cd $(bin/bay logs blog --path --env production)
+cd $(bay logs blog --path --env production)
 
 # 2. Or get a dry-run zcat pipeline for a date range
-bin/bay logs blog --path --since 2026-04-20 --env production
+bay logs blog --path --since 2026-04-20 --env production
 
 # 3. Pure workstation view, no SSH needed for steps 1–2.
 #    The path points at the archive on the target host; ssh when you need to read.
@@ -1003,12 +1003,12 @@ container restart that typically clears it.
 
 ```bash
 # Dry run — shows per-file match counts, no files touched
-bin/bay logs blog --scrub --pattern 'user@example\.com' --env production
+bay logs blog --scrub --pattern 'user@example\.com' --env production
 
 # Destructive — requires --yes; removes matching lines from live.log AND
 # every .log.gz; recomputes each archive's sha256 sidecar; writes a
 # `reason=scrub` line to .prune-log with pattern, lines_removed, operator.
-bin/bay logs blog --scrub --pattern 'user@example\.com' --yes --env production
+bay logs blog --scrub --pattern 'user@example\.com' --yes --env production
 ```
 
 The scrub is idempotent (second run finds no matches, writes no new audit
@@ -1072,13 +1072,13 @@ Operators must:
    (RoPA).
 2. Set a retention period (`days:`) no longer than necessary for the stated
    purpose.
-3. Use `bin/bay logs --scrub` to respond to data subject erasure requests
+3. Use `bay logs --scrub` to respond to data subject erasure requests
    (Article 17). The scrub command removes matching lines from live.log
    **and** every rotated archive, recomputes sha256 sidecars, and records a
    `reason=scrub` audit entry including the operator's git email.
 4. Restrict access to archived logs:
-   - Keep the default (`argo-logreaders` group)  <!-- legacy-argo: unix group on hosts -->
-   - Only add `debugbot` (or other sub-argo-admin accounts) to the group on  <!-- legacy-argo: unix group on hosts -->
+   - Keep the default (`argo-logreaders` group)  <!-- kept-argo: unix group on hosts -->
+   - Only add `debugbot` (or other sub-argo-admin accounts) to the group on  <!-- kept-argo: unix group on hosts -->
      hosts where read-only access is explicitly required
    - Use `mode: sensitive` for any service that logs PII in detail —
      archives become root-only at the filesystem level
@@ -1093,7 +1093,7 @@ controllers and are responsible for GDPR compliance.
 - Not applied to infrastructure containers (traefik, watchtower,
   bay-webhook) — v1 scope. If durable Traefik logs become necessary, a
   follow-up milestone extends the mechanism explicitly.
-- Not a streaming `--since <duration>` wrapper. `bin/bay logs <svc>
+- Not a streaming `--since <duration>` wrapper. `bay logs <svc>
   --since 1h` still forwards to `docker logs` (legacy behavior); date-shaped
   `--since YYYY-MM-DD` requires `--path` and produces a dry-run `zcat`
   hint for operator-side execution.
@@ -1158,7 +1158,7 @@ For multi-region deployments, replace hardcoded domains with a variable so each 
 services:
   gatus:
     domains:
-      - gatus.argo.example.com  # legacy-argo: DNS zone example, not a rename target
+      - gatus.argo.example.com  # kept-argo: DNS zone example, not a rename target
 ```
 
 **After (multi-region, parameterized):**
@@ -1241,7 +1241,7 @@ Each link entry specifies a target service or accessory and the region where it'
 - **The link target must declare host exposure**:
   - For an accessory target: `expose: tailnet` at the top level (alongside `port:`)
   - For a service target: `ports.expose: tailnet` (nested inside the `ports:` block)
-  - Without it, the target has no host-port binding on its region's host. Pre-deploy validation (`bin/bay validate`) rejects this configuration.
+  - Without it, the target has no host-port binding on its region's host. Pre-deploy validation (`bay validate`) rejects this configuration.
 
 > **Migration note (framework v0.84.0+):** Previously the framework auto-rewrote a link target's port from `127.0.0.1:` to `0.0.0.0:`. A later change severed that rewrite to make exposure declarative; a subsequent fix closed the resulting gap by adding `ports.expose:` for services and fixing cross-region port resolution. If you have an accessory or service that's a cross-region link target, declare `expose: tailnet` (or `ports.expose: tailnet` for services) explicitly.
 
@@ -1264,7 +1264,7 @@ See [docs/multi-region.md](multi-region.md) for the full multi-region setup patt
 
 Many app images run nginx as PID 1 with the app process (Node, Python, Ruby) supervised under it (s6-overlay, supervisord, foreman, dumb-init+wrapper). When the inner process dies, **nginx stays alive and Docker reports the container as healthy** — the restart policy only fires when PID 1 exits. From the outside, `docker ps` is green, `bay healthcheck` probing `/` gets a 2xx from nginx's static or cached response, and the service is silently dead from the user's perspective.
 
-Docker's per-container `healthcheck:` block helps when set, but most upstream images either don't define one or define one that exec's a shallow check (`curl -f http://127.0.0.1/ || exit 1`) which hits the same nginx that masks the failure. The `bin/bay healthcheck` probe runs from outside via HTTPS and is the canonical "is the user-visible URL serving" check — but only if it probes a path the inner process actually owns.
+Docker's per-container `healthcheck:` block helps when set, but most upstream images either don't define one or define one that exec's a shallow check (`curl -f http://127.0.0.1/ || exit 1`) which hits the same nginx that masks the failure. The `bay healthcheck` probe runs from outside via HTTPS and is the canonical "is the user-visible URL serving" check — but only if it probes a path the inner process actually owns.
 
 The fix is `healthcheck_path:` in `services.yml` (framework v0.84.0+):
 
@@ -1282,7 +1282,7 @@ services:
     healthcheck_path: /healthcheck
 ```
 
-**Rule: any new service where an inner process handles requests but is not PID 1 MUST declare `healthcheck_path` pointing to a route the inner process owns.** Without it, `bin/bay healthcheck` cannot detect app-level death.
+**Rule: any new service where an inner process handles requests but is not PID 1 MUST declare `healthcheck_path` pointing to a route the inner process owns.** Without it, `bay healthcheck` cannot detect app-level death.
 
 **Incident** — 2026-04-22: a demo deploy audit reported "all services healthy" while two storefront locale Node backends had silently died inside their nginx supervisors. Probing `/healthcheck` (proxied to Node on :3001) would have surfaced the failure as a 502; probing `/` returned 200 from nginx. This triggered the addition of the `healthcheck_path:` schema field, probe wiring, output formatting, and migration of every nginx+Node service in demo.
 
@@ -1329,7 +1329,7 @@ fix the route rather than relying on the password.
 
 **A `basic_auth` service with no `healthcheck_path` reports `[gated]`.** Not a
 pass and not a failure: there is nothing to carve out, so the probe can say
-nothing about the backend. It does not affect the `bin/bay healthcheck` exit
+nothing about the backend. It does not affect the `bay healthcheck` exit
 code. Declare `healthcheck_path` to turn it into a real check.
 
 **Upgrade note.** The first deploy after adopting this recreates each affected
@@ -1337,7 +1337,7 @@ service once, because the new router changes the container's config hash.
 
 #### The deploy summary says which failures are yours
 
-`bin/bay deploy` probes every service, then splits the result: what this deploy
+`bay deploy` probes every service, then splits the result: what this deploy
 changed, and everything else. The headline count and the "users may see
 outages" warning are driven by the first group only. A service this deploy
 never touched cannot answer "did I just break something".
@@ -1352,7 +1352,7 @@ break something it never touched, such as an accessory recreated under an
 unchanged app, and those are the failures most worth catching.
 
 The grouping comes from the reconciler, which writes what it changed to
-`.bay/.reconcile-report/<host>.json` on your machine, one file per host. The
+`.reconcile-report/<host>.json` in the framework checkout on your machine, one file per host. The
 CLI empties that directory before every deploy, so a report found afterwards
 can only be the current run's. When there is no report the summary says so in
 one line and prints ungrouped, exactly as it did before. That is the normal
@@ -1361,7 +1361,7 @@ framework.
 
 #### Cold starts and the readiness window
 
-`bin/bay healthcheck` retries a failing probe inside a **wall-clock budget**,
+`bay healthcheck` retries a failing probe inside a **wall-clock budget**,
 and the size of that budget depends on *how* the probe failed:
 
 | Probe outcome | Reading | Budget |
@@ -1409,6 +1409,6 @@ These are framework-level invariants — services don't usually need to think ab
 ### Ansible / Jinja2
 
 - **Use `.get()` for optional dict keys: `env.clear` / `env.secret` / `svc.update` / `acc.update`** — Use `item.value.env.get('clear', {})`, `env.get('secret', [])`, `svc.get('update', 'monitor')`, `acc.get('update', 'monitor')`. Dot notation resolves to Python dict methods (`.clear()`, `.update()`), not the YAML key — that's the original trap. Bracket notation (`env['clear']`) is **not enough**: when the key is absent, `dict['key']` raises KeyError, and Jinja2 silently falls back to `getattr(env, 'clear')`, which returns the bound `.clear()` method. `| default({})` does NOT save you — the value is technically defined (it's a callable), so `default` never fires, and the template crashes downstream with `object of type 'builtin_function_or_method' has no attribute 'items'`. `.get('clear', {})` calls the dict's real `.get` method, never triggers attribute fallback, and returns the explicit default on missing keys. Existence checks (`'clear' in env`) are also correct but more verbose — prefer `.get()`. Same applies to `svc['update']` / `acc['update']` when the `update:` key is absent — Watchtower labels silently default to `monitor` today by accident, but the pattern is fragile. Fixed framework-side in v0.85.3; see `roles/deploy_stack/tasks/main.yml:89,107` for the canonical pattern.
-- **`playbook_dir` resolves to `.bay/`** — `import_playbook: .bay/deploy.yml` changes `playbook_dir` to the framework directory. To reference consumer files (e.g., `files/`), use `playbook_dir | dirname`.
+- **`playbook_dir` is the framework checkout** — the playbooks run from the framework directory, not the fleet. To reference fleet files (e.g., `files/`), use `bay_fleet_root`.
 - **Role defaults unavailable in pre-role plays** — The bootstrap play in `deploy.yml` runs before roles are loaded, so role defaults like `traefik_acme_path` are undefined there. Inline defaults with `| default()`.
 - **Deploy lock must use `block/always`** — If a task fails after lock acquisition, linear execution skips the cleanup task. All post-lock tasks go inside `block:`, lock release goes in `always:`.

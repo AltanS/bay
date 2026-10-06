@@ -50,17 +50,17 @@ debug_agent_keys:
 ### 2. Provision
 
 ```bash
-bin/bay provision production --tags users,agent-debug
+bay provision production --tags users,agent-debug
 ```
 
 This creates the `debugbot` user with the configured SSH keys, installs the wrapper scripts into `/usr/local/bin/`, and writes `/etc/sudoers.d/debugbot`.
 
 ### 3. Set up the Claude Code SSH hook
 
-Copy the hook script to your consumer project:
+Copy the hook script from the framework checkout into the repo where you run Claude Code:
 
 ```bash
-cp .bay/files/hooks/validate-ssh.sh .claude/hooks/
+cp ~/.local/share/bay/framework/files/hooks/validate-ssh.sh .claude/hooks/
 ```
 
 Add to `.claude/settings.json`:

@@ -2,7 +2,7 @@
 
 > **Status:** the **sole** container-deploy path, framework-wide, since v0.97.0.
 > Parity-proven on sandbox, shipped in v0.96.0, soaked
-> per-consumer behind a flag through v0.96.x, then made **unconditional** in
+> per-fleet behind a flag through v0.96.x, then made **unconditional** in
 > v0.97.0 — the per-container Ansible deploy loops and the
 > `bay_reconciler_enabled` flag were retired. Runs on **myapp** and
 > **demo** (3-region). See [Operation](#operation) and [Rollout](#rollout-complete).
@@ -96,7 +96,7 @@ Two operational knobs remain:
 Dry-run any deploy (safe — mutates nothing) to preview the plan:
 
 ```bash
-bin/bay deploy <env> -- -e bay_reconciler_plan_only=true
+bay deploy <env> -- -e bay_reconciler_plan_only=true
 ```
 
 ### Check mode (`-- --check --diff`)
@@ -106,7 +106,7 @@ reconciler a second way, in plan-only mode, and prints the result as the
 `Reconciler check-mode plan` task:
 
 ```bash
-bin/bay deploy <env> -- --check --diff
+bay deploy <env> -- --check --diff
 ```
 
 Check mode also skips the bundle write and the package ship. The bundle and
@@ -142,7 +142,7 @@ The NoOp decision depends on the `com.bay.config-hash` label the S1 gate
 (v0.96.0+) stamps. A container created by a **pre-v0.96.0** framework has no such
 label, so its first reconcile **recreates it once to stamp the label** —
 zero-downtime services canary-swap, others recreate in place. One-time cost;
-every deploy after is a clean NoOp. All current consumers are stamped, so a
+every deploy after is a clean NoOp. All current fleets are stamped, so a
 normal deploy reads all-NoOp.
 
 ## Rollout (complete)
@@ -162,7 +162,7 @@ normal deploy reads all-NoOp.
    (`deploy_infra` / `deploy_accessory` / `deploy_service` + the `_prepare` and
    `cleanup` helpers) and removed the `bay_reconciler_enabled` flag — the
    reconciler is now unconditional. Orphan cleanup carried over via
-   `remove_orphans` (defaults to `container_lifecycle_cleanup`). All consumers
+   `remove_orphans` (defaults to `container_lifecycle_cleanup`). All fleets
    redeployed on v0.97.0 behind a plan-only gate (0 Recreate / 0 unexpected
    Remove), all containers healthy. ✓
 

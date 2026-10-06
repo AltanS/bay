@@ -5,7 +5,7 @@ Bay supports three access-gateway backends, selected with the `access_gateway` v
 | Backend | What it is | Node management |
 |---|---|---|
 | `wireguard` | **Default.** Plain WireGuard on the VPS, peers configured by hand. | None — you edit `vpn_allowed_ips`. |
-| `headscale` | Self-hosted Tailscale control plane, automatic tunnels, split-DNS, ACLs. | Full, via `bin/bay gateway`. |
+| `headscale` | Self-hosted Tailscale control plane, automatic tunnels, split-DNS, ACLs. | Full, via `bay gateway`. |
 | `none` | No private overlay at all. Everything is public. | None. |
 
 `wireguard` and `headscale` both terminate in a WireGuard tunnel and then feed the same downstream pipeline -- nftables firewall, CrowdSec IDS, Traefik IPAllowList. `none` is for an operator who wants a plain public deploy and runs no overlay network; with it, `access: vpn` is rejected at validation time rather than silently serving nobody.
@@ -28,7 +28,7 @@ vpn_allowed_ips:
   - 10.0.0.3/32               # bob
 ```
 
-Each peer needs a WireGuard config file on their device with the server's public key, endpoint, and their assigned IP. Adding or removing peers means editing `vpn_allowed_ips` and running `bin/bay provision production`.
+Each peer needs a WireGuard config file on their device with the server's public key, endpoint, and their assigned IP. Adding or removing peers means editing `vpn_allowed_ips` and running `bay provision production`.
 
 ### Traffic flow
 
@@ -66,7 +66,7 @@ Two components are deployed:
 - **Tailscale daemon** -- runs on the VPS, joins the tailnet, provides the tunnel interface (`tailscale0`)
 
 There is no admin web UI. All node, user, and key management happens through the
-`bin/bay gateway` CLI (which drives the Headscale CLI over the deploy connection)
+`bay gateway` CLI (which drives the Headscale CLI over the deploy connection)
 or, optionally, OIDC self-service enrollment.
 
 ### Headscale user model
@@ -75,13 +75,13 @@ Bay creates two kinds of Headscale users:
 
 1. **Server node user** (automatic) -- created by the `tailscale_register` role during deploy. Defaults to `stack_name` (e.g., `myapp`). The VPS itself registers under this user. You do not need to manage this user manually.
 
-2. **Device users** (operator-created) -- for enrolling end-user laptops, phones, and other client devices. Created via `bin/bay gateway add-user <name>` (e.g., `alice`, `mobile-devices`). Each device user gets their own pre-auth keys and appears separately in `bin/bay gateway users` / `bin/bay gateway nodes`.
+2. **Device users** (operator-created) -- for enrolling end-user laptops, phones, and other client devices. Created via `bay gateway add-user <name>` (e.g., `alice`, `mobile-devices`). Each device user gets their own pre-auth keys and appears separately in `bay gateway users` / `bay gateway nodes`.
 
 This separation ensures that when multiple Bay projects share one Headscale server, each project's VPS nodes are isolated under their own user (matching `stack_name`), while device users remain project-specific by convention.
 
 The server node hostname in Headscale follows the pattern `{stack_name}` for single-server setups and `{stack_name}-{region}` for multi-region (e.g., `myapp-eu`, `myapp-na`).
 
-To rename Headscale resources after changing `stack_name`, use `bin/bay gateway migrate-namespace --from <old> --to <new>`. Without flags, it migrates from the legacy `server` user to the current `stack_name`.
+To rename Headscale resources after changing `stack_name`, use `bay gateway migrate-namespace --from <old> --to <new>`. Without flags, it migrates from the legacy `server` user to the current `stack_name`.
 
 ### Configuration
 
@@ -98,7 +98,7 @@ headscale_oidc_client_id: headscale
 headscale_oidc_client_secret: "{{ vault_headscale_oidc_secret }}"
 ```
 
-Without OIDC, create pre-auth keys via the `bin/bay gateway` CLI (`bin/bay gateway key <user>` or `bin/bay gateway enroll`). With OIDC, users open `https://hs.example.com` in a browser and authenticate through your identity provider.
+Without OIDC, create pre-auth keys via the `bay gateway` CLI (`bay gateway key <user>` or `bay gateway enroll`). With OIDC, users open `https://hs.example.com` in a browser and authenticate through your identity provider.
 
 ### Traffic flow
 
@@ -133,7 +133,7 @@ Without OIDC, create pre-auth keys via the `bin/bay gateway` CLI (`bin/bay gatew
 6. Authorized requests are routed to the target service container
 
 There is no admin UI to reach — manage the tailnet from your workstation with the
-[`bin/bay gateway` CLI](#gateway-cli) (no SSH to the server needed).
+[`bay gateway` CLI](#gateway-cli) (no SSH to the server needed).
 
 ### Headscale quick start
 
@@ -156,8 +156,8 @@ Create an A record for `hs.example.com` pointing to your server IP. Traefik issu
 #### 3. Provision and deploy
 
 ```bash
-bin/bay provision production
-bin/bay deploy production
+bay provision production
+bay deploy production
 ```
 
 This deploys Headscale (public, for client enrollment) and the Tailscale daemon (VPS joins its own tailnet). There is no admin UI container.
@@ -168,7 +168,7 @@ Single-server setups can skip this step — enrollment below uses pre-auth keys,
 the API key.
 
 ```bash
-bin/bay gateway apikey
+bay gateway apikey
 ```
 
 This creates a Headscale API key (valid for 1 year by default). Use `--expiration` to change the lifetime (e.g. `--expiration 90d`).
@@ -179,7 +179,7 @@ API during deploy. This must persist — if it expires, deploys to non-control r
 fail at the `tailscale_register` step.
 
 ```bash
-bin/bay vault edit production
+bay vault edit production
 ```
 
 Then inside the `secrets:` dict:
@@ -191,8 +191,8 @@ headscale_api_key: "hskey-api-..."
 #### 5. Create a user and pre-auth key
 
 ```bash
-bin/bay gateway add-user alice
-bin/bay gateway key alice
+bay gateway add-user alice
+bay gateway key alice
 ```
 
 The pre-auth key is a one-time token that allows a device to join the tailnet without interactive login.
@@ -210,7 +210,7 @@ On macOS/iOS/Android, enter the login server URL in Tailscale settings before co
 #### 7. Verify
 
 ```bash
-bin/bay gateway nodes
+bay gateway nodes
 ```
 
 The enrolled device should appear in the node list with a green status indicator. VPN-protected services (`access: vpn`) are now accessible from the device.
@@ -218,20 +218,20 @@ The enrolled device should appear in the node list with a green status indicator
 **Notes:**
 
 - **OIDC alternative** — instead of pre-auth keys, configure `headscale_oidc_*` variables to let users self-enroll through your identity provider. See [Configuration](#configuration-1) above.
-- **Revoking access** — remove a node via `bin/bay gateway delete-node <name>`, or delete an entire user and their devices with `bin/bay gateway delete-user <name> --force`.
+- **Revoking access** — remove a node via `bay gateway delete-node <name>`, or delete an entire user and their devices with `bay gateway delete-user <name> --force`.
 - **Adding more devices** — repeat steps 5–6 for each user/device. Each pre-auth key is single-use by default.
-- **Managing users** — `bin/bay gateway users` lists all users with node counts. `bin/bay gateway user-info <name>` shows a user's devices and online status.
-- **API key renewal** — run `bin/bay gateway apikey` again when the current key expires. Old keys stop working immediately after expiration. If you have a multi-region setup, update the vault key too (`bin/bay vault edit production`).
+- **Managing users** — `bay gateway users` lists all users with node counts. `bay gateway user-info <name>` shows a user's devices and online status.
+- **API key renewal** — run `bay gateway apikey` again when the current key expires. Old keys stop working immediately after expiration. If you have a multi-region setup, update the vault key too (`bay vault edit production`).
 
 ### Enrolling external devices
 
-Not every device that needs tailnet access lives in the Ansible inventory — laptops, phones, or boxes managed elsewhere (another team, a vendor, a homelab) still need to reach `access: vpn` services sometimes. `bin/bay gateway enroll` is the lightweight path for this, and it deliberately does **less** than onboarding an inventory server: no `bin/bay provision`, no hardening, no `tailscale_register` role run — the device only gains a Tailscale client session.
+Not every device that needs tailnet access lives in the Ansible inventory — laptops, phones, or boxes managed elsewhere (another team, a vendor, a homelab) still need to reach `access: vpn` services sometimes. `bay gateway enroll` is the lightweight path for this, and it deliberately does **less** than onboarding an inventory server: no `bay provision`, no hardening, no `tailscale_register` role run — the device only gains a Tailscale client session.
 
 ```bash
-bin/bay gateway enroll --user external-box
+bay gateway enroll --user external-box
 ```
 
-This creates a Headscale user (if it doesn't already exist), generates a single-use pre-auth key (`--expiry` and `--reusable` are available — see `bin/bay gateway enroll --help`), and prints the join command to run on the device:
+This creates a Headscale user (if it doesn't already exist), generates a single-use pre-auth key (`--expiry` and `--reusable` are available — see `bay gateway enroll --help`), and prints the join command to run on the device:
 
 ```bash
 tailscale up --login-server=https://hs.example.com --authkey=<key> --hostname=external-box
@@ -239,26 +239,26 @@ tailscale up --login-server=https://hs.example.com --authkey=<key> --hostname=ex
 
 `--user` names the **owner** in Headscale, which is not the same thing as the device's tailnet name. Left to itself the device registers under whatever hostname it happens to have locally, so `ssh external-box` resolves nothing. Since `enroll` is one-user-per-device, it defaults the tailnet name to the user name and adds `--hostname` for you. Override with `--hostname <name>`, or opt out with `--no-hostname` to let the device keep its own.
 
-> **Default-deny tailnets:** if the consumer defines `headscale_acl_policy`, enrollment alone leaves the device unreachable — `enroll` does not touch the policy. It detects this and prints the next steps. See [ACL policy](tailnet-ingress.md#locking-the-upstream-headscale-acl-headscale_acl_policy) for why an ungranted node doesn't even appear in other nodes' `tailscale status`.
+> **Default-deny tailnets:** if the fleet defines `headscale_acl_policy`, enrollment alone leaves the device unreachable — `enroll` does not touch the policy. It detects this and prints the next steps. See [ACL policy](tailnet-ingress.md#locking-the-upstream-headscale-acl-headscale_acl_policy) for why an ungranted node doesn't even appear in other nodes' `tailscale status`.
 
-Contrast with inventory servers: they join the tailnet automatically during `bin/bay provision` / `bin/bay deploy`, via the `tailscale_register` role (see [Headscale user model](#headscale-user-model) above), with full hardening included. `gateway enroll` skips all of that on purpose — it's for boxes Bay doesn't own or manage.
+Contrast with inventory servers: they join the tailnet automatically during `bay provision` / `bay deploy`, via the `tailscale_register` role (see [Headscale user model](#headscale-user-model) above), with full hardening included. `gateway enroll` skips all of that on purpose — it's for boxes Bay doesn't own or manage.
 
 #### Enrolling a class of device: `--tag`
 
 A per-device `hosts:` alias plus a per-device rule is the wrong shape when the device is one of many interchangeable boxes — an agent runner, a CI worker, a burner VM. ACL tags express that class once; `--tag` stamps the tag onto the **pre-auth key**, so the node joins already tagged:
 
 ```bash
-bin/bay gateway enroll --user ci-runner --tag tag:agent --reusable --expiry 30d
+bay gateway enroll --user ci-runner --tag tag:agent --reusable --expiry 30d
 ```
 
-`--tag` is repeatable (`--tag tag:agent --tag tag:ci`) and is also available on `bin/bay gateway key` for a user that already exists. Values must be lowercase `tag:name` (letters, digits, hyphens); anything else is rejected locally, before a user is created on the control host.
+`--tag` is repeatable (`--tag tag:agent --tag tag:ci`) and is also available on `bay gateway key` for a user that already exists. Values must be lowercase `tag:name` (letters, digits, hyphens); anything else is rejected locally, before a user is created on the control host.
 
 The point is *when* the tag applies. The alternative — enroll, then `headscale nodes tag -i <id> -t tag:agent` on the control host — leaves the node online-but-ungranted between the two commands, and reassigns its owner to the synthetic `tagged-devices` user after the fact. A key-stamped tag is in force from the node's first packet, so every rule matching that tag applies at join.
 
 Three caveats, which the CLI also prints after a tagged enrollment:
 
 - **A tag no rule names grants nothing.** If `tag:agent` doesn't appear in `tagOwners` *and* in accept rules, the node is exactly as dead on arrival as an untagged one. Tags remove the per-device edit; they don't remove the need for the class rules to exist first.
-- **Ownership moves.** On Headscale **v0.29.x** a key-stamped node registers under the synthetic `tagged-devices` user, not the enrollment user — verified end-to-end against v0.29.2. The tag itself still shows in the Tags column of `bin/bay gateway nodes`; only the owner moves, so ACL rules keyed on the *user* will not match this node. Key off the tag. Re-confirm on a different Headscale major.
+- **Ownership moves.** On Headscale **v0.29.x** a key-stamped node registers under the synthetic `tagged-devices` user, not the enrollment user — verified end-to-end against v0.29.2. The tag itself still shows in the Tags column of `bay gateway nodes`; only the owner moves, so ACL rules keyed on the *user* will not match this node. Key off the tag. Re-confirm on a different Headscale major.
 - **`acl audit` can't verify this.** It deliberately does not resolve `tag:` targets — they resolve against live Headscale state, not the policy file — so a tag-granted node reads as `unknown` there. Verify with a peer probe instead, run **from another node**, never from the node serving the port: a denied flow **times out** (`exit 124`), an allowed flow to a closed port is **refused** (`exit 1`).
 
 #### Recommended join flags for externally-managed boxes
@@ -268,12 +268,12 @@ tailscale up --login-server=https://hs.example.com --authkey=<key> \
   --hostname=external-box --accept-dns=false
 ```
 
-- `--hostname=<name>` — sets the node name shown in `bin/bay gateway nodes`. Without it, Headscale falls back to the device's own hostname, which may be uninformative or collide with another node. `enroll` now adds this for you (defaulting to the `--user` name), so you only need it by hand when joining a device without the CLI, or when overriding via `enroll --hostname`. To fix a node that already joined under the wrong name, use `bin/bay gateway rename-node`.
+- `--hostname=<name>` — sets the node name shown in `bay gateway nodes`. Without it, Headscale falls back to the device's own hostname, which may be uninformative or collide with another node. `enroll` now adds this for you (defaulting to the `--user` name), so you only need it by hand when joining a device without the CLI, or when overriding via `enroll --hostname`. To fix a node that already joined under the wrong name, use `bay gateway rename-node`.
 - `--accept-dns=false` — stops Tailscale/MagicDNS from rewriting the box's `/etc/resolv.conf`. An externally-managed box's DNS isn't Bay's to change just because it joined the tailnet — reach tailnet services by their raw `100.64.0.x` address instead of MagicDNS names.
 
 #### Finding the assigned tailnet IP
 
-`bin/bay gateway nodes` shows each node's tailnet IP. New nodes get the next free `100.64.0.x` address. (The key-display quirk is documented in `bin/bay gateway key --help`.)
+`bay gateway nodes` shows each node's tailnet IP. New nodes get the next free `100.64.0.x` address. (The key-display quirk is documented in `bay gateway key --help`.)
 
 #### ACL implications under default-deny
 
@@ -296,7 +296,7 @@ If the deployment defines `headscale_acl_policy` (see [Hardening the tailnet](#h
 #### Applying the policy change
 
 ```bash
-bin/bay deploy production --tags headscale --region <control-region>
+bay deploy production --tags headscale --region <control-region>
 ```
 
 This re-templates `policy.hujson` on the control host and restarts the `headscale` container. Verify in order: grep the rendered policy on the control host for the new alias/rule, confirm `headscale nodes list` shows the node online, then live-test the flow you just granted. Rollback is `git revert` of the policy commit followed by the same deploy command — **never** delete `headscale_acl_policy` to back out, since removing it reverts the tailnet to allow-all (a far larger blast radius than the edit, and it strips the only source restriction left wherever the ACL replaced host-level sshd pins).
@@ -306,8 +306,8 @@ This re-templates `policy.hujson` on the control host and restarts the `headscal
 Teardown uses the same commands as any other node or user:
 
 ```bash
-bin/bay gateway delete-node external-box
-bin/bay gateway delete-user external-box --force   # also drops the user
+bay gateway delete-node external-box
+bay gateway delete-user external-box --force   # also drops the user
 ```
 
 ### Multi-region Headscale
@@ -327,7 +327,7 @@ Remote region (any other region)
   └── Tailscale daemon (registers via API, joins same tailnet)
 ```
 
-All servers share one tailnet — devices and services in any region can reach VPN-protected services in any other region through the mesh. There is no admin UI; the tailnet is managed via `bin/bay gateway` (which auto-targets the control host).
+All servers share one tailnet — devices and services in any region can reach VPN-protected services in any other region through the mesh. There is no admin UI; the tailnet is managed via `bay gateway` (which auto-targets the control host).
 
 #### Variables
 
@@ -336,16 +336,16 @@ All servers share one tailnet — devices and services in any region can reach V
 | `headscale_control_region` | — | `group_vars/all/access_gateway.yml` | Names the region that runs the Headscale coordination server |
 | `secrets.headscale_api_key` | — | `group_vars/production/secrets.yml` (vault, inside `secrets:` dict) | API key for remote region registration |
 
-The wizard sets `headscale_control_region` automatically when you choose multi-region + headscale (first region entered). Single-server setups leave it unset.
+For multi-region with Headscale, set `headscale_control_region` to the region that runs it. Single-server setups leave it unset.
 
 #### Deploy order
 
 Multi-region + headscale requires a specific deploy order:
 
-1. `bin/bay deploy <control-region>` — deploys Headscale server and registers the control host
-2. `bin/bay gateway apikey` — generates an API key on the control server
-3. `bin/bay vault edit production` — add `headscale_api_key` inside the `secrets:` dict
-4. `bin/bay deploy <remote_region>` — remote host registers via API using the key
+1. `bay deploy <control-region>` — deploys Headscale server and registers the control host
+2. `bay gateway apikey` — generates an API key on the control server
+3. `bay vault edit production` — add `headscale_api_key` inside the `secrets:` dict
+4. `bay deploy <remote_region>` — remote host registers via API using the key
 
 If you deploy a remote region before the control region, the deploy fails with a clear error message indicating that `headscale_api_key` is required.
 
@@ -441,7 +441,7 @@ If a service uses a hardcoded domain (e.g., `blog.example.com`), the templates f
 The headscale role runs only on the control region host. If you add or change a VPN service and deploy only that service's region, the split-DNS records are **not updated**. After changing VPN services, always also deploy the headscale tag:
 
 ```bash
-bin/bay deploy production --tags headscale
+bay deploy production --tags headscale
 ```
 
 ### DNS override behavior
@@ -530,16 +530,16 @@ Two related controls live on the control host and are documented in full in
 
 ## Gateway CLI
 
-All Headscale management is available through `bin/bay gateway` subcommands — no SSH to the server needed. The CLI help is the reference:
+All Headscale management is available through `bay gateway` subcommands — no SSH to the server needed. The CLI help is the reference:
 
 ```bash
-bin/bay gateway --help              # all subcommands
-bin/bay gateway enroll --help       # per-command details, quirks, and examples
+bay gateway --help              # all subcommands
+bay gateway enroll --help       # per-command details, quirks, and examples
 ```
 
-Every subcommand accepts `--env` (default: `production`) and `--region` to target a specific region in multi-region setups; `bin/bay gateway` auto-targets the control host.
+Every subcommand accepts `--env` (default: `production`) and `--region` to target a specific region in multi-region setups; `bay gateway` auto-targets the control host.
 
-For enrolling boxes that live outside the Ansible inventory (contractor laptops, vendor-managed servers, homelab devices), see [Enrolling external devices](#enrolling-external-devices) above. On a default-deny tailnet, `bin/bay gateway acl audit` is the post-enrollment check that catches nodes the policy never names (see `--help` for the status taxonomy).
+For enrolling boxes that live outside the Ansible inventory (contractor laptops, vendor-managed servers, homelab devices), see [Enrolling external devices](#enrolling-external-devices) above. On a default-deny tailnet, `bay gateway acl audit` is the post-enrollment check that catches nodes the policy never names (see `--help` for the status taxonomy).
 
 ## Choosing a gateway
 
@@ -549,7 +549,7 @@ For enrolling boxes that live outside the Ansible inventory (contractor laptops,
 | **Peer management** | Edit `vpn_allowed_ips`, redeploy | OIDC self-service or pre-auth keys |
 | **Key rotation** | Manual | Automatic |
 | **IP assignment** | Manual (you pick IPs) | Automatic (CGNAT range) |
-| **Management** | Edit YAML + redeploy | `bin/bay gateway` CLI (no SSH) + optional OIDC |
+| **Management** | Edit YAML + redeploy | `bay gateway` CLI (no SSH) + optional OIDC |
 | **Dependencies** | WireGuard kernel module | Headscale container + Tailscale daemon |
 | **Best for** | Small teams, static peers | Growing teams, self-service onboarding |
 
@@ -639,7 +639,7 @@ With self-hosted Headscale, you also get the `bay gateway` CLI for user/node/key
 3. **Deploy normally:**
 
    ```bash
-   bin/bay deploy production
+   bay deploy production
    ```
 
    Services with `access: vpn` are now protected by Traefik's IPAllowList — only requests from tailnet IPs are allowed.
@@ -693,7 +693,7 @@ to branch on which backend is active.
 |---|---|---|---|---|
 | `gateway_enabled` | any private overlay exists | `true` | `true` | `false` |
 | `gateway_bind_ip` | this host's overlay IP — the bind target for `expose: gateway`, the Traefik overlay entrypoint, zot's self-pin, the CrowdSec self-ban exemption | the configured overlay IP | the configured overlay IP | `''` |
-| `gateway_cidrs` | overlay CIDR(s) for allowlists | tailnet CIDR | `[]` (consumer supplies `vpn_allowed_ips` directly) | `[]` |
+| `gateway_cidrs` | overlay CIDR(s) for allowlists | tailnet CIDR | `[]` (the fleet supplies `vpn_allowed_ips` directly) | `[]` |
 | `gateway_identity_supported` | per-request identity injection available | `tailnet_identity_enabled` | `false` | `false` |
 | `gateway_requires_node_registration` | hosts must register with a control server after their containers start | `true` | `false` | `false` |
 
@@ -735,7 +735,7 @@ IP). Those two go through a resolver instead:
 {{ hostvars[h] | bay_gateway_bind_ip }}
 ```
 
-`bay_gateway_bind_ip` reads `gateway_bind_ip` if the consumer set it in
+`bay_gateway_bind_ip` reads `gateway_bind_ip` if the fleet set it in
 `group_vars`/`host_vars`, falls back to the incumbent
 per-host overlay-IP var, and otherwise returns `''`. It is duplicated in
 `roles/crowdsec_allowlist/library/crowdsec_allowlist_sync.py` because an Ansible
@@ -746,7 +746,7 @@ filter plugin; `tests/test_gateway_contract.py` asserts the two copies agree.
 
 `src/bay_cli/commands/gateway_backend.py` defines a `typing.Protocol` minted
 from `LocalHeadscaleBackend`'s existing method list — that class was already the
-de facto interface, so the Protocol only writes down what `bin/bay gateway` had
+de facto interface, so the Protocol only writes down what `bay gateway` had
 always assumed.
 
 - A backend with **equivalent semantics** (a remote Headscale, or a
@@ -766,7 +766,7 @@ speculative generality with zero second implementations.
 
 `ports.expose` accepts `gateway`. `tailnet` remains accepted **indefinitely** as
 a documented synonym — both resolve through `gateway_bind_ip`. `services.yml` is
-consumer-facing API, so there is no breaking rename; existing files never need
+fleet-facing API, so there is no breaking rename; existing files never need
 editing. New docs and `example/` use `gateway`.
 
 Validation is now a live guard rather than a dead one. It used to test the
@@ -794,4 +794,4 @@ var. Add the var — do not add the branch.
 
 The `access_gateway` variable defaults to `wireguard`. Existing deployments that do not set this variable continue to work without changes.
 
-Switching from one gateway to the other requires reprovisioning (`bin/bay provision production`) since the tunnel interface, firewall rules, and IPAllowList configuration all change. The switch is not disruptive to service definitions -- only the infrastructure layer is replaced.
+Switching from one gateway to the other requires reprovisioning (`bay provision production`) since the tunnel interface, firewall rules, and IPAllowList configuration all change. The switch is not disruptive to service definitions -- only the infrastructure layer is replaced.

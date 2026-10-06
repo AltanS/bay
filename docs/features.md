@@ -69,7 +69,7 @@ Bay generates these DNS records automatically from `services.yml` -- adding a VP
 
 ### Gateway management
 
-The `bin/bay gateway` CLI provides full Headscale administration — status, nodes, users, keys, enrollment, routes, and ACL auditing — with no SSH to the server. `bin/bay gateway --help` is the command reference.
+The `bay gateway` CLI provides full Headscale administration — status, nodes, users, keys, enrollment, routes, and ACL auditing — with no SSH to the server. `bay gateway --help` is the command reference.
 
 ### Additional capabilities
 
@@ -79,13 +79,13 @@ The `bin/bay gateway` CLI provides full Headscale administration — status, nod
 
 ## Multi-Region Support
 
-Deploy the same stack to multiple regional servers from a single consumer repo:
+Deploy the same stack to multiple regional servers from a single fleet:
 
 - Regions are standard Ansible inventory groups with per-region `group_vars/` overrides
 - Cross-region service connectivity via the tailnet (Headscale coordinates all regions)
 - Per-region domain configuration (e.g., `eu.example.com`, `na.example.com`)
 - Shared Headscale coordination server on the control region
-- Target individual regions or all at once: `bin/bay deploy eu`, `bin/bay deploy production`
+- Target individual regions or all at once: `bay deploy eu`, `bay deploy production`
 
 See [multi-region.md](multi-region.md) for the full setup guide.
 
@@ -105,25 +105,24 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 
 ## Developer Experience
 
-- **`bin/bay` CLI** -- single entry point wrapping deploy, provision, validate, gateway, vault, backup, test, and framework management
+- **`bay` CLI** -- single entry point wrapping deploy, provision, validate, gateway, vault, backup, test, and framework management
 - **`bay validate`** -- pre-deploy config checks: YAML syntax, `services.yml` schema, inventory, vault keys (also runs automatically before every deploy)
 - **`bay doctor`** -- environment probes: SSH reachability, vault password, DNS resolution
-- **`bay setup`** -- interactive wizard for project scaffolding (also supports `--defaults` and fully non-interactive flag-driven mode)
-- **`bay guide`** -- context-aware setup guide for the current project state
-- **Framework versioning** -- consumers pin to semver tags via `.bay-version`; `install`/`update`/`status` commands manage the lifecycle
-- **`dev-link` / `dev-unlink`** -- symlink `.bay/` to a local framework checkout for rapid iteration without commit+push+tag cycles
+- **`bay fleet init`** -- make a fleet, or clone one with `--from`; `bay init` then writes a `bay.toml` in an app repo
+- **Framework versioning** -- Bay releases are semver tags; `bay self update [--to <tag>]` and `bay self version` manage the installed copy
+- **`bay --fleet <path>`** -- point any command at a fleet or framework change for rapid iteration without commit+push+tag cycles
 - **Config change detection** -- only redeploy services whose configuration has actually changed
-- **Dry runs** -- `bin/bay deploy production -- --check --diff` passes extra args through to Ansible and prints the reconciler's container plan (see [reconciler.md](reconciler.md#check-mode----check---diff))
+- **Dry runs** -- `bay deploy production -- --check --diff` passes extra args through to Ansible and prints the reconciler's container plan (see [reconciler.md](reconciler.md#check-mode----check---diff))
 
 ## Infrastructure as Code
 
 - **Pure Ansible** -- no custom runtime, no daemon, no agent on target servers; standard SSH + Python
-- **Consumer model** -- the framework is cloned into `.bay/` inside the consumer repo; consumer provides only configuration (`group_vars/`, `hosts/`, `services.yml`)
+- **Fleet model** -- Bay is installed once per machine; the fleet repo provides only configuration (`group_vars/`, `hosts/`, `services.yml`)
 - **Idempotent deploys** -- run `deploy` repeatedly; only changed resources are updated
 - **Restic backups** -- deduplicated, encrypted backups to S3-compatible storage with per-accessory repositories, systemd timers, configurable retention, and one-command restore
 - **Watchtower** -- container image update monitoring with Telegram notifications; opt-in auto-update per service
 - **Pluggable alerting** -- crash/build/deploy/disk/backup alerts to Telegram and/or a generic webhook sink (Campfire, Slack, or plain text), fail-open by design; see [alerting.md](alerting.md)
-- **`bootstrap.sh`** -- one-command project scaffolding from the framework's `example/` template
+- **`bootstrap.sh`** -- one-command install of the `bay` command on a machine (see [install.md](install.md))
 
 ---
 

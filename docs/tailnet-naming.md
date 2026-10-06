@@ -47,7 +47,7 @@ so the tailnet's naming is yours rather than whatever the laptop happens to call
 itself:
 
 ```bash
-bin/bay gateway enroll --user alice --hostname alice-laptop
+bay gateway enroll --user alice --hostname alice-laptop
 ```
 
 Pick names that read as a class when they belong to one — `ci-runner-1`,
@@ -109,7 +109,7 @@ the class by carrying the tag, with no policy edit.
 
 - **Singletons.** One laptop, one phone, one workstation. A class of one is a name
   wearing a costume.
-- **Anything the audit must cover.** `bin/bay gateway acl audit` reasons about
+- **Anything the audit must cover.** `bay gateway acl audit` reasons about
   reachability per node; a `hosts:`-named node is individually accounted for. A tag
   resolves to whichever nodes currently carry it, which is a weaker statement about
   any *particular* node.
@@ -180,7 +180,7 @@ it shares, and named in `hosts:` for the one port it does not.
 ### Class device — key-stamped tag (preferred)
 
 ```bash
-bin/bay gateway enroll --user ci-runner-1 --tag tag:agent --expiry 24h
+bay gateway enroll --user ci-runner-1 --tag tag:agent --expiry 24h
 ```
 
 The tag is stamped on the **pre-auth key**, so the node joins already tagged and
@@ -222,7 +222,7 @@ rather than as silence.
 Three checks, in order — they answer different questions and none substitutes for
 another.
 
-1. **`bin/bay gateway acl audit`** — resolves `tag:` targets against the live node
+1. **`bay gateway acl audit`** — resolves `tag:` targets against the live node
    list, on both sides of a rule, and flags nodes no accept rule can reach plus any
    inert tags. Two limits to hold in mind: it is **dst-side only** (a half-listed
    node that can be reached but cannot initiate reads as `reachable`), and it
@@ -256,8 +256,8 @@ To back out an ACL change, **revert the commit** and redeploy:
 
 ```bash
 git revert <sha>
-bin/bay validate
-bin/bay deploy production --tags headscale
+bay validate
+bay deploy production --tags headscale
 ```
 
 Do **not** roll back by deleting `headscale_acl_policy`. Removing the policy does
@@ -282,7 +282,7 @@ policy. A delete returns you to no policy.
   machines, reference `hosts:` aliases directly in `src`/`dst`, or give them a tag.
 - **An invalid policy crash-loops headscale.** The tailnet coasts on its cached policy
   until the container actually dies, so the failure surfaces long after the deploy
-  that caused it. Always `bin/bay validate` first; the role also stages and
+  that caused it. Always `bay validate` first; the role also stages and
   `policy check`s before installing (see
   [Locking the upstream](tailnet-ingress.md#locking-the-upstream-headscale-acl-headscale_acl_policy)).
 - **Enrolling ≠ authorizing.** `enroll` never touches the policy. Only `--tag` against

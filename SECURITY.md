@@ -3,7 +3,7 @@
 ## Supported Versions
 
 Only the latest tagged release of Bay is supported with security fixes.
-Please upgrade to the latest release (`bin/bay update` from a consumer repo,
+Please upgrade to the latest release (`bay self update`,
 or check the [releases page](https://github.com/AltanS/bay/tags)) before
 reporting an issue, and confirm it still reproduces there.
 

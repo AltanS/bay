@@ -81,7 +81,7 @@ defines the correlation contract between webhook, fan-out, and rebuild.sh
   will continue to show `triggered N services` on every push (webhook
   correctly wrote the trigger); the CB guard in rebuild.sh exits early.
   This is the incident pattern: webhook looks healthy, service is stuck.
-- **Recovery:** `bin/bay build reset <svc>` from the consumer directory
+- **Recovery:** `bay build reset <svc>` from the fleet directory
   (see `--help` for flags). See "Webhook Auto-Build Troubleshooting" below
   for the manual JSON fallback.
 - **Incident (2026-04-16)** — `blog` on the `demo` NA region. Build failed,
@@ -104,7 +104,7 @@ ssh debugbot@203.0.113.14 "journalctl -u bay-build@<svc>.service --since '1h ago
 # Check state file for CB status:
 ssh debugbot@203.0.113.14 "cat /opt/demo/state/<svc>.json"
 # If CB is open (consecutive_failures >= git_deploy_cb_max_failures=5):
-ssh debugbot@203.0.113.11 "bin/bay build reset <svc>"  # from demo consumer
+ssh debugbot@203.0.113.11 "bay build reset <svc>"  # from the demo fleet
 ```
 
 **Pull signal not reaching deployment servers:**
@@ -125,11 +125,11 @@ ssh debugbot@203.0.113.12 "systemctl status bay-build@<svc>.path"
 **Circuit breaker (CB) recovery workflow:**
 ```bash
 # Check CB state (or: ssh debugbot@<host> "cat /opt/<stack>/state/<svc>.json"):
-bin/bay build status
+bay build status
 # Reset CB (writes clean state + sends Telegram audit; see --help for flags):
-bin/bay build reset <svc>
+bay build reset <svc>
 # Manual reset (if CLI unavailable):
-ssh argo-admin@<host> "sudo -u bay printf '{\"version\":1,\"consecutive_failures\":0,\"opened_at\":null,\"last_failure\":null,\"alerts\":{\"opened_sent\":false,\"last_blocked_alert_at\":null}}\n' > /opt/<stack>/state/<svc>.json"  # legacy-argo: live host account value
+ssh argo-admin@<host> "sudo -u bay printf '{\"version\":1,\"consecutive_failures\":0,\"opened_at\":null,\"last_failure\":null,\"alerts\":{\"opened_sent\":false,\"last_blocked_alert_at\":null}}\n' > /opt/<stack>/state/<svc>.json"  # kept-argo: live host account value
 # After reset, push again or touch trigger to re-fire:
 ssh debugbot@<host> "touch /opt/<stack>/triggers/<svc>.trigger"
 ```
@@ -151,7 +151,7 @@ before `start_period` expires, the issue is `health_check_timeout`
 (rebuild.sh side), not `start_period` (Docker side).
 
 `health_check_timeout` has a **second consumer**: the post-deploy
-`bin/bay healthcheck` URL probe uses it as the readiness window for a
+`bay healthcheck` URL probe uses it as the readiness window for a
 still-booting upstream (connection refused / 502). There it can only *widen*
 the 90s framework default — a smaller value is ignored, so tuning rebuild.sh's
 rollback poll down can never make the probe stricter than baseline. See
@@ -170,7 +170,7 @@ rollback poll down can never make the probe stricter than baseline. See
   a Traefik 404.
 - Fixed in the framework (GitHub #27): the zot router now binds
   `websecure,websecure_tailnet` automatically whenever `traefik_split_entrypoints`
-  is on (`websecure` alone otherwise — unchanged for non-split consumers).
+  is on (`websecure` alone otherwise — unchanged for non-split fleets).
   Override via `zot_entrypoints` in group_vars (same idiom as
   `vpn_entrypoints`). The zot role also manages an `/etc/hosts` pin on the
   control host — `zot_tailnet_pin_ip` (defaults to
@@ -258,14 +258,14 @@ the receiver's in-memory `IMAGE_MAP` table on process start
   `tests/test_image_consumers.py` (`test_shared_image_groups_all_consumers`)
   pins this producer-inclusive contract.
 
-- **When it's rendered** — Automatically on every `bin/bay deploy`,
+- **When it's rendered** — Automatically on every `bay deploy`,
   including `--tags deploy_stack`, `--tags build`, AND `--tags git_deploy`.
   The render lives in a dedicated, self-contained task file
   (`roles/git_deploy/tasks/render_image_map.yml`) that the role
   includes early enough to compute its own facts under any tag context.
   No separate `--tags git_deploy` step is required after a `services.yml`
   change touching `image:` or `build:` blocks — the next normal
-  `bin/bay deploy <env>` keeps the map current.
+  `bay deploy <env>` keeps the map current.
 
 - **When the receiver picks up changes** — The `bay-webhook` container
   loads its map once at startup, so a fresh render only takes effect
@@ -298,11 +298,11 @@ the receiver's in-memory `IMAGE_MAP` table on process start
 > **once**:
 >
 > ```
-> bin/bay deploy <env> --tags git_deploy
+> bay deploy <env> --tags git_deploy
 > docker restart bay-webhook
 > ```
 >
-> After upgrading to this framework version, standard `bin/bay deploy`
+> After upgrading to this framework version, standard `bay deploy`
 > keeps the map current automatically and the receiver auto-restarts
 > via the handler whenever the file content changes. The manual
 > `docker restart bay-webhook` step is needed **only once**, to flush
@@ -351,12 +351,12 @@ on actual content change.
   passed to the webhook container from the host's `region` variable
   (`{{ region | default('') }}`). If unset, the webhook runs in
   single-region legacy mode: every push writes a local trigger, no
-  fan-out happens. Multi-region consumers MUST set `region: <name>` in
+  fan-out happens. Multi-region fleets MUST set `region: <name>` in
   `group_vars/<region>/main.yml` for fan-out to work.
-- **`git_deploy_peer_webhook_urls` is consumer-defined** — a dict of
+- **`git_deploy_peer_webhook_urls` is fleet-defined** — a dict of
   `region: https://deploy.<region>.<domain_base>` pairs in
   `group_vars/all/main.yml`. Empty default is fine for single-region
-  consumers; required on multi-region consumers where any service's
+  fleets; required on multi-region fleets where any service's
   `regions` does not include every region.
 - **Loop-safety** — when a region forwards a push to a peer, it sets
   `X-Bay-Webhook-Forwarded: 1`. The receiving peer writes its local

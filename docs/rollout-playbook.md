@@ -3,7 +3,7 @@
 Lessons from the 2026-04-22 `expose:` migration. Treat a deploy session as
 an end-to-end operation, not a sequence of per-host successes.
 
-1. **Before touching anything**, run `bin/bay validate` on each consumer
+1. **Before touching anything**, run `bay validate` on each fleet
    and fix anything that fails. Vault gaps, stale refs, and same-stack
    link errors are easier to debug when they surface before the
    ansible-playbook output.
@@ -22,7 +22,7 @@ an end-to-end operation, not a sequence of per-host successes.
    ```bash
    ssh debugbot@<host> "docker ps --filter name=<acc> --format '{{.Ports}}'"
    # if old IP still bound:
-   ssh argo-admin@<host> "sudo docker stop <acc> && sudo docker rm <acc> && sudo docker compose -f /opt/<stack>/docker-compose.yml up -d <acc>"  # legacy-argo: live host account value
+   ssh argo-admin@<host> "sudo docker stop <acc> && sudo docker rm <acc> && sudo docker compose -f /opt/<stack>/docker-compose.yml up -d <acc>"  # kept-argo: live host account value
    ```
 
 4. **Post-deploy audit must hit user-facing URLs**, not just `docker ps`
@@ -34,7 +34,7 @@ an end-to-end operation, not a sequence of per-host successes.
    ```
    A 4xx/5xx means the service is broken *right now*, regardless of
    whether the breakage predates your work. Until
-   `bin/bay healthcheck` is added, do this by hand.
+   `bay healthcheck` is added, do this by hand.
 
 5. **Pre-existing unhealthy containers are still your problem during a
    rollout.** If a container is `Up N days (unhealthy)` when you finish

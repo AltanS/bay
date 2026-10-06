@@ -1,10 +1,10 @@
 # Multi-Region Deployments
 
-Bay supports deploying the same stack to multiple regional servers from a single consumer repo -- with zero framework changes. The CLI passes the `env` argument to Ansible as a host pattern (`-e target_host=<env>`), Ansible resolves groups and merges `group_vars/` by specificity, and Jinja2 lazy evaluation handles per-region configuration. Everything described here is standard Ansible behavior; Bay simply stays out of the way.
+Bay supports deploying the same stack to multiple regional servers from a single fleet -- with zero framework changes. The CLI passes the `env` argument to Ansible as a host pattern (`-e target_host=<env>`), Ansible resolves groups and merges `group_vars/` by specificity, and Jinja2 lazy evaluation handles per-region configuration. Everything described here is standard Ansible behavior; Bay simply stays out of the way.
 
 ## Single-Server Setup
 
-If you are deploying to a single server, multi-region files are unnecessary. Remove them from your consumer project:
+If you are deploying to a single server, multi-region files are unnecessary. Remove them from your fleet:
 
 ```bash
 rm hosts/production-multi-region
@@ -35,9 +35,9 @@ The CLI argument is just an Ansible host pattern passed as `target_host`:
 
 | Command | What it targets |
 |---------|-----------------|
-| `bin/bay deploy eu` | Only `eu-server` |
-| `bin/bay deploy na` | Only `na-server` |
-| `bin/bay deploy production` | Both `eu-server` and `na-server` |
+| `bay deploy eu` | Only `eu-server` |
+| `bay deploy na` | Only `na-server` |
+| `bay deploy production` | Both `eu-server` and `na-server` |
 
 This works because the framework playbooks use `hosts: "{{ target_host }}"` -- whatever you pass as the environment argument becomes the Ansible host pattern. There is nothing region-specific in the framework.
 
@@ -144,13 +144,13 @@ Manage region-specific secrets with the vault CLI:
 
 ```bash
 # Edit EU secrets
-bin/bay vault edit eu
+bay vault edit eu
 
 # Edit NA secrets
-bin/bay vault edit na
+bay vault edit na
 
 # Edit shared production secrets
-bin/bay vault edit production
+bay vault edit production
 ```
 
 Ansible merges secrets the same way it merges any other group_vars -- region-specific values override production-wide values. A secret defined in both `production/secrets.yml` and `eu/secrets.yml` will use the EU value when deploying to the EU server.
@@ -203,7 +203,7 @@ If regions should use different S3 buckets or endpoints (e.g., for data residenc
 ### Deploy one region
 
 ```bash
-bin/bay deploy eu
+bay deploy eu
 ```
 
 Targets only the EU server. Useful for canary deployments or region-specific maintenance.
@@ -211,7 +211,7 @@ Targets only the EU server. Useful for canary deployments or region-specific mai
 ### Deploy all regions
 
 ```bash
-bin/bay deploy production
+bay deploy production
 ```
 
 Targets all servers in the `production` group. Ansible runs plays against each host.
@@ -222,31 +222,31 @@ Deploy to one region first, verify it works, then deploy to the rest:
 
 ```bash
 # Step 1: Deploy to EU
-bin/bay deploy eu
+bay deploy eu
 
 # Step 2: Verify (check health endpoints, logs, monitoring)
 
 # Step 3: Deploy to NA
-bin/bay deploy na
+bay deploy na
 ```
 
 This is the safest approach for production changes. There is no special canary feature -- you simply deploy to groups one at a time.
 
 ### Tag-scoped deploys and dry runs
 
-`bin/bay deploy --help` covers tag filtering (`--tags`), region targeting, and ansible passthrough dry runs (`-- --check --diff`).
+`bay deploy --help` covers tag filtering (`--tags`), region targeting, and ansible passthrough dry runs (`-- --check --diff`).
 
 ### Provision a new region
 
 ```bash
-bin/bay provision eu
+bay provision eu
 ```
 
 Provisions and hardens only the EU server. Add a new region by adding its host to the inventory, creating the region `group_vars/`, and running provision + deploy.
 
 ## Headscale Access Gateway in Multi-Region
 
-When using `access_gateway: headscale` with multi-region, a single Headscale instance serves all regions. One region (the **control region**) runs the Headscale coordination server + the Tailscale daemon. All other regions run only the Tailscale daemon and register against the control region's Headscale via its REST API. There is no admin web UI — manage the tailnet with `bin/bay gateway` (it auto-targets the control host).
+When using `access_gateway: headscale` with multi-region, a single Headscale instance serves all regions. One region (the **control region**) runs the Headscale coordination server + the Tailscale daemon. All other regions run only the Tailscale daemon and register against the control region's Headscale via its REST API. There is no admin web UI — manage the tailnet with `bay gateway` (it auto-targets the control host).
 
 ### How it works
 
@@ -291,7 +291,7 @@ map shifts:
   move. Prefer ACLs keyed by **node name** over IP so they survive renumbering (see
   [tailnet-ingress.md](tailnet-ingress.md)).
 - Re-deploy the `headscale` tag last so split-DNS / `extra-records.json` reflects the new
-  IPs, and verify with `bin/bay gateway nodes`.
+  IPs, and verify with `bay gateway nodes`.
 
 ### Example group_vars layout
 
@@ -341,34 +341,34 @@ Multi-region + headscale requires deploying regions in a specific order:
 
 ```bash
 # 1. Deploy control region first (starts Headscale server)
-bin/bay deploy eu
+bay deploy eu
 
 # 2. Generate API key on control server
-bin/bay gateway apikey
+bay gateway apikey
 
 # 3. Add the API key to vault secrets
-bin/bay vault edit production
+bay vault edit production
 # Add headscale_api_key inside the secrets dict
 
 # 4. Deploy remote region (registers via API)
-bin/bay deploy na
+bay deploy na
 ```
 
 After both regions are deployed, verify connectivity:
 
 ```bash
 # List all nodes across regions
-bin/bay gateway nodes
+bay gateway nodes
 
 # Check status
-bin/bay gateway status
+bay gateway status
 ```
 
 ### Troubleshooting
 
-- **"headscale_api_key is required"** — You deployed a remote region before adding the API key to vault. Run `bin/bay gateway apikey` on the control region, add the key inside the `secrets:` dict in `group_vars/production/secrets.yml`, then retry.
+- **"headscale_api_key is required"** — You deployed a remote region before adding the API key to vault. Run `bay gateway apikey` on the control region, add the key inside the `secrets:` dict in `group_vars/production/secrets.yml`, then retry.
 - **Remote node not appearing in `gateway nodes`** — Check that the Tailscale daemon on the remote host can reach `https://<headscale_domain>`. The domain must resolve to the control region's IP.
-- **Gateway CLI targeting wrong host** — In multi-region, `bin/bay gateway` commands auto-target the control host. Use `--region <name>` to explicitly target a specific region.
+- **Gateway CLI targeting wrong host** — In multi-region, `bay gateway` commands auto-target the control host. Use `--region <name>` to explicitly target a specific region.
 
 See [access-gateways.md](access-gateways.md#multi-region-headscale) for the architecture overview and variable reference.
 
@@ -411,10 +411,10 @@ Containers reach the tailnet via the host's network stack — no special Docker 
 
 ```bash
 # Add n8n in NA, linked to postgres in EU
-bin/bay service add n8n --region na --link postgres:eu
+bay service add n8n --region na --link postgres:eu
 
 # Or add links to an existing service
-bin/bay service edit n8n --link postgres:eu --link redis:eu
+bay service edit n8n --link postgres:eu --link redis:eu
 ```
 
 The link target must declare host exposure on its own stanza, otherwise it will not be reachable from the tailnet:
@@ -456,16 +456,16 @@ Configure your application to use these variables for cross-region connections.
 - For services this **bypasses Traefik** — no TLS termination, no IPAllowList, no middleware. The tailnet itself is the access boundary; only nodes registered with Headscale can reach the port.
 - For accessories this is the same posture — the accessory is unprotected by Traefik anyway, so tailnet is its only ingress.
 - Public internet traffic cannot reach a tailnet bind. The host's nftables baseline policy + the tailnet-restricted bind IP both contribute to the boundary.
-- Pre-deploy, `bin/bay validate` rejects a cross-region `links:` whose target lacks `expose: tailnet` (or `expose: host`) — the symptom would be the consumer resolving env vars correctly but connecting to nothing.
+- Pre-deploy, `bay validate` rejects a cross-region `links:` whose target lacks `expose: tailnet` (or `expose: host`) — the symptom would be the consumer resolving env vars correctly but connecting to nothing.
 
 ### Removing links
 
 ```bash
 # Remove a specific link
-bin/bay service edit n8n --unlink postgres
+bay service edit n8n --unlink postgres
 
 # Deploy to apply changes
-bin/bay deploy production
+bay deploy production
 ```
 
 After removing a link, redeploy. If the link target served only that one consumer, you should also remove `expose: tailnet` from the target so the host bind goes away.
@@ -475,18 +475,18 @@ After removing a link, redeploy. If the link target served only that one consume
 
 See [services.md](services.md#cross-region-links) for the full `links:` schema reference.
 
-## When to Use Multi-Region vs Separate Consumers
+## When to Use Multi-Region vs Separate Fleets
 
 | Scenario | Approach |
 |----------|----------|
-| Same stack in EU and NA | Multi-region (single consumer repo) |
+| Same stack in EU and NA | Multi-region (single fleet) |
 | Same stack with minor per-region config differences | Multi-region with group_vars overrides |
-| Completely different projects that happen to use Bay | Separate consumer repos |
-| Different stacks with different services | Separate consumer repos |
+| Completely different projects that happen to use Bay | Separate fleets |
+| Different stacks with different services | Separate fleets |
 | Staging and production of the same project | Multi-region (staging as a "region" group) |
 
 **Use multi-region** when the service definitions are fundamentally the same and only configuration (domains, secrets, VPN peers) differs per location. The `services.yml` is shared, and per-region `group_vars/` handle the differences.
 
-**Use separate consumer repos** when the projects have different services, different infrastructure requirements, or are managed by different teams. Each consumer repo gets its own `.bay/` clone, its own inventory, and its own `group_vars/` -- they are completely independent.
+**Use separate fleets** when the projects have different services, different infrastructure requirements, or are managed by different teams. Each fleet gets its own inventory and its own `group_vars/` -- they are completely independent.
 
-The dividing line: if two deployments share the same `services.yml` (possibly with parameterized values), they belong in the same consumer repo as a multi-region setup. If they need fundamentally different `services.yml` definitions, they should be separate consumers.
+The dividing line: if two deployments share the same `services.yml` (possibly with parameterized values), they belong in the same fleet as a multi-region setup. If they need fundamentally different `services.yml` definitions, they should be separate fleets.
