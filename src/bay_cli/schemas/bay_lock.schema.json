@@ -27,11 +27,31 @@
   },
   "$defs": {
     "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "commit_or_null": { "type": ["string", "null"], "pattern": "^[0-9a-f]{7,64}$" },
+    "sha256_or_null": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "previous": {
+      "description": "The pin this environment had before the last `bay up`: one level, enough for `bay rollback`. force_reason is set when `bay up --force --reason` replaced it without an approval.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit"],
+      "properties": {
+        "commit": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
+        "deployed_at": { "type": ["string", "null"] },
+        "receipt_sha256": { "$ref": "#/$defs/sha256_or_null" },
+        "force_reason": { "type": "string", "minLength": 1 }
+      }
+    },
     "env": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
         "box": { "$ref": "#/$defs/name" },
+        "commit": { "$ref": "#/$defs/commit_or_null" },
+        "deployed_at": { "type": ["string", "null"] },
+        "result": { "type": "string", "enum": ["pending", "ok", "failed"] },
+        "plan_id": { "type": ["string", "null"], "pattern": "^[0-9a-f]{12}$" },
+        "last_receipt_sha256": { "$ref": "#/$defs/sha256_or_null" },
+        "previous": { "$ref": "#/$defs/previous" },
         "adopted": {
           "type": "object",
           "additionalProperties": false,

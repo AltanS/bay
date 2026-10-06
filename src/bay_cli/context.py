@@ -166,6 +166,15 @@ class Context:
         )
 
     @classmethod
+    def for_fleet_name(cls, name: str) -> Context:
+        """The fleet ``~/.config/bay/fleets/<name>``, as ``BAY_FLEET_NAME=<name>`` would find it.
+
+        Used when a bay.toml names its fleet (``fleet = "<name>"``) and no
+        ``--fleet <path>`` was given.
+        """
+        return cls._from_fleet_path(fleet_dir_for_name(name), SOURCE_FLEETS_DIR)
+
+    @classmethod
     def _from_fleet_path(cls, path: Path, source: str) -> Context:
         fleet_root = path.expanduser().resolve()
         if not fleet_root.is_dir():
@@ -185,11 +194,16 @@ def _fleet_from_fleets_dir() -> Path | None:
     name = os.environ.get(FLEET_NAME_ENV)
     if not name:
         return None
+    return fleet_dir_for_name(name, hint=f"Unset {FLEET_NAME_ENV}, or create the fleet there.")
+
+
+def fleet_dir_for_name(name: str, *, hint: str | None = None) -> Path:
+    """``~/.config/bay/fleets/<name>``. Raises BayError when it is not a directory."""
     candidate = Path.home() / _FLEETS_DIR / name
     if not candidate.is_dir():
         raise BayError(
             f"fleet '{name}' not found at {candidate}",
-            hint=f"Unset {FLEET_NAME_ENV}, or create the fleet there.",
+            hint=hint or "Clone the fleet there, or pass --fleet <path>.",
         )
     return candidate
 

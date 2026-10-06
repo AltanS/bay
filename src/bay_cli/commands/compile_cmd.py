@@ -1,5 +1,11 @@
 """`bay compile`: build services.yml from bay.fleet.toml and the pinned bay.toml files.
 
+Each project is read at the commit its lock pins, through the same temp
+copy of the fleet that ``bay plan`` and ``bay up`` compile
+(:func:`bay_cli.plan.compiled_fleet`). A project with no pinned commit is
+left out, with a note. ``--working-tree`` reads the local checkouts as they
+are instead (dev use).
+
 Exit codes: 0 written or already up to date (or ``--check`` found no
 difference), 1 for a ``--check`` difference, invalid input, a hand-edited
 target or a feature the deploy code cannot express yet.
@@ -47,6 +53,13 @@ def compile_fleet(
             help="First compile: replace a services.yml that bay compile did not write.",
         ),
     ] = False,
+    working_tree: Annotated[
+        bool,
+        typer.Option(
+            "--working-tree",
+            help="Read each project's local checkout as it is, not its pinned commit (dev use).",
+        ),
+    ] = False,
     allow_unsupported: Annotated[
         bool,
         typer.Option(
@@ -62,13 +75,28 @@ def compile_fleet(
     cx = Context.resolve(fleet) if fleet is not None else context_from(ctx)
     target = (out / GENERATED_SERVICES) if out is not None else (cx.fleet_root / GENERATED_SERVICES)
 
-    try:
-        inputs = load_inputs(cx.fleet_root, output=target)
-        result = compiler.compile_fleet(inputs)
-    except (FleetError, compiler.CompileError) as exc:
-        for line in exc.lines:
-            typer.echo(line, err=True)
-        raise BayError(f"compile failed with {len(exc.lines)} problem(s)") from None
+    if working_tree:
+        try:
+            inputs = load_inputs(cx.fleet_root, output=target)
+            result = compiler.compile_fleet(inputs)
+        except (FleetError, compiler.CompileError) as exc:
+            for line in exc.lines:
+                typer.echo(line, err=True)
+            raise BayError(f"compile failed with {len(exc.lines)} problem(s)") from None
+    else:
+        from bay_cli.plan import compiled_fleet
+
+        with compiled_fleet(cx) as comp:
+            for note in comp.notes:
+                typer.echo(f"note: {note}", err=True)
+            if comp.result is None:
+                for line in comp.errors:
+                    typer.echo(line, err=True)
+                raise BayError(
+                    f"compile failed with {len(comp.errors)} problem(s)",
+                    hint="Pass --working-tree to read the local checkouts as they are.",
+                )
+            result = comp.result
 
     if result.unsupported:
         for item in result.unsupported:

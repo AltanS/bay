@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AltanS/bay/schemas/plan.schema.json",
+  "title": "bay plan --json",
+  "description": "One plan: WANTED (bay.toml at a commit) against PINNED (the fleet lock and services file) and RUNNING (the box receipt). Saved as <fleet>/plans/<plan_id>.json. Version 1. Documented in docs/plan.md. A new field may appear without a version bump; readers ignore fields they do not know.",
+  "type": "object",
+  "required": [
+    "plan_version", "plan_id", "plan_sha256", "created_at", "project", "env", "box", "box_env",
+    "fleet", "wanted", "pinned", "running", "box_checked", "steps", "unsupported",
+    "missing_secrets", "blockers", "notes", "verdict", "exit_code", "approval", "stale"
+  ],
+  "properties": {
+    "plan_version": { "const": 1 },
+    "plan_id": { "type": "string", "pattern": "^[0-9a-f]{12}$" },
+    "plan_sha256": { "$ref": "#/$defs/sha256" },
+    "created_at": { "type": "string" },
+    "project": { "$ref": "#/$defs/name" },
+    "env": { "type": "string", "pattern": "^[a-z][a-z0-9]*$" },
+    "box": { "type": ["string", "null"] },
+    "box_env": { "type": ["string", "null"] },
+    "fleet": {
+      "type": "object",
+      "required": ["name", "commit", "dirty", "behind"],
+      "properties": {
+        "name": { "type": ["string", "null"] },
+        "commit": { "$ref": "#/$defs/commit_or_null" },
+        "dirty": { "type": ["boolean", "null"] },
+        "behind": { "type": ["boolean", "null"] }
+      }
+    },
+    "wanted": {
+      "type": "object",
+      "required": ["commit", "toml_sha256", "dirty"],
+      "properties": {
+        "commit": { "$ref": "#/$defs/commit_or_null" },
+        "toml_sha256": { "$ref": "#/$defs/sha256_or_null" },
+        "dirty": { "type": ["boolean", "null"] }
+      }
+    },
+    "pinned": {
+      "type": "object",
+      "required": ["commit", "lock_sha256"],
+      "properties": {
+        "commit": { "$ref": "#/$defs/commit_or_null" },
+        "lock_sha256": { "$ref": "#/$defs/sha256_or_null" }
+      }
+    },
+    "running": {
+      "type": "object",
+      "required": ["checked", "receipt_sha256", "boxes"],
+      "properties": {
+        "checked": { "type": "boolean" },
+        "receipt_sha256": { "$ref": "#/$defs/sha256_or_null" },
+        "boxes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["box", "error", "containers"],
+            "properties": {
+              "box": { "type": ["string", "null"] },
+              "error": { "type": ["string", "null"] },
+              "containers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["name", "image", "config_hash"],
+                  "properties": {
+                    "name": { "type": "string" },
+                    "image": { "type": ["string", "null"] },
+                    "config_hash": { "type": ["string", "null"] }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "box_checked": { "type": "boolean" },
+    "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+    "unsupported": { "type": "array", "items": { "type": "string" } },
+    "missing_secrets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "used_by"],
+        "properties": {
+          "name": { "type": "string" },
+          "used_by": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "blockers": { "type": "array", "items": { "type": "string" } },
+    "notes": { "type": "array", "items": { "type": "string" } },
+    "verdict": { "enum": ["auto", "approve", "blocked", "stale"] },
+    "exit_code": { "enum": [0, 10, 20, 30] },
+    "approval": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["reason", "approved_at"],
+          "properties": {
+            "reason": { "type": ["string", "null"] },
+            "approved_at": { "type": ["string", "null"] }
+          }
+        }
+      ]
+    },
+    "stale": { "type": "array", "items": { "type": "string" } }
+  },
+  "allOf": [
+    { "if": { "properties": { "verdict": { "const": "auto" } } }, "then": { "properties": { "exit_code": { "const": 0 } } } },
+    { "if": { "properties": { "verdict": { "const": "approve" } } }, "then": { "properties": { "exit_code": { "const": 10 } } } },
+    { "if": { "properties": { "verdict": { "const": "blocked" } } }, "then": { "properties": { "exit_code": { "const": 20 } } } },
+    { "if": { "properties": { "verdict": { "const": "stale" } } }, "then": { "properties": { "exit_code": { "const": 30 } } } }
+  ],
+  "$defs": {
+    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "sha256_or_null": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "commit_or_null": { "type": ["string", "null"], "pattern": "^[0-9a-f]{7,64}$" },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "container", "resource", "project", "action", "risk", "reason"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^s[1-9][0-9]*$" },
+        "kind": {
+          "enum": ["container", "volume", "database", "database_user", "secret", "resource", "tailnet", "fleet"]
+        },
+        "container": { "type": ["string", "null"] },
+        "resource": { "type": ["string", "null"] },
+        "project": { "type": ["string", "null"] },
+        "action": { "enum": ["create", "update", "remove", "rename", "move"] },
+        "risk": { "enum": ["safe", "shared", "destructive"] },
+        "reason": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

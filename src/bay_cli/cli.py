@@ -5,7 +5,7 @@ from pathlib import Path
 import typer
 
 from bay_cli import console
-from bay_cli.commands import compile_cmd, import_cmd, toml_cmd
+from bay_cli.commands import compile_cmd, import_cmd, project_cmd, toml_cmd
 from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault, webhook
 from bay_cli.context import GlobalOptions, context_from
 from bay_cli.errors import BayError
@@ -128,6 +128,14 @@ def main(
     console.set_json_mode(json_output)
     console.set_yes_mode(yes)
 
+
+# Daily verbs (top-level): WANTED / PINNED / RUNNING, see docs/plan.md
+app.command(rich_help_panel="Daily")(project_cmd.init)
+app.command(rich_help_panel="Daily")(project_cmd.plan)
+app.command(rich_help_panel="Daily")(project_cmd.approve)
+app.command(rich_help_panel="Daily")(project_cmd.up)
+app.command(rich_help_panel="Daily")(project_cmd.show)
+app.command(rich_help_panel="Daily")(project_cmd.rollback)
 
 # Framework commands (top-level)
 app.command(rich_help_panel="Framework")(framework.setup)
