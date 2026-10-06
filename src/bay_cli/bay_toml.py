@@ -127,9 +127,14 @@ def _join(base: str, key: str) -> str:
 # ── Layer 1: JSON Schema ────────────────────────────────────────────────────
 
 def _schema_violations(doc: dict[str, Any]) -> Iterator[Violation]:
+    yield from schema_violations(doc, load_schema())
+
+
+def schema_violations(doc: Any, schema: dict[str, Any]) -> Iterator[Violation]:
+    """Check ``doc`` against any schema that uses the x-messages / x-at annotations."""
     from jsonschema import Draft202012Validator
 
-    validator = Draft202012Validator(load_schema())
+    validator = Draft202012Validator(schema)
     for error in validator.iter_errors(doc):
         yield from _translate(error)
 

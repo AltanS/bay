@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AltanS/bay/schemas/bay_lock.schema.json",
+  "title": "projects/<name>.lock",
+  "description": "The per-project lockfile in the fleet repo. The CLI owns it: it pins the repo commit, the box per environment and the adopted data names. Version 1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lock_version", "name", "envs"],
+  "properties": {
+    "lock_version": { "const": 1 },
+    "name": { "$ref": "#/$defs/name" },
+    "repo": { "type": ["string", "null"], "minLength": 1 },
+    "commit": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{7,64}$"
+    },
+    "toml_path": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
+    },
+    "local_path": { "type": ["string", "null"], "minLength": 1 },
+    "envs": {
+      "type": "object",
+      "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9]*$" },
+      "additionalProperties": { "$ref": "#/$defs/env" }
+    }
+  },
+  "$defs": {
+    "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+    "env": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "box": { "$ref": "#/$defs/name" },
+        "adopted": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "database": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$" },
+            "role": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$" },
+            "volumes": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$" }
+            },
+            "containers": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$" }
+            },
+            "images": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "pattern": "^[^\\s]+$" }
+            }
+          }
+        }
+      }
+    }
+  }
+}
