@@ -441,6 +441,7 @@ ALLOWED_DOMAINS+='|crowdsec\.net|hub\.crowdsec\.net'
 ALLOWED_DOMAINS+='|canarytokens\.com|requestbin\.net|oastify\.com|cypex\.ai'  # crowdsec SSRF/UA scenarios
 ALLOWED_DOMAINS+='|bitbucket\.org|gitlab\.com|ghcr\.io|docker\.io|packagecloud\.io'  # vendor/registry
 ALLOWED_DOMAINS+='|json-schema\.org|restic\.net|non-github\.com'
+ALLOWED_DOMAINS+='|githubusercontent\.com|raw\.githubusercontent\.com'  # public GitHub raw host (bootstrap.sh install one-liner)
 ALLOWED_DOMAINS+='|gatus\.io|networkgenomics\.com'  # Gatus docs / Mitogen docs (public project sites)
 ALLOWED_DOMAINS+='|a\.com|app\.com|b\.com|y\.com|z\.com|test\.com'          # test fixtures
 ALLOWED_DOMAINS+='|blogco\.de|wrong-domain\.com|yourdomain\.com'           # test fixtures / wizard prompt example
