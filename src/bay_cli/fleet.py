@@ -60,6 +60,8 @@ class LockEnv:
     volumes: dict[str, str] = field(default_factory=dict)
     containers: dict[str, str] = field(default_factory=dict)
     images: dict[str, str] = field(default_factory=dict)
+    #: ``from`` path in bay.toml -> today's path under config/ and files/.
+    files: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,7 @@ def load_lock(path: Path, fleet_root: Path) -> Lock:
             volumes=dict(adopted.get("volumes", {})),
             containers=dict(adopted.get("containers", {})),
             images=dict(adopted.get("images", {})),
+            files=dict(adopted.get("files", {})),
         )
     local = raw.get("local_path")
     local_path = None

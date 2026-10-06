@@ -116,7 +116,7 @@ domain = "admin.example.com"   # a second hostname is a service, not a route; ov
 inherit = false                # sidecar: none of the project's secrets or needs
 image = "ghcr.io/steel-dev/steel-browser:latest"
 port = 3000
-expose = "loopback"            # loopback | tailnet; the fleet picks the box port and records it in the lockfile. Never 0.0.0.0.
+expose = "loopback"            # loopback | tailnet; the box port is the container port. Never 0.0.0.0.
 
 # ── Deploy targets (one table per environment; each env = own data + secret values) ──
 [deploy.production]

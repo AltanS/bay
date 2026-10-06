@@ -49,6 +49,11 @@
             "images": {
               "type": "object",
               "additionalProperties": { "type": "string", "pattern": "^[^\\s]+$" }
+            },
+            "files": {
+              "type": "object",
+              "propertyNames": { "type": "string", "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$" },
+              "additionalProperties": { "type": "string", "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$))[^\\s{}]+$" }
             }
           }
         }

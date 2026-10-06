@@ -277,6 +277,14 @@ def test_base_document_is_valid():
                      {"services.b.expose"}, id="expose-never-all-interfaces"),
         pytest.param(_doc(services={"b": {"port": 1, "expose": 8080}}),
                      {"services.b.expose"}, id="expose-names-no-box-port"),
+        pytest.param(_doc(expose="host"), {"expose"}, id="top-expose-enum"),
+        pytest.param({**{k: v for k, v in _doc().items() if k != "port"},
+                      "access": {"mode": "internal"}, "expose": "loopback"},
+                     {"port"}, id="top-expose-needs-port"),
+        pytest.param(_doc(log_rotation={"max_size": "10", "max_file": 2}),
+                     {"log_rotation.max_size"}, id="log-rotation-size"),
+        pytest.param(_doc(services={"w": {"log_rotation": {"max_size": "10m"}}}),
+                     {"services.w.log_rotation.max_file"}, id="log-rotation-needs-max-file"),
         pytest.param(_doc(services={"job-cleanup": {}}), {"services.job-cleanup"},
                      id="service-starts-with-job"),
         pytest.param(_doc(mounts=[{"path": "/d", "volume": "production-data"}]),
@@ -323,6 +331,11 @@ def test_file_rule(doc, expected):
         pytest.param(
             _doc(services={"worker": {"env": {"WEB_URL": "x"}}}),
             {"services.worker"}, id="web-url-in-a-service",
+        ),
+        pytest.param(
+            _doc(needs={"api": {"env": "API_BASE"}},
+                 services={"api": {"port": 4000, "path": "/api"}}),
+            set(), id="need-env-replaces-the-need-name",
         ),
         pytest.param(
             _doc(deploy={"production": {"env": {"API_URL": "x"}}},

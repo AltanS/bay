@@ -271,7 +271,8 @@ def test_ports_health_memory_logs(data: dict[str, Any]) -> None:
     assert s["shop-api"]["healthcheck_path"] == "/health"
     assert "healthcheck_path" not in s["gatus"], 'health = "none" sets no probe path'
     assert all("healthcheck" not in svc for svc in s.values())
-    assert s["shop"]["mem_limit"] == "512m" and s["shop"]["memswap_limit"] == "512m"
+    # swap-off ships in 2.x: memory sets only the memory limit today
+    assert s["shop"]["mem_limit"] == "512m" and "memswap_limit" not in s["shop"]
     assert s["shop"]["log_retention"] == {"days": 7}
     assert "log_retention" not in s["gatus"], "fleet default logs = off"
 
@@ -363,6 +364,46 @@ def test_needs_a_published_project_on_the_same_box(fleet: Path) -> None:
     out = yaml.safe_load(compiled(fleet).body())
     assert out["services"]["gatus"]["env"]["clear"]["SHOP_URL"] == "http://shop:3000"
     assert "expose" not in out["services"]["shop"]["ports"]
+
+
+def test_need_env_names_the_variable_instead(fleet: Path) -> None:
+    edit(fleet, GATUS, 'needs = ["shop"]', 'needs = { shop = { env = "SHOP_BASE_URL" } }')
+    clear = yaml.safe_load(compiled(fleet).body())["services"]["gatus"]["env"]["clear"]
+    assert clear["SHOP_BASE_URL"] == "http://100.64.0.3:3000"
+    assert "SHOP_URL" not in clear
+
+
+def test_expose_publishes_the_container_port(fleet: Path) -> None:
+    edit(fleet, SHOP, 'command = "warm --every 5m"', 'command = "warm --every 5m"\nexpose = "loopback"')
+    edit(fleet, GATUS, "port = 8080", 'port = 8080\nexpose = "tailnet"')
+    result = compiled(fleet)
+    assert result.unsupported == []
+    out = yaml.safe_load(result.body())
+    assert out["accessories"]["shop-warmer"]["port"] == "9000:9000"
+    assert "expose" not in out["accessories"]["shop-warmer"], "loopback is the default"
+    assert out["services"]["gatus"]["ports"] == {"internal": 8080, "expose": "tailnet"}
+
+
+def test_log_rotation(fleet: Path) -> None:
+    edit(fleet, GATUS, 'update = "auto"', 'update = "auto"\nlog_rotation = { max_size = "10m", max_file = 2 }')
+    out = yaml.safe_load(compiled(fleet).body())
+    assert out["services"]["gatus"]["log_rotation"] == {"max_size": "10m", "max_file": 2}
+    assert "log_rotation" not in out["services"]["shop"]
+
+
+def test_adopted_files_keep_todays_config_path(fleet: Path) -> None:
+    legal = fleet / "files" / "legal-site" / "beta"
+    (legal / "de").mkdir(parents=True)
+    (legal / "de" / "imprint.md").write_text("x\n")
+    (legal / "terms.md").write_text("y\n")
+    edit(fleet, SHOP, 'from = "deploy/config.yaml"', 'from = "legal"')
+    edit_lock(fleet, lambda d: d["envs"]["production"]["adopted"].update(files={"legal": "legal-site/beta"}))
+    out = yaml.safe_load(compiled(fleet).body())
+    shop = out["services"]["shop"]
+    assert "{{ stack_dir }}/config/legal-site/beta:/etc/shop/config.yaml:ro" in shop["volumes"]
+    assert shop["config_files"] == ["legal-site/beta/de/imprint.md", "legal-site/beta/terms.md"]
+    # staging adopts nothing: <name>/<from>
+    assert out["services"]["shop-staging"]["config_files"] == ["shop/legal"]
 
 
 def test_needs_an_unpublished_project_is_an_error(fleet: Path) -> None:
@@ -558,7 +599,6 @@ def test_webhook_domain_collision(fleet: Path) -> None:
 UNSUPPORTED = [
     pytest.param(SHOP, 'secrets = ["SESSION_SECRET"]', 'secrets = ["SESSION_SECRET"]\nrelease = "migrate"', "a release command before traffic moves", id="release"),
     pytest.param(SHOP, "[deploy.production]", '[[jobs]]\nname = "nightly"\nschedule = "0 2 * * *"\ncommand = "x"\n\n[deploy.production]', "scheduled jobs", id="jobs"),
-    pytest.param(SHOP, 'command = "warm --every 5m"', 'command = "warm --every 5m"\nexpose = "loopback"', "publishing a port on the box", id="expose"),
     pytest.param(SHOP, 'volume = "data"\nbackup = false', 'volume = "data"\nbackup = false\nowner = "472:472"', "a volume owner", id="mount-owner"),
     pytest.param(SHOP, "redirect = false\n", "", "alias redirect (HTTP 308); the aliases are served instead", id="alias-redirect"),
     pytest.param(SHOP, "[deploy.production]", '[backup]\nkeep = "7d"\n\n[deploy.production]', "project backup schedule for volumes", id="project-backup"),
@@ -765,7 +805,7 @@ def test_compile_fixture_fleet_feeds_build_specs(fleet: Path, tmp_path: Path) ->
     assert "gatus" not in by_name, "gatus runs on the na box"
     assert by_name["shop"]["type"] == "service"
     assert by_name["shop"]["ports"] == ["100.64.0.3:3000:3000"]
-    assert by_name["shop"]["memswap_limit"] == "512m"
+    assert by_name["shop"]["mem_limit"] == "512m" and "memswap_limit" not in by_name["shop"]
     labels = by_name["shop"]["labels"]
     assert labels["traefik.http.routers.shop-health.rule"].startswith("(Host(`shop.example.com`)")
     assert "shop-basicauth" in labels["traefik.http.routers.shop.middlewares"]

@@ -20,6 +20,8 @@
     "update": { "$ref": "#/$defs/update" },
     "zero_downtime": { "type": "boolean" },
     "logs": { "$ref": "#/$defs/logs" },
+    "log_rotation": { "$ref": "#/$defs/log_rotation" },
+    "expose": { "$ref": "#/$defs/expose" },
     "secrets": { "$ref": "#/$defs/secrets" },
     "needs": { "$ref": "#/$defs/needs" },
     "build": { "$ref": "#/$defs/build" },
@@ -59,6 +61,13 @@
       "then": {
         "required": ["health"],
         "x-messages": { "required": "is required when [access.password] is set; write a path or \"none\"" }
+      }
+    },
+    {
+      "if": { "required": ["expose"] },
+      "then": {
+        "required": ["port"],
+        "x-messages": { "required": "is required when expose is set, because the box publishes the container port" }
       }
     },
     {
@@ -138,6 +147,19 @@
     "update": {
       "type": "string",
       "enum": ["notify", "auto", "off"]
+    },
+    "expose": {
+      "type": "string",
+      "enum": ["loopback", "tailnet"]
+    },
+    "log_rotation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_size", "max_file"],
+      "properties": {
+        "max_size": { "$ref": "#/$defs/size" },
+        "max_file": { "type": "integer", "minimum": 1 }
+      }
     },
     "url_path": {
       "type": "string",
@@ -400,9 +422,10 @@
         "zero_downtime": { "type": "boolean" },
         "update": { "$ref": "#/$defs/update" },
         "logs": { "$ref": "#/$defs/logs" },
+        "log_rotation": { "$ref": "#/$defs/log_rotation" },
         "path": { "$ref": "#/$defs/url_path" },
         "domain": { "$ref": "#/$defs/domain" },
-        "expose": { "type": "string", "enum": ["loopback", "tailnet"] },
+        "expose": { "$ref": "#/$defs/expose" },
         "access": { "$ref": "#/$defs/access" },
         "mounts": { "$ref": "#/$defs/mounts" },
         "env": { "$ref": "#/$defs/env" },

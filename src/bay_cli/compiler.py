@@ -49,7 +49,7 @@ HEADER_RE = re.compile(
 #: Keys a [deploy.<env>] table may override with a plain replace.
 _RUNTIME_KEYS = (
     "image", "port", "command", "release", "health", "replicas", "memory", "update",
-    "zero_downtime", "logs", "secrets",
+    "zero_downtime", "logs", "secrets", "log_rotation",
 )
 #: bay.toml update -> services.yml update. None means: leave the key out (monitor).
 _UPDATE = {"notify": None, "auto": "auto", "off": False}
@@ -473,9 +473,12 @@ class _Compiler:
             if files_public:
                 entry["config_files_mode"] = "public"
         if "memory" in level:
-            # bay.toml: swap is never allowed, so memory plus swap equals memory.
+            # Only the memory limit. Swap-off (memswap_limit equal to memory)
+            # ships in a 2.x release, so a compile today recreates nothing.
             entry["mem_limit"] = level["memory"]
-            entry["memswap_limit"] = level["memory"]
+        rotation = level.get("log_rotation")
+        if rotation:
+            entry["log_rotation"] = dict(rotation)
         update_value = level.get("update", unit.eff.get("update", "notify"))
         update = _UPDATE[update_value]
         if update is not None:
@@ -492,6 +495,9 @@ class _Compiler:
 
         port = unit.ports.get(service)
         health = level.get("health")
+        # The main container reads expose from the top level of the file;
+        # it is never overridden per environment.
+        expose = doc.get("expose") if is_web else level.get("expose")
         if not routed:
             if build is not None:
                 self._todo(
@@ -507,20 +513,19 @@ class _Compiler:
                     unit, base or "access.mode",
                     "zero_downtime or replicas on an internal container",
                 )
-            if "expose" in level and port is not None:
-                self._todo(unit, _p(base, "expose"), "publishing a port on the box")
+            # The deploy code binds the box port equal to the container port.
+            if expose is not None and port is not None:
                 entry["port"] = f"{port}:{port}"
-                if level["expose"] != "loopback":
-                    entry["expose"] = level["expose"]
+                if expose != "loopback":
+                    entry["expose"] = expose
             self.accessories[name] = entry
             return
 
         assert port is not None  # the validator requires a port for routed containers
         entry["access"] = "public" if mode == "public" else "vpn"
         entry["ports"] = {"internal": port}
-        if "expose" in level:
-            self._todo(unit, _p(base, "expose"), "publishing a port on the box")
-            entry["ports"]["expose"] = level["expose"]
+        if expose is not None:
+            entry["ports"]["expose"] = expose
         if database is not None:
             entry["database"] = database
         if level.get("zero_downtime"):
@@ -698,9 +703,11 @@ class _Compiler:
             url = self._need_url(unit, need, npath, depends)
             if url is None:
                 continue
-            for var in filter(None, [need.upper().replace("-", "_") + "_URL", alias]):
-                claim(var, f"needs.{need}")
-                clear[var] = url
+            # `env` names the variable instead of <NEED>_URL, so an app keeps
+            # the name it reads today.
+            var = alias or need.upper().replace("-", "_") + "_URL"
+            claim(var, f"needs.{need}")
+            clear[var] = url
 
         if inherit:
             for other, port in sorted(unit.ports.items()):
@@ -799,16 +806,21 @@ class _Compiler:
                     self._todo(unit, _p(mpath, "backup"), "volume backups")
                 continue
             src = mount["from"].rstrip("/")
+            # An adopted path keeps today's directory under config/ (and under
+            # the fleet's files/), instead of <name>/<from>.
+            adopted = unit.lock.files.get(src)
+            target = adopted or f"{unit.project.name}/{src}"
+            in_fleet = self.inputs.root / "files" / adopted if adopted else None
             local = unit.project.repo_root / src
-            if local.is_dir():
-                entries = sorted(
-                    str(p.relative_to(unit.project.repo_root))
-                    for p in local.rglob("*") if p.is_file()
+            listing = in_fleet if in_fleet is not None and in_fleet.is_dir() else local
+            if listing.is_dir():
+                files.extend(
+                    f"{target}/{p.relative_to(listing)}"
+                    for p in sorted(listing.rglob("*")) if p.is_file()
                 )
-                files.extend(f"{unit.project.name}/{e}" for e in entries)
             else:
-                files.append(f"{unit.project.name}/{src}")
-            dest = "{{ stack_dir }}/config/" + f"{unit.project.name}/{src}"
+                files.append(target)
+            dest = "{{ stack_dir }}/config/" + target
             volumes.append(f"{dest}:{mount['path']}:ro")
             if int(mount.get("mode", "0600"), 8) & 0o004:
                 public = True

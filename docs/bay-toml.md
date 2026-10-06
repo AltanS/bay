@@ -78,8 +78,9 @@ cannot check most of them. They are here so that one reading of the file is poss
 
 Data names and volumes:
 
-- Adopted data names (database, database user and volumes) are per environment and live
-  only in the fleet lockfile, which `bay show` prints.
+- Adopted data names (database, database user, volumes, and the directory a `from`
+  mount uses on the box) are per environment and live only in the fleet lockfile, which
+  `bay show` prints.
 - bay.toml never names an adopted database, user or volume.
 - Volume names are `<name>-<volume>` in the primary environment and
   `<name>-<env>-<volume>` in the others.
@@ -125,7 +126,7 @@ Services:
 
 Routing and access:
 
-- With `expose`, the fleet chooses the box port and records it in the lockfile.
+- With `expose`, the box publishes the container port on the same port number.
 - bay.toml never names a box port.
 - The bind address is the box loopback address or the box tailnet address, never
   `0.0.0.0`.
@@ -269,7 +270,7 @@ domain = "admin.example.com"   # a second hostname is a service, not a route; ov
 inherit = false                # sidecar: none of the project's secrets or needs
 image = "ghcr.io/steel-dev/steel-browser:latest"
 port = 3000
-expose = "loopback"            # loopback | tailnet; the fleet picks the box port and records it in the lockfile. Never 0.0.0.0.
+expose = "loopback"            # loopback | tailnet; the box port is the container port. Never 0.0.0.0.
 
 # ── Deploy targets (one table per environment; each env = own data + secret values) ──
 [deploy.production]
@@ -315,11 +316,19 @@ These keys sit at the top level. Every key in this table may also be set in a
 | `release` | string | none | Runs once per environment per deploy, in a one-shot container of the new image, before traffic moves. A failure stops the deploy and the old container stays. |
 | `health` | string | `"/"` when there is a port, else `"none"` | Health check path, or `"none"`. Bay probes it on the container, not through the route. A failed check removes the new container and starts the previous one again. |
 | `replicas` | integer >= 1 | `1` | Number of containers. |
-| `memory` | size | none | Memory limit. Swap is never allowed. |
+| `memory` | size | none | Memory limit. Swap is never allowed: Bay turns swap off in a later 2.x release. Until then only the memory limit applies. |
 | `update` | `notify`, `auto`, `off` | `notify` | What happens when a newer image appears. |
 | `zero_downtime` | bool | `false` | `true`: the previous container keeps running until the new one is healthy. `false`: there is a gap. |
 | `logs` | `"off"` or duration | fleet setting | How long the log archive on the box keeps logs. Rotation is always on. |
 | `secrets` | list of names | `[]` | Secret names. The fleet holds one value per environment. |
+
+Two more top-level keys apply to the main container. An environment cannot override
+them.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `expose` | `loopback`, `tailnet` | none | Publish `port` on the box: on its loopback address or its tailnet address. Needs `port`. |
+| `log_rotation` | table: `max_size` (size), `max_file` (integer) | fleet setting | Docker log rotation for this container: the size of one log file and how many files to keep. |
 
 ### `needs`
 
@@ -341,7 +350,7 @@ env = "GF_DATABASE_URL"
 |------|---------|---------|
 | `postgres` | `DATABASE_URL` | `env` (an extra variable name with the same value), `extensions` (list) |
 | `redis` | `REDIS_URL` | `env` |
-| any other name | `<NAME>_URL` | `env`. The name is a published project, or a shared resource the fleet defines. |
+| any other name | `<NAME>_URL`, or the `env` name instead | `env` (the variable name to use instead of `<NAME>_URL`). The name is a published project, or a shared resource the fleet defines. |
 
 Each environment gets its own database and user. A project cannot need itself. Removing a
 need never deletes data. Adopted names are not options here: they live in the fleet
@@ -431,16 +440,16 @@ An extra container in the same project. The main container is service `web`.
 - The service inherits `update` and `logs` from the project. `replicas` defaults to `1`
   and `zero_downtime` to `false`.
 - The service may set its own: `command`, `port`, `health`, `memory`, `replicas`,
-  `zero_downtime`, `update`, `logs`, `access`, `mounts`, `env`, `secrets`,
-  `fleet_secrets`, `needs`, `image` or `build`.
+  `zero_downtime`, `update`, `logs`, `log_rotation`, `access`, `mounts`, `env`,
+  `secrets`, `fleet_secrets`, `needs`, `image` or `build`.
 - Routing: `path = "/api"` routes a prefix of the main domain. `domain = "..."` gives
   the service its own domain. Set one of them, or neither. With neither, the service is
   internal and may not set `access`.
 - A routed service takes the project's `access.mode` unless it sets its own. Password
   and limits are never inherited.
 - `expose = "loopback"` or `"tailnet"` publishes the port on the box. It needs `port`.
-  The fleet picks the box port and records it in the lockfile. The bind is the box
-  loopback address or the box tailnet address, never `0.0.0.0`.
+  The box port is the container port. The bind is the box loopback address or the box
+  tailnet address, never `0.0.0.0`.
 - Siblings reach each other at `http://<service>:<port>`. Every service with a `port`
   gets `<SERVICE>_URL` in every other service of the same environment, and the main
   container is `WEB_URL`. A service with `inherit = false` receives none.

@@ -374,21 +374,22 @@ def sibling_var(service: str) -> str:
 def need_vars(needs: Any) -> dict[str, str]:
     """Variable name -> the need that injects it, for one ``needs`` value.
 
-    ``postgres`` injects ``DATABASE_URL``, ``redis`` injects ``REDIS_URL``,
-    any other need ``<NAME>_URL``. An ``env`` option adds a second name.
+    ``postgres`` injects ``DATABASE_URL``, ``redis`` injects ``REDIS_URL``;
+    for them an ``env`` option adds a second name. Any other need injects
+    ``<NAME>_URL``, or the ``env`` name instead of it.
     """
     out: dict[str, str] = {}
     names = needs if isinstance(needs, list) else list(_dict(needs))
     for need in names:
         if not isinstance(need, str):
             continue
+        alias = _dict(_dict(needs).get(need)).get("env") if isinstance(needs, dict) else None
         if need == "postgres":
             out["DATABASE_URL"] = need
         elif need == "redis":
             out["REDIS_URL"] = need
-        else:
+        elif not isinstance(alias, str):
             out[need.upper().replace("-", "_") + "_URL"] = need
-        alias = _dict(_dict(needs).get(need)).get("env") if isinstance(needs, dict) else None
         if isinstance(alias, str):
             out[alias] = need
     return out
