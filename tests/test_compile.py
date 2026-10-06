@@ -399,12 +399,22 @@ def test_adopted_files_keep_todays_config_path(fleet: Path) -> None:
     (legal / "terms.md").write_text("y\n")
     edit(fleet, SHOP, 'from = "deploy/config.yaml"', 'from = "legal"')
     edit_lock(fleet, lambda d: d["envs"]["production"]["adopted"].update(files={"legal": "legal-site/beta"}))
+    (fleet / "checkouts" / "shop" / "legal").write_text("z\n")  # staging's own, unadopted
     out = yaml.safe_load(compiled(fleet).body())
     shop = out["services"]["shop"]
     assert "{{ stack_dir }}/config/legal-site/beta:/etc/shop/config.yaml:ro" in shop["volumes"]
     assert shop["config_files"] == ["legal-site/beta/de/imprint.md", "legal-site/beta/terms.md"]
     # staging adopts nothing: <name>/<from>
     assert out["services"]["shop-staging"]["config_files"] == ["shop/legal"]
+
+
+def test_mount_source_that_is_not_there_is_an_error(fleet: Path) -> None:
+    edit(fleet, SHOP, 'from = "deploy/config.yaml"', 'from = "nowhere/"')
+    found = problems(fleet)
+    assert any(
+        "shop" in p and "mounts[1]" in p and "from = 'nowhere' cannot be listed" in p
+        for p in found
+    ), found
 
 
 def test_needs_an_unpublished_project_is_an_error(fleet: Path) -> None:

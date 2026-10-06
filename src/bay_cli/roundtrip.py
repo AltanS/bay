@@ -439,7 +439,8 @@ def run_gate(
     import yaml
 
     from bay_cli import compiler
-    from bay_cli.fleet import load_inputs
+    from bay_cli.context import Context
+    from bay_cli.plan import compiled_fleet
 
     if workdir is None:
         with tempfile.TemporaryDirectory(prefix="bay-import-check-") as tmp:
@@ -449,7 +450,14 @@ def run_gate(
     imported = import_fleet(fleet_path, name)
     out = workdir / "fleet"
     imported.write(out)
-    result = compiler.compile_fleet(load_inputs(out))
+    # Compile through the path `bay up` runs: a git repo, copied by
+    # plan._materialize, never the working tree. A fleet input that path drops
+    # (the files/ tree once) then shows here as a diff.
+    _commit_scratch(out)
+    with compiled_fleet(Context.for_fleet_root(out)) as comp:
+        if comp.result is None:
+            raise compiler.CompileError(comp.errors)
+        result = comp.result
     gate = GateResult(
         fleet=imported.fleet_name,
         imported=imported,
@@ -481,6 +489,17 @@ def run_gate(
     )
     gate.renders = (original, compiled)
     return gate
+
+
+def _commit_scratch(root: Path) -> None:
+    """Make the imported fleet a one-commit git repo, as a real fleet is."""
+    base = [
+        "git", "-C", str(root), "-c", "user.name=bay", "-c", "user.email=bay@localhost",
+        "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null",
+    ]
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "import"]):
+        subprocess.run([*base, *args], check=True, capture_output=True, env=env)
 
 
 def _original_data(legacy: Legacy) -> dict[str, Any]:

@@ -61,7 +61,7 @@ from typing import Any
 from bay_cli import gitrepo, lockfile
 from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
-from bay_cli.fleet import FLEET_FILE, GENERATED_SERVICES, PROJECTS_DIR
+from bay_cli.fleet import FILES_DIR, FLEET_FILE, GENERATED_SERVICES, PROJECTS_DIR
 
 PLAN_VERSION = 1
 PLANS_DIR = "plans"
@@ -324,6 +324,13 @@ def _materialize(cx: Context, tmp: Path, pins: Mapping[str, str]) -> _Copy:
     * A project in the fleet (``projects/<name>/``) is read from the fleet
       repo at its lock ``commit``; with no lock or no commit, at the fleet's
       HEAD, with a note. The working tree is never read.
+    * The fleet's ``files/`` tree (the config files a directory mount expands
+      into) is read at the fleet's HEAD. Leave it out and the compiler cannot
+      list a mounted directory.
+
+    Every path the compiler and ``fleet.load_inputs`` read from the fleet root
+    is copied here: ``bay.fleet.toml``, ``group_vars/all/*.y*ml``,
+    ``projects/`` (``bay.toml`` and ``*.lock``) and ``files/``.
     """
     root = tmp / "fleet"
     root.mkdir(parents=True)
@@ -356,6 +363,7 @@ def _materialize(cx: Context, tmp: Path, pins: Mapping[str, str]) -> _Copy:
             locks[lock.name[: -len(".lock")]] = raw
 
     fleet_head = gitrepo.head(src)
+    _copy_files_tree(src, fleet_head, out)
     for child in sorted(projects_src.iterdir()) if projects_src.is_dir() else []:
         if child.is_dir() and (child / "bay.toml").is_file():
             _copy_in_fleet(src, fleet_head, child.name, pins, locks.get(child.name), out)
@@ -402,6 +410,20 @@ def _materialize(cx: Context, tmp: Path, pins: Mapping[str, str]) -> _Copy:
         pinned["commit"] = full
         (projects_dst / f"{stem}.lock").write_text(json.dumps(pinned, indent=2) + "\n")
     return out
+
+
+def _copy_files_tree(src: Path, fleet_head: str | None, out: _Copy) -> None:
+    """Copy the fleet's ``files/`` tree: at its HEAD, or as it is when not a git repo."""
+    if fleet_head is None:
+        if (src / FILES_DIR).is_dir():
+            shutil.copytree(src / FILES_DIR, out.root / FILES_DIR, symlinks=True)
+        return
+    if not gitrepo.has_path(src, fleet_head, FILES_DIR):
+        return
+    try:
+        gitrepo.extract(src, fleet_head, [FILES_DIR], out.root)
+    except gitrepo.GitError as exc:
+        out.problems.append(f"{FILES_DIR}: cannot read fleet commit {fleet_head[:12]}: {exc}")
 
 
 def _copy_in_fleet(

@@ -28,6 +28,8 @@ from bay_cli.bay_toml import Violation
 
 FLEET_FILE = "bay.fleet.toml"
 PROJECTS_DIR = "projects"
+#: The fleet's config files; a directory mount of an adopted path lists it.
+FILES_DIR = "files"
 LOCK_SUFFIX = ".lock"
 LOCK_VERSION = 1
 
