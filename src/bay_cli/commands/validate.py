@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 from bay_cli import console, paths
+from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -2847,7 +2848,8 @@ def run_validation(
         A ValidationResult with all checks applied.
     """
     if show_banner:
-        console.show_banner(subtitle="Validate")
+        banner_cx = Context.for_fleet_root(root, bay_dir) if bay_dir is not None else None
+        console.show_banner(banner_cx, subtitle="Validate")
 
     result = ValidationResult()
 
@@ -2948,6 +2950,7 @@ def _default_env(root: Path) -> str:
 
 
 def validate(
+    ctx: typer.Context,
     env: str | None = typer.Option(
         None,
         "--env",
@@ -3018,8 +3021,8 @@ def validate(
         bin/bay validate --check-token-scope --check-webhook-health
         bin/bay validate --check-config-age --region eu
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     if env is None:
         env = _default_env(root)
@@ -3036,7 +3039,7 @@ def validate(
     # ── Optional remote config-age check ────────────────────────────────
     if check_config_age:
         from bay_cli.commands.ops import _resolve_target_host
-        limit = _resolve_target_host(bay_dir, region) if region else None
+        limit = _resolve_target_host(cx, region) if region else None
         _check_config_age_remote(root, env, bay_dir, result, limit=limit)
 
     # ── Summary ──────────────────────────────────────────────────────

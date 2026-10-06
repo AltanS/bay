@@ -14,6 +14,7 @@ import yaml
 from rich.panel import Panel
 
 from bay_cli import ansible, console, guards, paths, runner
+from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
 # Re-export for clarity in the scrub helpers below — imported as
@@ -122,6 +123,7 @@ def _validate_env(env: str, root: Path) -> None:
 
 
 def _run_playbook(
+    cx: Context,
     playbook: str,
     env: str,
     tags: Optional[str],
@@ -130,8 +132,7 @@ def _run_playbook(
     skip_git_health: bool = False,
     profile: bool = False,
 ) -> None:
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     _validate_env(env, root)
     guards.check_bay_version(bay_dir, root)
@@ -152,14 +153,14 @@ def _run_playbook(
     guards.show_update_notice(bay_dir, root)
 
 
-def _show_headscale_onboarding(root: Path, bay_dir: Path) -> None:
+def _show_headscale_onboarding(cx: Context) -> None:
     """Print first-deploy onboarding steps for headscale gateway."""
-    marker = root / ".first_deploy_done"
+    marker = cx.fleet_root / ".first_deploy_done"
     if marker.exists():
         return
 
     # Read access gateway config
-    gw_file = root / "group_vars" / "all" / "access_gateway.yml"
+    gw_file = cx.env_file("all", "access_gateway.yml")
     if not gw_file.exists():
         return
     try:
@@ -467,9 +468,9 @@ def deploy(
         bin/bay deploy production -- --check --diff
         bin/bay deploy production -- -e bay_reconciler_plan_only=true
     """
-    console.show_banner(subtitle=f"Deploy \u2192 {env}")
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    console.show_banner(cx, subtitle=f"Deploy \u2192 {env}")
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     # Rescue flags swallowed by allow_interspersed_args=False
     rig, tags, skip_validate, region = _rescue_interspersed_args(
@@ -530,7 +531,7 @@ def deploy(
     ] + extra_args
 
     if region:
-        host = _resolve_target_host(bay_dir, region)
+        host = _resolve_target_host(cx, region)
         if host is None:
             raise BayError(f"Unknown region '{region}' for env '{env}'")
         extra_args = ["-l", host] + extra_args
@@ -543,8 +544,8 @@ def deploy(
 
     purge_reconcile_reports(bay_dir)
 
-    _run_playbook("deploy", env, tags, extra_args, profile=profile)
-    _show_headscale_onboarding(root, bay_dir)
+    _run_playbook(cx, "deploy", env, tags, extra_args, profile=profile)
+    _show_headscale_onboarding(cx)
 
     # ── Post-deploy reachability audit ────────────────────────────────
     # Skip under dry-run (--check / -C) so we don't probe real URLs for
@@ -622,11 +623,11 @@ def _run_post_deploy_healthcheck(env: str, root: Path, bay_dir: Path) -> None:
 
 
 def _region_extra_args(
-    bay_dir: Path, region: str | None, env: str, base_args: list[str]
+    cx: Context, region: str | None, env: str, base_args: list[str]
 ) -> list[str]:
     if not region:
         return list(base_args)
-    host = _resolve_target_host(bay_dir, region)
+    host = _resolve_target_host(cx, region)
     if host is None:
         raise BayError(f"Unknown region '{region}' for env '{env}'")
     return ["-l", host] + list(base_args)
@@ -660,16 +661,16 @@ def provision(
         bin/bay provision production --tags nftables,crowdsec
         bin/bay provision eu -- --check --diff
     """
-    console.show_banner(subtitle=f"Provision \u2192 {env}")
+    cx = context_from(ctx)
+    console.show_banner(cx, subtitle=f"Provision \u2192 {env}")
     _, tags, _, region = _rescue_interspersed_args(ctx, tags=tags, region=region)
-    bay_dir = paths.find_bay_dir()
     # `--profile` after the positional env lands in ctx.args: promote it, and
     # strip it either way so it is never forwarded to ansible-playbook.
     if "--profile" in (ctx.args or []):
         profile = True
     passthrough = [a for a in (ctx.args or []) if a != "--profile"]
-    extra_args = _region_extra_args(bay_dir, region, env, passthrough)
-    _run_playbook("provision", env, tags, extra_args, profile=profile)
+    extra_args = _region_extra_args(cx, region, env, passthrough)
+    _run_playbook(cx, "provision", env, tags, extra_args, profile=profile)
 
 
 def restore(
@@ -691,11 +692,11 @@ def restore(
         bin/bay backup restore production postgres
         bin/bay restore production -- -e accessory=postgres -e confirm=yes
     """
-    console.show_banner(subtitle=f"Restore \u2192 {env}")
+    cx = context_from(ctx)
+    console.show_banner(cx, subtitle=f"Restore \u2192 {env}")
     _, tags, _, region = _rescue_interspersed_args(ctx, tags=tags, region=region)
-    bay_dir = paths.find_bay_dir()
-    extra_args = _region_extra_args(bay_dir, region, env, ctx.args)
-    _run_playbook("restore", env, tags, extra_args, skip_git_health=True)
+    extra_args = _region_extra_args(cx, region, env, ctx.args)
+    _run_playbook(cx, "restore", env, tags, extra_args, skip_git_health=True)
 
 
 # ── Runtime helpers (logs, restart) ──────────────────────────────────
@@ -750,7 +751,7 @@ def _validate_service_name(name: str, root: Path) -> None:
     )
 
 
-def _resolve_target_host(bay_dir: Path, region: str | None) -> str | None:
+def _resolve_target_host(cx: Context, region: str | None) -> str | None:
     """Resolve the ansible --limit host for a given region.
 
     For single-server setups returns None (no limit needed).
@@ -759,8 +760,7 @@ def _resolve_target_host(bay_dir: Path, region: str | None) -> str | None:
     if region is None:
         return None
 
-    consumer_root = bay_dir.parent
-    inventory = consumer_root / "hosts" / "production"
+    inventory = cx.inventory("production")
     if not inventory.exists():
         return None
 
@@ -988,6 +988,7 @@ def _print_archive_zcat_hint(archive_dir: str, since: str) -> None:
 
 
 def logs(
+    ctx: typer.Context,
     service: str = typer.Argument(..., help="Service or accessory name."),
     follow: bool = typer.Option(False, "--follow", "-f", help="Follow log output."),
     tail: int = typer.Option(100, "--tail", "-n", help="Number of lines to show from the end."),
@@ -1058,8 +1059,8 @@ def logs(
         bin/bay logs myapp --scrub --pattern 'user@example\\.com'
         bin/bay logs myapp --scrub --pattern 'user@example\\.com' --yes
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     _validate_env(env, root)
     _validate_service_name(service, root)
@@ -1087,7 +1088,7 @@ def logs(
 
         stack_name = _read_stack_name(root)
         archive_dir = _archive_path_for(stack_name, service)
-        limit = _resolve_target_host(bay_dir, region)
+        limit = _resolve_target_host(cx, region)
 
         # Always show the dry-run preview first. Execution is gated on --yes
         # so an operator types `--scrub ... --pattern X` to see what WOULD be
@@ -1140,7 +1141,7 @@ def logs(
         raise typer.Exit(code=1)
 
     # ── default: forward to `docker logs` on the target host ─────────
-    limit = _resolve_target_host(bay_dir, region)
+    limit = _resolve_target_host(cx, region)
 
     parts = ["docker", "logs"]
     parts.extend(["--tail", str(tail)])
@@ -1165,6 +1166,7 @@ def logs(
 
 
 def restart(
+    ctx: typer.Context,
     service: Optional[list[str]] = typer.Argument(None, help="Service(s) to restart. Omit to restart all."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     region: Optional[str] = typer.Option(None, "--region", "-r", help="Target a specific region."),
@@ -1187,12 +1189,12 @@ def restart(
         bin/bay restart myapp worker --env production
         bin/bay restart --yes
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     _validate_env(env, root)
 
-    limit = _resolve_target_host(bay_dir, region)
+    limit = _resolve_target_host(cx, region)
 
     # Resolve service list
     services = service or []
@@ -1216,7 +1218,7 @@ def restart(
         for name in services:
             _validate_service_name(name, root)
 
-    console.show_banner(subtitle=f"Restart \u2192 {env}")
+    console.show_banner(cx, subtitle=f"Restart \u2192 {env}")
 
     # Build docker restart command (direct container, no Compose)
     parts = ["docker", "restart"]
@@ -1237,6 +1239,7 @@ def restart(
 
 
 def admin_shell(
+    ctx: typer.Context,
     host: str = typer.Argument(
         ...,
         help="Target host: region name (e.g. 'eu'), inventory name, or IP.",
@@ -1259,11 +1262,11 @@ def admin_shell(
         bin/bay admin-shell eu
         bin/bay admin-shell 203.0.113.10 --yes
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    root = cx.fleet_root
     _validate_env(env, root)
 
-    target_ip = _resolve_target_host(bay_dir, host)
+    target_ip = _resolve_target_host(cx, host)
     if target_ip is None:
         target_ip = host
 

@@ -180,7 +180,7 @@ def test_deploy_help_advertises_profile():
 def test_provision_passes_profile_through(tmp_path):
     seen = {}
 
-    def fake_run_playbook(playbook, env, tags, extra_args, **kwargs):
+    def fake_run_playbook(cx, playbook, env, tags, extra_args, **kwargs):
         seen["playbook"] = playbook
         seen["extra_args"] = extra_args
         seen["profile"] = kwargs.get("profile")
@@ -198,7 +198,7 @@ def test_provision_passes_profile_through(tmp_path):
 def test_provision_rescues_profile_after_env(tmp_path):
     seen = {}
 
-    def fake_run_playbook(playbook, env, tags, extra_args, **kwargs):
+    def fake_run_playbook(cx, playbook, env, tags, extra_args, **kwargs):
         seen["extra_args"] = extra_args
         seen["profile"] = kwargs.get("profile")
 

@@ -12,7 +12,8 @@ import typer
 import yaml
 from rich.table import Table
 
-from bay_cli import console, paths
+from bay_cli import console
+from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
 app = typer.Typer(help="Inspect and reset the webhook build circuit breaker.")
@@ -22,14 +23,14 @@ app = typer.Typer(help="Inspect and reset the webhook build circuit breaker.")
 # Vault / Telegram helpers
 # ---------------------------------------------------------------------------
 
-def _decrypt_vault(root: Path, env: str) -> dict:
+def _decrypt_vault(cx: Context, env: str) -> dict:
     """Decrypt group_vars/<env>/secrets.yml via .vault_pass.
 
     Returns parsed YAML dict, or empty dict if vault unavailable.
     Mirrors the pattern in validate.py::_validate_vault_file.
     """
-    vault_pass = root / ".vault_pass"
-    vault_file = root / "group_vars" / env / "secrets.yml"
+    vault_pass = cx.vault_pass
+    vault_file = cx.secrets_file(env)
     if not vault_pass.exists() or not vault_file.exists():
         return {}
     try:
@@ -51,12 +52,12 @@ def _decrypt_vault(root: Path, env: str) -> dict:
         return {}
 
 
-def _read_telegram_creds(root: Path, env: str) -> tuple[str, str]:
+def _read_telegram_creds(cx: Context, env: str) -> tuple[str, str]:
     """Read TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID from vault.
 
     Returns (token, chat_id). Both empty strings if unavailable.
     """
-    secrets = _decrypt_vault(root, env)
+    secrets = _decrypt_vault(cx, env)
     token = str(secrets.get("TELEGRAM_BOT_TOKEN", "") or "")
     chat_id = str(secrets.get("TELEGRAM_CHAT_ID", "") or "")
     return token, chat_id
@@ -137,13 +138,12 @@ def _parse_adhoc_json(raw: str) -> dict | None:
 # Multi-region host resolution
 # ---------------------------------------------------------------------------
 
-def _get_regions(bay_dir: Path) -> dict[str, str]:
+def _get_regions(cx: Context) -> dict[str, str]:
     """Return {region_name: host_ip} for multi-region inventories.
 
     For single-region, returns {None: None} sentinel (no region column needed).
     """
-    root = bay_dir.parent
-    inventory = root / "hosts" / "production"
+    inventory = cx.inventory("production")
     if not inventory.exists():
         return {}
 
@@ -178,8 +178,8 @@ def _get_regions(bay_dir: Path) -> dict[str, str]:
     return groups
 
 
-def _is_multi_region(bay_dir: Path) -> bool:
-    return bool(_get_regions(bay_dir))
+def _is_multi_region(cx: Context) -> bool:
+    return bool(_get_regions(cx))
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +364,7 @@ def _render_status_table(
 
 @app.command()
 def status(
+    ctx: typer.Context,
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     region: Optional[str] = typer.Option(None, "--region", "-r", help="Filter to a specific region."),
     service: Optional[str] = typer.Option(None, "--service", "-s", help="Show full state for one service."),
@@ -388,14 +389,14 @@ def status(
         _validate_env,
     )
 
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     _validate_env(env, root)
 
     stack_name = _read_stack_name(root)
-    multi = _is_multi_region(bay_dir)
-    regions = _get_regions(bay_dir) if multi else {}
+    multi = _is_multi_region(cx)
+    regions = _get_regions(cx) if multi else {}
 
     all_states: list[dict] = []
 
@@ -434,6 +435,7 @@ def status(
 
 @app.command()
 def reset(
+    ctx: typer.Context,
     service: Optional[str] = typer.Argument(None, help="Service to reset. Omit with --all to reset all."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     region: Optional[str] = typer.Option(None, "--region", "-r", help="Target a specific region."),
@@ -468,8 +470,8 @@ def reset(
         _validate_service_name,
     )
 
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     _validate_env(env, root)
 
@@ -479,8 +481,8 @@ def reset(
         raise BayError("Cannot pass both a service name and --all")
 
     stack_name = _read_stack_name(root)
-    multi = _is_multi_region(bay_dir)
-    regions = _get_regions(bay_dir) if multi else {}
+    multi = _is_multi_region(cx)
+    regions = _get_regions(cx) if multi else {}
 
     # Resolve target hosts
     if multi and regions:
@@ -562,7 +564,7 @@ def reset(
     )
 
     # Read Telegram credentials once (non-fatal if unavailable)
-    token, chat_id = _read_telegram_creds(root, env)
+    token, chat_id = _read_telegram_creds(cx, env)
 
     for rname, rhost in sorted(target_regions.items()):
         for svc in services_to_reset:

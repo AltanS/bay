@@ -15,6 +15,7 @@ import pytest
 
 from unittest.mock import MagicMock, patch
 
+from bay_cli.context import Context
 from bay_cli.commands.ops import (
     _all_service_names,
     _check_rig_state,
@@ -156,41 +157,41 @@ class TestResolveTargetHost:
         """Returns None when region is None."""
         bay_dir = tmp_path / ".bay"
         bay_dir.mkdir()
-        assert _resolve_target_host(bay_dir, None) is None
+        assert _resolve_target_host(Context.for_fleet_root(tmp_path, bay_dir), None) is None
 
     def test_single_server_returns_none(self, tmp_path: Path) -> None:
         """Returns None for single-server inventory even with region."""
         bay_dir = tmp_path / ".bay"
         bay_dir.mkdir()
         _write_single_region_inventory(tmp_path)
-        assert _resolve_target_host(bay_dir, "eu") is None
+        assert _resolve_target_host(Context.for_fleet_root(tmp_path, bay_dir), "eu") is None
 
     def test_multi_region_resolves_eu(self, tmp_path: Path) -> None:
         """Resolves eu region to its host IP."""
         bay_dir = tmp_path / ".bay"
         bay_dir.mkdir()
         _write_multi_region_inventory(tmp_path)
-        assert _resolve_target_host(bay_dir, "eu") == "10.0.0.1"
+        assert _resolve_target_host(Context.for_fleet_root(tmp_path, bay_dir), "eu") == "10.0.0.1"
 
     def test_multi_region_resolves_na(self, tmp_path: Path) -> None:
         """Resolves na region to its host IP."""
         bay_dir = tmp_path / ".bay"
         bay_dir.mkdir()
         _write_multi_region_inventory(tmp_path)
-        assert _resolve_target_host(bay_dir, "na") == "10.0.0.2"
+        assert _resolve_target_host(Context.for_fleet_root(tmp_path, bay_dir), "na") == "10.0.0.2"
 
     def test_unknown_region_returns_none(self, tmp_path: Path) -> None:
         """Returns None for an unknown region name."""
         bay_dir = tmp_path / ".bay"
         bay_dir.mkdir()
         _write_multi_region_inventory(tmp_path)
-        assert _resolve_target_host(bay_dir, "asia") is None
+        assert _resolve_target_host(Context.for_fleet_root(tmp_path, bay_dir), "asia") is None
 
     def test_missing_inventory_returns_none(self, tmp_path: Path) -> None:
         """Returns None when hosts/production does not exist."""
         bay_dir = tmp_path / ".bay"
         bay_dir.mkdir()
-        assert _resolve_target_host(bay_dir, "eu") is None
+        assert _resolve_target_host(Context.for_fleet_root(tmp_path, bay_dir), "eu") is None
 
 
 # ── _all_service_names tests ────────────────────────────────────────────
