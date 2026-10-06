@@ -1,0 +1,16 @@
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[services.worker]
+command = "node worker.js"
+replicas = 0
+zero_downtime = "yes"
+update = "maybe"
+logs = "7m"
+
+[deploy.production]
+domain = "app.example.com"

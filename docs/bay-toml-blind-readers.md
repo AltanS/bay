@@ -30,4 +30,31 @@ All fields converge, and the lists of open questions are empty or name the same 
 
 ## Runs
 
-Result: pending
+Result: converged, after sixteen rulings.
+
+2026-10-06. Three readers got only `docs/bay-toml.md` and `corrected-example.toml`. They
+converged on the containers, the routes, the env vars and the data for both environments.
+
+The readers differed only where the doc was silent. There were sixteen open points:
+
+1. Whether `[needs.postgres]` names a database and user.
+2. What the health path does when a route prefix covers it.
+3. Who chooses the box port for `expose`, and the bind address.
+4. Which sibling URL variables each service receives.
+5. Whether a `locked` path needs the password.
+6. How jobs are named, and what a job inherits.
+7. What a service inherits for `update`, `logs`, `replicas` and `zero_downtime`.
+8. Whether `[access.identity]` works in `public` mode.
+9. The status code and the certificates of an alias redirect.
+10. The name of a volume.
+11. What a failed health check does during a deploy.
+12. Whether `fleet_secrets` values differ per environment.
+13. Whether an `open` path stays open in every environment.
+14. What a service with an inline `build` inherits.
+15. When `release` runs and what a failure does.
+16. The default `health` of a service with a port.
+
+Each point now has one plain sentence in `docs/bay-toml.md`, under Behavior. The example
+changed in two more places: the web `health` is now `/healthz`, because `/api/health`
+sat under the `/api` route prefix, and `[needs.postgres]` no longer names a database or
+user.

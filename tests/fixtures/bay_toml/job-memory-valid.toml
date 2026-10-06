@@ -1,0 +1,15 @@
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[[jobs]]
+name = "cleanup"
+schedule = "0 2 * * *"
+command = "node dist/cleanup.js"
+memory = "256m"
+
+[deploy.production]
+domain = "app.example.com"

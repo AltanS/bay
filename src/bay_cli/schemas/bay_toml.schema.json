@@ -203,16 +203,6 @@
             "pattern": "^[a-z0-9_]+$",
             "x-messages": { "pattern": "extension names use only lowercase letters, digits and underscores" }
           }
-        },
-        "database": {
-          "type": "string",
-          "pattern": "^[a-z_][a-z0-9_]*$",
-          "x-messages": { "pattern": "database names use only lowercase letters, digits and underscores" }
-        },
-        "role": {
-          "type": "string",
-          "pattern": "^[a-z_][a-z0-9_]*$",
-          "x-messages": { "pattern": "database user names use only lowercase letters, digits and underscores" }
         }
       }
     },
@@ -391,7 +381,8 @@
           "pattern": "^\\S+( \\S+){4}$",
           "x-messages": { "pattern": "must be a five-field cron line in UTC such as \"0 2 * * *\"" }
         },
-        "command": { "$ref": "#/$defs/command" }
+        "command": { "$ref": "#/$defs/command" },
+        "memory": { "$ref": "#/$defs/size" }
       }
     },
     "service": {
@@ -405,6 +396,10 @@
         "port": { "$ref": "#/$defs/port" },
         "health": { "$ref": "#/$defs/health" },
         "memory": { "$ref": "#/$defs/size" },
+        "replicas": { "$ref": "#/$defs/replicas" },
+        "zero_downtime": { "type": "boolean" },
+        "update": { "$ref": "#/$defs/update" },
+        "logs": { "$ref": "#/$defs/logs" },
         "path": { "$ref": "#/$defs/url_path" },
         "domain": { "$ref": "#/$defs/domain" },
         "expose": { "type": "string", "enum": ["loopback", "tailnet"] },

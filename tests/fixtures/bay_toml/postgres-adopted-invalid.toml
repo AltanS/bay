@@ -1,0 +1,14 @@
+# A literal database or user name would make staging share the production database.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[needs.postgres]
+database = "myapp_prod"
+role = "myapp"
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "app.example.com"

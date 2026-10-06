@@ -50,6 +50,15 @@ PAIRS: dict[str, set[str]] = {
     "needs-one-form": {"services.worker.needs"},
     "image-or-build": {"image"},
     "mounts": {"mounts[0]"},
+    "postgres-adopted": {"needs.postgres.database", "needs.postgres.role"},
+    "job-memory": {"jobs[0].memory"},
+    "service-runtime": {
+        "services.worker.replicas",
+        "services.worker.zero_downtime",
+        "services.worker.update",
+        "services.worker.logs",
+    },
+    "identity-public": {"access.identity.header"},
 }
 
 #: Invalid fixtures with no valid twin (the twin is the corrected example).
@@ -255,6 +264,21 @@ def test_base_document_is_valid():
         pytest.param(_doc(update="false"), {"update"}, id="update-enum"),
         pytest.param(_doc(services={"b": {"port": 1, "expose": "host"}}),
                      {"services.b.expose"}, id="expose-enum"),
+        pytest.param(_doc(services={"b": {"port": 1, "expose": "0.0.0.0"}}),
+                     {"services.b.expose"}, id="expose-never-all-interfaces"),
+        pytest.param(_doc(services={"b": {"port": 1, "expose": 8080}}),
+                     {"services.b.expose"}, id="expose-names-no-box-port"),
+        pytest.param(_doc(services={"job-cleanup": {}}), {"services.job-cleanup"},
+                     id="service-starts-with-job"),
+        pytest.param(_doc(mounts=[{"path": "/d", "volume": "production-data"}]),
+                     {"mounts[0].volume"}, id="volume-starts-with-env"),
+        pytest.param(_doc(services={"w": {"mounts": [{"path": "/d", "volume": "production-d"}]}}),
+                     {"services.w.mounts[0].volume"}, id="service-volume-starts-with-env"),
+        pytest.param(_doc(jobs=[{"name": "a", "schedule": "0 2 * * *", "command": "x",
+                                 "memory": "0m"}]),
+                     {"jobs[0].memory"}, id="job-memory-size"),
+        pytest.param(_doc(services={"w": {"replicas": 0}}), {"services.w.replicas"},
+                     id="service-replicas-minimum"),
         pytest.param({k: v for k, v in _doc().items() if k != "access"}, {"access"},
                      id="access-required"),
         pytest.param(_doc(access={"identity": {}}), {"access.identity.header"},
@@ -272,10 +296,35 @@ def test_needs_list_and_table_in_services_only():
 
 
 def test_postgres_options_only_on_postgres():
-    ok = _doc(needs={"postgres": {"database": "x_prod", "role": "x", "extensions": ["vector"]}})
+    ok = _doc(needs={"postgres": {"env": "GF_DATABASE_URL", "extensions": ["vector"]}})
     assert bay_toml.validate(ok) == []
-    bad = _doc(needs={"redis": {"database": "x"}})
-    assert _paths(bay_toml.validate(bad)) == {"needs.redis.database"}
+    bad = _doc(needs={"redis": {"extensions": ["x"]}})
+    assert _paths(bay_toml.validate(bad)) == {"needs.redis.extensions"}
+
+
+@pytest.mark.parametrize("key", ["database", "role"])
+def test_postgres_never_names_adopted_data(key):
+    """Adopted names are per environment and live in the lockfile, so bay.toml rejects them."""
+    doc = _doc(needs={"postgres": {key: "myapp_prod"}})
+    (v,) = bay_toml.validate(doc)
+    assert v.path == f"needs.postgres.{key}"
+    assert "lockfile" in v.message
+
+
+def test_service_may_set_runtime_keys():
+    doc = _doc(services={"w": {"replicas": 3, "zero_downtime": True, "update": "auto",
+                               "logs": "off"}})
+    assert bay_toml.validate(doc) == []
+
+
+def test_job_may_set_memory():
+    job = {"name": "a", "schedule": "0 2 * * *", "command": "x", "memory": "1g"}
+    assert bay_toml.validate(_doc(jobs=[job])) == []
+
+
+def test_identity_is_valid_in_public_mode():
+    doc = _doc(access={"mode": "public", "identity": {"header": "X-Tailnet-Device"}})
+    assert bay_toml.validate(doc) == []
 
 
 # ── Schema hygiene ───────────────────────────────────────────────────────────
@@ -348,7 +397,42 @@ def test_docs_example_is_the_corrected_fixture():
 
 
 def test_blind_readers_doc_records_a_result():
-    assert re.search(r"^Result: ", BLIND_DOC.read_text(), re.MULTILINE)
+    text = BLIND_DOC.read_text()
+    assert re.search(r"^Result: ", text, re.MULTILINE)
+    assert "Result: pending" not in text
+
+
+#: One phrase per ruling from the blind-reader run. Each must stay in the reference doc.
+RULING_PHRASES = [
+    "bay.toml never names an adopted database, user or volume",
+    "Bay probes the health path directly on the container, not through the route",
+    "bay.toml never names a box port",
+    "never\n  `0.0.0.0`",
+    "`WEB_URL`",
+    "A service with `inherit = false` receives no such variable",
+    "`locked` paths also need the password",
+    "A job gets the image, env, secrets, `fleet_secrets`, needs and mounts",
+    "A job may set `memory`",
+    "A service inherits `update` and `logs` from the project",
+    "`[access.identity]` is valid in `public` mode",
+    "strips\n  the header on all others",
+    "An alias redirect is HTTP 308 and keeps the path and the query",
+    "Bay issues a certificate for every alias",
+    "`<name>-<env>-<volume>`",
+    "removes the new container and starts the\n  previous container again",
+    "`fleet_secrets` values are shared across environments by default",
+    "An `open` path stays open in every environment",
+    "A service with an inline `build` inherits nothing from the project `[build]`",
+    "A service that inherits the image shares the one build",
+    "A failed `release` aborts the deploy before traffic moves",
+    "inside a one-shot container of the new\n  image",
+    "`health` for a service with a `port` defaults to `/`",
+]
+
+
+@pytest.mark.parametrize("phrase", RULING_PHRASES)
+def test_doc_states_each_ruling(phrase):
+    assert phrase in DOC.read_text()
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

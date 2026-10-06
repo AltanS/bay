@@ -1,0 +1,19 @@
+# A service inherits update and logs, and may set replicas, zero_downtime, update and logs itself.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+update = "notify"
+logs = "7d"
+
+[access]
+mode = "public"
+
+[services.worker]
+command = "node worker.js"
+replicas = 2
+zero_downtime = true
+update = "off"
+logs = "3d"
+
+[deploy.production]
+domain = "app.example.com"

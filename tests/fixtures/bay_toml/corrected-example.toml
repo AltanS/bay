@@ -8,7 +8,8 @@ publish = false                # true = other projects may `needs = ["myapp"]` (
 port = 3000                    # container port that receives traffic
 command = "node server.js"     # default: image CMD
 release = "npx prisma migrate deploy"  # once per deploy before traffic moves; failure aborts, old container stays
-health = "/api/health"         # default "/"; "none" disables. Required explicit when [access.password] is set.
+health = "/healthz"            # default "/"; "none" disables. Bay probes it on the container, not through the route.
+                               # Required explicit when [access.password] is set. The route bypasses the password for it only if the path is routed.
 replicas = 1
 memory = "512m"                # default none; swap never allowed
 update = "notify"              # notify | auto | off  (default notify)
@@ -20,8 +21,7 @@ secrets = ["SESSION_SECRET"]   # names only; fleet holds values per environment
 [needs.postgres]
 env = "GF_DATABASE_URL"        # alias injected beside DATABASE_URL. Own database and user per environment.
 extensions = ["vector"]
-database = "myapp_prod"        # adopt an existing db name (importer writes this; default <name>_<env>)
-role = "myapp"                 # adopt an existing database user name
+# Adopted database, user and volume names are per environment. They live only in the fleet lockfile (`bay show`).
 [needs.redis]                  # REDIS_URL, own key namespace per environment
 [needs.pigeon]                 # a published project; injects PIGEON_URL; fleet decides network path and ACL
 # Removing a need never deletes data; the plan marks that step destructive and separate.
@@ -53,7 +53,7 @@ mode = "public"                # public | tailnet | internal
                                # internal = no route; reachable only by containers that need it
 open   = ["/webhooks"]         # paths opened to public; bypass mode AND password
 locked = ["/admin"]            # paths locked to the tailnet
-# The health path bypasses the password by exact match. Identity header is stripped on non-tailnet requests.
+# A locked path also needs the password when [access.password] is set. An open path stays open in every environment.
 [access.limits]                # per source IP; default = fleet setting
 rate = "100/s"
 burst = 50
@@ -61,7 +61,7 @@ concurrent = 100
 [access.password]              # HTTP basic auth on everything not in `open`; passwords are secrets PASSWORD_<USER>
 users = ["admin"]
 realm = "Staff only"
-[access.identity]              # tailnet only; app receives caller's device name in this header
+[access.identity]              # valid in any mode; set only on requests from the tailnet, stripped on all others
 header = "X-Tailnet-Device"
 
 # ── Data ───────────────────────────────────────────────────
@@ -82,25 +82,31 @@ mode = "0644"                  # default 0600
 keep = "30d"                   # default fleet setting
 hour = 3                       # UTC; default fleet setting
 
-# ── Scheduled jobs (same image, env, secrets, needs) ───────
+# ── Scheduled jobs (image, env, secrets, fleet_secrets, needs and mounts of the main container) ──────
 [[jobs]]
 name = "cleanup"
 schedule = "0 2 * * *"         # UTC cron
 command = "node dist/cleanup.js"
+memory = "256m"                # default none; the job is a one-shot container <name>-job-cleanup
 
 # ── Extra services ─────────────────────────────────────────
 # Inherit by default: image/[build], env, secrets, fleet_secrets, needs. `inherit = false` starts empty.
-# Own: command, port, health, memory, access, mounts, env, secrets, needs, image/[build].
+# Inherit update and logs from the project; replicas = 1 and zero_downtime = false unless the service sets them.
+# Own: command, port, health, memory, replicas, zero_downtime, update, logs, access, mounts, env, secrets, needs, image/[build].
 # No `domain` and no `path` = internal. Routed services default to the project mode.
 # Password and limits are never inherited.
-# Siblings reach each other at http://<service>:<port>; Bay injects <SERVICE>_URL.
+# Siblings reach each other at http://<service>:<port>. Every service with a port gets <SERVICE>_URL (WEB_URL for the main
+# container) in every other service of the same environment, except services with inherit = false, which get none.
 [services.worker]
 command = "node dist/worker.js"
 memory = "256m"
+update = "off"                 # own value; without it the service takes the project update
 [services.api]
 build = { dockerfile = "apps/api/Dockerfile", context = "apps/api" }
 port = 4000
 path = "/api"                  # routed on the main domain by prefix
+replicas = 2
+zero_downtime = true           # the previous container keeps running until the new one is healthy
 [services.api.access.limits]
 rate = "2/s"
 [services.admin]
@@ -110,13 +116,13 @@ domain = "admin.example.com"   # a second hostname is a service, not a route; ov
 inherit = false                # sidecar: none of the project's secrets or needs
 image = "ghcr.io/steel-dev/steel-browser:latest"
 port = 3000
-expose = "loopback"            # loopback | tailnet; publish the port on the box for Traefik or probes
+expose = "loopback"            # loopback | tailnet; the fleet picks the box port and records it in the lockfile. Never 0.0.0.0.
 
 # ── Deploy targets (one table per environment; each env = own data + secret values) ──
 [deploy.production]
 box = "eu-1"                   # default: fleet default box
 domain = "app.example.com"     # default: <name>.<fleet default domain>
-aliases = ["example.com"]      # redirect to domain; redirect = false serves both
+aliases = ["example.com"]      # HTTP 308 to domain, path and query kept; Bay issues a certificate per alias. redirect = false serves both
 branch = "main"                # webhook builds follow this branch; default main
 [deploy.staging]
 box = "eu-1"

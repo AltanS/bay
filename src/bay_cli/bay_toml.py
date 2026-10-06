@@ -167,6 +167,11 @@ def _translate(error: Any) -> Iterator[Violation]:
 
 
 def _unknown_key_message(key: str, base: str, allowed: list[str]) -> str:
+    if base.endswith("needs.postgres") and key in ("database", "role"):
+        return (
+            "bay.toml never names an adopted database or user; they differ per "
+            "environment and live in the fleet lockfile (see `bay show`)"
+        )
     if base and key in TOP_LEVEL_KEYS:
         return (
             "unknown key here; a top-level key written below a [table] header "
@@ -271,6 +276,13 @@ def _name_rules(
                     f"service names must not start with {env}-, because container "
                     f"names for the {env} environment would collide",
                 )
+        if svc_name.startswith("job-"):
+            yield Violation(
+                f"services.{svc_name}",
+                "service names must not start with job-, because the container name "
+                "would collide with a scheduled job",
+            )
+    yield from _volume_names(doc, envs, services)
     seen: set[str] = set()
     jobs = doc.get("jobs")
     for i, job in enumerate(jobs if isinstance(jobs, list) else []):
@@ -282,6 +294,27 @@ def _name_rules(
         elif jname in services or jname == "web":
             yield Violation(f"jobs[{i}].name", f"{jname} is already the name of a service")
         seen.add(jname)
+
+
+def _volume_names(
+    doc: dict[str, Any], envs: dict[str, Any], services: dict[str, Any]
+) -> Iterator[Violation]:
+    levels = [("", doc)] + [
+        (f"services.{n}", s) for n, s in services.items() if isinstance(s, dict)
+    ]
+    for base, level in levels:
+        mounts = level.get("mounts")
+        for i, m in enumerate(mounts if isinstance(mounts, list) else []):
+            vol = m.get("volume") if isinstance(m, dict) else None
+            if not isinstance(vol, str):
+                continue
+            for env in envs:
+                if vol.startswith(f"{env}-"):
+                    yield Violation(
+                        _join(base, f"mounts[{i}].volume"),
+                        f"volume names must not start with {env}-, because volume "
+                        f"names for the {env} environment would collide",
+                    )
 
 
 def _needs_rules(doc: dict[str, Any], services: dict[str, Any]) -> Iterator[Violation]:

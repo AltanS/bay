@@ -1,0 +1,13 @@
+# The identity header is valid in public mode. Bay sets it only on requests from the tailnet.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[access.identity]
+header = "X-Tailnet-Device"
+
+[deploy.production]
+domain = "app.example.com"

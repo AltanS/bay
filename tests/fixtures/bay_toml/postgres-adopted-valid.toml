@@ -1,0 +1,17 @@
+# Adopted database, user and volume names are per environment and live in the fleet lockfile.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[needs.postgres]
+env = "GF_DATABASE_URL"
+extensions = ["vector"]
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "app.example.com"
+
+[deploy.staging]
+domain = "staging.example.com"
