@@ -9,20 +9,22 @@ from typing import Optional
 import typer
 import yaml
 
-from bay_cli import ansible, console, paths, runner
+from bay_cli import ansible, console, runner
+from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
 app = typer.Typer(help="Manage encrypted secrets (ansible-vault).")
 
 
-def _vault_file(env: str, file: Optional[str]) -> str:
+def _vault_file(cx: Context, env: str, file: Optional[str]) -> str:
     if file:
         return file
-    return f"group_vars/{env}/secrets.yml"
+    return str(cx.secrets_file(env))
 
 
 @app.command()
 def edit(
+    ctx: typer.Context,
     env: str = typer.Argument(..., help="Target environment."),
     file: Optional[str] = typer.Option(None, "--file", "-f", help="Vault file path."),
 ) -> None:
@@ -40,12 +42,13 @@ def edit(
         bin/bay vault edit production
         bin/bay vault edit eu --file group_vars/eu/secrets.yml
     """
-    bay_dir = paths.find_bay_dir()
-    ansible.vault_cmd("edit", _vault_file(env, file), bay_dir=bay_dir)
+    cx = context_from(ctx)
+    ansible.vault_cmd("edit", _vault_file(cx, env, file), bay_dir=cx.framework_root)
 
 
 @app.command()
 def view(
+    ctx: typer.Context,
     env: str = typer.Argument(..., help="Target environment."),
     file: Optional[str] = typer.Option(None, "--file", "-f", help="Vault file path."),
 ) -> None:
@@ -55,12 +58,13 @@ def view(
 
         bin/bay vault view production
     """
-    bay_dir = paths.find_bay_dir()
-    ansible.vault_cmd("view", _vault_file(env, file), bay_dir=bay_dir)
+    cx = context_from(ctx)
+    ansible.vault_cmd("view", _vault_file(cx, env, file), bay_dir=cx.framework_root)
 
 
 @app.command()
 def encrypt(
+    ctx: typer.Context,
     env: str = typer.Argument(..., help="Target environment."),
     file: Optional[str] = typer.Option(None, "--file", "-f", help="Vault file path."),
 ) -> None:
@@ -70,12 +74,13 @@ def encrypt(
 
         bin/bay vault encrypt production
     """
-    bay_dir = paths.find_bay_dir()
-    ansible.vault_cmd("encrypt", _vault_file(env, file), bay_dir=bay_dir)
+    cx = context_from(ctx)
+    ansible.vault_cmd("encrypt", _vault_file(cx, env, file), bay_dir=cx.framework_root)
 
 
 @app.command()
 def decrypt(
+    ctx: typer.Context,
     env: str = typer.Argument(..., help="Target environment."),
     file: Optional[str] = typer.Option(None, "--file", "-f", help="Vault file path."),
 ) -> None:
@@ -88,8 +93,8 @@ def decrypt(
 
         bin/bay vault decrypt production
     """
-    bay_dir = paths.find_bay_dir()
-    ansible.vault_cmd("decrypt", _vault_file(env, file), bay_dir=bay_dir)
+    cx = context_from(ctx)
+    ansible.vault_cmd("decrypt", _vault_file(cx, env, file), bay_dir=cx.framework_root)
 
 
 def _uv_run_cmd(bay_dir: Path) -> list[str]:
@@ -114,6 +119,7 @@ def _normalise_stdin_value(raw: str) -> str:
 
 @app.command("set")
 def set_key(
+    ctx: typer.Context,
     env: str = typer.Argument(..., help="Target environment."),
     key: str = typer.Argument(..., help="Secret key name."),
     value: Optional[str] = typer.Argument(
@@ -162,8 +168,9 @@ def set_key(
             "and in /proc/<pid>/cmdline. Pipe it on stdin instead."
         )
 
-    bay_dir = paths.find_bay_dir()
-    vault_file = Path(_vault_file(env, None))
+    cx = context_from(ctx)
+    bay_dir = cx.framework_root
+    vault_file = Path(_vault_file(cx, env, None))
 
     if not vault_file.exists():
         raise BayError.config(

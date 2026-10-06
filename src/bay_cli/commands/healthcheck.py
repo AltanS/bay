@@ -14,7 +14,8 @@ from pathlib import Path
 
 import typer
 
-from bay_cli import console, paths
+from bay_cli import console
+from bay_cli.context import context_from
 from bay_cli.config import StackConfig
 from bay_cli.healthcheck import (
     CheckResult,
@@ -46,6 +47,7 @@ def _emit_rich(env: str, consumer: str, results: list[CheckResult]) -> None:
 
 
 def healthcheck(
+    ctx: typer.Context,
     env: str = typer.Argument(..., help="Target environment (e.g. 'production', 'testing')."),
     include_vpn: bool = typer.Option(
         False,
@@ -82,8 +84,7 @@ def healthcheck(
         bin/bay healthcheck production --service myapp
         bin/bay healthcheck production --include-vpn
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    root = context_from(ctx).fleet_root
     # Consumer name for the header — use the root dir's folder name.
     consumer = Path(root).name
 

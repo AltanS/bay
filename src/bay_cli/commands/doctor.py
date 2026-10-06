@@ -10,10 +10,12 @@ from pathlib import Path
 import typer
 import yaml
 
-from bay_cli import console, paths
+from bay_cli import console
+from bay_cli.context import context_from
 
 
 def doctor(
+    ctx: typer.Context,
     env: str = typer.Argument("production", help="Target environment to check."),
 ) -> None:
     """Run pre-flight checks on your project before deploying.
@@ -31,15 +33,15 @@ def doctor(
         bin/bay doctor
         bin/bay doctor testing
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    root = cx.fleet_root
 
-    console.show_banner(subtitle="Doctor")
+    console.show_banner(cx, subtitle="Doctor")
 
     issues = 0
 
     # ── Vault password ───────────────────────────────────────────────
-    vault_pass = root / ".vault_pass"
+    vault_pass = cx.vault_pass
     if vault_pass.exists():
         console.success("Vault password     .vault_pass exists")
     else:
@@ -47,7 +49,7 @@ def doctor(
         issues += 1
 
     # ── Inventory ────────────────────────────────────────────────────
-    inventory_file = root / "hosts" / env
+    inventory_file = cx.inventory(env)
     hosts = _parse_inventory(inventory_file)
     if not inventory_file.exists():
         console.error(f"Inventory          hosts/{env} not found")
@@ -74,9 +76,9 @@ def doctor(
         console.warning("SSH connectivity   skipped (no hosts in inventory)")
 
     # ── Load config files ────────────────────────────────────────────
-    access_gw_cfg = _load_yaml(root / "group_vars" / "all" / "access_gateway.yml")
-    domains_cfg = _load_yaml(root / "group_vars" / env / "domains.yml")
-    vpn_cfg = _load_yaml(root / "group_vars" / "all" / "vpn_access.yml")
+    access_gw_cfg = _load_yaml(cx.env_file("all", "access_gateway.yml"))
+    domains_cfg = _load_yaml(cx.env_file(env, "domains.yml"))
+    vpn_cfg = _load_yaml(cx.env_file("all", "vpn_access.yml"))
 
     gateway_type = access_gw_cfg.get("access_gateway", "none") if access_gw_cfg else "none"
     headscale_domain = access_gw_cfg.get("headscale_domain") if access_gw_cfg else None

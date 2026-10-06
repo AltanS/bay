@@ -12,7 +12,8 @@ from rich.table import Table
 
 import yaml as _yaml
 
-from bay_cli import ansible, console as con, paths, runner
+from bay_cli import ansible, console as con, runner
+from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
 app = typer.Typer(help="Manage restic backups (list, run, restore, status, check).")
@@ -20,9 +21,9 @@ app = typer.Typer(help="Manage restic backups (list, run, restore, status, check
 _console = Console()
 
 
-def _get_stack_name(bay_dir: Path) -> str:
+def _get_stack_name(cx: Context) -> str:
     """Read stack_name from consumer group_vars, default to 'bay'."""
-    main_yml = bay_dir.parent / "group_vars" / "all" / "main.yml"
+    main_yml = cx.main_vars_file
     if main_yml.exists():
         try:
             data = _yaml.safe_load(main_yml.read_text()) or {}
@@ -215,6 +216,7 @@ def _hosts_with_target(
 
 @app.command("list")
 def list_snapshots(
+    ctx: typer.Context,
     accessory: str = typer.Argument(..., help="Accessory name (e.g., postgres)."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
 ) -> None:
@@ -228,11 +230,12 @@ def list_snapshots(
         bin/bay backup list postgres
         bin/bay backup list headscale
     """
-    bay_dir = paths.find_bay_dir()
+    cx = context_from(ctx)
+    bay_dir = cx.framework_root
 
     con.header(f"Snapshots for {accessory}")
 
-    stack = _get_stack_name(bay_dir)
+    stack = _get_stack_name(cx)
     hosts = _hosts_with_target(env, accessory, bay_dir=bay_dir, stack=stack)
     if not hosts:
         con.info(f"No host has a '{accessory}' backup configured.")
@@ -281,6 +284,7 @@ def list_snapshots(
 
 @app.command()
 def run(
+    ctx: typer.Context,
     accessory: Optional[str] = typer.Argument(None, help="Accessory name. If omitted, runs all."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
 ) -> None:
@@ -291,9 +295,10 @@ def run(
         bin/bay backup run postgres
         bin/bay backup run
     """
-    bay_dir = paths.find_bay_dir()
+    cx = context_from(ctx)
+    bay_dir = cx.framework_root
 
-    stack = _get_stack_name(bay_dir)
+    stack = _get_stack_name(cx)
     if accessory:
         con.header(f"Running backup for {accessory}")
         hosts = _hosts_with_target(env, accessory, bay_dir=bay_dir, stack=stack)
@@ -319,6 +324,7 @@ def run(
 
 @app.command()
 def restore(
+    ctx: typer.Context,
     env: str = typer.Argument(..., help="Target environment (e.g., production)."),
     accessory: str = typer.Argument(..., help="Accessory name (e.g., postgres)."),
     snapshot: Optional[str] = typer.Option(None, "--snapshot", "-s", help="Snapshot ID (omit to pick interactively from the latest 10)."),
@@ -336,8 +342,9 @@ def restore(
         bin/bay backup restore production postgres
         bin/bay backup restore production postgres --snapshot ab12cd34
     """
-    bay_dir = paths.find_bay_dir()
-    stack = _get_stack_name(bay_dir)
+    cx = context_from(ctx)
+    bay_dir = cx.framework_root
+    stack = _get_stack_name(cx)
 
     con.header(f"Restore {accessory} on {env}")
 
@@ -411,6 +418,7 @@ def restore(
 
 @app.command()
 def status(
+    ctx: typer.Context,
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
 ) -> None:
     """Show the backup status dashboard (last backup, snapshots, repo size).
@@ -419,12 +427,13 @@ def status(
 
         bin/bay backup status
     """
-    bay_dir = paths.find_bay_dir()
+    cx = context_from(ctx)
+    bay_dir = cx.framework_root
 
     con.header("Backup Status")
 
     # Get list of backup scripts to discover accessories
-    stack = _get_stack_name(bay_dir)
+    stack = _get_stack_name(cx)
     scripts_cmd = f'ls -1 /opt/{stack}/backup/backup-*.sh 2>/dev/null | sed "s|.*/backup-||;s|\\.sh||"'
     result = _run_on_host(env, scripts_cmd, bay_dir=bay_dir, message="Discovering accessories...")
 
@@ -512,6 +521,7 @@ def status(
 
 @app.command()
 def check(
+    ctx: typer.Context,
     accessory: str = typer.Argument(..., help="Accessory name (e.g., postgres)."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     read_data: bool = typer.Option(False, "--read-data", help="Full data verification (slow, S3 egress)."),
@@ -523,11 +533,12 @@ def check(
         bin/bay backup check postgres
         bin/bay backup check postgres --read-data
     """
-    bay_dir = paths.find_bay_dir()
+    cx = context_from(ctx)
+    bay_dir = cx.framework_root
 
     con.header(f"Checking {accessory} repository")
 
-    stack = _get_stack_name(bay_dir)
+    stack = _get_stack_name(cx)
     hosts = _hosts_with_target(env, accessory, bay_dir=bay_dir, stack=stack)
     if not hosts:
         con.info(f"No host has a '{accessory}' backup configured.")

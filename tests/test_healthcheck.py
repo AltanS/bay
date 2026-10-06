@@ -348,8 +348,8 @@ class TestCliNonzeroExit:
             "svc": {"access": "public", "domains": ["example.com"]},
         }
 
-        with patch("bay_cli.commands.healthcheck.paths.find_bay_dir", return_value="/tmp/bay"), \
-             patch("bay_cli.commands.healthcheck.paths.consumer_root", return_value="/tmp/consumer"), \
+        with patch("bay_cli.paths.find_bay_dir", return_value="/tmp/bay"), \
+             patch("bay_cli.paths.consumer_root", return_value="/tmp/consumer"), \
              patch("bay_cli.commands.healthcheck.StackConfig") as sc_cls, \
              patch("bay_cli.commands.healthcheck.run_healthcheck") as run:
             instance = sc_cls.return_value
@@ -371,8 +371,8 @@ class TestCliNonzeroExit:
             "svc": {"access": "public", "domains": ["example.com"]},
         }
 
-        with patch("bay_cli.commands.healthcheck.paths.find_bay_dir", return_value="/tmp/bay"), \
-             patch("bay_cli.commands.healthcheck.paths.consumer_root", return_value="/tmp/consumer"), \
+        with patch("bay_cli.paths.find_bay_dir", return_value="/tmp/bay"), \
+             patch("bay_cli.paths.consumer_root", return_value="/tmp/consumer"), \
              patch("bay_cli.commands.healthcheck.StackConfig") as sc_cls, \
              patch("bay_cli.commands.healthcheck.run_healthcheck") as run:
             instance = sc_cls.return_value
@@ -396,8 +396,8 @@ class TestCliNonzeroExit:
             "svc": {"access": "public", "domains": ["example.com"]},
         }
 
-        with patch("bay_cli.commands.healthcheck.paths.find_bay_dir", return_value="/tmp/bay"), \
-             patch("bay_cli.commands.healthcheck.paths.consumer_root", return_value="/tmp/consumer"), \
+        with patch("bay_cli.paths.find_bay_dir", return_value="/tmp/bay"), \
+             patch("bay_cli.paths.consumer_root", return_value="/tmp/consumer"), \
              patch("bay_cli.commands.healthcheck.StackConfig") as sc_cls, \
              patch("bay_cli.commands.healthcheck.run_healthcheck") as run:
             instance = sc_cls.return_value
@@ -541,8 +541,8 @@ class TestOutputProbedUrl:
         from bay_cli.cli import app
 
         services = {"svc": {"access": "public", "domains": ["example.com"]}}
-        with patch("bay_cli.commands.healthcheck.paths.find_bay_dir", return_value="/tmp/bay"), \
-             patch("bay_cli.commands.healthcheck.paths.consumer_root", return_value="/tmp/consumer"), \
+        with patch("bay_cli.paths.find_bay_dir", return_value="/tmp/bay"), \
+             patch("bay_cli.paths.consumer_root", return_value="/tmp/consumer"), \
              patch("bay_cli.commands.healthcheck.StackConfig") as sc_cls, \
              patch("bay_cli.commands.healthcheck.run_healthcheck") as run:
             sc_cls.return_value.get_services.return_value = services
@@ -1096,8 +1096,8 @@ class TestReadinessNoteRendering:
             service="svc", domain="example.com", status=200, ok=True,
             attempts=7, elapsed_ms=44_350, probed_url="https://example.com/",
         )
-        with patch("bay_cli.commands.healthcheck.paths.find_bay_dir", return_value="/tmp/bay"), \
-             patch("bay_cli.commands.healthcheck.paths.consumer_root", return_value="/tmp/consumer"), \
+        with patch("bay_cli.paths.find_bay_dir", return_value="/tmp/bay"), \
+             patch("bay_cli.paths.consumer_root", return_value="/tmp/consumer"), \
              patch("bay_cli.commands.healthcheck.StackConfig") as sc_cls, \
              patch("bay_cli.commands.healthcheck.run_healthcheck") as run:
             sc_cls.return_value.get_services.return_value = services

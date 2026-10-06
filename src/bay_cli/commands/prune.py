@@ -24,11 +24,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from pathlib import Path
 
 import typer
 
-from bay_cli import ansible, console, paths, runner
+from bay_cli import ansible, console, runner
+from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
 # Mirrors `argo_buildx_builder` in roles/{git_deploy,cronjobs}/defaults/main.yml.  # legacy-argo: live host artifact name, migrate separately
@@ -123,7 +123,7 @@ _DF_CMD = (
 )
 
 
-def _resolve_build_server(env: str, bay_dir: Path) -> str:
+def _resolve_build_server(env: str, cx: Context) -> str:
     """Resolve the value of `build_server` for the env via ansible-inventory.
 
     Runs `ansible-inventory --list` once and scans hostvars for any host that
@@ -131,13 +131,13 @@ def _resolve_build_server(env: str, bay_dir: Path) -> str:
     the env is misconfigured; raises BayError with the conflicting values so
     the operator can see the problem.
     """
+    bay_dir = cx.framework_root
     uv_cmd = ansible._uv_run_cmd(bay_dir)
-    consumer_root = paths.consumer_root(bay_dir)
-    inventory = consumer_root / "hosts" / env
+    inventory = cx.inventory(env)
     if not inventory.exists():
         raise BayError(
             f"Inventory file not found: {inventory}",
-            hint=f"Known envs: {', '.join(p.name for p in (consumer_root / 'hosts').iterdir() if p.is_file())}",
+            hint=f"Known envs: {', '.join(p.name for p in cx.hosts_dir.iterdir() if p.is_file())}",
         )
 
     # Merge with os.environ so uv / other binaries on PATH are still found —
@@ -179,12 +179,12 @@ def _run_ad_hoc(
     env: str,
     cmd: str,
     *,
-    bay_dir: Path,
+    cx: Context,
     limit: str | None,
     message: str,
 ) -> None:
-    consumer_root = paths.consumer_root(bay_dir)
-    inventory = consumer_root / "hosts" / env
+    bay_dir = cx.framework_root
+    inventory = cx.inventory(env)
     uv_cmd = ansible._uv_run_cmd(bay_dir)
     # Use `all` as the host pattern — `--limit` then scopes the run. The env
     # group name may not contain the build_server host (e.g. sandbox's
@@ -214,6 +214,7 @@ def _run_ad_hoc(
 
 
 def prune(
+    ctx: typer.Context,
     env: str = typer.Argument(..., help="Target environment (e.g. production, testing)."),
     dry_run: bool = typer.Option(
         False,
@@ -248,11 +249,11 @@ def prune(
             f"--target must be 'build' or 'all', got: {target!r}",
         )
 
-    bay_dir = paths.find_bay_dir()
+    cx = context_from(ctx)
 
     limit: str | None = None
     if target == "build":
-        limit = _resolve_build_server(env, bay_dir)
+        limit = _resolve_build_server(env, cx)
         console.info(f"Targeting build_server: {limit}")
     else:
         console.warning("Targeting ALL hosts in env — use --target build for the common case")
@@ -262,7 +263,7 @@ def prune(
         _run_ad_hoc(
             env,
             _DF_CMD,
-            bay_dir=bay_dir,
+            cx=cx,
             limit=limit,
             message="Querying disk usage",
         )
@@ -271,7 +272,7 @@ def prune(
     _run_ad_hoc(
         env,
         _PRUNE_CMD,
-        bay_dir=bay_dir,
+        cx=cx,
         limit=limit,
         message=f"Pruning docker images + build cache on {limit or 'all hosts'}",
     )

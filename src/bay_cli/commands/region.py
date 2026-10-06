@@ -8,7 +8,8 @@ from pathlib import Path
 import typer
 from rich.panel import Panel
 
-from bay_cli import console, paths
+from bay_cli import console
+from bay_cli.context import context_from
 from bay_cli.errors import BayError
 
 app = typer.Typer(help="Manage deployment regions (multi-region inventories).")
@@ -218,6 +219,7 @@ def _create_region_group_vars(
 
 @app.command()
 def add(
+    ctx: typer.Context,
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
 ) -> None:
     """Add a new region to an existing multi-region deployment (interactive).
@@ -233,12 +235,12 @@ def add(
     """
     from rich.prompt import Prompt
 
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    root = cx.fleet_root
 
-    console.show_banner(subtitle="Add Region")
+    console.show_banner(cx, subtitle="Add Region")
 
-    inventory_path = root / "hosts" / env
+    inventory_path = cx.inventory(env)
 
     # Validate inventory structure
     if not _validate_inventory_structure(inventory_path):

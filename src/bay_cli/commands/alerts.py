@@ -39,13 +39,13 @@ from typing import Any
 
 import typer
 
-from bay_cli import console, paths
+from bay_cli import console
+from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
 app = typer.Typer(help="Inspect and configure Bay's alert surface.", no_args_is_help=True)
 
 _LEVELS = ("debug", "info", "warn", "critical")
-_ALERTS_FILE = "group_vars/all/alerts.yml"
 
 
 # ── Registry access ──────────────────────────────────────────────────────
@@ -101,12 +101,12 @@ def _yaml():
     return yaml
 
 
-def _config_path(root: Path) -> Path:
-    return root / _ALERTS_FILE
+def _config_path(cx: Context) -> Path:
+    return cx.env_file("all", "alerts.yml")
 
 
-def _load_config(root: Path) -> dict[str, Any]:
-    path = _config_path(root)
+def _load_config(cx: Context) -> dict[str, Any]:
+    path = _config_path(cx)
     if not path.is_file():
         return {}
     with path.open() as handle:
@@ -114,8 +114,8 @@ def _load_config(root: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _save_config(root: Path, data: dict[str, Any]) -> None:
-    path = _config_path(root)
+def _save_config(cx: Context, data: dict[str, Any]) -> None:
+    path = _config_path(cx)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w") as handle:
         _yaml().dump(data, handle)
@@ -155,14 +155,15 @@ def _apply_hint() -> None:
 
 @app.command("list")
 def list_alerts(
+    ctx: typer.Context,
     recipient: str = typer.Option(None, "--recipient", help="Only this recipient."),
     level: str = typer.Option(None, "--level", help="Only alerts at or above this level."),
     as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
 ) -> None:
     """Show every alert with its effective per-recipient state."""
     registry = _load_registry()
-    root = paths.consumer_root()
-    config = _load_config(root)
+    cx = context_from(ctx)
+    config = _load_config(cx)
     recipients = _recipients(config)
     muted = set(_disabled(config))
     forced = set(_enabled(config))
@@ -256,6 +257,7 @@ def _match_ids(registry: dict[str, Any], pattern: str) -> list[str]:
 
 @app.command("disable")
 def disable_alert(
+    ctx: typer.Context,
     pattern: str = typer.Argument(..., help="Alert ID or glob, e.g. 'log.*'."),
     for_: str = typer.Option(
         None, "--for", help="Expiry, e.g. 24h. Required unless --permanent."
@@ -266,8 +268,8 @@ def disable_alert(
 ) -> None:
     """Mute one or more alerts."""
     registry = _load_registry()
-    root = paths.consumer_root()
-    config = _load_config(root)
+    cx = context_from(ctx)
+    config = _load_config(cx)
     matched = _match_ids(registry, pattern)
 
     if not for_ and not permanent:
@@ -292,19 +294,20 @@ def disable_alert(
             "Permanent mute: this alert will never fire again until re-enabled."
         )
 
-    _save_config(root, config)
+    _save_config(cx, config)
     console.success(f"Muted {len(matched)} alert(s): {', '.join(matched)}")
     _apply_hint()
 
 
 @app.command("enable")
 def enable_alert(
+    ctx: typer.Context,
     pattern: str = typer.Argument(..., help="Alert ID or glob, e.g. 'log.*'."),
 ) -> None:
     """Un-mute one or more alerts."""
     registry = _load_registry()
-    root = paths.consumer_root()
-    config = _load_config(root)
+    cx = context_from(ctx)
+    config = _load_config(cx)
     matched = set(_match_ids(registry, pattern))
 
     disabled = [a for a in _disabled(config) if a not in matched]
@@ -314,7 +317,7 @@ def enable_alert(
             a for a in config.get("alert_policy_mute") or [] if a not in matched
         )
 
-    _save_config(root, config)
+    _save_config(cx, config)
     console.success(f"Un-muted {len(matched)} alert(s): {', '.join(sorted(matched))}")
     _apply_hint()
 
@@ -323,11 +326,11 @@ def enable_alert(
 
 
 @app.command("doctor")
-def doctor() -> None:
+def doctor(ctx: typer.Context) -> None:
     """Diagnose the failure modes that have actually bitten."""
     registry = _load_registry()
-    root = paths.consumer_root()
-    config = _load_config(root)
+    cx = context_from(ctx)
+    config = _load_config(cx)
     recipients = _recipients(config)
     resolver = _alert_module()
     problems: list[str] = []
@@ -402,6 +405,7 @@ def doctor() -> None:
 
 @app.command("test")
 def test_alert(
+    ctx: typer.Context,
     alert_id: str = typer.Argument("alerts.test", help="Alert ID to simulate."),
     recipient: str = typer.Option(None, "--recipient", help="Only this recipient."),
     live: bool = typer.Option(
@@ -417,8 +421,8 @@ def test_alert(
             f"Unknown alert {alert_id!r}. See `bin/bay alerts list` for valid IDs."
         )
 
-    root = paths.consumer_root()
-    config = _load_config(root)
+    cx = context_from(ctx)
+    config = _load_config(cx)
     muted = set(_disabled(config))
     forced = set(_enabled(config))
     resolver = _alert_module()

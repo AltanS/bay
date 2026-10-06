@@ -5,12 +5,14 @@ from pathlib import Path
 
 import typer
 
-from bay_cli import ansible, console, guards, paths, runner
+from bay_cli import ansible, console, guards, runner
+from bay_cli.context import context_from
 from bay_cli.config import StackConfig
 from bay_cli.utils.ephemeral import show_ephemeral
 
 
 def webhook(
+    ctx: typer.Context,
     env: str = typer.Argument(..., help="Target environment (e.g., production)."),
     keys_only: bool = typer.Option(
         False, "--keys-only", help="Only display deploy keys, skip deployment."
@@ -27,8 +29,8 @@ def webhook(
         bin/bay webhook production
         bin/bay webhook production --keys-only
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
 
     guards.check_bay_version(bay_dir, root)
 

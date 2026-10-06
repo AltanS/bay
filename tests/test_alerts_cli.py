@@ -9,14 +9,19 @@ import pytest
 import typer
 
 from bay_cli.commands import alerts
+from bay_cli.context import Context
 from bay_cli.errors import BayError
+from helpers import typer_ctx
 
 
 @pytest.fixture
-def consumer(tmp_path, monkeypatch):
+def consumer(tmp_path):
     (tmp_path / "group_vars" / "all").mkdir(parents=True)
-    monkeypatch.setattr(alerts.paths, "consumer_root", lambda *a, **k: tmp_path)
-    return tmp_path
+    return Context.for_fleet_root(tmp_path)
+
+
+def _c(consumer):
+    return typer_ctx(consumer)
 
 
 def _write(consumer, data):
@@ -32,7 +37,7 @@ def _webhook(name, url, min_level="info"):
 
 
 def test_list_json_covers_every_registry_entry(consumer, capsys):
-    alerts.list_alerts(recipient=None, level=None, as_json=True)
+    alerts.list_alerts(_c(consumer), recipient=None, level=None, as_json=True)
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["alerts"]) == len(alerts._load_registry())
 
@@ -40,7 +45,7 @@ def test_list_json_covers_every_registry_entry(consumer, capsys):
 def test_list_shows_effective_state_not_configured_state(consumer, capsys):
     """A critical-only recipient must not be listed against an info alert."""
     _write(consumer, {"alert_recipients": [_webhook("oncall", "https://p.invalid", "critical")]})
-    alerts.list_alerts(recipient=None, level=None, as_json=True)
+    alerts.list_alerts(_c(consumer), recipient=None, level=None, as_json=True)
     rows = {r["id"]: r for r in json.loads(capsys.readouterr().out)["alerts"]}
     assert rows["deploy.failed"]["recipients"] == ["oncall"]
     assert rows["deploy.complete"]["recipients"] == []
@@ -50,7 +55,7 @@ def test_list_marks_muted_alerts(consumer, capsys):
     _write(consumer, {
         "alert_recipients": [_webhook("chat", "https://c.invalid", "debug")],
         "alerts_disabled": ["deploy.complete"]})
-    alerts.list_alerts(recipient=None, level=None, as_json=True)
+    alerts.list_alerts(_c(consumer), recipient=None, level=None, as_json=True)
     rows = {r["id"]: r for r in json.loads(capsys.readouterr().out)["alerts"]}
     assert rows["deploy.complete"]["state"] == "muted"
     assert rows["deploy.complete"]["recipients"] == []
@@ -61,7 +66,7 @@ def test_list_shows_alerts_test_still_delivered_by_default(consumer, capsys):
     `bin/bay alerts test` (and its dry run) depend on that. A sibling info
     alert (deploy.complete) must show the opt-in "default off" state instead."""
     _write(consumer, {"alert_recipients": [_webhook("chat", "https://c.invalid", "info")]})
-    alerts.list_alerts(recipient=None, level=None, as_json=True)
+    alerts.list_alerts(_c(consumer), recipient=None, level=None, as_json=True)
     rows = {r["id"]: r for r in json.loads(capsys.readouterr().out)["alerts"]}
     assert rows["alerts.test"]["recipients"] == ["chat"]
     assert rows["alerts.test"]["state"] == "delivered"
@@ -71,12 +76,12 @@ def test_list_shows_alerts_test_still_delivered_by_default(consumer, capsys):
 
 def test_list_rejects_an_unknown_level(consumer):
     with pytest.raises(BayError, match="Unknown level"):
-        alerts.list_alerts(recipient=None, level="emergency", as_json=True)
+        alerts.list_alerts(_c(consumer), recipient=None, level="emergency", as_json=True)
 
 
 def test_list_rejects_an_unknown_recipient(consumer):
     with pytest.raises(BayError, match="No recipient named"):
-        alerts.list_alerts(recipient="ghost", level=None, as_json=True)
+        alerts.list_alerts(_c(consumer), recipient="ghost", level=None, as_json=True)
 
 
 # ── disable / enable ─────────────────────────────────────────────────────
@@ -85,38 +90,38 @@ def test_list_rejects_an_unknown_recipient(consumer):
 def test_disable_requires_an_expiry(consumer):
     """A mute with no TTL is GH#33 with extra steps."""
     with pytest.raises(BayError, match="needs an expiry"):
-        alerts.disable_alert(pattern="deploy.complete", for_=None, permanent=False)
+        alerts.disable_alert(_c(consumer), pattern="deploy.complete", for_=None, permanent=False)
 
 
 def test_disable_with_duration_records_a_ttl(consumer):
     before = int(time.time())
-    alerts.disable_alert(pattern="deploy.complete", for_="2h", permanent=False)
+    alerts.disable_alert(_c(consumer), pattern="deploy.complete", for_="2h", permanent=False)
     config = alerts._load_config(consumer)
     assert config["alerts_disabled"] == ["deploy.complete"]
     assert config["alert_policy_mute_until"] >= before + 7200
 
 
 def test_disable_permanent_is_allowed_but_explicit(consumer):
-    alerts.disable_alert(pattern="deploy.complete", for_=None, permanent=True)
+    alerts.disable_alert(_c(consumer), pattern="deploy.complete", for_=None, permanent=True)
     config = alerts._load_config(consumer)
     assert config["alerts_disabled"] == ["deploy.complete"]
     assert "alert_policy_mute_until" not in config
 
 
 def test_disable_accepts_a_glob(consumer):
-    alerts.disable_alert(pattern="host.disk_*", for_="1h", permanent=False)
+    alerts.disable_alert(_c(consumer), pattern="host.disk_*", for_="1h", permanent=False)
     assert alerts._load_config(consumer)["alerts_disabled"] == [
         "host.disk_page", "host.disk_recovered", "host.disk_warn"]
 
 
 def test_disable_rejects_an_unknown_id(consumer):
     with pytest.raises(BayError, match="No alert matches"):
-        alerts.disable_alert(pattern="not.real", for_="1h", permanent=False)
+        alerts.disable_alert(_c(consumer), pattern="not.real", for_="1h", permanent=False)
 
 
 def test_enable_removes_the_mute(consumer):
-    alerts.disable_alert(pattern="deploy.complete", for_="1h", permanent=False)
-    alerts.enable_alert(pattern="deploy.complete")
+    alerts.disable_alert(_c(consumer), pattern="deploy.complete", for_="1h", permanent=False)
+    alerts.enable_alert(_c(consumer), pattern="deploy.complete")
     assert alerts._load_config(consumer)["alerts_disabled"] == []
 
 
@@ -135,7 +140,7 @@ def test_bad_duration_is_rejected():
 
 def test_writes_never_contain_a_literal_secret(consumer):
     """The CLI writes vault references, never values."""
-    alerts.disable_alert(pattern="deploy.complete", for_="1h", permanent=False)
+    alerts.disable_alert(_c(consumer), pattern="deploy.complete", for_="1h", permanent=False)
     text = alerts._config_path(consumer).read_text()
     for leaked in ("bot_token:", "password", "AAAA", "http"):
         assert leaked not in text, f"{leaked!r} appeared in written config"
@@ -145,7 +150,7 @@ def test_comments_survive_a_round_trip(consumer):
     """Config goes through ruamel so an operator's notes are not eaten."""
     alerts._config_path(consumer).write_text(
         "---\n# keep me: explains why prune noise is muted\nalerts_disabled: []\n")
-    alerts.disable_alert(pattern="deploy.complete", for_="1h", permanent=False)
+    alerts.disable_alert(_c(consumer), pattern="deploy.complete", for_="1h", permanent=False)
     assert "# keep me" in alerts._config_path(consumer).read_text()
 
 
@@ -154,14 +159,14 @@ def test_comments_survive_a_round_trip(consumer):
 
 def test_doctor_passes_on_clean_config(consumer):
     _write(consumer, {"alert_recipients": [_webhook("chat", "https://c.invalid", "info")]})
-    alerts.doctor()  # no raise
+    alerts.doctor(_c(consumer))  # no raise
 
 
 def test_doctor_flags_duplicate_targets(consumer):
     _write(consumer, {"alert_recipients": [
         _webhook("a", "https://same.invalid"), _webhook("b", "https://same.invalid")]})
     with pytest.raises(typer.Exit):
-        alerts.doctor()
+        alerts.doctor(_c(consumer))
 
 
 def test_doctor_flags_a_permanent_mute(consumer):
@@ -169,7 +174,7 @@ def test_doctor_flags_a_permanent_mute(consumer):
         "alert_recipients": [_webhook("chat", "https://c.invalid", "debug")],
         "alerts_disabled": ["deploy.complete"]})
     with pytest.raises(typer.Exit):
-        alerts.doctor()
+        alerts.doctor(_c(consumer))
 
 
 def test_doctor_flags_a_muted_id_not_in_the_registry(consumer):
@@ -178,14 +183,14 @@ def test_doctor_flags_a_muted_id_not_in_the_registry(consumer):
         "alerts_disabled": ["typo.alert"],
         "alert_policy_mute_until": int(time.time()) + 3600})
     with pytest.raises(typer.Exit):
-        alerts.doctor()
+        alerts.doctor(_c(consumer))
 
 
 def test_doctor_flags_a_recipient_with_no_target(consumer):
     _write(consumer, {"alert_recipients": [
         {"name": "empty", "adapter": "webhook", "min_level": "info", "config": {}}]})
     with pytest.raises(typer.Exit):
-        alerts.doctor()
+        alerts.doctor(_c(consumer))
 
 
 # ── test ─────────────────────────────────────────────────────────────────
@@ -196,7 +201,7 @@ def test_test_is_a_dry_run_by_default(consumer, capsys):
     default now, so an info-floor recipient would show zero recipients and
     the "chat" assertion below would fail for the wrong reason."""
     _write(consumer, {"alert_recipients": [_webhook("chat", "https://c.invalid", "info")]})
-    alerts.test_alert(alert_id="alerts.test", recipient=None, live=False)
+    alerts.test_alert(_c(consumer), alert_id="alerts.test", recipient=None, live=False)
     out = capsys.readouterr().out
     assert "Dry run" in out
     assert "chat" in out
@@ -204,7 +209,7 @@ def test_test_is_a_dry_run_by_default(consumer, capsys):
 
 def test_test_rejects_an_unknown_alert(consumer):
     with pytest.raises(BayError, match="Unknown alert"):
-        alerts.test_alert(alert_id="not.real", recipient=None, live=False)
+        alerts.test_alert(_c(consumer), alert_id="not.real", recipient=None, live=False)
 
 
 def test_live_refuses_rather_than_sending_from_the_control_node(consumer):
@@ -212,4 +217,4 @@ def test_live_refuses_rather_than_sending_from_the_control_node(consumer):
     and a stale rendered script is exactly what GH#33 was."""
     _write(consumer, {"alert_recipients": [_webhook("chat", "https://c.invalid", "info")]})
     with pytest.raises(BayError, match="RENDERED emitter"):
-        alerts.test_alert(alert_id="deploy.complete", recipient=None, live=True)
+        alerts.test_alert(_c(consumer), alert_id="deploy.complete", recipient=None, live=True)
