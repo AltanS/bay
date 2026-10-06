@@ -1,0 +1,18 @@
+# Every service with a port gets <SERVICE>_URL in its siblings. The names Bay
+# injects must not also be declared, so the app sets API_BASE instead of API_URL.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[env]
+API_BASE = "http://api:4000/v1"
+
+[access]
+mode = "public"
+
+[services.api]
+port = 4000
+path = "/api"
+
+[deploy.production]
+domain = "app.example.com"

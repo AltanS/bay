@@ -1,0 +1,17 @@
+# API_URL is the variable Bay injects for services.api, so [env] may not set it.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[env]
+API_URL = "http://api:4000/v1"
+
+[access]
+mode = "public"
+
+[services.api]
+port = 4000
+path = "/api"
+
+[deploy.production]
+domain = "app.example.com"

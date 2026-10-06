@@ -65,6 +65,11 @@ schema itself is `src/bay_cli/schemas/bay_toml.schema.json` (JSON Schema draft 2
     same default domain.
 14. One variable name comes from one place in a level: `env`, `secrets` or
     `fleet_secrets`.
+15. A container may not declare a variable that Bay injects into it. Every service with a
+    `port` injects `<SERVICE>_URL` into its siblings, and the main container injects
+    `WEB_URL`. These names may not also appear in `env`, `secrets`, `fleet_secrets` or a
+    need (`DATABASE_URL`, `REDIS_URL`, `<NEED>_URL` or a need's `env` name). The check
+    reports the path `services.<name>` of the service to rename.
 
 ## Behavior
 

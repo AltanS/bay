@@ -59,6 +59,7 @@ PAIRS: dict[str, set[str]] = {
         "services.worker.logs",
     },
     "identity-public": {"access.identity.header"},
+    "sibling-url": {"services.api"},
 }
 
 #: Invalid fixtures with no valid twin (the twin is the corrected example).
@@ -286,6 +287,53 @@ def test_base_document_is_valid():
     ],
 )
 def test_file_rule(doc, expected):
+    violations = bay_toml.validate(doc)
+    assert _paths(violations) == expected, [str(v) for v in violations]
+
+
+@pytest.mark.parametrize(
+    ("doc", "expected"),
+    [
+        pytest.param(
+            _doc(secrets=["API_URL"], services={"api": {"port": 4000, "path": "/api"}}),
+            {"services.api"}, id="sibling-var-in-secrets",
+        ),
+        pytest.param(
+            _doc(fleet_secrets={"API_URL": "SHARED"},
+                 services={"api": {"port": 4000, "path": "/api"}}),
+            {"services.api"}, id="sibling-var-in-fleet-secrets",
+        ),
+        pytest.param(
+            _doc(needs={"api": {}}, services={"api": {"port": 4000, "path": "/api"}}),
+            {"services.api"}, id="sibling-var-is-a-need-name",
+        ),
+        pytest.param(
+            _doc(needs={"postgres": {"env": "API_URL"}},
+                 services={"api": {"port": 4000, "path": "/api"}}),
+            {"services.api"}, id="sibling-var-is-a-need-alias",
+        ),
+        pytest.param(
+            _doc(services={"worker": {"env": {"WEB_URL": "x"}}}),
+            {"services.worker"}, id="web-url-in-a-service",
+        ),
+        pytest.param(
+            _doc(deploy={"production": {"env": {"API_URL": "x"}}},
+                 services={"api": {"port": 4000, "path": "/api"}}),
+            {"services.api"}, id="sibling-var-in-deploy-env",
+        ),
+        pytest.param(
+            _doc(services={"api": {"port": 4000, "path": "/api", "env": {"API_URL": "x"}}}),
+            set(), id="own-var-is-not-injected-into-itself",
+        ),
+        pytest.param(
+            _doc(services={"api": {"port": 4000, "path": "/api"},
+                           "side": {"inherit": False, "image": "x:1",
+                                    "env": {"API_URL": "x"}}}),
+            set(), id="inherit-false-receives-no-sibling-vars",
+        ),
+    ],
+)
+def test_sibling_url_collisions(doc, expected):
     violations = bay_toml.validate(doc)
     assert _paths(violations) == expected, [str(v) for v in violations]
 

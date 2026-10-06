@@ -231,6 +231,7 @@ def _file_rules(doc: dict[str, Any]) -> Iterator[Violation]:
     for svc_name, svc in services.items():
         if isinstance(svc, dict):
             yield from _var_collisions(svc, f"services.{svc_name}")
+    yield from _sibling_url_collisions(doc, envs, services)
     yield from _mount_rules(doc, services)
     yield from _access_rules(doc, services)
     yield from _deploy_rules(doc, envs, services)
@@ -358,6 +359,91 @@ def _var_collisions(level: dict[str, Any], base: str) -> Iterator[Violation]:
             )
         else:
             sources[key] = "fleet_secrets"
+
+
+def sibling_var(service: str) -> str:
+    """The variable a service with a port injects into its siblings: ``API_URL``."""
+    return service.upper().replace("-", "_") + "_URL"
+
+
+def need_vars(needs: Any) -> dict[str, str]:
+    """Variable name -> the need that injects it, for one ``needs`` value.
+
+    ``postgres`` injects ``DATABASE_URL``, ``redis`` injects ``REDIS_URL``,
+    any other need ``<NAME>_URL``. An ``env`` option adds a second name.
+    """
+    out: dict[str, str] = {}
+    names = needs if isinstance(needs, list) else list(_dict(needs))
+    for need in names:
+        if not isinstance(need, str):
+            continue
+        if need == "postgres":
+            out["DATABASE_URL"] = need
+        elif need == "redis":
+            out["REDIS_URL"] = need
+        else:
+            out[need.upper().replace("-", "_") + "_URL"] = need
+        alias = _dict(_dict(needs).get(need)).get("env") if isinstance(needs, dict) else None
+        if isinstance(alias, str):
+            out[alias] = need
+    return out
+
+
+def _declared_vars(levels: list[dict[str, Any]]) -> dict[str, str]:
+    """Variable name -> where it is declared, across the levels one container reads."""
+    out: dict[str, str] = {}
+    for level in levels:
+        for key in _dict(level.get("env")):
+            out.setdefault(key, "env")
+        for key in _str_list(level.get("secrets")):
+            out.setdefault(key, "secrets")
+        for key in _dict(level.get("fleet_secrets")):
+            out.setdefault(key, "fleet_secrets")
+        if "needs" in level:
+            for key, need in need_vars(level["needs"]).items():
+                out.setdefault(key, f"needs.{need}")
+    return out
+
+
+def _sibling_url_collisions(
+    doc: dict[str, Any], envs: dict[str, dict[str, Any]], services: dict[str, Any]
+) -> Iterator[Violation]:
+    # Producers: every container with a port. The main container is `web`.
+    main_has_port = "port" in doc or any("port" in d for d in envs.values())
+    producers = (["web"] if main_has_port else []) + [
+        n for n, s in services.items() if isinstance(s, dict) and "port" in s
+    ]
+    env_levels = [{"env": d.get("env"), "secrets": d.get("secrets")} for d in envs.values()]
+
+    # Receivers: the main container and every service that inherits.
+    receivers: list[tuple[str, list[dict[str, Any]]]] = [("web", [doc, *env_levels])]
+    for n, s in services.items():
+        if not isinstance(s, dict) or s.get("inherit") is False:
+            continue
+        receivers.append((n, [doc, *env_levels, s]))
+
+    seen: set[tuple[str, str]] = set()
+    for receiver, levels in receivers:
+        declared = _declared_vars(levels)
+        for producer in producers:
+            if producer == receiver:
+                continue
+            var = sibling_var(producer)
+            if var not in declared:
+                continue
+            where = producer if producer != "web" else receiver
+            if (where, var) in seen:
+                continue
+            seen.add((where, var))
+            yield Violation(
+                f"services.{where}",
+                f"Bay injects {var} for {_label(producer)}, so {_label(receiver)} must "
+                f"not also set it in {declared[var]}; rename one of them",
+            )
+
+
+def _label(service: str) -> str:
+    return "the main container" if service == "web" else f"services.{service}"
 
 
 def _mount_rules(doc: dict[str, Any], services: dict[str, Any]) -> Iterator[Violation]:
