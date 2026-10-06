@@ -16,6 +16,7 @@ import pytest
 from click.exceptions import Exit as ClickExit
 from typer.testing import CliRunner
 
+from bay_cli import paths as bay_paths
 from bay_cli.cli import app
 from bay_cli.commands import gateway
 from bay_cli.commands.gateway import (
@@ -32,6 +33,7 @@ from bay_cli.commands.gateway import (
     _strip_ansi,
     _validate_username,
 )
+from bay_cli.context import Context
 from bay_cli.errors import BayError
 
 runner = CliRunner()
@@ -211,13 +213,13 @@ class TestExtractOutputFromAnsible:
 # ── _get_control_host — inventory parsing ─────────────────────────────────
 
 
-def _make_consumer(tmp_path: Path) -> Path:
-    """Create a minimal consumer directory structure and return bay_dir."""
+def _make_consumer(tmp_path: Path) -> Context:
+    """Create a minimal consumer directory structure and return its Context."""
     bay_dir = tmp_path / ".bay"
     bay_dir.mkdir()
     (tmp_path / "hosts").mkdir()
     (tmp_path / "group_vars" / "all").mkdir(parents=True)
-    return bay_dir
+    return Context.for_fleet_root(tmp_path, bay_dir)
 
 
 class TestGetControlHostSingleServer:
@@ -535,7 +537,7 @@ class TestFindAclPolicyFile:
     def test_none_when_no_group_vars_dir(self, tmp_path: Path) -> None:
         bay_dir = tmp_path / ".bay"
         bay_dir.mkdir()
-        assert _find_acl_policy_file(bay_dir) is None
+        assert _find_acl_policy_file(Context.for_fleet_root(tmp_path, bay_dir)) is None
 
 
 # ── _node_ip / _format_timestamp ──────────────────────────────────────────
@@ -910,7 +912,7 @@ class _RecordingBackend:
 def gateway_stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _RecordingBackend:
     """Stub out config/host resolution so commands reach the backend."""
     backend = _RecordingBackend()
-    monkeypatch.setattr(gateway.paths, "find_bay_dir", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(bay_paths, "find_bay_dir", lambda *a, **k: tmp_path)
     monkeypatch.setattr(
         gateway,
         "_get_gateway_config",

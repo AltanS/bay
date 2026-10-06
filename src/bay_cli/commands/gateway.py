@@ -10,13 +10,14 @@ from pathlib import Path
 import typer
 from rich.table import Table
 
-from bay_cli import ansible, paths, runner
+from bay_cli import ansible, runner
 from bay_cli import console as con
 from bay_cli.commands.gateway_backend import (
     GatewayBackend,
     LocalHeadscaleBackend,
     NullGatewayBackend,
 )
+from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 from bay_cli.utils.ephemeral import show_ephemeral
 
@@ -144,7 +145,7 @@ def _validate_tags(tags: list[str] | None) -> list[str]:
     return list(dict.fromkeys(tags))
 
 
-def _get_control_host(bay_dir: Path, region: str | None = None) -> str | None:
+def _get_control_host(cx: Context, region: str | None = None) -> str | None:
     """Return the control host for gateway commands, or None for single-server.
 
     Uses headscale_control_region from access_gateway.yml when available,
@@ -152,8 +153,7 @@ def _get_control_host(bay_dir: Path, region: str | None = None) -> str | None:
     With --region, targets that specific region's host instead.
     Returns None for single-server setups (no --limit needed).
     """
-    consumer_root = bay_dir.parent
-    inventory = consumer_root / "hosts" / "production"
+    inventory = cx.inventory("production")
     if not inventory.exists():
         return None
 
@@ -197,7 +197,7 @@ def _get_control_host(bay_dir: Path, region: str | None = None) -> str | None:
         return None
 
     # Prefer explicit headscale_control_region from config
-    config = _get_gateway_config(bay_dir)
+    config = _get_gateway_config(cx)
     control_region = config.get("headscale_control_region")
     if control_region and control_region in groups:
         return groups[control_region]
@@ -253,11 +253,10 @@ def _extract_output_from_ansible(stdout: str) -> str:
     return clean[idx + len(marker):].strip()
 
 
-def _get_gateway_config(bay_dir: Path) -> dict:
+def _get_gateway_config(cx: Context) -> dict:
     """Read access gateway configuration from consumer group_vars."""
     import yaml
 
-    consumer_root = bay_dir.parent
     config: dict = {
         "access_gateway": "wireguard",
         "vpn_allowed_ips": [],
@@ -268,8 +267,8 @@ def _get_gateway_config(bay_dir: Path) -> dict:
 
     # Check candidate files for gateway configuration
     candidates = [
-        consumer_root / "group_vars" / "all" / "access_gateway.yml",
-        consumer_root / "group_vars" / "all" / "main.yml",
+        cx.env_file("all", "access_gateway.yml"),
+        cx.main_vars_file,
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -279,7 +278,7 @@ def _get_gateway_config(bay_dir: Path) -> dict:
                     config[key] = data[key]
 
     # Also check vpn_access.yml for vpn_allowed_ips if not already found
-    vpn_file = consumer_root / "group_vars" / "all" / "vpn_access.yml"
+    vpn_file = cx.env_file("all", "vpn_access.yml")
     if vpn_file.exists():
         data = yaml.safe_load(vpn_file.read_text()) or {}
         if "vpn_allowed_ips" in data:
@@ -288,7 +287,7 @@ def _get_gateway_config(bay_dir: Path) -> dict:
     return config
 
 
-def _find_acl_policy_file(bay_dir: Path) -> Path | None:
+def _find_acl_policy_file(cx: Context) -> Path | None:
     """Return the consumer group_vars file defining headscale_acl_policy, if any.
 
     Its presence means the tailnet is DEFAULT-DENY, which is load-bearing for
@@ -300,7 +299,7 @@ def _find_acl_policy_file(bay_dir: Path) -> Path | None:
     """
     import yaml
 
-    group_vars = bay_dir.parent / "group_vars"
+    group_vars = cx.group_vars
     if not group_vars.is_dir():
         return None
 
@@ -325,10 +324,10 @@ def _find_acl_policy_file(bay_dir: Path) -> Path | None:
     return None
 
 
-def _warn_default_deny(acl_file: Path, bay_dir: Path, node_name: str | None, env: str) -> None:
+def _warn_default_deny(acl_file: Path, cx: Context, node_name: str | None, env: str) -> None:
     """Warn that an enrolled node stays unreachable until the ACL names it."""
     try:
-        rel = acl_file.relative_to(bay_dir.parent)
+        rel = acl_file.relative_to(cx.fleet_root)
     except ValueError:
         rel = acl_file
     alias = node_name or "<device>"
@@ -367,7 +366,7 @@ def _warn_default_deny(acl_file: Path, bay_dir: Path, node_name: str | None, env
 
 
 def _report_tagged_enrollment(
-    tags: list[str], acl_file: Path | None, bay_dir: Path, node_name: str | None, env: str
+    tags: list[str], acl_file: Path | None, cx: Context, node_name: str | None, env: str
 ) -> None:
     """Explain what a key-stamped tag does — and the three ways it can still be inert."""
     alias = node_name or "<device>"
@@ -376,7 +375,7 @@ def _report_tagged_enrollment(
     rel: Path | str = "your headscale ACL policy"
     if acl_file:
         try:
-            rel = acl_file.relative_to(bay_dir.parent)
+            rel = acl_file.relative_to(cx.fleet_root)
         except ValueError:
             rel = acl_file
 
@@ -619,7 +618,7 @@ def _require_headscale(config: dict) -> None:
 
 
 def _make_backend(
-    bay_dir: Path, env: str, region: str | None = None, config: dict | None = None
+    cx: Context, env: str, region: str | None = None, config: dict | None = None
 ) -> GatewayBackend:
     """Create the backend for the configured access gateway.
 
@@ -632,8 +631,8 @@ def _make_backend(
     gateway_type = (config or {}).get("access_gateway", "headscale")
     if gateway_type != "headscale":
         return NullGatewayBackend(gateway_type)
-    control_host = _get_control_host(bay_dir, region)
-    return LocalHeadscaleBackend(env, bay_dir, limit=control_host)
+    control_host = _get_control_host(cx, region)
+    return LocalHeadscaleBackend(env, cx.framework_root, limit=control_host)
 
 
 def _get_node_by_name(
@@ -670,6 +669,7 @@ def _get_node_by_name(
 
 @app.command()
 def status(
+    ctx: typer.Context,
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     region: str | None = typer.Option(None, "--region", "-r", help="Target a specific region."),
 ) -> None:
@@ -683,8 +683,8 @@ def status(
         bin/bay gateway status
         bin/bay gateway status --region eu
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     gateway_type = config.get("access_gateway", "wireguard")
 
     con.header("Access Gateway")
@@ -700,7 +700,7 @@ def status(
 
         # Get node count from remote
         try:
-            backend = _make_backend(bay_dir, env, region)
+            backend = _make_backend(cx, env, region)
             nodes = backend.list_nodes()
             online = sum(1 for n in nodes if n.get("online", False))
             con.console.print(f"  Nodes:        {online} connected ({len(nodes)} total)")
@@ -722,6 +722,7 @@ def status(
 
 @app.command()
 def nodes(
+    ctx: typer.Context,
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     region: str | None = typer.Option(None, "--region", "-r", help="Target a specific region."),
 ) -> None:
@@ -737,13 +738,13 @@ def nodes(
         bin/bay gateway nodes
         bin/bay gateway nodes --region eu
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
 
     con.header("Gateway Nodes")
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     try:
         nodes_data = backend.list_nodes()
     except json.JSONDecodeError:
@@ -810,6 +811,7 @@ def nodes(
 
 @acl_app.command("audit")
 def acl_audit(
+    ctx: typer.Context,
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     region: str | None = typer.Option(None, "--region", "-r", help="Target a specific region."),
 ) -> None:
@@ -843,11 +845,11 @@ def acl_audit(
     """
     import yaml
 
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
 
-    acl_file = _find_acl_policy_file(bay_dir)
+    acl_file = _find_acl_policy_file(cx)
     if acl_file is None:
         con.info("No headscale_acl_policy defined — the tailnet is allow-all, nothing to audit.")
         return
@@ -857,7 +859,7 @@ def acl_audit(
 
     con.header("ACL Audit")
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     try:
         nodes_data = backend.list_nodes()
     except json.JSONDecodeError:
@@ -920,7 +922,7 @@ def acl_audit(
     names = ", ".join(r["name"] for r in unknown)
     con.error(f"{len(unknown)} node(s) the policy never names: {names}")
     try:
-        rel = acl_file.relative_to(bay_dir.parent)
+        rel = acl_file.relative_to(cx.fleet_root)
     except ValueError:
         rel = acl_file
     con.console.print(
@@ -938,6 +940,7 @@ def acl_audit(
 
 @app.command("add-user")
 def add_user(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Username to create."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     region: str | None = typer.Option(None, "--region", "-r", help="Target a specific region."),
@@ -951,14 +954,14 @@ def add_user(
 
         bin/bay gateway add-user alice
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
     _validate_username(name)
 
     con.header(f"Creating user: {name}")
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     try:
         backend.create_user(name)
         con.success(f"User '{name}' created.")
@@ -969,6 +972,7 @@ def add_user(
 
 @app.command()
 def key(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Username to generate key for."),
     tag: list[str] | None = typer.Option(
         None,
@@ -995,15 +999,15 @@ def key(
         bin/bay gateway key alice
         bin/bay gateway key ci-runner --tag tag:agent
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
     _validate_username(name)
     tags = _validate_tags(tag)
 
     con.header(f"Generating pre-auth key for: {name}")
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     try:
         user_id = backend.get_user_id(name)
     except BayError:
@@ -1024,6 +1028,7 @@ def key(
 
 @app.command()
 def apikey(
+    ctx: typer.Context,
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     expiration: str = typer.Option("1y", "--expiration", help="Key lifetime (e.g. 90d, 24h, 1y)."),
     region: str | None = typer.Option(None, "--region", "-r", help="Target a specific region."),
@@ -1043,10 +1048,10 @@ def apikey(
         bin/bay gateway apikey
         bin/bay gateway apikey --expiration 90d
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
-    control_host = _get_control_host(bay_dir, region)
+    control_host = _get_control_host(cx, region)
 
     if not _EXPIRATION_RE.match(expiration):
         con.error(
@@ -1057,7 +1062,7 @@ def apikey(
 
     con.header("Generating Headscale API key")
 
-    backend = LocalHeadscaleBackend(env, bay_dir, limit=control_host)
+    backend = LocalHeadscaleBackend(env, cx.framework_root, limit=control_host)
     output = backend.create_api_key(expiration)
 
     if output:
@@ -1081,6 +1086,7 @@ def apikey(
 
 @app.command()
 def enroll(
+    ctx: typer.Context,
     user: str | None = typer.Option(None, "--user", "-u", help="Username for enrollment."),
     hostname: str | None = typer.Option(
         None,
@@ -1147,8 +1153,8 @@ def enroll(
     """
     from rich.prompt import Prompt
 
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
 
     if config.get("access_gateway") != "headscale":
         raise BayError.config(
@@ -1180,7 +1186,7 @@ def enroll(
     tags = _validate_tags(tag)
 
     domain = config.get("headscale_domain", "")
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     user_created = False
 
     # -- Step 1: Create user (idempotent) --
@@ -1248,7 +1254,7 @@ def enroll(
     if node_name:
         join_cmd += f" --hostname={node_name}"
 
-    acl_file = _find_acl_policy_file(bay_dir)
+    acl_file = _find_acl_policy_file(cx)
 
     if con.is_json_mode():
         con.emit_result(
@@ -1283,9 +1289,9 @@ def enroll(
     # A tagged key changes the whole ACL story, so it gets its own epilogue rather
     # than the per-device "add a hosts: alias" walkthrough, which would be wrong advice.
     if tags:
-        _report_tagged_enrollment(tags, acl_file, bay_dir, node_name, env)
+        _report_tagged_enrollment(tags, acl_file, cx, node_name, env)
     elif acl_file:
-        _warn_default_deny(acl_file, bay_dir, node_name, env)
+        _warn_default_deny(acl_file, cx, node_name, env)
 
 
 # -- S1: User management --
@@ -1293,6 +1299,7 @@ def enroll(
 
 @app.command()
 def users(
+    ctx: typer.Context,
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     region: str | None = typer.Option(None, "--region", "-r", help="Target a specific region."),
 ) -> None:
@@ -1302,13 +1309,13 @@ def users(
 
         bin/bay gateway users
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
 
     con.header("Gateway Users")
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     try:
         users_data = backend.list_users()
     except json.JSONDecodeError:
@@ -1355,6 +1362,7 @@ def users(
 
 @app.command("user-info")
 def user_info(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Username to inspect."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     region: str | None = typer.Option(None, "--region", "-r", help="Target a specific region."),
@@ -1365,12 +1373,12 @@ def user_info(
 
         bin/bay gateway user-info alice
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
     _validate_username(name)
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     try:
         users_data = backend.list_users()
     except json.JSONDecodeError:
@@ -1426,6 +1434,7 @@ def user_info(
 
 @app.command("rename-user")
 def rename_user(
+    ctx: typer.Context,
     old_name: str = typer.Argument(..., help="Current username."),
     new_name: str = typer.Argument(..., help="New username."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
@@ -1440,13 +1449,13 @@ def rename_user(
 
         bin/bay gateway rename-user alice bob
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
     _validate_username(old_name)
     _validate_username(new_name)
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     # Existence pre-check, for a precise error. `rename_user` resolves the name
     # itself — passing an id here makes it look up a user literally named "3".
     try:
@@ -1465,6 +1474,7 @@ def rename_user(
 
 @app.command("delete-user")
 def delete_user(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Username to delete."),
     force: bool = typer.Option(False, "--force", "-f", help="Delete even if user has active nodes."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
@@ -1481,12 +1491,12 @@ def delete_user(
         bin/bay gateway delete-user alice
         bin/bay gateway delete-user alice --force -y
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
     _validate_username(name)
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
 
     # Check for existing nodes
     try:
@@ -1549,6 +1559,7 @@ def delete_user(
 
 @app.command("delete-node")
 def delete_node(
+    ctx: typer.Context,
     name: str = typer.Argument(..., help="Node name (given_name) to delete."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
@@ -1565,11 +1576,11 @@ def delete_node(
         bin/bay gateway delete-node myphone
         bin/bay gateway delete-node myphone -y
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     node = _get_node_by_name(name, backend)
     node_id = node.get("id")
     user = (
@@ -1598,6 +1609,7 @@ def delete_node(
 
 @app.command("rename-node")
 def rename_node(
+    ctx: typer.Context,
     old_name: str = typer.Argument(..., help="Current node name (given_name)."),
     new_name: str = typer.Argument(..., help="New node name."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
@@ -1622,12 +1634,12 @@ def rename_node(
 
         bin/bay gateway rename-node myphone phone
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
     _validate_node_name(new_name)
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     node = _get_node_by_name(old_name, backend)
     node_id = node.get("id")
 
@@ -1644,6 +1656,7 @@ def rename_node(
 
 @app.command()
 def routes(
+    ctx: typer.Context,
     node_name: str | None = typer.Option(None, "--node", "-n", help="Filter routes by node name."),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
     region: str | None = typer.Option(None, "--region", "-r", help="Target a specific region."),
@@ -1657,13 +1670,13 @@ def routes(
         bin/bay gateway routes
         bin/bay gateway routes --node myserver
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
 
     con.header("Gateway Routes")
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     node_id = None
     if node_name:
         node_record = _get_node_by_name(node_name, backend)
@@ -1718,6 +1731,7 @@ def routes(
 
 @app.command("route-approve")
 def route_approve(
+    ctx: typer.Context,
     node_name: str = typer.Argument(..., help="Node name (given_name) to manage routes for."),
     route: str = typer.Argument(..., help="Route prefix to approve (e.g. 10.0.0.0/8)."),
     revoke: bool = typer.Option(False, "--revoke", help="Revoke (remove) the route instead of approving it."),
@@ -1734,11 +1748,11 @@ def route_approve(
         bin/bay gateway route-approve mynode 10.0.0.0/8
         bin/bay gateway route-approve mynode 10.0.0.0/8 --revoke
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
     node_record = _get_node_by_name(node_name, backend)
     node_id = node_record.get("id")
 
@@ -1784,12 +1798,11 @@ def route_approve(
 # -- S4: Namespace migration --
 
 
-def _read_stack_name(bay_dir: Path) -> str:
+def _read_stack_name(cx: Context) -> str:
     """Read stack_name from consumer group_vars/all/main.yml."""
     import yaml
 
-    consumer_root = bay_dir.parent
-    main_file = consumer_root / "group_vars" / "all" / "main.yml"
+    main_file = cx.main_vars_file
     if not main_file.exists():
         con.error("group_vars/all/main.yml not found. Cannot determine stack_name.")
         raise typer.Exit(1)
@@ -1801,21 +1814,20 @@ def _read_stack_name(bay_dir: Path) -> str:
     return stack_name
 
 
-def _read_region(bay_dir: Path, target_region: str | None) -> str:
+def _read_region(cx: Context, target_region: str | None) -> str:
     """Read region from consumer group_vars if available."""
     import yaml
 
     if target_region:
         return target_region
 
-    consumer_root = bay_dir.parent
     # Check for region-specific group_vars
-    group_vars_dir = consumer_root / "group_vars"
+    group_vars_dir = cx.group_vars
     if not group_vars_dir.exists():
         return ""
 
     # Look for headscale_control_region in access_gateway config
-    config = _get_gateway_config(bay_dir)
+    config = _get_gateway_config(cx)
     control_region = config.get("headscale_control_region", "")
     if control_region:
         return control_region
@@ -1825,6 +1837,7 @@ def _read_region(bay_dir: Path, target_region: str | None) -> str:
 
 @app.command("migrate-namespace")
 def migrate_namespace(
+    ctx: typer.Context,
     from_user: str | None = typer.Option(None, "--from", help="Current Headscale user to rename (default: auto-detect old 'server' user)."),
     to_user: str | None = typer.Option(None, "--to", help="Target Headscale user name (default: stack_name from group_vars)."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Print plan without executing."),
@@ -1845,12 +1858,12 @@ def migrate_namespace(
         bin/bay gateway migrate-namespace --from old --to new
         bin/bay gateway migrate-namespace --dry-run
     """
-    bay_dir = paths.find_bay_dir()
-    config = _get_gateway_config(bay_dir)
+    cx = context_from(ctx)
+    config = _get_gateway_config(cx)
     _require_headscale(config)
 
-    stack_name = _read_stack_name(bay_dir)
-    resolved_region = _read_region(bay_dir, region)
+    stack_name = _read_stack_name(cx)
+    resolved_region = _read_region(cx, region)
     old_user = from_user or "server"
     new_user = to_user or stack_name
 
@@ -1858,7 +1871,7 @@ def migrate_namespace(
         con.error(f"Source and target user are the same: '{old_user}'")
         raise typer.Exit(1)
 
-    backend = _make_backend(bay_dir, env, region)
+    backend = _make_backend(cx, env, region)
 
     # Fetch current state
     try:
