@@ -13,6 +13,8 @@
 5. Run today's deploy for the box env, limited to the ``deploy_stack`` tag.
 6. Read the receipt back, record ``result``, ``deployed_at`` and
    ``last_receipt_sha256``, and commit again: ``bay: receipt <name> <env>``.
+7. Push the fleet repo when it has a remote (not with ``--no-push``). A
+   failed push is a warning.
 
 A failed deploy keeps the new pin and records ``result: failed``, so
 ``bay show`` says HALF. ``bay rollback`` runs the same steps with the
@@ -104,8 +106,14 @@ def up(
     read_receipts: planmod.ReceiptReader | None = None,
     deploy: Deployer | None = None,
     echo: Echo | None = None,
+    push: bool = True,
 ) -> dict[str, Any]:
-    """Apply a plan. Returns a result document; raises :class:`Refused` or BayError."""
+    """Apply a plan. Returns a result document; raises :class:`Refused` or BayError.
+
+    With ``push`` (the default) the fleet repo is pushed after the last lock
+    commit when it has a remote. A failed push is a warning, never a failed
+    deploy; the result says ``pushed: false`` and ``push_error``.
+    """
     say = echo or (lambda _msg: None)
     cx = proj.cx
     if force and not (reason and reason.strip()):
@@ -234,8 +242,17 @@ def up(
         "receipt_commit": receipt_commit,
         "result": record["result"],
         "error": failure,
+        "pushed": False,
+        "push_error": None,
         "steps": plan["steps"],
     }
+    if push:
+        pushed, problem = gitrepo.push(cx.fleet_root)
+        result["pushed"], result["push_error"] = pushed, problem
+        if problem:
+            say(f"warning: the fleet repo was not pushed: {problem}")
+        elif pushed:
+            say("pushed the fleet repo")
     if failure:
         raise DeployFailed(result)
     return result

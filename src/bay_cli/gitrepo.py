@@ -75,15 +75,19 @@ def resolve_commit(repo: Path, ref: str) -> str | None:
 
 
 def show_file(repo: Path, commit: str, rel: str) -> bytes | None:
-    """The bytes of ``rel`` at ``commit``, or None when it is not there."""
-    proc = _run_bytes(repo, "show", f"{commit}:{rel}")
+    """The bytes of ``rel`` at ``commit``, or None when it is not there.
+
+    ``rel`` is relative to ``repo`` (``./`` form), so a fleet that is a
+    subdirectory of a bigger repo works too.
+    """
+    proc = _run_bytes(repo, "show", f"{commit}:./{_plain(rel)}")
     if proc is None or proc.returncode != 0:
         return None
     return proc.stdout
 
 
 def has_path(repo: Path, commit: str, rel: str) -> bool:
-    proc = _run(repo, "cat-file", "-e", f"{commit}:{rel}")
+    proc = _run(repo, "cat-file", "-e", f"{commit}:./{_plain(rel)}")
     return proc is not None and proc.returncode == 0
 
 
@@ -98,6 +102,17 @@ def extract(repo: Path, commit: str, rels: list[str], dest: Path) -> None:
         raise GitError(_last_line(detail) or f"git archive failed in {repo}")
     with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
         tar.extractall(dest, filter="data")
+
+
+def last_change(repo: Path, rel: str, ref: str = "HEAD") -> str | None:
+    """The newest commit at or before ``ref`` that touched ``rel``, or None."""
+    return _out(repo, "log", "-1", "--format=%H", ref, "--", rel) or None
+
+
+def path_dirty(repo: Path, rel: str) -> bool | None:
+    """True when ``rel`` differs from HEAD in the work tree (untracked files count)."""
+    out = _out(repo, "status", "--porcelain", "--untracked-files=normal", "--", rel)
+    return None if out is None else bool(out)
 
 
 def dirty(repo: Path, *, exclude: tuple[str, ...] = ()) -> bool | None:
@@ -140,6 +155,28 @@ def behind_remote(repo: Path) -> tuple[bool | None, str | None]:
     return int(count) > 0, None
 
 
+def push(repo: Path) -> tuple[bool, str | None]:
+    """Push HEAD to its remote branch. ``(pushed, problem)``. Never prompts.
+
+    The upstream remote wins, else ``origin``, else the first remote. A repo
+    with no remote returns ``(False, None)``: there is nothing to push to.
+    """
+    remotes = (_out(repo, "remote") or "").split()
+    if not remotes:
+        return False, None
+    upstream = _out(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if upstream:
+        proc = _run(repo, "push", "--quiet", timeout=120)
+    else:
+        remote = "origin" if "origin" in remotes else remotes[0]
+        proc = _run(repo, "push", "--quiet", remote, "HEAD", timeout=120)
+    if proc is None:
+        return False, "git push timed out"
+    if proc.returncode != 0:
+        return False, _last_line(str(proc.stderr)) or "git push failed"
+    return True, None
+
+
 def commit_paths(repo: Path, paths: list[Path], message: str) -> str:
     """Stage ``paths`` and commit only them. Return the new HEAD.
 
@@ -164,6 +201,10 @@ def commit_paths(repo: Path, paths: list[Path], message: str) -> str:
     if new is None:
         raise GitError("git commit left no HEAD")
     return new
+
+
+def _plain(rel: str) -> str:
+    return rel[2:] if rel.startswith("./") else rel
 
 
 def _last_line(text: str) -> str:

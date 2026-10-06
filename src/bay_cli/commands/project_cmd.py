@@ -15,11 +15,14 @@ Plan exit codes: 0 auto, 10 approve, 20 blocked, 30 stale.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import sys
 import tomllib
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Annotated, Any
+from typing import IO, Annotated, Any
 
 import typer
 
@@ -33,6 +36,16 @@ _ProjectOpt = Annotated[
 ]
 _JsonOpt = Annotated[bool, typer.Option("--json", help="Print one JSON document.")]
 _NoRemoteOpt = Annotated[bool, typer.Option("--no-remote", help="Do not read the box receipt.")]
+_LogOpt = Annotated[
+    Path | None,
+    typer.Option(
+        "--log",
+        help="Append progress and deploy output to this file instead of the terminal.",
+    ),
+]
+_NoPushOpt = Annotated[
+    bool, typer.Option("--no-push", help="Do not push the fleet repo after the last commit.")
+]
 _AllowUnsupportedOpt = Annotated[
     bool,
     typer.Option(
@@ -103,8 +116,49 @@ def _echo_json(doc: Any) -> None:
     typer.echo(json.dumps(doc, indent=2))
 
 
-def _say(as_json: bool) -> Any:
-    return (lambda _m: None) if as_json else (lambda m: console.info(m))
+@contextlib.contextmanager
+def routed_output(as_json: bool, log: Path | None) -> Iterator[Callable[[str], None]]:
+    """Keep stdout for the one result document.
+
+    With ``--log``, progress lines and everything the deploy prints (Ansible
+    included) are appended to that file. Otherwise, with ``--json``, they go
+    to stderr. Otherwise nothing is redirected. Both the Python ``sys.stdout``
+    and, when it is a real file, descriptor 1 are redirected, so a child
+    process that inherits stdout follows too.
+
+    Yields the function that prints one progress line.
+    """
+    if log is None and not as_json:
+        yield lambda m: console.info(m)
+        return
+    handle: IO[str] = open(log, "a", encoding="utf-8") if log is not None else sys.stderr
+    saved_fd: int | None = None
+    try:
+        target_fd = handle.fileno()
+        sys.stdout.flush()
+        saved_fd = os.dup(1)
+        os.dup2(target_fd, 1)
+    except (OSError, ValueError, AttributeError):  # io.UnsupportedOperation is both
+        saved_fd = None
+
+    def say(message: str) -> None:
+        print(message, file=handle, flush=True)
+
+    try:
+        with contextlib.redirect_stdout(handle):
+            yield say
+    finally:
+        handle.flush()
+        if saved_fd is not None:
+            os.dup2(saved_fd, 1)
+            os.close(saved_fd)
+        if log is not None:
+            handle.close()
+
+
+def _json_error(exc: BayError) -> None:
+    _echo_json({"error": str(exc), "hint": exc.hint, "code": exc.code.value})
+    raise typer.Exit(exc.exit_code)
 
 
 # ── verbs ───────────────────────────────────────────────────────────────────
@@ -173,6 +227,7 @@ def plan(
     ] = False,
     no_remote: _NoRemoteOpt = False,
     allow_unsupported: _AllowUnsupportedOpt = False,
+    log: _LogOpt = None,
 ) -> None:
     """Compare WANTED (bay.toml at HEAD), PINNED (the lock) and RUNNING (the box).
 
@@ -188,20 +243,26 @@ def plan(
     """
     from bay_cli import plan as planmod
 
-    proj, cwd_repo = resolve(ctx, project)
-    opts = planmod.PlanOptions(
-        env=env,
-        at=at,
-        read_running=not no_remote,
-        box_check=remote,
-        allow_unsupported=allow_unsupported,
-        cwd_repo=cwd_repo,
-    )
-    if plan_id:
-        result = planmod.recheck(proj, planmod.load_saved(proj.cx, plan_id), opts)
-    else:
-        result = planmod.make_plan(proj, opts)
-    planmod.save(proj.cx, result)
+    try:
+        with routed_output(as_json, log):
+            proj, cwd_repo = resolve(ctx, project)
+            opts = planmod.PlanOptions(
+                env=env,
+                at=at,
+                read_running=not no_remote,
+                box_check=remote,
+                allow_unsupported=allow_unsupported,
+                cwd_repo=cwd_repo,
+            )
+            if plan_id:
+                result = planmod.recheck(proj, planmod.load_saved(proj.cx, plan_id), opts)
+            else:
+                result = planmod.make_plan(proj, opts)
+            planmod.save(proj.cx, result)
+    except BayError as exc:
+        if not as_json:
+            raise
+        _json_error(exc)
     if as_json:
         _echo_json(result)
     else:
@@ -243,20 +304,27 @@ def _apply(
     reason: str | None,
     allow_unsupported: bool,
     as_json: bool,
+    push: bool,
+    log: Path | None,
 ) -> None:
     from bay_cli import apply as applymod
     from bay_cli import plan as planmod
 
-    proj, cwd_repo = resolve(ctx, project)
-    opts = planmod.PlanOptions(
-        env=env, at=at, allow_unsupported=allow_unsupported, cwd_repo=cwd_repo
-    )
-    say = _say(as_json)
     try:
-        if which == "rollback":
-            result = applymod.rollback(proj, opts, force=force, reason=reason, echo=say)
-        else:
-            result = applymod.up(proj, opts, plan_id=plan_id, force=force, reason=reason, echo=say)
+        with routed_output(as_json, log) as say:
+            proj, cwd_repo = resolve(ctx, project)
+            opts = planmod.PlanOptions(
+                env=env, at=at, allow_unsupported=allow_unsupported, cwd_repo=cwd_repo
+            )
+            common: dict[str, Any] = {"force": force, "reason": reason, "echo": say, "push": push}
+            if which == "rollback":
+                result = applymod.rollback(proj, opts, **common)
+            else:
+                result = applymod.up(proj, opts, plan_id=plan_id, **common)
+    except BayError as exc:
+        if not as_json:
+            raise
+        _json_error(exc)
     except applymod.Refused as exc:
         if as_json:
             _echo_json(exc.plan)
@@ -281,7 +349,10 @@ def _apply(
         f"{result['action']} {result['project']} {result['env']}: "
         f"{(previous or 'none')[:12]} -> {result['commit'][:12]}, "
         f"{len(result['steps'])} step(s), fleet commit {result['receipt_commit'][:12]}"
+        + (", pushed" if result["pushed"] else "")
     )
+    if result["push_error"]:
+        console.warning(f"the fleet repo was not pushed: {result['push_error']}")
 
 
 def up(
@@ -301,12 +372,15 @@ def up(
     reason: Annotated[str | None, typer.Option("--reason", help="Why --force.")] = None,
     allow_unsupported: _AllowUnsupportedOpt = False,
     as_json: _JsonOpt = False,
+    no_push: _NoPushOpt = False,
+    log: _LogOpt = None,
 ) -> None:
     """Pin the project's commit in the fleet and deploy it.
 
     Plans first and refuses a blocked (exit 20) or stale (exit 30) plan, and
     an approve plan (exit 10) without `bay approve`. Then writes the lock,
-    compiles, commits the fleet repo, deploys and records the receipt.
+    compiles, commits the fleet repo, deploys, records the receipt and pushes
+    the fleet repo (not with --no-push; a failed push is only a warning).
 
     Examples:
 
@@ -314,7 +388,20 @@ def up(
         bay up staging --at 1a2b3c4
         bay up --plan-id 3f2a9c0d1e2b
     """
-    _apply(ctx, "up", env, project, at, plan_id, force, reason, allow_unsupported, as_json)
+    _apply(
+        ctx,
+        "up",
+        env,
+        project,
+        at,
+        plan_id,
+        force,
+        reason,
+        allow_unsupported,
+        as_json,
+        not no_push,
+        log,
+    )
 
 
 def rollback(
@@ -329,6 +416,8 @@ def rollback(
     reason: Annotated[str | None, typer.Option("--reason", help="Why --force.")] = None,
     allow_unsupported: _AllowUnsupportedOpt = False,
     as_json: _JsonOpt = False,
+    no_push: _NoPushOpt = False,
+    log: _LogOpt = None,
 ) -> None:
     """Return an environment to its previous pin and deploy it.
 
@@ -336,7 +425,20 @@ def rollback(
     swap, so a second rollback undoes the first. Refuses when there is no
     previous pin.
     """
-    _apply(ctx, "rollback", env, project, None, None, force, reason, allow_unsupported, as_json)
+    _apply(
+        ctx,
+        "rollback",
+        env,
+        project,
+        None,
+        None,
+        force,
+        reason,
+        allow_unsupported,
+        as_json,
+        not no_push,
+        log,
+    )
 
 
 def show(
@@ -353,8 +455,13 @@ def show(
     """
     from bay_cli import apply as applymod
 
-    proj, _ = resolve(ctx, name)
-    doc = applymod.show(proj, remote=not no_remote)
+    try:
+        proj, _ = resolve(ctx, name)
+        doc = applymod.show(proj, remote=not no_remote)
+    except BayError as exc:
+        if not as_json:
+            raise
+        _json_error(exc)
     if as_json:
         _echo_json(doc)
     else:

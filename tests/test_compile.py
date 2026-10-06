@@ -84,7 +84,8 @@ def todo_features(root: Path) -> set[str]:
 
 
 def cli(root: Path, *args: str) -> Any:
-    return runner.invoke(app, ["compile", "--fleet", str(root), *args])
+    # The fixture checkouts are plain directories, not git repos, so read them as they are.
+    return runner.invoke(app, ["compile", "--fleet", str(root), "--working-tree", *args])
 
 
 def said(result: Any) -> str:

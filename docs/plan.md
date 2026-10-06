@@ -26,19 +26,46 @@ No verb asks a question. No verb takes a secret on the command line.
   (`local_path`). When you run a verb in another clone, the plan says so in a
   note.
 
+### Projects with no repo
+
+Some projects have no repo of their own. Their `bay.toml` (and the files it
+mounts) live in the fleet as `projects/<name>/`. Use `--project <name>` (or
+`bay show <name>`) for them. plan, up, show and rollback work the same way,
+with these differences:
+
+- WANTED is `projects/<name>/` at the fleet's HEAD. Commit an edit in the
+  fleet repo before you plan it.
+- The lock has `repo: null` and `local_path: null`. Its `commit` is the fleet
+  commit that last changed `projects/<name>/`.
+- `bay show` reports WANTED as dirty when the working tree of
+  `projects/<name>/` differs from HEAD.
+- A project in the fleet with no lock, or with no pinned commit, is read at
+  the fleet's HEAD when other projects are planned, with a note. The working
+  tree is never read.
+
 ## The verbs
 
 ```bash
 bay init [--name N] [--fleet F] [--box B] [--domain D]   # draft bay.toml, register the project
-bay plan [env] [--json] [--at SHA] [--plan-id ID] [--remote] [--no-remote]
+bay plan [env] [--json] [--log PATH] [--at SHA] [--plan-id ID] [--remote] [--no-remote]
 bay approve <plan-id> --reason "<why>"
-bay up [env] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--json]
+bay up [env] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--json] [--log PATH] [--no-push]
 bay show [name] [--json] [--no-remote]
-bay rollback [env] [--force --reason "<why>"] [--json]
+bay rollback [env] [--force --reason "<why>"] [--json] [--log PATH] [--no-push]
 ```
 
 `env` is the `[deploy.<env>]` name. The default is the fleet's primary
 environment (`production`).
+
+With `--json`, stdout holds exactly one JSON document, also for an error
+(`{"error", "hint", "code"}`). Progress lines and everything the deploy
+prints, Ansible included, go to stderr. With `--log <path>`, they are
+appended to that file instead, with or without `--json`.
+
+The pin is a config pin. Bay compiles `bay.toml` at the pinned commit, but a
+container that builds from source still builds the head of its `branch` on
+the box. The `image` in the box receipt shows what really runs. A code pin
+(build exactly the pinned commit) is 2.x work.
 
 ### bay init
 
@@ -166,11 +193,13 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    `--tags deploy_stack` (the same work as `bay deploy <env> --tags deploy_stack`).
 7. Bay reads the receipt back, records `result`, `deployed_at` and
    `last_receipt_sha256`, and commits again: `bay: receipt <name> <env>`.
+8. When the fleet repo has a remote, Bay pushes it. `--no-push` skips this.
+   A failed push is a warning, never a failed deploy. The JSON result says
+   `pushed: true|false` and `push_error`.
 
 When the deploy fails, the lock keeps the new pin and records
-`result: failed`. `bay show` then says `HALF` until a deploy succeeds.
-
-Bay never pushes the fleet repo. Push it yourself after `bay up`.
+`result: failed`. Bay still commits and pushes that record. `bay show` then
+says `HALF` until a deploy succeeds.
 
 ### bay rollback
 
@@ -191,6 +220,14 @@ box receipt), and one status word per environment:
 | `drift` | The box runs something else than the pin: the receipt differs from the one `bay up` recorded, or the fleet pins a commit this environment never got. |
 | `unknown` | The box was not read, has no receipt, or `bay up` never ran here. |
 | `HALF` | The last `bay up` failed or never reported back. |
+
+## bay compile
+
+`bay compile` reads every project at the commit its lock pins, through the
+same temporary copy of the fleet that `bay plan` and `bay up` compile. A
+project with no pinned commit is left out, with a note on stderr.
+`bay compile --working-tree` reads the local checkouts as they are instead.
+Use it while you develop, never to deploy.
 
 ## The plan JSON
 

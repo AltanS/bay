@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -695,7 +696,8 @@ def test_project_flag_works_from_anywhere(
     result = cli(world, "plan", "--project", "webapp", "--json", cwd=elsewhere)
     assert result.exit_code == 0, result.output
     outside = cli(world, "plan", "--json", cwd=elsewhere)
-    assert outside.exit_code != 0 and "no bay.toml" in str(outside.exception)
+    assert outside.exit_code != 0
+    assert "no bay.toml" in json.loads(outside.stdout)["error"]  # still one JSON document
 
 
 def test_up_from_a_second_clone_notes_the_checkout(
@@ -819,3 +821,216 @@ def test_live_plan_up_roundtrip() -> None:
         assert all(e["status"] in ("ok", "behind") for e in shown["envs"])
     finally:
         os.chdir(old)
+
+
+# ── coordinator rulings: push, compile at the pin, in-fleet projects, clean JSON ─
+
+
+def _with_remote(world: dict[str, Path], tmp_path: Path) -> Path:
+    remote = tmp_path / "fleet-remote.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    git(world["fleet"], "remote", "add", "origin", str(remote))
+    git(world["fleet"], "push", "-q", "-u", "origin", "main")
+    return remote
+
+
+def test_up_pushes_the_fleet(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
+    remote = _with_remote(world, tmp_path)
+    doc = json.loads(cli(world, "up", "--json").stdout)
+    assert doc["pushed"] is True and doc["push_error"] is None
+    assert git(remote, "rev-parse", "main") == doc["receipt_commit"]
+
+
+def test_no_push_leaves_the_remote(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
+    remote = _with_remote(world, tmp_path)
+    before = git(remote, "rev-parse", "main")
+    doc = json.loads(cli(world, "up", "--json", "--no-push").stdout)
+    assert doc["pushed"] is False
+    assert git(remote, "rev-parse", "main") == before
+
+
+def test_failed_push_is_a_warning(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
+    remote = _with_remote(world, tmp_path)
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho refused by test >&2\nexit 1\n")
+    hook.chmod(0o755)
+    result = cli(world, "up", "--json")
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert doc["result"] == "ok" and doc["pushed"] is False and doc["push_error"]
+    assert lock_of(world)["envs"]["production"]["result"] == "ok"
+
+
+def test_failed_deploy_is_still_pushed(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    remote = _with_remote(world, tmp_path)
+    box.fail = True
+    result = cli(world, "up", "--json")
+    assert result.exit_code == 1
+    doc = json.loads(result.stdout)
+    assert doc["result"] == "failed" and doc["pushed"] is True
+    assert git(remote, "rev-parse", "main") == doc["receipt_commit"]
+
+
+def test_compile_reads_the_pinned_commit(world: dict[str, Path], box: FakeBox) -> None:
+    do_up(world)
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')  # committed, not pinned
+    pinned = runner.invoke(app, ["compile", "--fleet", str(world["fleet"]), "--check"])
+    assert pinned.exit_code == 0, pinned.output
+    live = runner.invoke(
+        app, ["compile", "--fleet", str(world["fleet"]), "--check", "--working-tree"]
+    )
+    assert live.exit_code == 1 and "LOG_LEVEL: debug" in live.output
+
+
+def test_compile_skips_an_unpinned_project_with_a_note(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    do_up(world)
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "bay.toml").write_text(
+        APP_TOML.replace("webapp", "other").replace('needs = ["postgres"]\n', "")
+    )
+    git(other, "init", "-q")
+    commit_all(other, "app")
+    lockfile.write(
+        lockfile.lock_path(world["fleet"], "other"),
+        lockfile.new_lock("other", repo=None, local_path=str(other)),
+    )
+    result = runner.invoke(app, ["compile", "--fleet", str(world["fleet"]), "--check"])
+    assert result.exit_code == 0, result.output
+    assert "other has no pinned commit yet" in result.stderr
+
+
+STATUS_TOML = """\
+name = "status"
+fleet = "testfleet"
+image = "ghcr.io/acme/status:1"
+port = 8080
+health = "none"
+
+[env]
+MODE = "one"
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "status.example.com"
+"""
+
+
+def _in_fleet(world: dict[str, Path]) -> Path:
+    path = world["fleet"] / "projects" / "status" / "bay.toml"
+    path.parent.mkdir()
+    path.write_text(STATUS_TOML)
+    commit_all(world["fleet"], "add status")
+    return path
+
+
+def _edit_in_fleet(path: Path, world: dict[str, Path], old: str, new: str) -> str:
+    path.write_text(path.read_text().replace(old, new))
+    return commit_all(world["fleet"], f"status {new}")
+
+
+def test_in_fleet_project_plan_up_show_rollback(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    path = _in_fleet(world)
+    first = git(world["fleet"], "log", "-1", "--format=%H", "--", "projects/status")
+    anywhere = tmp_path / "anywhere"
+    anywhere.mkdir()
+
+    def run(*args: str) -> Any:
+        if args[0] == "show":
+            return cli(world, "show", "status", *args[1:], cwd=anywhere)
+        return cli(world, *args, "--project", "status", cwd=anywhere)
+
+    plan = json.loads(run("plan", "--json").stdout)
+    assert plan["verdict"] == "auto" and plan["wanted"]["commit"] == first
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    assert {(s["container"], s["action"]) for s in plan["steps"]} == {("status", "create")}
+
+    up = run("up", "--json")
+    assert up.exit_code == 0, up.output
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "status"))
+    assert raw is not None
+    assert raw["repo"] is None and raw["local_path"] is None and raw["commit"] == first
+    assert json.loads(run("show", "--json").stdout)["envs"][0]["status"] == "ok"
+
+    path.write_text(path.read_text().replace('MODE = "one"', 'MODE = "two"'))
+    shown = json.loads(run("show", "--json").stdout)
+    assert shown["wanted"]["dirty"] is True and shown["envs"][0]["status"] == "ok"
+    second = commit_all(world["fleet"], "status two")
+    assert json.loads(run("show", "--json").stdout)["envs"][0]["status"] == "behind"
+
+    assert run("up", "--json").exit_code == 0
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "status"))
+    assert raw is not None and raw["commit"] == second
+    assert "MODE: two" in (world["fleet"] / GENERATED_SERVICES).read_text()
+
+    back = run("rollback", "--json")
+    assert back.exit_code == 0, back.output
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "status"))
+    assert raw is not None and raw["commit"] == first
+    assert raw["envs"]["production"]["previous"]["commit"] == second
+    assert "MODE: one" in (world["fleet"] / GENERATED_SERVICES).read_text()
+    # the fleet file still says two, so WANTED is ahead of the pin again
+    assert json.loads(run("show", "--json").stdout)["envs"][0]["status"] == "behind"
+
+
+def test_in_fleet_project_with_no_lock_is_read_at_fleet_head(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    do_up(world)
+    path = _in_fleet(world)
+    path.write_text(path.read_text().replace('MODE = "one"', 'MODE = "uncommitted"'))
+    plan = make(world)
+    assert any("status lives in the fleet" in n for n in plan["notes"])
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        assert comp.result.services["status"]["env"]["clear"]["MODE"] == "one"
+    assert ("status", "shared") in {(s["container"], s["risk"]) for s in plan["steps"]}
+
+
+def _noisy_deploy(box: FakeBox) -> Any:
+    def deploy(cx: Context, box_env: str) -> None:
+        print("ANSIBLE-PRINT-NOISE")
+        subprocess.run(["echo", "ANSIBLE-CHILD-NOISE"], stdout=sys.stdout, check=True)
+        box.deploy(cx, box_env)
+
+    return deploy
+
+
+def test_json_stdout_is_one_document(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def deploy(cx: Context, box_env: str) -> None:
+        print("ANSIBLE-PRINT-NOISE")
+        box.deploy(cx, box_env)
+
+    monkeypatch.setattr(applymod, "default_deploy", deploy)
+    result = cli(world, "up", "--json")
+    assert result.exit_code == 0, result.output
+    json.loads(result.stdout)  # nothing else on stdout
+    assert "ANSIBLE-PRINT-NOISE" in result.stderr
+    for args in (("plan", "--json"), ("show", "--json")):
+        json.loads(cli(world, *args).stdout)
+
+
+def test_log_file_takes_progress_and_child_output(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(applymod, "default_deploy", _noisy_deploy(box))
+    log = tmp_path / "up.log"
+    log.write_text("earlier run\n")
+    result = cli(world, "up", "--json", "--log", str(log))
+    assert result.exit_code == 0, result.output
+    json.loads(result.stdout)
+    text = log.read_text()
+    assert text.startswith("earlier run\n")  # appended, not replaced
+    assert "ANSIBLE-PRINT-NOISE" in text and "ANSIBLE-CHILD-NOISE" in text
+    assert "fleet commit" in text
+    assert "NOISE" not in result.stdout and "NOISE" not in result.stderr
