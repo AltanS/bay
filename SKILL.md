@@ -191,6 +191,7 @@ to reproduce it. The flags that change what a command *means*:
 - `bin/bay compile` — Compile bay.fleet.toml and every pinned bay.toml into services.yml.
 - `bin/bay doctor [env]` — Run pre-flight checks on your project before deploying.
 - `bin/bay secret` — Generate random secrets or hash passwords.
+- `bin/bay secret missing <env>` — List secret NAMES the services need that the env's vault lacks.
 - `bin/bay test` — Run the consumer's infrastructure tests (tests/test_infra.sh).
 - `bin/bay toml` — Work with bay.toml files.
 - `bin/bay toml validate [path]` — Check a bay.toml file against schema v3; print one line per violation.
@@ -230,6 +231,7 @@ Paths are relative to the framework root (`.bay/` in a consumer).
 - `docs/build-pipeline.md` — Operator reference for the webhook → build → deploy flow: trigger files, circuit breaker, troubleshooting.
 - `docs/build-pipeline-observability-contract.md` — The CI-enforced contract mapping every pipeline exit path to an observable terminal state.
 - `docs/reconciler.md` — The server-side Python reconciler (`bay_reconcile`) — the sole container-deploy path since v0.97.0.
+- `docs/deploy-receipt.md` — The receipt each box writes after a deploy, the `bay status --json` document, and the missing-secret check. Both JSON formats are versioned and stable.
 - `docs/rollout-playbook.md` — Multi-host deploy playbook — deploy order, port-drift recreation, and the post-deploy audit checklist.
 
 **Operations**
