@@ -48,7 +48,7 @@ def _patch_server_module(
     """Monkeypatch _get_inventory() in the server module."""
     from bay_cli.commands import server as server_mod
 
-    def mock_get_inventory(requested_env: str = "production") -> tuple[InventoryConfig, Path]:
+    def mock_get_inventory(requested_env: str = "production", cx=None) -> tuple[InventoryConfig, Path]:
         inv_path = root / "hosts" / requested_env
         if not inv_path.is_file():
             from bay_cli.errors import BayError

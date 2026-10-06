@@ -64,10 +64,10 @@ def _patch_service_module(
     """Monkeypatch _get_config() and _get_catalog() in service.py."""
     from bay_cli.commands import service as service_mod
 
-    def mock_get_config():
+    def mock_get_config(ctx=None):
         return StackConfig(root)
 
-    def mock_get_catalog():
+    def mock_get_catalog(ctx=None):
         return {}
 
     monkeypatch.setattr(service_mod, "_get_config", mock_get_config)

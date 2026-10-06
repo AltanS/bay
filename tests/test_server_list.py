@@ -50,7 +50,7 @@ _SINGLE_HOST = """\
 def _patch_inventory(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     from bay_cli.commands import server as server_mod
 
-    def mock_get_inventory(requested_env: str = "production") -> tuple[InventoryConfig, Path]:
+    def mock_get_inventory(requested_env: str = "production", cx=None) -> tuple[InventoryConfig, Path]:
         inv = InventoryConfig()
         inv.load(root / "hosts" / requested_env)
         return inv, root

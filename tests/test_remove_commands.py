@@ -69,10 +69,10 @@ def _patch_service_module(
     """Monkeypatch _get_config() and _get_catalog() in service.py."""
     from bay_cli.commands import service as service_mod
 
-    def mock_get_config():
+    def mock_get_config(ctx=None):
         return StackConfig(root)
 
-    def mock_get_catalog():
+    def mock_get_catalog(ctx=None):
         from bay_cli.catalog import _package_framework_root, load_catalog
 
         fw_root = _package_framework_root()
@@ -89,7 +89,7 @@ def _patch_server_module(
     """Monkeypatch _get_inventory() in the server module."""
     from bay_cli.commands import server as server_mod
 
-    def mock_get_inventory(requested_env: str = "production") -> tuple[InventoryConfig, Path]:
+    def mock_get_inventory(requested_env: str = "production", cx=None) -> tuple[InventoryConfig, Path]:
         inv_path = root / "hosts" / requested_env
         if not inv_path.is_file():
             from bay_cli.errors import BayError

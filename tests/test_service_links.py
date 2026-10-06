@@ -54,10 +54,10 @@ class TestServiceAddLink:
         """Adding a service with --link shows links in dry-run diff."""
         cfg = _make_config(tmp_path)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
-        def mock_catalog():
+        def mock_catalog(ctx=None):
             return {}
 
         with (
@@ -85,10 +85,10 @@ class TestServiceAddLink:
         """Adding with --link includes links in JSON output."""
         cfg = _make_config(tmp_path)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
-        def mock_catalog():
+        def mock_catalog(ctx=None):
             return {}
 
         with (
@@ -119,10 +119,10 @@ class TestServiceAddLink:
         """Self-link rejected."""
         cfg = _make_config(tmp_path)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
-        def mock_catalog():
+        def mock_catalog(ctx=None):
             return {}
 
         with (
@@ -148,10 +148,10 @@ class TestServiceAddLink:
         """Missing colon in --link format rejected."""
         cfg = _make_config(tmp_path)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
-        def mock_catalog():
+        def mock_catalog(ctx=None):
             return {}
 
         with (
@@ -180,7 +180,7 @@ class TestServiceEditLink:
         """Adding a link via edit."""
         cfg = _make_config(tmp_path)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
         with patch.object(svc_mod, "_get_config", mock_config):
@@ -219,7 +219,7 @@ class TestServiceEditLink:
         }
         cfg = _make_config(tmp_path, services_content)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
         with patch.object(svc_mod, "_get_config", mock_config):
@@ -239,7 +239,7 @@ class TestServiceEditLink:
         """Same-region link rejected on edit."""
         cfg = _make_config(tmp_path)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
         with patch.object(svc_mod, "_get_config", mock_config):
@@ -280,7 +280,7 @@ class TestServiceListLinks:
         }
         cfg = _make_config(tmp_path, services_content)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
         with patch.object(svc_mod, "_get_config", mock_config):
@@ -307,7 +307,7 @@ class TestServiceListLinks:
         }
         cfg = _make_config(tmp_path, services_content)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
         with patch.object(svc_mod, "_get_config", mock_config):
@@ -338,7 +338,7 @@ class TestServiceShowLinks:
         }
         cfg = _make_config(tmp_path, services_content)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
         with patch.object(svc_mod, "_get_config", mock_config):
@@ -366,7 +366,7 @@ class TestServiceShowLinks:
         }
         cfg = _make_config(tmp_path, services_content)
 
-        def mock_config():
+        def mock_config(ctx=None):
             return cfg
 
         with patch.object(svc_mod, "_get_config", mock_config):

@@ -56,11 +56,11 @@ def _package_framework_root() -> Path:
 
 def load_catalog(
     framework_root: Path,
-    consumer_root: Path,
+    fleet_root: Path,
 ) -> dict[str, CatalogEntry]:
     """Load catalog entries from framework and consumer directories.
 
-    Scans ``framework_root/catalog/`` then ``consumer_root/catalog/``.
+    Scans ``framework_root/catalog/`` then ``fleet_root/catalog/``.
     Consumer entries with the same ``meta.id`` override framework entries
     entirely (no merging).
     """
@@ -70,7 +70,7 @@ def load_catalog(
     if fw_catalog_dir.is_dir():
         catalog.update(_scan_catalog_dir(fw_catalog_dir))
 
-    consumer_catalog_dir = consumer_root / "catalog"
+    consumer_catalog_dir = fleet_root / "catalog"
     if consumer_catalog_dir.is_dir():
         catalog.update(_scan_catalog_dir(consumer_catalog_dir))
 

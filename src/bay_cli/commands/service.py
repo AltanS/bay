@@ -15,32 +15,23 @@ from rich.table import Table
 
 from bay_cli import console
 from bay_cli.catalog import CatalogEntry
+from bay_cli.context import context_or_cwd
 from bay_cli.errors import BayError
 
 app = typer.Typer(help="Manage services and accessories in services.yml.")
 
 
-def _get_config():
+def _get_config(ctx: typer.Context):
     from bay_cli.config import StackConfig
-    from bay_cli.paths import consumer_root, find_bay_dir
 
-    try:
-        root = consumer_root(find_bay_dir())
-    except BayError:
-        root = Path.cwd()
-    return StackConfig(root)
+    return StackConfig(context_or_cwd(ctx).fleet_root)
 
 
-def _get_catalog():
-    from bay_cli.catalog import _package_framework_root, load_catalog
-    from bay_cli.paths import consumer_root, find_bay_dir
+def _get_catalog(ctx: typer.Context):
+    from bay_cli.catalog import load_catalog
 
-    try:
-        bay_dir = find_bay_dir()
-        return load_catalog(bay_dir, consumer_root(bay_dir))
-    except BayError:
-        fw_root = _package_framework_root()
-        return load_catalog(fw_root, Path.cwd())
+    cx = context_or_cwd(ctx)
+    return load_catalog(cx.framework_root, cx.fleet_root)
 
 
 def _get_all_domain_bases(cfg: Any, env: str = "production") -> dict[str, str]:
@@ -118,6 +109,7 @@ def _resolve_domains(
 
 @app.command("list")
 def list_services(
+    ctx: typer.Context,
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
 ) -> None:
     """List all configured services and accessories.
@@ -127,7 +119,7 @@ def list_services(
         bin/bay service list
         bin/bay --json service list
     """
-    cfg = _get_config()
+    cfg = _get_config(ctx)
     services = cfg.get_services()
     accessories = cfg.get_accessories()
     domain_bases = _get_all_domain_bases(cfg, env)
@@ -240,7 +232,7 @@ def list_services(
 
 
 @app.command()
-def show(name: str = typer.Argument(help="Service or accessory name")) -> None:
+def show(ctx: typer.Context, name: str = typer.Argument(help="Service or accessory name")) -> None:
     """Show the full configuration for a service or accessory.
 
     Includes the LINKS_* env var names generated for cross-region links.
@@ -250,7 +242,7 @@ def show(name: str = typer.Argument(help="Service or accessory name")) -> None:
         bin/bay service show myapp
         bin/bay --json service show postgres
     """
-    cfg = _get_config()
+    cfg = _get_config(ctx)
     svc = cfg.get_service(name)
 
     if svc is None:
@@ -295,6 +287,7 @@ def show(name: str = typer.Argument(help="Service or accessory name")) -> None:
 
 @app.command()
 def catalog(
+    ctx: typer.Context,
     filter: str | None = typer.Option(
         None,
         "--filter",
@@ -311,7 +304,7 @@ def catalog(
         bin/bay service catalog
         bin/bay service catalog --filter accessory
     """
-    entries = _get_catalog()
+    entries = _get_catalog(ctx)
 
     if filter:
         entries = {k: v for k, v in entries.items() if v.category == filter}
@@ -452,7 +445,7 @@ def _check_port_collision(
 
 def _copy_config_files(
     catalog_entry: CatalogEntry,
-    consumer_root: Path,
+    fleet_root: Path,
 ) -> list[str]:
     """Copy config files from catalog definition to consumer's files/ dir.
 
@@ -466,7 +459,7 @@ def _copy_config_files(
     if not files_src_dir.is_dir():
         return []
 
-    files_dst_dir = consumer_root / "files"
+    files_dst_dir = fleet_root / "files"
     copied: list[str] = []
 
     for config_file in catalog_entry.config_files:
@@ -523,6 +516,7 @@ def _add_single_entry(
 
 @app.command()
 def add(
+    ctx: typer.Context,
     catalog_id: str | None = typer.Argument(
         None,
         help="Catalog entry ID to add, or omit for a custom service",
@@ -658,8 +652,8 @@ def add(
     # (full validation deferred until after cfg is loaded below)
 
     # ── Load config and catalog ──────────────────────────────────────
-    cfg = _get_config()
-    all_catalog = _get_catalog()
+    cfg = _get_config(ctx)
+    all_catalog = _get_catalog(ctx)
     catalog_entry: CatalogEntry | None = all_catalog.get(catalog_id) if catalog_id else None
 
     if database:
@@ -860,14 +854,14 @@ def add(
             added.append(dep_id)
 
     # ── Config file copying ──────────────────────────────────────────
-    consumer_root = cfg._root
+    fleet_root = cfg._root
     copied_files: list[str] = []
     if catalog_entry:
-        copied_files = _copy_config_files(catalog_entry, consumer_root)
+        copied_files = _copy_config_files(catalog_entry, fleet_root)
     for dep_id in deps_added:
         dep_entry = all_catalog.get(dep_id)
         if dep_entry:
-            copied_files.extend(_copy_config_files(dep_entry, consumer_root))
+            copied_files.extend(_copy_config_files(dep_entry, fleet_root))
 
     # ── Secret scaffolding info ──────────────────────────────────────
     secrets_required: list[str] = []
@@ -947,6 +941,7 @@ def add(
 
 @app.command()
 def edit(
+    ctx: typer.Context,
     name: str = typer.Argument(help="Service name to edit"),
     access: str | None = typer.Option(
         None,
@@ -1009,7 +1004,7 @@ def edit(
         )
 
     # ── Service must exist ──────────────────────────────────────────
-    cfg = _get_config()
+    cfg = _get_config(ctx)
     current = cfg.get_service(name)
     if current is None:
         raise BayError.not_found("service", name)
@@ -1164,6 +1159,7 @@ def edit(
 
 @app.command()
 def remove(
+    ctx: typer.Context,
     name: str = typer.Argument(help="Service or accessory name to remove"),
     dry_run: bool = typer.Option(
         False,
@@ -1191,7 +1187,7 @@ def remove(
     """
     from rich.prompt import Confirm
 
-    cfg = _get_config()
+    cfg = _get_config(ctx)
 
     # ── Idempotency: service must exist ──────────────────────────
     svc_block = cfg.get_service(name)
@@ -1440,6 +1436,7 @@ def _read_vault_token(root: Path, env: str, key: str) -> str | None:
 
 @app.command("prune-webhooks")
 def prune_webhooks(
+    ctx: typer.Context,
     repo: str = typer.Argument(help="GitHub repo in owner/name format (e.g., MyOrg/myapp)"),
     env: str = typer.Option("production", "--env", "-e", help="Target environment for vault and webhook_domain lookup."),
     dry_run: bool = typer.Option(False, "--dry-run", help="List orphan hooks without deleting them."),
@@ -1465,7 +1462,7 @@ def prune_webhooks(
         resolve_webhook_domain,
     )
 
-    cfg = _get_config()
+    cfg = _get_config(ctx)
 
     # 1. Resolve webhook_domain
     webhook_domain = resolve_webhook_domain(cfg._root, env)

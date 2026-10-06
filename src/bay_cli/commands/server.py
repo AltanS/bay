@@ -12,22 +12,18 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
-from bay_cli import ansible, console, paths, runner
+from bay_cli import ansible, console, runner
+from bay_cli.context import Context, context_from, context_or_cwd
 from bay_cli.errors import BayError
 from bay_cli.inventory import InventoryConfig
 
 app = typer.Typer(help="Manage inventory servers.")
 
 
-def _get_inventory(env: str) -> tuple[InventoryConfig, Path]:
-    from bay_cli.paths import consumer_root, find_bay_dir
+def _get_inventory(env: str, cx: Context) -> tuple[InventoryConfig, Path]:
+    root = cx.fleet_root
 
-    try:
-        root = consumer_root(find_bay_dir())
-    except BayError:
-        root = Path.cwd()
-
-    inv_path = root / "hosts" / env
+    inv_path = cx.inventory(env)
     if not inv_path.is_file():
         raise BayError.config(
             f"Inventory file not found: {inv_path}",
@@ -55,6 +51,7 @@ def _check_ssh(host: str) -> bool:
 
 @app.command("list")
 def list_servers(
+    ctx: typer.Context,
     env: str = typer.Argument("production", help="Environment / inventory name"),
     check: bool = typer.Option(False, "--check", help="Test SSH reachability"),
 ) -> None:
@@ -65,7 +62,8 @@ def list_servers(
         bin/bay server list
         bin/bay server list production --check
     """
-    inv, root = _get_inventory(env)
+    cx = context_or_cwd(ctx)
+    inv, root = _get_inventory(env, cx)
     hosts = inv.list_hosts()
     children = inv.get_children_groups()
 
@@ -128,6 +126,7 @@ def list_servers(
 
 @app.command()
 def add(
+    ctx: typer.Context,
     ip: str = typer.Argument(help="Server IP address"),
     region: str | None = typer.Option(None, "--region", "-r", help="Region/group name"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show diff without writing"),
@@ -148,7 +147,8 @@ def add(
     """
     from rich.prompt import Confirm, Prompt
 
-    inv, root = _get_inventory(env)
+    cx = context_or_cwd(ctx)
+    inv, root = _get_inventory(env, cx)
     hosts = inv.list_hosts()
     children = inv.get_children_groups()
     is_multi = bool(children)
@@ -256,6 +256,7 @@ def add(
 
 @app.command()
 def remove(
+    ctx: typer.Context,
     ip: str = typer.Argument(help="Server IP address to remove"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show diff without writing"),
     env: str = typer.Option("production", "--env", "-e", help="Environment / inventory name"),
@@ -272,7 +273,8 @@ def remove(
     """
     from rich.prompt import Confirm
 
-    inv, root = _get_inventory(env)
+    cx = context_or_cwd(ctx)
+    inv, root = _get_inventory(env, cx)
     hosts = inv.list_hosts()
 
     # ── Idempotency: find host(s) matching this IP ───────────────
@@ -518,6 +520,7 @@ def _check_drift(
 
 @app.command()
 def inspect(
+    ctx: typer.Context,
     env: str = typer.Argument("production", help="Environment / inventory name"),
     interface: str = typer.Option("eth0", "--interface", "-i", help="Network interface"),
     region: str | None = typer.Option(None, "--region", "-r", help="Restrict to a specific region"),
@@ -535,9 +538,9 @@ def inspect(
         bin/bay server inspect production --region eu
         bin/bay server inspect production --interface ens3
     """
-    bay_dir = paths.find_bay_dir()
-    root = paths.consumer_root(bay_dir)
-    inv, _ = _get_inventory(env)
+    cx = context_from(ctx)
+    bay_dir, root = cx.framework_root, cx.fleet_root
+    inv, _ = _get_inventory(env, cx)
 
     hosts = inv.list_hosts()
     children = inv.get_children_groups()
