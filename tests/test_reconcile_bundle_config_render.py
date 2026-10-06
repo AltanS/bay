@@ -22,8 +22,16 @@ _ROLE = Path(__file__).parent.parent / "roles" / "container_lifecycle"
 
 
 def _bundle_expression() -> str:
+    def walk(items: list[dict]):
+        for item in items:
+            yield item
+            for key in ("block", "rescue", "always"):
+                yield from walk(item.get(key, []))
+
     tasks = yaml.safe_load((_ROLE / "tasks" / "reconcile.yml").read_text())
-    task = next(t for t in tasks if str(t.get("name", "")).startswith("Write reconcile bundle"))
+    task = next(
+        t for t in walk(tasks) if str(t.get("name", "")).startswith("Write reconcile bundle")
+    )
     return str(task["ansible.builtin.copy"]["content"])
 
 

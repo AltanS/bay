@@ -248,8 +248,16 @@ def test_reconciler_report_carries_post_pass_state() -> None:
 # ── the Ansible wiring ───────────────────────────────────────────────────
 
 
-def _tasks() -> list[dict]:
+_PASS_BLOCK = "Reconcile the containers and record the result"
+
+
+def _top() -> list[dict]:
     return yaml.safe_load(_RECONCILE_TASKS.read_text())
+
+
+def _tasks() -> list[dict]:
+    """The pass block's children, in order: where every receipt task lives."""
+    return next(t for t in _top() if t.get("name") == _PASS_BLOCK)["block"]
 
 
 def _task(name: str) -> dict:
@@ -270,7 +278,34 @@ def test_receipt_task_runs_after_the_pass_as_root_and_never_in_check_mode() -> N
     assert "container_lifecycle_only" in when and "bay_reconciler_plan_only" in when
     write = block["block"][1]["ansible.builtin.command"]["argv"]
     assert write[:3] == ["python3", "-m", "bay_reconcile.receipt"]
+    assert "--dir" not in write, "the helper's RECEIPTS_DIR is the one definition"
     assert block["rescue"], "an unwritable receipt must warn, not fail a finished deploy"
+
+
+def test_the_role_and_the_cli_use_one_receipts_path() -> None:
+    mkdir = _task("Write the deploy receipt")["block"][0]["ansible.builtin.file"]
+    assert mkdir["path"] == str(box_receipt.RECEIPTS_DIR) == "/var/lib/bay/receipts"
+    assert "receipts_dir" not in (_REPO / "roles/container_lifecycle/defaults/main.yml").read_text()
+
+
+def test_the_bundle_is_removed_on_every_path() -> None:
+    """The bundle holds resolved secrets: its removal must sit in `always:`."""
+    top = _top()
+    names = [t.get("name") for t in top]
+    assert "Remove reconcile bundle (contains resolved env)" not in names, "not a plain task"
+    wrapper = top[names.index(_PASS_BLOCK)]
+    assert wrapper["block"][0]["name"].startswith("Write reconcile bundle"), (
+        "the block must open with the bundle write, so any later failure is covered"
+    )
+    always = wrapper["always"]
+    assert always[0]["name"] == "Remove reconcile bundle (contains resolved env)"
+    assert always[0]["ansible.builtin.file"] == {
+        "path": "{{ stack_dir }}/.reconcile-bundle.json",
+        "state": "absent",
+    }
+    inner = [t.get("name") for t in wrapper["block"]]
+    # The deliberate failure is inside the block, so always: still runs after it.
+    assert "Stop the deploy when the reconciler failed" in inner
 
 
 def test_a_failed_pass_writes_the_receipt_then_still_fails_the_deploy() -> None:

@@ -28,9 +28,23 @@ _RECONCILE_TASKS = (
 )
 
 
+# Since M115/S06 the pass (bundle write .. CLI hand-off) sits in one block
+# whose `always:` removes the bundle. Its children are read as if they were
+# top-level: the layout rules below are about the pass, not the wrapper.
+_PASS_BLOCK = "Reconcile the containers and record the result"
+
+
 def _tasks() -> list[dict]:
     with _RECONCILE_TASKS.open() as f:
-        return yaml.safe_load(f)
+        top = yaml.safe_load(f)
+    out: list[dict] = []
+    for task in top:
+        if task.get("name") == _PASS_BLOCK:
+            out.extend(task["block"])
+            out.extend(task.get("always", []))
+        else:
+            out.append(task)
+    return out
 
 
 def _task(name: str) -> dict:

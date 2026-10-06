@@ -54,6 +54,11 @@ deploy:
 If the receipt cannot be written, the deploy prints a warning and goes on.
 The containers are already in place at that point.
 
+The reconcile bundle holds every resolved secret. The whole pass runs in one
+block, and the bundle is removed in its `always:` step. So the bundle leaves
+the box on every path: success, a failed pass, or a failed step before the
+pass.
+
 ### How it is written
 
 `python3 -m bay_reconcile.receipt` writes it. The deploy ships that module to
@@ -68,9 +73,11 @@ A rename in one directory is atomic. A reader sees the old receipt or the new
 one, never half of a file.
 
 The task is "Write the deploy receipt" in
-`roles/container_lifecycle/tasks/reconcile.yml`. The directory is
-`container_lifecycle_receipts_dir` (default `/var/lib/bay/receipts`). Do not
-change it: `bay status` reads the default path.
+`roles/container_lifecycle/tasks/reconcile.yml`. The directory
+`/var/lib/bay/receipts` is fixed. It is not a setting, because the box and
+`bay status` must agree on it. The one definition is `RECEIPTS_DIR` in
+`src/bay_reconcile/receipt.py`. The task repeats the same literal, and a test
+checks that the two match.
 
 ### Format, version 1
 

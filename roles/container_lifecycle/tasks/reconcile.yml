@@ -121,414 +121,424 @@
       } }}
   no_log: true
 
-- name: Write reconcile bundle (resolved env — mode 0600, removed after run)
-  ansible.builtin.copy:
-    dest: "{{ stack_dir }}/.reconcile-bundle.json"
-    # Anchored: the check-mode plan below writes this exact expression into
-    # its temporary directory, so the dry run plans the bundle a real run
-    # would write, never a hand-kept copy that drifted.
-    content: &reconcile_bundle_content >-
-      {{ {
-        'stack': stack_name | default('bay'),
-        'managed_label': container_lifecycle_managed_label | default('bay.managed'),
-        'remove_orphans': bay_reconciler_remove_orphans | default(container_lifecycle_cleanup | default(true)) | bool,
-        'config': {
-          'stop_timeout': container_lifecycle_stop_timeout | int,
-          'healthcheck_timeout': container_lifecycle_healthcheck_timeout | float,
-          'healthcheck_poll': container_lifecycle_healthcheck_poll | float
-        },
-        'containers': _reconcile_entries | default([])
-      } | to_nice_json }}
-    owner: "{{ app_user }}"
-    group: docker
-    mode: "0600"
-  no_log: true
-
-# ── shipping the package ────────────────────────────────────────────────
-# This used to be a recursive `copy` of src/bay_reconcile on every deploy —
-# every file re-transferred every run, `__pycache__` included. Now the package
-# is packed once into a tar (pycache excluded) and shipped only when the
-# marker on the host disagrees with the framework version + a digest of the
-# package contents. A matching marker skips the transfer entirely.
-#
-# Consequence worth knowing: a hand-edited .reconcile/ tree is NOT repaired
-# until the marker moves. `rm <stack_dir>/.reconcile/.version` forces a reship.
-
-- name: Compute the reconciler package marker
-  vars:
-    # fileglob returns files only, so __pycache__/ never enters the digest.
-    _pkg_files: >-
-      {{ query('ansible.builtin.fileglob', playbook_dir ~ '/src/bay_reconcile/*')
-         | sort }}
-  ansible.builtin.set_fact:
-    _reconcile_pkg_marker: >-
-      {{ (bay_version | default('dev')) ~ ' ' ~
-         (((_pkg_files | map('basename') | list)
-           ~ query('ansible.builtin.file', *_pkg_files))
-          | string | hash('sha256')) }}
-
-- name: Read the reconciler marker on the host
-  ansible.builtin.command:
-    argv:
-      - cat
-      - "{{ stack_dir }}/.reconcile/.version"
-  register: _reconcile_marker_on_host
-  changed_when: false
-  failed_when: false
-  check_mode: false
-
-- name: Ship the bay_reconcile package
-  when: >-
-    (_reconcile_marker_on_host.stdout | default('') | trim)
-    != (_reconcile_pkg_marker | trim)
-  # Anchored: the check-mode plan below packs the same tar.
-  vars: &reconcile_pkg_vars
-    _pkg_cache: >-
-      {{ lookup('ansible.builtin.env', 'XDG_CACHE_HOME')
-         | default(lookup('ansible.builtin.env', 'HOME') ~ '/.cache', true) }}/bay
-    _pkg_tar: >-
-      {{ _pkg_cache }}/bay_reconcile-{{ _reconcile_pkg_marker | hash('sha1') }}.tar.gz
+# ── One pass, one cleanup ─────────────────────────────────────────────────
+# Everything from the bundle write to the CLI hand-off sits in this block so
+# the bundle, which holds every resolved secret, is removed in `always:` on
+# EVERY path: a failed package ship, a failed pass (after the receipt records
+# it), a crashed report. Before S06 the removal was a plain last task, and any
+# failure above it left the bundle on the box until the next good deploy.
+- name: Reconcile the containers and record the result
   block:
-    # Both controller-side steps run in check mode. They touch a cache
-    # directory under the operator's own HOME, never a managed host, and the
-    # `unarchive` below cannot even be simulated without the tar: a
-    # check-mode-SKIPPED pack left `--check` failing on a missing file, which
-    # is the worst kind of dry-run result — one that says the change is broken
-    # when only the dry run is. `changed_when: false` for the same reason:
-    # filling a local cache is not a change to the host being reported on.
-    - name: Ensure the controller-side package cache exists
-      ansible.builtin.file:
-        path: "{{ _pkg_cache }}"
-        state: directory
-        mode: "0700"
-      delegate_to: localhost
-      become: false
-      check_mode: false
-      changed_when: false
-
-    # `creates:` makes this a no-op once the tar for this exact marker exists,
-    # so a multi-host deploy packs once and ships N times. `creates:` is a
-    # check-then-act, though: with forks, two hosts can both see no tar and
-    # both pack. Each host packs into its own temp file and `mv` renames it
-    # onto the final path, which is atomic, so no host ever unpacks a
-    # half-written tar. The trap removes the temp file if tar or mv fails.
-    - name: Pack bay_reconcile without __pycache__
-      ansible.builtin.shell:
-        executable: /bin/bash
-        cmd: |
-          set -euo pipefail
-          tmp={{ (_pkg_tar ~ '.' ~ inventory_hostname ~ '.tmp') | quote }}
-          trap 'rm -f "$tmp"' EXIT
-          tar '--exclude=__pycache__' '--exclude=*.pyc' -czf "$tmp" \
-            -C {{ (playbook_dir ~ '/src') | quote }} bay_reconcile
-          mv -f "$tmp" {{ _pkg_tar | quote }}
-        creates: "{{ _pkg_tar }}"
-      delegate_to: localhost
-      become: false
-      check_mode: false
-      changed_when: false
-
-    - name: Ensure the reconciler directory exists
-      ansible.builtin.file:
-        path: "{{ stack_dir }}/.reconcile"
-        state: directory
-        owner: "{{ app_user }}"
-        group: docker
-        mode: "0750"
-
-    - name: Unpack bay_reconcile on the host
-      ansible.builtin.unarchive:
-        src: "{{ _pkg_tar }}"
-        dest: "{{ stack_dir }}/.reconcile/"
-        owner: "{{ app_user }}"
-        group: docker
-
-    # Written LAST: if anything above fails the marker keeps its old value and
-    # the next deploy retries the ship.
-    - name: Record the shipped reconciler marker
+    - name: Write reconcile bundle (resolved env — mode 0600, removed after run)
       ansible.builtin.copy:
-        content: "{{ _reconcile_pkg_marker | trim }}\n"
-        dest: "{{ stack_dir }}/.reconcile/.version"
+        dest: "{{ stack_dir }}/.reconcile-bundle.json"
+        # Anchored: the check-mode plan below writes this exact expression into
+        # its temporary directory, so the dry run plans the bundle a real run
+        # would write, never a hand-kept copy that drifted.
+        content: &reconcile_bundle_content >-
+          {{ {
+            'stack': stack_name | default('bay'),
+            'managed_label': container_lifecycle_managed_label | default('bay.managed'),
+            'remove_orphans': bay_reconciler_remove_orphans | default(container_lifecycle_cleanup | default(true)) | bool,
+            'config': {
+              'stop_timeout': container_lifecycle_stop_timeout | int,
+              'healthcheck_timeout': container_lifecycle_healthcheck_timeout | float,
+              'healthcheck_poll': container_lifecycle_healthcheck_poll | float
+            },
+            'containers': _reconcile_entries | default([])
+          } | to_nice_json }}
         owner: "{{ app_user }}"
         group: docker
-        mode: "0640"
-
-# `failed_when: false` so a failed pass still reaches the deploy receipt
-# below, which records `result: failed`. The deploy is NOT allowed to pass:
-# "Stop the deploy when the reconciler failed" re-raises it right after the
-# receipt is written. `changed_when` reads stdout only when there is any, so a
-# reconciler that crashed before printing its report still reaches that task
-# instead of dying here on `from_json` of an empty string.
-- name: Run server-side reconciler
-  ansible.builtin.command:
-    cmd: >-
-      python3 -m bay_reconcile {{ stack_dir }}/.reconcile-bundle.json
-      {{ '--plan-only' if (bay_reconciler_plan_only | default(false) | bool) else '' }}
-  environment:
-    PYTHONPATH: "{{ stack_dir }}/.reconcile"
-  register: _reconcile_result
-  changed_when: >-
-    (_reconcile_result.stdout | default('') | trim | length > 0)
-    and ((_reconcile_result.stdout | from_json).changed | default(false))
-  failed_when: false
-
-# ── The container plan under --check ────────────────────────────────────
-# Check mode skips the command task above, so a dry run used to print no
-# container plan at all. This block runs the reconciler in plan-only mode
-# instead. It is gated on `ansible_check_mode`, so a real deploy skips the
-# whole block and runs exactly the tasks it ran before.
-#
-# The trap: check mode ALSO skips the bundle write and the package ship
-# above. The bundle and package on the host are the ones the LAST real deploy
-# left. A plan computed from them would be confident and wrong. So every
-# step here writes into a per-run temporary directory on the host, never
-# into stack_dir: the new bundle (same anchored expression as the real one)
-# and the new package (same tar as the real ship). Each task carries
-# `check_mode: false`, because a check-mode-skipped step would leave the
-# reconciler planning against nothing.
-#
-# `--plan-only` is passed unconditionally. In that mode the reconciler only
-# lists containers and looks up local images. It makes no mutating docker
-# call (src/bay_reconcile/__main__.py, reconcile()).
-#
-# What the plan does NOT see: images and env files are read as they are on
-# the host now. Builds, pulls and env-file renders are skipped in check mode,
-# so a pending rebuild or an undeployed secret change shows as NoOp.
-#
-# `changed` is true when the plan holds any action other than NoOp, so the
-# --check recap counts the containers a real deploy would touch.
-#
-# The result registers under its own name. `_reconcile_result` stays the
-# skipped one, so the CLI report hand-off below still skips under --check.
-- name: Plan the container changes in check mode
-  when: ansible_check_mode
-  vars: *reconcile_pkg_vars
-  block:
-    - name: Create a temporary directory for the check-mode plan
-      ansible.builtin.tempfile:
-        state: directory
-        prefix: bay-reconcile-check.
-      register: _reconcile_check_dir
-      check_mode: false
-      changed_when: false
-
-    # Same controller-side steps as the real ship above, including the
-    # temp-file-then-rename pack. `creates:` makes the pack a no-op when the
-    # tar for this marker already exists.
-    - name: Ensure the controller-side package cache exists for the check-mode plan
-      ansible.builtin.file:
-        path: "{{ _pkg_cache }}"
-        state: directory
-        mode: "0700"
-      delegate_to: localhost
-      become: false
-      check_mode: false
-      changed_when: false
-
-    - name: Pack bay_reconcile for the check-mode plan
-      ansible.builtin.shell:
-        executable: /bin/bash
-        cmd: |
-          set -euo pipefail
-          tmp={{ (_pkg_tar ~ '.' ~ inventory_hostname ~ '.tmp') | quote }}
-          trap 'rm -f "$tmp"' EXIT
-          tar '--exclude=__pycache__' '--exclude=*.pyc' -czf "$tmp" \
-            -C {{ (playbook_dir ~ '/src') | quote }} bay_reconcile
-          mv -f "$tmp" {{ _pkg_tar | quote }}
-        creates: "{{ _pkg_tar }}"
-      delegate_to: localhost
-      become: false
-      check_mode: false
-      changed_when: false
-
-    - name: Unpack bay_reconcile into the temporary directory
-      ansible.builtin.unarchive:
-        src: "{{ _pkg_tar }}"
-        dest: "{{ _reconcile_check_dir.path }}/"
-      check_mode: false
-      changed_when: false
-
-    - name: Write the check-mode plan bundle into the temporary directory
-      ansible.builtin.copy:
-        dest: "{{ _reconcile_check_dir.path }}/bundle.json"
-        content: *reconcile_bundle_content
         mode: "0600"
-      check_mode: false
-      changed_when: false
-      diff: false
       no_log: true
 
-    - name: Run the reconciler in plan-only mode
+    # ── shipping the package ────────────────────────────────────────────────
+    # This used to be a recursive `copy` of src/bay_reconcile on every deploy —
+    # every file re-transferred every run, `__pycache__` included. Now the package
+    # is packed once into a tar (pycache excluded) and shipped only when the
+    # marker on the host disagrees with the framework version + a digest of the
+    # package contents. A matching marker skips the transfer entirely.
+    #
+    # Consequence worth knowing: a hand-edited .reconcile/ tree is NOT repaired
+    # until the marker moves. `rm <stack_dir>/.reconcile/.version` forces a reship.
+
+    - name: Compute the reconciler package marker
+      vars:
+        # fileglob returns files only, so __pycache__/ never enters the digest.
+        _pkg_files: >-
+          {{ query('ansible.builtin.fileglob', playbook_dir ~ '/src/bay_reconcile/*')
+             | sort }}
+      ansible.builtin.set_fact:
+        _reconcile_pkg_marker: >-
+          {{ (bay_version | default('dev')) ~ ' ' ~
+             (((_pkg_files | map('basename') | list)
+               ~ query('ansible.builtin.file', *_pkg_files))
+              | string | hash('sha256')) }}
+
+    - name: Read the reconciler marker on the host
       ansible.builtin.command:
         argv:
-          - python3
-          - -m
-          - bay_reconcile
-          - "{{ _reconcile_check_dir.path }}/bundle.json"
-          - --plan-only
-      environment:
-        PYTHONPATH: "{{ _reconcile_check_dir.path }}"
-      register: _reconcile_check_result
-      check_mode: false
-      # `rc == 0 and` first: Jinja short-circuits, so a failed run reaches
-      # failed_when instead of dying on from_json of a non-JSON stdout.
-      changed_when: >-
-        _reconcile_check_result.rc == 0 and
-        ((_reconcile_check_result.stdout | from_json).actions
-         | reject('equalto', 'NoOp') | list | length > 0)
-      failed_when: _reconcile_check_result.rc != 0
-
-    - name: Reconciler check-mode plan
-      ansible.builtin.debug:
-        msg:
-          note: >-
-            Check mode: this is a plan only, nothing was changed. The plan
-            uses the images and env files present on the host now. Builds,
-            pulls and env-file renders are skipped in check mode, so a
-            pending rebuild or secret change shows as NoOp.
-          plan: "{{ (_reconcile_check_result.stdout | from_json).plan }}"
-          actions: "{{ (_reconcile_check_result.stdout | from_json).actions }}"
-      when: _reconcile_check_result is not skipped
-
-  always:
-    # The bundle holds resolved env (secrets). Remove it on every path.
-    - name: Remove the check-mode plan directory
-      ansible.builtin.file:
-        path: "{{ _reconcile_check_dir.path }}"
-        state: absent
-      check_mode: false
+          - cat
+          - "{{ stack_dir }}/.reconcile/.version"
+      register: _reconcile_marker_on_host
       changed_when: false
-      when: _reconcile_check_dir.path is defined
+      failed_when: false
+      check_mode: false
 
-# ── Deploy receipt ─────────────────────────────────────────────────────────
-# The box's own record of what this deploy left running:
-# /var/lib/bay/receipts/<env>.json, read back by `bay status --json`. Format:
-# docs/deploy-receipt.md. Written by `python -m bay_reconcile.receipt` (the
-# package shipped above), which writes a temp file and renames it, and keeps
-# the receipt it replaces as <env>.prev.json.
-#
-# Written on a failed pass too (`result: failed`), which is why the run above
-# has `failed_when: false`. Skipped when:
-#   - the run was skipped (--check). `is not skipped`, never `rc is defined`:
-#     a check-mode-skipped command still registers rc 0.
-#   - this is a partial pass (`container_lifecycle_only`, the git_deploy
-#     webhook pass). Its bundle lists one container, not the box.
-#   - the run was --plan-only. Nothing was deployed.
-#
-# `become_user: root` explicitly: deploy.yml runs this play as app_user, and a
-# task-level `become: true` alone keeps that user. The env is `target_host`,
-# the inventory group the CLI passes (`-e target_host=production`). The fleet
-# and framework commits arrive from the CLI as extra vars and are null when a
-# playbook is run by hand. A receipt that cannot be written is a warning, not
-# a failed deploy: the containers are already in place.
-- name: Write the deploy receipt
-  when:
-    - _reconcile_result is not skipped
-    - container_lifecycle_only | default([]) | length == 0
-    - not (bay_reconciler_plan_only | default(false) | bool)
-  become: true
-  become_user: root
-  block:
-    - name: Ensure the receipts directory exists
-      ansible.builtin.file:
-        path: "{{ container_lifecycle_receipts_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0755"
+    - name: Ship the bay_reconcile package
+      when: >-
+        (_reconcile_marker_on_host.stdout | default('') | trim)
+        != (_reconcile_pkg_marker | trim)
+      # Anchored: the check-mode plan below packs the same tar.
+      vars: &reconcile_pkg_vars
+        _pkg_cache: >-
+          {{ lookup('ansible.builtin.env', 'XDG_CACHE_HOME')
+             | default(lookup('ansible.builtin.env', 'HOME') ~ '/.cache', true) }}/bay
+        _pkg_tar: >-
+          {{ _pkg_cache }}/bay_reconcile-{{ _reconcile_pkg_marker | hash('sha1') }}.tar.gz
+      block:
+        # Both controller-side steps run in check mode. They touch a cache
+        # directory under the operator's own HOME, never a managed host, and the
+        # `unarchive` below cannot even be simulated without the tar: a
+        # check-mode-SKIPPED pack left `--check` failing on a missing file, which
+        # is the worst kind of dry-run result — one that says the change is broken
+        # when only the dry run is. `changed_when: false` for the same reason:
+        # filling a local cache is not a change to the host being reported on.
+        - name: Ensure the controller-side package cache exists
+          ansible.builtin.file:
+            path: "{{ _pkg_cache }}"
+            state: directory
+            mode: "0700"
+          delegate_to: localhost
+          become: false
+          check_mode: false
+          changed_when: false
 
-    - name: Write the receipt for this environment
+        # `creates:` makes this a no-op once the tar for this exact marker exists,
+        # so a multi-host deploy packs once and ships N times. `creates:` is a
+        # check-then-act, though: with forks, two hosts can both see no tar and
+        # both pack. Each host packs into its own temp file and `mv` renames it
+        # onto the final path, which is atomic, so no host ever unpacks a
+        # half-written tar. The trap removes the temp file if tar or mv fails.
+        - name: Pack bay_reconcile without __pycache__
+          ansible.builtin.shell:
+            executable: /bin/bash
+            cmd: |
+              set -euo pipefail
+              tmp={{ (_pkg_tar ~ '.' ~ inventory_hostname ~ '.tmp') | quote }}
+              trap 'rm -f "$tmp"' EXIT
+              tar '--exclude=__pycache__' '--exclude=*.pyc' -czf "$tmp" \
+                -C {{ (playbook_dir ~ '/src') | quote }} bay_reconcile
+              mv -f "$tmp" {{ _pkg_tar | quote }}
+            creates: "{{ _pkg_tar }}"
+          delegate_to: localhost
+          become: false
+          check_mode: false
+          changed_when: false
+
+        - name: Ensure the reconciler directory exists
+          ansible.builtin.file:
+            path: "{{ stack_dir }}/.reconcile"
+            state: directory
+            owner: "{{ app_user }}"
+            group: docker
+            mode: "0750"
+
+        - name: Unpack bay_reconcile on the host
+          ansible.builtin.unarchive:
+            src: "{{ _pkg_tar }}"
+            dest: "{{ stack_dir }}/.reconcile/"
+            owner: "{{ app_user }}"
+            group: docker
+
+        # Written LAST: if anything above fails the marker keeps its old value and
+        # the next deploy retries the ship.
+        - name: Record the shipped reconciler marker
+          ansible.builtin.copy:
+            content: "{{ _reconcile_pkg_marker | trim }}\n"
+            dest: "{{ stack_dir }}/.reconcile/.version"
+            owner: "{{ app_user }}"
+            group: docker
+            mode: "0640"
+
+    # `failed_when: false` so a failed pass still reaches the deploy receipt
+    # below, which records `result: failed`. The deploy is NOT allowed to pass:
+    # "Stop the deploy when the reconciler failed" re-raises it right after the
+    # receipt is written. `changed_when` reads stdout only when there is any, so a
+    # reconciler that crashed before printing its report still reaches that task
+    # instead of dying here on `from_json` of an empty string.
+    - name: Run server-side reconciler
       ansible.builtin.command:
-        argv:
-          - python3
-          - -m
-          - bay_reconcile.receipt
-          - --dir
-          - "{{ container_lifecycle_receipts_dir }}"
-          - --bundle
-          - "{{ stack_dir }}/.reconcile-bundle.json"
-          - --meta
-          - >-
-            {{ {
-              'env': target_host | default(group_names | reject('equalto', 'all') | first | default('default')),
-              'box': inventory_hostname,
-              'framework_version': bay_version | default(none),
-              'framework_commit': bay_receipt_framework_commit | default(none),
-              'fleet_commit': bay_receipt_fleet_commit | default(none),
-              'fleet_dirty': bay_receipt_fleet_dirty | default(none),
-              'reconcile_rc': _reconcile_result.rc | int
-            } | to_json }}
-        stdin: "{{ _reconcile_result.stdout | default('') }}"
+        cmd: >-
+          python3 -m bay_reconcile {{ stack_dir }}/.reconcile-bundle.json
+          {{ '--plan-only' if (bay_reconciler_plan_only | default(false) | bool) else '' }}
       environment:
         PYTHONPATH: "{{ stack_dir }}/.reconcile"
-      register: _reconcile_receipt
-      # A record of the deploy, not a change to it: an idempotent deploy
-      # keeps a recap with changed=0.
-      changed_when: false
+      register: _reconcile_result
+      changed_when: >-
+        (_reconcile_result.stdout | default('') | trim | length > 0)
+        and ((_reconcile_result.stdout | from_json).changed | default(false))
+      failed_when: false
 
-  rescue:
-    - name: Warn that the deploy receipt was not written
-      ansible.builtin.debug:
+    # ── The container plan under --check ────────────────────────────────────
+    # Check mode skips the command task above, so a dry run used to print no
+    # container plan at all. This block runs the reconciler in plan-only mode
+    # instead. It is gated on `ansible_check_mode`, so a real deploy skips the
+    # whole block and runs exactly the tasks it ran before.
+    #
+    # The trap: check mode ALSO skips the bundle write and the package ship
+    # above. The bundle and package on the host are the ones the LAST real deploy
+    # left. A plan computed from them would be confident and wrong. So every
+    # step here writes into a per-run temporary directory on the host, never
+    # into stack_dir: the new bundle (same anchored expression as the real one)
+    # and the new package (same tar as the real ship). Each task carries
+    # `check_mode: false`, because a check-mode-skipped step would leave the
+    # reconciler planning against nothing.
+    #
+    # `--plan-only` is passed unconditionally. In that mode the reconciler only
+    # lists containers and looks up local images. It makes no mutating docker
+    # call (src/bay_reconcile/__main__.py, reconcile()).
+    #
+    # What the plan does NOT see: images and env files are read as they are on
+    # the host now. Builds, pulls and env-file renders are skipped in check mode,
+    # so a pending rebuild or an undeployed secret change shows as NoOp.
+    #
+    # `changed` is true when the plan holds any action other than NoOp, so the
+    # --check recap counts the containers a real deploy would touch.
+    #
+    # The result registers under its own name. `_reconcile_result` stays the
+    # skipped one, so the CLI report hand-off below still skips under --check.
+    - name: Plan the container changes in check mode
+      when: ansible_check_mode
+      vars: *reconcile_pkg_vars
+      block:
+        - name: Create a temporary directory for the check-mode plan
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: bay-reconcile-check.
+          register: _reconcile_check_dir
+          check_mode: false
+          changed_when: false
+
+        # Same controller-side steps as the real ship above, including the
+        # temp-file-then-rename pack. `creates:` makes the pack a no-op when the
+        # tar for this marker already exists.
+        - name: Ensure the controller-side package cache exists for the check-mode plan
+          ansible.builtin.file:
+            path: "{{ _pkg_cache }}"
+            state: directory
+            mode: "0700"
+          delegate_to: localhost
+          become: false
+          check_mode: false
+          changed_when: false
+
+        - name: Pack bay_reconcile for the check-mode plan
+          ansible.builtin.shell:
+            executable: /bin/bash
+            cmd: |
+              set -euo pipefail
+              tmp={{ (_pkg_tar ~ '.' ~ inventory_hostname ~ '.tmp') | quote }}
+              trap 'rm -f "$tmp"' EXIT
+              tar '--exclude=__pycache__' '--exclude=*.pyc' -czf "$tmp" \
+                -C {{ (playbook_dir ~ '/src') | quote }} bay_reconcile
+              mv -f "$tmp" {{ _pkg_tar | quote }}
+            creates: "{{ _pkg_tar }}"
+          delegate_to: localhost
+          become: false
+          check_mode: false
+          changed_when: false
+
+        - name: Unpack bay_reconcile into the temporary directory
+          ansible.builtin.unarchive:
+            src: "{{ _pkg_tar }}"
+            dest: "{{ _reconcile_check_dir.path }}/"
+          check_mode: false
+          changed_when: false
+
+        - name: Write the check-mode plan bundle into the temporary directory
+          ansible.builtin.copy:
+            dest: "{{ _reconcile_check_dir.path }}/bundle.json"
+            content: *reconcile_bundle_content
+            mode: "0600"
+          check_mode: false
+          changed_when: false
+          diff: false
+          no_log: true
+
+        - name: Run the reconciler in plan-only mode
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -m
+              - bay_reconcile
+              - "{{ _reconcile_check_dir.path }}/bundle.json"
+              - --plan-only
+          environment:
+            PYTHONPATH: "{{ _reconcile_check_dir.path }}"
+          register: _reconcile_check_result
+          check_mode: false
+          # `rc == 0 and` first: Jinja short-circuits, so a failed run reaches
+          # failed_when instead of dying on from_json of a non-JSON stdout.
+          changed_when: >-
+            _reconcile_check_result.rc == 0 and
+            ((_reconcile_check_result.stdout | from_json).actions
+             | reject('equalto', 'NoOp') | list | length > 0)
+          failed_when: _reconcile_check_result.rc != 0
+
+        - name: Reconciler check-mode plan
+          ansible.builtin.debug:
+            msg:
+              note: >-
+                Check mode: this is a plan only, nothing was changed. The plan
+                uses the images and env files present on the host now. Builds,
+                pulls and env-file renders are skipped in check mode, so a
+                pending rebuild or secret change shows as NoOp.
+              plan: "{{ (_reconcile_check_result.stdout | from_json).plan }}"
+              actions: "{{ (_reconcile_check_result.stdout | from_json).actions }}"
+          when: _reconcile_check_result is not skipped
+
+      always:
+        # The bundle holds resolved env (secrets). Remove it on every path.
+        - name: Remove the check-mode plan directory
+          ansible.builtin.file:
+            path: "{{ _reconcile_check_dir.path }}"
+            state: absent
+          check_mode: false
+          changed_when: false
+          when: _reconcile_check_dir.path is defined
+
+    # ── Deploy receipt ─────────────────────────────────────────────────────────
+    # The box's own record of what this deploy left running:
+    # /var/lib/bay/receipts/<env>.json, read back by `bay status --json`. Format:
+    # docs/deploy-receipt.md. Written by `python -m bay_reconcile.receipt` (the
+    # package shipped above), which writes a temp file and renames it, and keeps
+    # the receipt it replaces as <env>.prev.json.
+    #
+    # Written on a failed pass too (`result: failed`), which is why the run above
+    # has `failed_when: false`. Skipped when:
+    #   - the run was skipped (--check). `is not skipped`, never `rc is defined`:
+    #     a check-mode-skipped command still registers rc 0.
+    #   - this is a partial pass (`container_lifecycle_only`, the git_deploy
+    #     webhook pass). Its bundle lists one container, not the box.
+    #   - the run was --plan-only. Nothing was deployed.
+    #
+    # `become_user: root` explicitly: deploy.yml runs this play as app_user, and a
+    # task-level `become: true` alone keeps that user. The env is `target_host`,
+    # the inventory group the CLI passes (`-e target_host=production`). The fleet
+    # and framework commits arrive from the CLI as extra vars and are null when a
+    # playbook is run by hand. A receipt that cannot be written is a warning, not
+    # a failed deploy: the containers are already in place.
+    - name: Write the deploy receipt
+      when:
+        - _reconcile_result is not skipped
+        - container_lifecycle_only | default([]) | length == 0
+        - not (bay_reconciler_plan_only | default(false) | bool)
+      become: true
+      become_user: root
+      block:
+        - name: Ensure the receipts directory exists
+          ansible.builtin.file:
+            # Fixed, not a variable: the CLI reads this exact path over SSH.
+            # Same literal as RECEIPTS_DIR in src/bay_reconcile/receipt.py,
+            # which the helper below uses; a test asserts the two agree.
+            path: /var/lib/bay/receipts
+            state: directory
+            owner: root
+            group: root
+            mode: "0755"
+
+        - name: Write the receipt for this environment
+          ansible.builtin.command:
+            argv:
+              - python3
+              - -m
+              - bay_reconcile.receipt
+              - --bundle
+              - "{{ stack_dir }}/.reconcile-bundle.json"
+              - --meta
+              - >-
+                {{ {
+                  'env': target_host | default(group_names | reject('equalto', 'all') | first | default('default')),
+                  'box': inventory_hostname,
+                  'framework_version': bay_version | default(none),
+                  'framework_commit': bay_receipt_framework_commit | default(none),
+                  'fleet_commit': bay_receipt_fleet_commit | default(none),
+                  'fleet_dirty': bay_receipt_fleet_dirty | default(none),
+                  'reconcile_rc': _reconcile_result.rc | int
+                } | to_json }}
+            stdin: "{{ _reconcile_result.stdout | default('') }}"
+          environment:
+            PYTHONPATH: "{{ stack_dir }}/.reconcile"
+          register: _reconcile_receipt
+          # A record of the deploy, not a change to it: an idempotent deploy
+          # keeps a recap with changed=0.
+          changed_when: false
+
+      rescue:
+        - name: Warn that the deploy receipt was not written
+          ansible.builtin.debug:
+            msg: >-
+              WARNING: the deploy receipt was not written
+              ({{ ansible_failed_result.msg | default('unknown error') }}).
+              `bay status --json` will show the previous receipt for this box.
+
+    - name: Stop the deploy when the reconciler failed
+      ansible.builtin.fail:
         msg: >-
-          WARNING: the deploy receipt was not written
-          ({{ ansible_failed_result.msg | default('unknown error') }}).
-          `bay status --json` will show the previous receipt for this box.
+          the reconciler exited {{ _reconcile_result.rc }}.
+          Report: {{ _reconcile_result.stdout | default('') }}
+          {{ _reconcile_result.stderr | default('') }}
+      when:
+        - _reconcile_result is not skipped
+        - _reconcile_result.rc != 0
 
-- name: Stop the deploy when the reconciler failed
-  ansible.builtin.fail:
-    msg: >-
-      the reconciler exited {{ _reconcile_result.rc }}.
-      Report: {{ _reconcile_result.stdout | default('') }}
-      {{ _reconcile_result.stderr | default('') }}
-  when:
-    - _reconcile_result is not skipped
-    - _reconcile_result.rc != 0
+    # In --check mode the command task above is skipped, so `stdout` is empty and
+    # `from_json` raises (exit 2, the whole play dies). Guard on `is not skipped`,
+    # NOT on `rc is defined` — a check-mode-skipped command still registers rc: 0,
+    # so an `rc`-based guard passes and the crash happens anyway.
+    - name: Reconciler report
+      ansible.builtin.debug:
+        msg: "{{ _reconcile_result.stdout | from_json }}"
+      when: _reconcile_result is not skipped
 
-# In --check mode the command task above is skipped, so `stdout` is empty and
-# `from_json` raises (exit 2, the whole play dies). Guard on `is not skipped`,
-# NOT on `rc is defined` — a check-mode-skipped command still registers rc: 0,
-# so an `rc`-based guard passes and the crash happens anyway.
-- name: Reconciler report
-  ansible.builtin.debug:
-    msg: "{{ _reconcile_result.stdout | from_json }}"
-  when: _reconcile_result is not skipped
+    # ── Hand the touched-container list to the CLI ────────────────────────────
+    # The reconciler is the only thing that knows which containers this deploy
+    # actually changed, and until now that knowledge died in the debug message
+    # above: `src/bay_cli/runner.py` gives the playbook's stdout straight to the
+    # terminal, so the CLI has nothing to parse. The post-deploy summary needs it
+    # to say which failures are this deploy's doing.
+    #
+    # ONE FILE PER HOST, on the control node. Not a merged file, and not an
+    # Ansible fact: role-scoped facts do not cross into hostvars[other_host], so
+    # each host writes its own and the CLI merges them. The CLI empties this
+    # directory before every run, so a file here is always current.
+    #
+    # `when: ... is not skipped` for the same reason the debug task above has it:
+    # in --check mode the command task is skipped, and a skipped command still
+    # registers rc 0, so an rc-based guard would pass and this would write "".
+    - name: Ensure the control-node report directory exists
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/.reconcile-report"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      when: _reconcile_result is not skipped
 
-# ── Hand the touched-container list to the CLI ────────────────────────────
-# The reconciler is the only thing that knows which containers this deploy
-# actually changed, and until now that knowledge died in the debug message
-# above: `src/bay_cli/runner.py` gives the playbook's stdout straight to the
-# terminal, so the CLI has nothing to parse. The post-deploy summary needs it
-# to say which failures are this deploy's doing.
-#
-# ONE FILE PER HOST, on the control node. Not a merged file, and not an
-# Ansible fact: role-scoped facts do not cross into hostvars[other_host], so
-# each host writes its own and the CLI merges them. The CLI empties this
-# directory before every run, so a file here is always current.
-#
-# `when: ... is not skipped` for the same reason the debug task above has it:
-# in --check mode the command task is skipped, and a skipped command still
-# registers rc 0, so an rc-based guard would pass and this would write "".
-- name: Ensure the control-node report directory exists
-  ansible.builtin.file:
-    path: "{{ playbook_dir }}/.reconcile-report"
-    state: directory
-    mode: "0700"
-  delegate_to: localhost
-  become: false
-  changed_when: false
-  when: _reconcile_result is not skipped
+    - name: Hand the reconciler report to the CLI
+      ansible.builtin.copy:
+        content: "{{ _reconcile_result.stdout }}"
+        dest: "{{ playbook_dir }}/.reconcile-report/{{ inventory_hostname }}.json"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      when: _reconcile_result is not skipped
 
-- name: Hand the reconciler report to the CLI
-  ansible.builtin.copy:
-    content: "{{ _reconcile_result.stdout }}"
-    dest: "{{ playbook_dir }}/.reconcile-report/{{ inventory_hostname }}.json"
-    mode: "0600"
-  delegate_to: localhost
-  become: false
-  changed_when: false
-  when: _reconcile_result is not skipped
-
-- name: Remove reconcile bundle (contains resolved env)
-  ansible.builtin.file:
-    path: "{{ stack_dir }}/.reconcile-bundle.json"
-    state: absent
+  always:
+    - name: Remove reconcile bundle (contains resolved env)
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/.reconcile-bundle.json"
+        state: absent
