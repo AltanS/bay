@@ -28,7 +28,7 @@
     environment:
       - TRIGGER_DIR=/triggers
       - TELEGRAM_FAILURES_LOG=/state/telegram-failures.log
-      - SERVICE_BRANCHES={% for svc_name in active_services | dict2items | selectattr('value.build', 'defined') | map(attribute='key') %}{{ svc_name }}:{{ active_services[svc_name].build.branch | default('main') }}{% if not loop.last %},{% endif %}{% endfor %}
+      - SERVICE_BRANCHES={% for svc_name in active_services | dict2items | selectattr('value.build', 'defined') | sort(attribute='key') | map(attribute='key') %}{{ svc_name }}:{{ active_services[svc_name].build.branch | default('main') }}{% if not loop.last %},{% endif %}{% endfor %}
 
       - TELEGRAM_HEADER={{ docker_monitor_alert_header | default('') }}
       - HOSTNAME={% include '_host_label.j2' +%}

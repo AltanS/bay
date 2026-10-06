@@ -300,18 +300,6 @@ def _env_pairs(text: str | None) -> list[tuple[str, str]]:
     ]
 
 
-def _norm_spec(spec: dict[str, Any] | None) -> dict[str, Any] | None:
-    if spec is None:
-        return None
-    spec = json.loads(json.dumps(spec))
-    env = spec.get("env")
-    if isinstance(env, dict) and "SERVICE_BRANCHES" in env:
-        # The webhook lists build services in services.yml order; the compiled
-        # file is sorted. Same pairs, another order.
-        env["SERVICE_BRANCHES"] = ",".join(sorted(filter(None, env["SERVICE_BRANCHES"].split(","))))
-    return spec
-
-
 def _raw(block: dict[str, Any] | None) -> dict[str, Any]:
     if block is None:
         return {}
@@ -414,7 +402,7 @@ def compare(
 
 
 def _container_view(render: dict[str, Any], name: str) -> dict[str, Any]:
-    spec = _norm_spec(render["specs"].get(name))
+    spec = render["specs"].get(name)
     if spec is None:
         return {"missing": True}
     view = {k: v for k, v in spec.items()}

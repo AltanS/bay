@@ -43,6 +43,8 @@ repo, the `.bay/` clone and the `bin/bay` wrapper are gone.
 - With no fleet selected, a command stops and lists the three ways to pick
   one.
 - The deploy version gate tells you to run `bay self update`.
+- The webhook receiver lists its build services in name order, so its
+  `SERVICE_BRANCHES` value no longer depends on the order of `services.yml`.
 
 ### Removed
 
@@ -79,6 +81,9 @@ repo, the `.bay/` clone and the `bin/bay` wrapper are gone.
 - A script that reads `bay status --json` must handle `status_version` 2:
   `framework.pinned`, `framework.checkout` and `framework.latest` are gone.
 - `bay test` still runs `tests/test_infra.sh` from the fleet.
+- The webhook receiver recreates once at the first deploy, because its
+  `SERVICE_BRANCHES` value is now sorted by service name and its config hash
+  changes.
 
 ## [1.0.0] - 2026-10-06
 

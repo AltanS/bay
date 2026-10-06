@@ -326,7 +326,10 @@
         if (_is_build_server_for_webhook and _has_global_remote_builds)
         else _build_services
       }}
-    _service_branches: "{{ _all_build_services_for_webhook | map(attribute='key') | zip(_all_build_services_for_webhook | map(attribute='value.build.branch', default='main')) | map('join', ':') | join(',') }}"
+    # Sorted by service name, so the value (and with it the container's config
+    # hash) does not move when services.yml lists its services in another order.
+    _webhook_build_services: "{{ _all_build_services_for_webhook | sort(attribute='key') }}"
+    _service_branches: "{{ _webhook_build_services | map(attribute='key') | zip(_webhook_build_services | map(attribute='value.build.branch', default='main')) | map('join', ':') | join(',') }}"
     _webhook_spec:
       name: bay-webhook
       type: infra
