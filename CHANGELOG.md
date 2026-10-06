@@ -7,6 +7,23 @@ Consumers pin a framework version in `.bay-version` and move with
 before upgrading — anything needing manual action is called out under
 **Upgrade notes**.
 
+## [1.0.0] - 2026-10-06
+
+### Changed
+
+- This is the last release of the `services.yml` era: the consumer repo
+  holds a clone of Bay in `.bay/`, you edit `group_vars/all/services.yml`
+  by hand, and you run `bin/bay`. There is no functional change versus
+  0.10.0.
+- Fixes to this model ship as 1.0.x from the `v1` branch.
+- Bay v2 replaces the consumer repo with a machine-level CLI, a fleet repo
+  that only the CLI writes, and a `bay.toml` file in each project. v2 is
+  developed on the `v2` branch.
+
+### Upgrade notes
+
+- You can pin v1.0.0 safely. There is nothing to do.
+
 ## [0.10.0] - 2026-10-05
 
 ### Added
