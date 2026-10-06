@@ -128,8 +128,10 @@ class Context:
 
         1. ``fleet``, the value of the global ``--fleet <path>`` option.
         2. The ``BAY_FLEET`` environment variable.
-        3. ``~/.config/bay/fleets/<name>``, when ``BAY_FLEET_NAME`` is set or
-           exactly one fleet directory exists there.
+        3. ``~/.config/bay/fleets/<name>``, only when ``BAY_FLEET_NAME`` is
+           set. There is no auto-pick of a lone fleet while step 4 exists:
+           the first fleet dir on a machine would otherwise capture every
+           command run inside a consumer repo.
         4. TRANSITION ONLY: walk up from the working directory to a ``.bay/``
            framework clone (the consumer layout). This keeps every current
            consumer command working unchanged until the cutover. Step 4 is
@@ -175,23 +177,21 @@ class Context:
 
 
 def _fleet_from_fleets_dir() -> Path | None:
-    """Discovery step 3: the fixed per-fleet path under ``~/.config/bay/fleets``."""
-    base = Path.home() / _FLEETS_DIR
+    """Discovery step 3: ``~/.config/bay/fleets/<name>``, only if ``BAY_FLEET_NAME`` is set.
+
+    S08 may reinstate "use the one fleet that exists" once the walk-up (step 4)
+    is gone. Until then it would hijack consumer-repo runs, so it is off.
+    """
     name = os.environ.get(FLEET_NAME_ENV)
-    if name:
-        candidate = base / name
-        if not candidate.is_dir():
-            raise BayError(
-                f"fleet '{name}' not found at {candidate}",
-                hint=f"Unset {FLEET_NAME_ENV}, or create the fleet there.",
-            )
-        return candidate
-    if not base.is_dir():
+    if not name:
         return None
-    fleets = sorted(p for p in base.iterdir() if p.is_dir())
-    if len(fleets) == 1:
-        return fleets[0]
-    return None
+    candidate = Path.home() / _FLEETS_DIR / name
+    if not candidate.is_dir():
+        raise BayError(
+            f"fleet '{name}' not found at {candidate}",
+            hint=f"Unset {FLEET_NAME_ENV}, or create the fleet there.",
+        )
+    return candidate
 
 
 @dataclass

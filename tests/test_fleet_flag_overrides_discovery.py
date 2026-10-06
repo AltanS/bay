@@ -1,7 +1,8 @@
 """Fleet discovery: `--fleet`, `BAY_FLEET`, the fleets dir, and the walk-up fallback.
 
 `Context.resolve` is the one place that finds the project. The order is
-`--fleet`, then `BAY_FLEET`, then `~/.config/bay/fleets/<name>`, then (this
+`--fleet`, then `BAY_FLEET`, then `~/.config/bay/fleets/<name>` (only with
+`BAY_FLEET_NAME` set), then (this
 transition only, removed in S08) walking up from the working directory.
 """
 
@@ -122,12 +123,31 @@ def test_missing_fleet_dir_is_an_error_not_a_fallback(
         Context.resolve(None)
 
 
-def test_fleets_dir_with_exactly_one_fleet_is_used(
+def test_a_lone_fleet_is_not_auto_picked_over_walk_up(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One fleet dir and no BAY_FLEET_NAME: a consumer repo must still win.
+
+    Otherwise the first fleet created on a machine would capture every
+    `bin/bay` run inside fleet-a or fleet-b. S08 may reinstate it.
+    """
+    (home / ".config" / "bay" / "fleets" / "acme").mkdir(parents=True)
+    consumer = _fake_consumer(tmp_path)
+    monkeypatch.chdir(consumer / "sub")
+
+    cx = Context.resolve(None)
+
+    assert cx.source == SOURCE_WALK_UP
+    assert cx.fleet_root == consumer
+
+
+def test_bay_fleet_name_selects_a_fleet_over_walk_up(
     tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     only = home / ".config" / "bay" / "fleets" / "acme"
     only.mkdir(parents=True)
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(_fake_consumer(tmp_path))
+    monkeypatch.setenv("BAY_FLEET_NAME", "acme")
 
     cx = Context.resolve(None)
 
@@ -151,10 +171,10 @@ def test_bay_fleet_name_picks_one_of_several(
         Context.resolve(None)
 
 
-def test_two_fleets_without_a_name_do_not_guess(
+def test_fleets_without_a_name_do_not_guess(
     tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two fleets and no name: step 3 declines, so walk-up decides (the transition)."""
+    """Several fleets and no name: step 3 is off, so walk-up decides (the transition)."""
     base = home / ".config" / "bay" / "fleets"
     (base / "acme").mkdir(parents=True)
     (base / "beta").mkdir()
