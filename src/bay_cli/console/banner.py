@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from rich.text import Text
 
 from bay_cli.console.output import console
 from bay_cli.console.output import is_json_mode
 from bay_cli.console.theme import BRAND_BOLD, BRAND_DIM
+
+if TYPE_CHECKING:
+    from bay_cli.context import Context
 
 _LOGO = [
     ("[ B A Y ]", BRAND_BOLD),
@@ -33,20 +38,27 @@ def banner(*, subtitle: str = "", version: str = "") -> None:
     console.print()
 
 
-def show_banner(*, subtitle: str = "") -> None:
-    """Print banner with auto-detected framework version."""
+def show_banner(cx: Context | None = None, *, subtitle: str = "") -> None:
+    """Print banner with the framework version read from ``cx``.
+
+    Without a Context there is no framework to ask, so the version and the
+    dev-link warning are left out.
+    """
     if is_json_mode():
         return
-    banner(subtitle=subtitle, version=_get_version())
-    _show_dev_link_warning()
+    if cx is None:
+        banner(subtitle=subtitle)
+        return
+    banner(subtitle=subtitle, version=_get_version(cx))
+    _show_dev_link_warning(cx)
 
 
-def _show_dev_link_warning() -> None:
+def _show_dev_link_warning(cx: Context) -> None:
     """Show a prominent warning if dev-link mode is active."""
     try:
         from bay_cli.paths import is_dev_linked
 
-        if is_dev_linked():
+        if is_dev_linked(cx.fleet_root):
             from rich.panel import Panel
 
             console.print(
@@ -61,14 +73,12 @@ def _show_dev_link_warning() -> None:
         pass
 
 
-def _get_version() -> str:
+def _get_version(cx: Context) -> str:
     """Read version from git tag (source of truth), falling back to version.yml."""
     try:
         import subprocess
 
-        from bay_cli.paths import find_bay_dir
-
-        bay_dir = find_bay_dir()
+        bay_dir = cx.framework_root
 
         # Prefer exact git tag
         result = subprocess.run(

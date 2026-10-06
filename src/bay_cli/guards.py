@@ -6,7 +6,7 @@ from bay_cli import console, git, paths
 from bay_cli.errors import BayError
 
 
-def check_bay_version(bay_dir: Path, root: Path | None = None) -> None:
+def check_bay_version(bay_dir: Path, root: Path) -> None:
     """Fail if .bay-version doesn't match the installed framework version.
 
     This is a hard guard — it raises :class:`BayError` on mismatch.
@@ -42,7 +42,7 @@ def check_git_health(bay_dir: Path) -> None:
     git.fsck(bay_dir)
 
 
-def show_update_notice(bay_dir: Path, root: Path | None = None) -> None:
+def show_update_notice(bay_dir: Path, root: Path) -> None:
     """Print a notice if a newer framework version is available locally."""
     pinned = paths.read_pinned_version(root)
     if pinned is None:

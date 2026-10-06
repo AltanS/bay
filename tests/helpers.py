@@ -65,3 +65,11 @@ def make_ansible_env(
     env.filters["quote"] = shlex.quote
     env.filters["to_json"] = json.dumps
     return env
+
+
+def typer_ctx(cx):
+    """A `typer.Context` carrying a ready-made bay Context, for calling a command directly."""
+    import click
+    import typer
+
+    return typer.Context(click.Command("bay"), obj=cx)

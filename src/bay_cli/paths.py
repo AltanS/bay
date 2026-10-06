@@ -83,6 +83,9 @@ def _describe_broken_framework(entry: Path) -> str:
 def find_bay_dir(start: Path | None = None) -> Path:
     """Locate the .bay/ framework directory.
 
+    Called only from ``bay_cli.context`` (discovery step 4, removed in S08).
+    Commands receive a Context instead of calling this.
+
     Walks up from start (default: cwd) looking for a .bay/ directory. Falls
     back to the pre-1.0 clone dir (with a warning) so an un-migrated
     consumer keeps working through the transition.
@@ -132,20 +135,22 @@ def find_bay_dir(start: Path | None = None) -> Path:
 def consumer_root(bay_dir: Path | None = None) -> Path:
     """Return the consumer project root (parent of .bay/).
 
+    Called only from ``bay_cli.context`` (discovery step 4, removed in S08).
+
     Requires a *resolvable* framework checkout, which every caller needs in
     order to do anything.
     """
     return (bay_dir or find_bay_dir()).parent
 
 
-def version_file(root: Path | None = None) -> Path:
+def version_file(root: Path) -> Path:
     """Return path to the .bay-version pin file.
 
     If only the pre-1.0 pin file exists, that path is returned (and a
     warning printed) so reads keep working before migration. Writers always
     get the new path once the legacy file is gone.
     """
-    r = root or consumer_root()
+    r = root
     new = r / VERSION_FILE
     if new.exists():
         return new
@@ -156,7 +161,7 @@ def version_file(root: Path | None = None) -> Path:
     return new
 
 
-def read_pinned_version(root: Path | None = None) -> str | None:
+def read_pinned_version(root: Path) -> str | None:
     """Read the pinned version from .bay-version, or None if missing."""
     vf = version_file(root)
     if vf.exists():
@@ -164,13 +169,13 @@ def read_pinned_version(root: Path | None = None) -> str | None:
     return None
 
 
-def dev_link_file(root: Path | None = None) -> Path:
+def dev_link_file(root: Path) -> Path:
     """Return path to the .bay-dev sentinel file.
 
     Falls back to the pre-1.0 sentinel spelling when only that one exists, so
     `dev-unlink` on an un-migrated consumer still finds and removes it.
     """
-    r = root or consumer_root()
+    r = root
     new = r / DEV_LINK_FILE
     if new.exists():
         return new
@@ -181,14 +186,14 @@ def dev_link_file(root: Path | None = None) -> Path:
     return new
 
 
-def is_dev_linked(root: Path | None = None) -> bool:
+def is_dev_linked(root: Path) -> bool:
     """Check if the consumer is in dev-link mode.
 
     A consumer is considered dev-linked if either the .bay-dev sentinel
     exists, OR the .bay entry is a symlink (the symlink is the
     authoritative signal; the sentinel is an operator convenience).
     """
-    r = root or consumer_root()
+    r = root
     if dev_link_file(r).exists():
         return True
     for name in (FRAMEWORK_DIR, _LEGACY_FRAMEWORK_DIR):  # legacy-argo: dual-read fallback

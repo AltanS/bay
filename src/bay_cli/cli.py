@@ -6,6 +6,7 @@ import typer
 
 from bay_cli import console
 from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault, webhook
+from bay_cli.context import GlobalOptions, context_from
 from bay_cli.errors import BayError
 
 app = typer.Typer(
@@ -19,14 +20,22 @@ app = typer.Typer(
 _allow_extra = {"allow_extra_args": True, "allow_interspersed_args": False}
 
 
-def version_callback(value: bool) -> None:
+def fleet_callback(ctx: typer.Context, value: Path | None) -> Path | None:
+    """Store the global options where every command can reach them.
+
+    Eager, and declared before ``--version``/``--skill``, so those callbacks
+    already see ``--fleet`` when it comes first on the command line.
+    """
+    ctx.obj = GlobalOptions(fleet=value)
+    return value
+
+
+def version_callback(ctx: typer.Context, value: bool) -> None:
     if value:
         import subprocess
 
         try:
-            from bay_cli.paths import find_bay_dir
-
-            bay_dir = find_bay_dir()
+            bay_dir = context_from(ctx).framework_root
 
             # Prefer git tag (source of truth)
             result = subprocess.run(
@@ -52,7 +61,7 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def skill_callback(value: bool) -> None:
+def skill_callback(ctx: typer.Context, value: bool) -> None:
     """Print SKILL.md — the framework's single-file orientation document.
 
     Written straight to stdout, unformatted: the consumer is usually an agent
@@ -60,15 +69,13 @@ def skill_callback(value: bool) -> None:
     """
     if not value:
         return
-    from bay_cli import paths
-
     # The package lives at <framework>/src/bay_cli, so the framework root is
     # two levels up — resolved from the import, not the cwd, so this works in
     # a consumer (.bay/), in dev-link mode, and from the framework repo alike.
     skill = Path(__file__).resolve().parents[2] / "SKILL.md"
     if not skill.is_file():
         try:
-            skill = paths.find_bay_dir() / "SKILL.md"
+            skill = context_from(ctx).framework_root / "SKILL.md"
         except BayError:
             pass
     if not skill.is_file():
@@ -82,6 +89,13 @@ def skill_callback(value: bool) -> None:
 
 @app.callback()
 def main(
+    fleet: Path | None = typer.Option(
+        None,
+        "--fleet",
+        callback=fleet_callback,
+        is_eager=True,
+        help="Fleet directory to operate on. Overrides BAY_FLEET.",
+    ),
     version: bool = typer.Option(
         False,
         "--version",
