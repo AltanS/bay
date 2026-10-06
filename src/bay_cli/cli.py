@@ -5,7 +5,7 @@ from pathlib import Path
 import typer
 
 from bay_cli import console
-from bay_cli.commands import compile_cmd, import_cmd, project_cmd, toml_cmd
+from bay_cli.commands import compile_cmd, fleet_cmd, import_cmd, project_cmd, self_cmd, toml_cmd
 from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault, webhook
 from bay_cli.context import GlobalOptions, context_from
 from bay_cli.errors import BayError
@@ -145,6 +145,10 @@ app.command(rich_help_panel="Framework")(framework.status)
 app.command(rich_help_panel="Framework")(framework.guide)
 app.command(rich_help_panel="Framework")(framework.dev_link)
 app.command(rich_help_panel="Framework")(framework.dev_unlink)
+
+# Install and fleets on this machine
+app.add_typer(self_cmd.app, name="self", rich_help_panel="Framework")
+app.add_typer(fleet_cmd.app, name="fleet", rich_help_panel="Framework")
 
 # Operational commands (top-level, allow extra args for ansible passthrough)
 app.command(rich_help_panel="Operations", context_settings=_allow_extra)(ops.deploy)

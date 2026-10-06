@@ -197,9 +197,14 @@ def _fleet_from_fleets_dir() -> Path | None:
     return fleet_dir_for_name(name, hint=f"Unset {FLEET_NAME_ENV}, or create the fleet there.")
 
 
+def fleets_root() -> Path:
+    """``~/.config/bay/fleets``, the directory that holds every fleet on this machine."""
+    return Path.home() / _FLEETS_DIR
+
+
 def fleet_dir_for_name(name: str, *, hint: str | None = None) -> Path:
     """``~/.config/bay/fleets/<name>``. Raises BayError when it is not a directory."""
-    candidate = Path.home() / _FLEETS_DIR / name
+    candidate = fleets_root() / name
     if not candidate.is_dir():
         raise BayError(
             f"fleet '{name}' not found at {candidate}",

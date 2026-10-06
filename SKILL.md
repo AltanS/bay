@@ -106,8 +106,14 @@ to reproduce it. The flags that change what a command *means*:
 
 - `bin/bay dev-link [path]` — Link .bay/ to a local framework checkout for development.
 - `bin/bay dev-unlink` — Remove the dev link and restore the pinned framework clone.
+- `bin/bay fleet` — Create, clone and list the fleets on this machine.
+- `bin/bay fleet init <name>` — Create a fleet at ~/.config/bay/fleets/<name>, or clone one with --from.
+- `bin/bay fleet ls` — List the fleets in ~/.config/bay/fleets.
 - `bin/bay guide` — Show tailored next steps for this project's current state.
 - `bin/bay install` — Install the framework version pinned in .bay-version.
+- `bin/bay self` — Show or change the Bay version installed on this machine.
+- `bin/bay self update` — Move this machine to the newest Bay release, or to the tag given by --to.
+- `bin/bay self version` — Print the installed Bay version and where the checkout lives.
 - `bin/bay setup` — Run the interactive setup wizard to configure your project.
 - `bin/bay status` — Show the pinned framework version, update status, and feature flags.
 - `bin/bay update` — Update to the latest framework release (bumps .bay-version).
@@ -218,6 +224,7 @@ Paths are relative to the framework root (`.bay/` in a consumer).
 **Start here**
 
 - `CHANGELOG.md` — What changed in each release, with upgrade notes. Read this before `bin/bay update`.
+- `docs/install.md` — Install the `bay` command once per machine, update it with `bay self update`, and make or clone a fleet.
 - `docs/features.md` — What Bay is, the full feature set, and how it compares to alternatives.
 - `docs/onboarding.md` — The `bin/bay setup` wizard, the files it generates, and your first deploy.
 

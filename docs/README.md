@@ -12,6 +12,7 @@ the topic you need below.
 | Doc | What it covers |
 |-----|----------------|
 | [../CHANGELOG.md](../CHANGELOG.md) | What changed in each release, with upgrade notes. Read this before `bin/bay update`. |
+| [install.md](install.md) | Install the `bay` command once per machine, update it with `bay self update`, and make or clone a fleet. |
 | [features.md](features.md) | What Bay is, the full feature set, and how it compares to alternatives. |
 | [onboarding.md](onboarding.md) | The `bin/bay setup` wizard, the files it generates, and your first deploy. |
 

@@ -50,6 +50,12 @@ def latest_tag(bay_dir: Path) -> str | None:
     return tags[0] if tags else None
 
 
+def list_tags(bay_dir: Path) -> list[str]:
+    """Every tag in the checkout, newest first (version sort)."""
+    result = runner.run(["git", "-C", str(bay_dir), "tag", "--sort=-v:refname"])
+    return result.stdout.strip().splitlines()
+
+
 def current_ref(bay_dir: Path) -> str:
     """Return the current tag if on one, otherwise short SHA."""
     tag = describe_tags(bay_dir)
