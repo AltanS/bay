@@ -77,6 +77,10 @@ repo, the `.bay/` clone and the `bin/bay` wrapper are gone.
   `previous`. An unpinned repo project is left out and named in `notes`. One
   commit: `bay: receipt <box env> (<n> projects)`. `bay show` reports `ok`
   for all of them, not `unknown` for all but one.
+- `bay up --json` reports what the deploy did: `applied` lists, per box,
+  every container whose receipt action is not `noop` (`box`, `container`,
+  `action`, `healthy`). `steps` stays the plan. A receipt from an earlier
+  deploy is left out, with a note. The human output prints both counts.
 
 ### Removed
 

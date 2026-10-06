@@ -360,7 +360,8 @@ def _apply(
     console.success(
         f"{result['action']} {result['project']} {result['env']}: "
         f"{(previous or 'none')[:12]} -> {result['commit'][:12]}, "
-        f"{len(result['steps'])} step(s), fleet commit {result['receipt_commit'][:12]}"
+        f"{len(result['steps'])} step(s) planned, {len(result.get('applied') or [])} "
+        f"container change(s) applied, fleet commit {result['receipt_commit'][:12]}"
         + (", pushed" if result["pushed"] else "")
     )
     others = [r for r in result.get("pinned") or [] if r["project"] != result["project"]]

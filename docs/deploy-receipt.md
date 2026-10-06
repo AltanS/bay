@@ -128,6 +128,10 @@ Each container entry:
 | `action` | string or null | `noop`, `create`, `recreate`, `start` or `remove`. A zero-downtime swap is `recreate`. Null when the pass crashed before it reported. `start` is reserved; version 1 does not write it. |
 | `healthy` | boolean or null | Read once, right after the pass. `true`: running and healthy. `false`: not running, or unhealthy. `null`: running with no health check, still starting, removed, or unknown. |
 
+`bay up` reads `action` back: every container that is not `noop` goes into
+the `applied` list of its JSON result, when the receipt's `fleet_commit` is
+the commit of that `bay up` (see [plan.md](plan.md)).
+
 The fleet and framework commits come from the CLI. `bay deploy` passes them
 to the deploy as one JSON extra var:
 

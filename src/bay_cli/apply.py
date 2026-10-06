@@ -16,7 +16,10 @@
    pinned (:func:`_pin_deployed`): ``commit``, ``result``, ``deployed_at``,
    ``plan_id``, ``last_receipt_sha256`` and ``previous``. One commit:
    ``bay: receipt <box env> (<n> projects)``.
-7. Push the fleet repo when it has a remote (not with ``--no-push``). A
+7. Report what the deploy did: ``applied`` lists, per box, every container
+   whose receipt action is not ``noop`` (:func:`applied_from`). ``steps`` is
+   still the plan.
+8. Push the fleet repo when it has a remote (not with ``--no-push``). A
    failed push is a warning. A fleet that is a subdirectory of a larger repo
    is committed but never pushed (``push_skipped`` says why).
 
@@ -260,6 +263,11 @@ def up(
         f"{name} has no pinned commit, so this deploy left it out and its lock is unchanged"
         for name in left_out
     ]
+    applied, stale_boxes = applied_from(entries, fleet_commit)
+    notes += [
+        f"box {b}: the receipt is not from this deploy, so `applied` leaves it out"
+        for b in stale_boxes
+    ]
     for note in notes:
         say(f"note: {note}")
     try:
@@ -287,6 +295,7 @@ def up(
         "push_error": None,
         "push_skipped": None,
         "steps": plan["steps"],
+        "applied": applied,
         "pinned": pinned,
         "notes": notes,
     }
@@ -310,6 +319,43 @@ def up(
     if failure:
         raise DeployFailed(result)
     return result
+
+
+def applied_from(
+    entries: list[dict[str, Any]], fleet_commit: str
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """What the deploy did, per box, read from the receipts it wrote.
+
+    ``steps`` is the plan; this is the result. One row per container whose
+    receipt ``action`` is not ``noop`` (nor null, a pass that crashed before
+    it reported): ``{box, container, action, healthy}``. A receipt whose
+    ``fleet_commit`` is not this deploy's is an older one (the deploy failed
+    before it wrote a new one), so it is left out and its box is returned in
+    the second list.
+    """
+    rows: list[dict[str, Any]] = []
+    stale: list[str] = []
+    for entry in entries:
+        receipt = entry.get("receipt")
+        if not isinstance(receipt, Mapping):
+            continue
+        box = str(entry.get("box") or receipt.get("box"))
+        if receipt.get("fleet_commit") != fleet_commit:
+            stale.append(box)
+            continue
+        for c in receipt.get("containers") or []:
+            if not isinstance(c, Mapping) or c.get("action") in (None, "noop"):
+                continue
+            rows.append(
+                {
+                    "box": box,
+                    "container": c.get("name"),
+                    "action": c.get("action"),
+                    "healthy": c.get("healthy"),
+                }
+            )
+    rows.sort(key=lambda r: (r["box"], str(r["container"])))
+    return rows, sorted(stale)
 
 
 def _pin_deployed(

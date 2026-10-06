@@ -261,7 +261,14 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
 7. Bay reads the receipt back and pins every project that the deploy
    covered (see below). Bay commits all those locks once:
    `bay: receipt <box env> (<n> projects)`.
-8. When the fleet repo has a remote, Bay pushes it. `--no-push` skips this.
+8. Bay reports what the deploy did. `applied` in the JSON result lists, per
+   box, every container whose receipt `action` is not `noop`:
+   `{"box", "container", "action", "healthy"}`. `steps` stays the plan; when
+   the two differ, `applied` is the truth. A receipt whose `fleet_commit` is
+   not this deploy's commit is an older one (the deploy stopped before the
+   box wrote a new one). Bay leaves it out of `applied` and says so in
+   `notes`.
+9. When the fleet repo has a remote, Bay pushes it. `--no-push` skips this.
    A failed push is a warning, never a failed deploy. The JSON result says
    `pushed: true|false` and `push_error`. Bay pushes only when the fleet
    directory is the root of its git repo. A fleet inside a larger repo is
