@@ -1,0 +1,282 @@
+# Plan, approve, up, show and rollback
+
+These are the daily verbs of Bay v2. They work on one project of one fleet.
+
+Bay keeps three truths apart:
+
+- **WANTED**: `bay.toml` at the project's current commit.
+- **PINNED**: the fleet lockfile `projects/<name>.lock`, and the services file
+  that the fleet last compiled from it.
+- **RUNNING**: the receipt that the box wrote after its last deploy
+  (see [deploy-receipt.md](deploy-receipt.md)).
+
+"The fleet decides. Main suggests. The box reports."
+
+No verb asks a question. No verb takes a secret on the command line.
+
+## Which project, which fleet
+
+- Inside an app repo, Bay reads the `bay.toml` in the working directory or
+  above it. `name` is the project. `fleet` names the fleet.
+- The fleet is `~/.config/bay/fleets/<fleet>`. `bay --fleet <path> <verb>` or
+  `BAY_FLEET=<path>` uses another directory.
+- `--project <name>` works from any directory. The fleet then comes from
+  `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME`.
+- Bay reads the project from the checkout that the lock names
+  (`local_path`). When you run a verb in another clone, the plan says so in a
+  note.
+
+## The verbs
+
+```bash
+bay init [--name N] [--fleet F] [--box B] [--domain D]   # draft bay.toml, register the project
+bay plan [env] [--json] [--at SHA] [--plan-id ID] [--remote] [--no-remote]
+bay approve <plan-id> --reason "<why>"
+bay up [env] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--json]
+bay show [name] [--json] [--no-remote]
+bay rollback [env] [--force --reason "<why>"] [--json]
+```
+
+`env` is the `[deploy.<env>]` name. The default is the fleet's primary
+environment (`production`).
+
+### bay init
+
+Run it in an app repo that has no `bay.toml`.
+
+1. Bay writes a draft `bay.toml`. It reads three hints: `EXPOSE` in the
+   `Dockerfile` gives the port, `package.json` gives port 3000 and a commented
+   `npm start`, `pyproject.toml` gives port 8000. `access.mode` is `public`.
+   There is one `[deploy.<primary env>]` table with the fleet's default box and
+   the domain `<name>.<default_domain>`.
+2. Bay checks the draft with the `bay.toml` validator.
+3. Bay writes `projects/<name>.lock`: `repo` from `git remote get-url origin`,
+   `commit: null`, and `local_path` set to the repo path.
+4. Bay commits the fleet repo with the message `bay: init <name>`.
+
+Bay refuses when `bay.toml` exists or the name is taken. A name never
+changes. Check the draft, commit it in the app repo, then run `bay plan`.
+
+A project whose lock pins no commit is not deployed. Other projects' plans
+leave it out.
+
+### bay plan
+
+1. **WANTED**: Bay reads `bay.toml` at HEAD of the checkout (`--at` picks
+   another commit). Uncommitted edits are not part of the plan. The plan
+   records them as `wanted.dirty`.
+2. Bay copies the fleet inputs to a temporary directory. Every project is
+   read at its pinned commit. This project is read at the WANTED commit.
+   Bay compiles the whole fleet from that copy, the same way `bay up` will.
+3. **PINNED**: Bay compares the result with the fleet's services file, entry
+   by entry. Each difference gives one or more steps.
+4. **RUNNING**: Bay reads the box receipt over SSH. `--no-remote` skips this.
+5. With `--remote`, Bay also runs today's deploy in check mode on the box
+   (`--tags deploy_stack`, `-e bay_reconciler_plan_only=true`, `--check`),
+   with the compiled file given as extra variables. Without `--remote`, the
+   steps come from the compiled files alone and `box_checked` is `false`.
+
+Bay saves the plan to `<fleet>/plans/<plan-id>.json`. `--json` prints it.
+Without `--json`, Bay prints a short table.
+
+The verb exits with the verdict's code:
+
+| Verdict | Exit | Meaning |
+|---|---|---|
+| `auto` | 0 | `bay up` may apply the plan. |
+| `approve` | 10 | A step is destructive or shared. Run `bay approve` first. |
+| `blocked` | 20 | Something must be fixed first. `blockers` says what. |
+| `stale` | 30 | With `--plan-id`: PINNED or RUNNING moved since the plan was made. |
+
+`blocked` wins over `stale`, and `stale` wins over `approve`.
+
+A plan is **blocked** when:
+
+- `bay.toml` at the commit is missing or not valid, or the fleet does not
+  compile.
+- The commit is not in the checkout.
+- `bay.toml` has no `[deploy.<env>]`, or names a box the fleet does not have.
+- A secret that this project's containers need is missing for the box's
+  environment (names only, see [deploy-receipt.md](deploy-receipt.md)).
+- The fleet repo is behind its remote. Bay runs `git fetch` first. A fleet
+  with no remote is never behind. A failed fetch also blocks.
+- The fleet's services file was not written by Bay (run `bay import`), or was
+  edited by hand.
+- `bay.toml` uses a feature Bay cannot deploy yet, unless
+  `--allow-unsupported` is given.
+- The fleet repo has uncommitted changes and a step is destructive. Without a
+  destructive step, the plan only records `fleet.dirty`.
+
+### Risk
+
+Risk is set by the data that a step touches.
+
+| Step | Risk |
+|---|---|
+| New container, changed container (image, env, memory, domains, routes and so on) | safe |
+| Memory lower than the current use | safe |
+| New volume, a volume mounted at a new path | safe |
+| New database | safe |
+| Container removed | destructive |
+| Volume removed, volume renamed (a rename is a delete in disguise) | destructive |
+| Database removed, renamed or moved to another postgres; database user renamed | destructive |
+| Secret removed from a container that runs (or when the box was not read) | destructive |
+| Secret removed from a container that does not run | safe |
+| Any change to a `[resources.*]` entry (shared postgres, redis and so on) | shared |
+| Shared resource removed | destructive |
+| Tailnet allowlist in `bay.fleet.toml` changed since the last fleet commit | shared |
+| Deploy webhook changed | shared |
+| Container of another project changed | shared |
+| Container of another project removed | destructive |
+
+`bay up` writes the whole compiled file, so a change to another project's
+container is part of this plan too.
+
+`bay up` also refreshes the shared proxy, the gateway and the update watcher
+on the boxes. That work comes from the fleet, not from `bay.toml`. The plan
+says so once, in `notes`. It is not a step.
+
+### bay approve
+
+```bash
+bay approve 3f2a9c0d1e2b --reason "the old volume holds test data only"
+```
+
+Bay writes `<fleet>/plans/<plan-id>.approved` with the plan hash, the reason
+and the time. `bay plan` then shows the verdict `auto` with the approval.
+An approval matches one plan hash. When anything in the plan changes, the
+plan id changes and the approval no longer applies. Bay refuses to approve a
+`blocked` or `stale` plan.
+
+### bay up
+
+1. Bay plans again. With `--plan-id`, Bay checks the saved plan: it is
+   `stale` when the lock, the box receipt or any other plan input moved.
+2. Bay refuses `blocked` (exit 20) and `stale` (exit 30). Bay refuses
+   `approve` (exit 10) unless an approval matches. `--force --reason "<why>"`
+   overrides `approve` only, never `blocked` or `stale`. The reason goes into
+   the lock as `previous.force_reason`.
+3. Bay writes the lock: the project pin moves to the planned commit. The
+   environment record gets `result: pending` and `previous` (the pin it
+   replaces).
+4. Bay compiles the fleet into its services file, with the hash header.
+5. Bay commits the fleet repo: `bay: up <name> <env> <short sha>`, and
+   prints the fleet commit.
+6. Bay runs today's deploy for the box's environment, limited to
+   `--tags deploy_stack` (the same work as `bay deploy <env> --tags deploy_stack`).
+7. Bay reads the receipt back, records `result`, `deployed_at` and
+   `last_receipt_sha256`, and commits again: `bay: receipt <name> <env>`.
+
+When the deploy fails, the lock keeps the new pin and records
+`result: failed`. `bay show` then says `HALF` until a deploy succeeds.
+
+Bay never pushes the fleet repo. Push it yourself after `bay up`.
+
+### bay rollback
+
+Bay takes the environment's `previous` commit and runs `bay up` with it. The
+two pins swap, so a second rollback undoes the first. Bay refuses when there
+is no `previous`. The output names the old and the new commit and the steps.
+
+### bay show
+
+Bay prints WANTED (the checkout's HEAD, the `bay.toml` hash, uncommitted
+changes), PINNED (the lock) and RUNNING (this project's containers in each
+box receipt), and one status word per environment:
+
+| Status | Meaning |
+|---|---|
+| `ok` | WANTED, PINNED and RUNNING agree. |
+| `behind` | The project's HEAD is ahead of the pin. Run `bay plan`. |
+| `drift` | The box runs something else than the pin: the receipt differs from the one `bay up` recorded, or the fleet pins a commit this environment never got. |
+| `unknown` | The box was not read, has no receipt, or `bay up` never ran here. |
+| `HALF` | The last `bay up` failed or never reported back. |
+
+## The plan JSON
+
+The schema is `src/bay_cli/schemas/plan.schema.json` (`plan_version` 1). A new
+field may appear without a version bump. Readers ignore fields they do not
+know.
+
+```json
+{
+  "plan_version": 1,
+  "plan_id": "3f2a9c0d1e2b",
+  "plan_sha256": "<64 hex>",
+  "created_at": "2026-10-06T12:00:00Z",
+  "project": "webapp",
+  "env": "production",
+  "box": "box-1",
+  "box_env": "production",
+  "fleet": {"name": "myfleet", "commit": "<sha>", "dirty": false, "behind": false},
+  "wanted": {"commit": "<sha>", "toml_sha256": "<64 hex>", "dirty": false},
+  "pinned": {"commit": "<sha>", "lock_sha256": "<64 hex>"},
+  "running": {
+    "checked": true,
+    "receipt_sha256": "<64 hex>",
+    "boxes": [{"box": "box-1", "error": null,
+               "containers": [{"name": "webapp", "image": "...", "config_hash": "..."}]}]
+  },
+  "box_checked": false,
+  "steps": [
+    {"id": "s1", "kind": "container", "container": "webapp", "resource": null,
+     "project": "webapp", "action": "update", "risk": "safe",
+     "reason": "changed: volumes"},
+    {"id": "s2", "kind": "volume", "container": "webapp", "resource": "webapp-data",
+     "project": "webapp", "action": "rename", "risk": "destructive",
+     "reason": "volume webapp-data becomes webapp-files; a rename is a delete in disguise: ..."}
+  ],
+  "unsupported": [],
+  "missing_secrets": [],
+  "blockers": [],
+  "notes": ["..."],
+  "verdict": "approve",
+  "exit_code": 10,
+  "approval": null,
+  "stale": []
+}
+```
+
+- `box_env` is the box's `env` in `bay.fleet.toml`: the group that the
+  deploy targets and the receipt file name.
+- `pinned.commit` is the commit this environment runs per the lock.
+- `running.receipt_sha256` hashes only the box, name, image and config hash
+  of this project's containers. A deploy of another project rewrites the
+  receipt file, but this hash stays the same, so the plan does not go stale.
+- `kind` is one of `container`, `volume`, `database`, `database_user`,
+  `secret`, `resource`, `tailnet`, `fleet`. `action` is one of `create`,
+  `update`, `remove`, `rename`, `move`.
+- `plan_sha256` is the SHA-256 of the plan without `plan_id`, `plan_sha256`,
+  `created_at`, `verdict`, `exit_code`, `approval` and `stale`. `plan_id` is
+  its first 12 hex digits. The same inputs give the same id.
+- A plan holds secret names, never values.
+
+## The lockfile
+
+`projects/<name>.lock` (schema `src/bay_cli/schemas/bay_lock.schema.json`).
+Only the CLI writes it, atomically. `bay up` adds these optional keys to an
+environment:
+
+```json
+"envs": {
+  "production": {
+    "box": "box-1",
+    "commit": "<sha>",
+    "deployed_at": "2026-10-06T12:00:00Z",
+    "result": "ok",
+    "plan_id": "3f2a9c0d1e2b",
+    "last_receipt_sha256": "<64 hex>",
+    "previous": {"commit": "<sha>", "deployed_at": "...", "receipt_sha256": "<64 hex>"},
+    "adopted": {"...": "..."}
+  }
+}
+```
+
+- The top-level `commit` is the project pin that the fleet compiles. One
+  `bay.toml` serves all environments of a project, so `bay up staging` also
+  moves the compiled production entries. Production then shows `drift` until
+  `bay up production` runs.
+- `result` is `pending` while a deploy runs, then `ok` or `failed`.
+- `previous` is one level of history: enough for `bay rollback`.
+- `box` is written by the first `bay up`. After that the fleet decides: a new
+  `box` in `bay.toml` gives a note, not a move.

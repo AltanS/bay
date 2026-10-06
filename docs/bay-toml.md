@@ -4,9 +4,9 @@
 repo holds everything else: boxes, secret values, shared resources and the per-project
 lockfile. Only the `bay` CLI writes the fleet repo.
 
-Status: the schema and the validator ship today. The commands that act on the file
-(`bay init`, `bay up`, `bay plan`) come later in Bay v2. This page is the contract they
-will follow.
+Status: the schema and the validator ship today, and so do the commands that act on the
+file (`bay init`, `bay plan`, `bay up`, `bay show`, `bay rollback`, see [plan.md](plan.md)).
+This page is the contract they follow.
 
 ## Check a file
 

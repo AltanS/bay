@@ -197,6 +197,15 @@ to reproduce it. The flags that change what a command *means*:
 - `bin/bay toml validate [path]` — Check a bay.toml file against schema v3; print one line per violation.
 - `bin/bay validate` — Validate configuration files before deploying.
 
+### Daily
+
+- `bin/bay approve <plan_id>` — Approve a saved plan with destructive or shared steps.
+- `bin/bay init` — Draft a bay.toml in this app repo and register the app in the fleet.
+- `bin/bay plan [env]` — Compare WANTED (bay.toml at HEAD), PINNED (the lock) and RUNNING (the box).
+- `bin/bay rollback [env]` — Return an environment to its previous pin and deploy it.
+- `bin/bay show [name]` — Print WANTED, PINNED and RUNNING for a project, and a status per environment.
+- `bin/bay up [env]` — Pin the project's commit in the fleet and deploy it.
+
 <!-- END GENERATED CLI REFERENCE -->
 
 ## Documentation map
@@ -231,6 +240,7 @@ Paths are relative to the framework root (`.bay/` in a consumer).
 - `docs/build-pipeline.md` — Operator reference for the webhook → build → deploy flow: trigger files, circuit breaker, troubleshooting.
 - `docs/build-pipeline-observability-contract.md` — The CI-enforced contract mapping every pipeline exit path to an observable terminal state.
 - `docs/reconciler.md` — The server-side Python reconciler (`bay_reconcile`) — the sole container-deploy path since v0.97.0.
+- `docs/plan.md` — The daily verbs of Bay v2: `bay init`, `plan`, `approve`, `up`, `show` and `rollback`, the plan JSON and its verdicts (exit 0, 10, 20, 30), the risk table and the lockfile deploy record.
 - `docs/deploy-receipt.md` — The receipt each box writes after a deploy, the `bay status --json` document, and the missing-secret check. Both JSON formats are versioned and stable.
 - `docs/rollout-playbook.md` — Multi-host deploy playbook — deploy order, port-drift recreation, and the post-deploy audit checklist.
 
