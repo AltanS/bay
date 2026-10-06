@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from .bundle import Bundle, load_bundle
 from .docker_client import DockerClient
 from .executor import execute
-from .planner import plan
+from .planner import describe, plan
 
 
 def reconcile(
@@ -26,11 +26,15 @@ def reconcile(
     the_plan = plan(bundle.containers, observed, remove_orphans=bundle.remove_orphans)
 
     if plan_only:
+        # `containers` is what `bay plan --remote` turns into steps: one entry
+        # per container, {name, action, reasons}. Reasons name keys, never an
+        # env value (planner.describe).
         return 0, {
             "ok": True,
             "plan_only": True,
             "plan": the_plan.summary(),
             "actions": [type(a).__name__ for a in the_plan.actions],
+            "containers": describe(the_plan, bundle.containers, observed),
         }
 
     report = execute(the_plan, client, config=bundle.config)

@@ -398,6 +398,25 @@
               actions: "{{ (_reconcile_check_result.stdout | from_json).actions }}"
           when: _reconcile_check_result is not skipped
 
+        # `bay plan --remote` names a control-node directory in
+        # `bay_reconciler_plan_report_dir` and reads one file per host back
+        # from it: the plan-only JSON, whose `containers` list
+        # ({name, action, reasons}) the CLI turns into plan steps. Reasons
+        # name env KEYS only, never a value. Without the variable (a plain
+        # `bay deploy -- --check`) nothing is written.
+        - name: Hand the check-mode plan to the CLI
+          ansible.builtin.copy:
+            content: "{{ _reconcile_check_result.stdout }}"
+            dest: "{{ bay_reconciler_plan_report_dir }}/{{ inventory_hostname }}.json"
+            mode: "0600"
+          delegate_to: localhost
+          become: false
+          check_mode: false
+          changed_when: false
+          when:
+            - bay_reconciler_plan_report_dir is defined
+            - _reconcile_check_result is not skipped
+
       always:
         # The bundle holds resolved env (secrets). Remove it on every path.
         - name: Remove the check-mode plan directory

@@ -103,6 +103,49 @@ leave it out.
    with the compiled file given as extra variables. Without `--remote`, the
    steps come from the compiled files alone and `box_checked` is `false`.
 
+### The box prediction (`--remote`)
+
+The check-mode run asks each box what it would do to every container. The
+box compares the compiled settings with the containers it runs, and writes
+one report per box back to this machine. Bay reads the reports into
+`box_prediction.containers`: one entry per container with `box`, `name`,
+`action` (`noop`, `create`, `recreate`, `start` or `remove`) and `reasons`.
+A canary swap counts as `recreate`. `start` is reserved: today the box
+leaves a stopped container stopped, so it reports `noop` with the reason
+`stopped`.
+
+Each reason is `<code>: <detail>`:
+
+| Code | Meaning |
+|---|---|
+| `missing` | No container with this name runs on the box. |
+| `orphan` | Bay manages the container, but the deploy no longer lists it. |
+| `config_hash` | The settings hash differs, or the container has none. |
+| `image` | The image name changed, or a new image arrived under the same name. |
+| `env` | Env values differ. The reason names the keys, never a value. |
+| `labels`, `ports`, `volumes` | That part of the settings differs. |
+| `env_order` | The hash changed, but env, labels, ports, volumes and image match. The env file most likely changed in line order or format only. |
+| `stopped` | The container does not run. The deploy leaves it as it is. |
+| `zero_downtime` | The new container takes over before the old one stops. |
+
+Bay merges the prediction into `steps`:
+
+- A container that already has a step from the compiled diff gets no second
+  step. The compiled diff names the cause.
+- Every other `create`, `recreate`, `start` or `remove` becomes a step with
+  `source: "box"`. Its reason is the box name and the box's reasons.
+- Risk: `remove` is destructive. `create`, `recreate` and `start` are safe. A
+  recreate with a volume or database change always has a compiled step, so
+  the compiled step sets the risk.
+- `noop` adds no step.
+
+`env_order_recreates` lists the containers whose only reason is
+`env_order`. `bay plan` prints the list with the same words as
+`bay import --check`, so you can compare the two lists.
+
+When the check runs but a box returns no report, or a report with no
+container list (an older Bay on the box), the plan is blocked.
+
 Bay saves the plan to `<fleet>/plans/<plan-id>.json`. `--json` prints it.
 Without `--json`, Bay prints a short table.
 
@@ -155,6 +198,8 @@ Risk is set by the data that a step touches.
 | Deploy webhook changed | shared |
 | Container of another project changed | shared |
 | Container of another project removed | destructive |
+| Box predicts a create, recreate or start (`source: box`) | safe |
+| Box predicts a remove (`source: box`) | destructive |
 
 `bay up` writes the whole compiled file, so a change to another project's
 container is part of this plan too.
@@ -254,14 +299,30 @@ know.
     "boxes": [{"box": "box-1", "error": null,
                "containers": [{"name": "webapp", "image": "...", "config_hash": "..."}]}]
   },
-  "box_checked": false,
+  "box_checked": true,
+  "box_prediction": {
+    "checked": true,
+    "containers": [
+      {"box": "box-1", "name": "webapp", "action": "recreate",
+       "reasons": ["config_hash: changed (1a2b3c4d5e6f -> 6f5e4d3c2b1a)"]},
+      {"box": "box-1", "name": "postgres", "action": "recreate",
+       "reasons": ["config_hash: changed (...)", "env_order: env, labels, ports, ..."]}
+    ],
+    "errors": []
+  },
+  "env_order_recreates": ["postgres"],
   "steps": [
     {"id": "s1", "kind": "container", "container": "webapp", "resource": null,
      "project": "webapp", "action": "update", "risk": "safe",
-     "reason": "changed: volumes"},
+     "reason": "changed: volumes", "source": "compile"},
     {"id": "s2", "kind": "volume", "container": "webapp", "resource": "webapp-data",
      "project": "webapp", "action": "rename", "risk": "destructive",
-     "reason": "volume webapp-data becomes webapp-files; a rename is a delete in disguise: ..."}
+     "reason": "volume webapp-data becomes webapp-files; a rename is a delete in disguise: ...",
+     "source": "compile"},
+    {"id": "s3", "kind": "container", "container": "postgres", "resource": null,
+     "project": null, "action": "recreate", "risk": "safe",
+     "reason": "box box-1 predicts recreate: config_hash: changed (...); env_order: ...",
+     "source": "box"}
   ],
   "unsupported": [],
   "missing_secrets": [],
@@ -282,7 +343,11 @@ know.
   receipt file, but this hash stays the same, so the plan does not go stale.
 - `kind` is one of `container`, `volume`, `database`, `database_user`,
   `secret`, `resource`, `tailnet`, `fleet`. `action` is one of `create`,
-  `update`, `remove`, `rename`, `move`.
+  `update`, `remove`, `rename`, `move`, and for a box step also `recreate`
+  and `start`.
+- `source` is `compile` for a step from the compiled diff, `box` for a step
+  from the box prediction.
+- `box_prediction` and `env_order_recreates` are empty without `--remote`.
 - `plan_sha256` is the SHA-256 of the plan without `plan_id`, `plan_sha256`,
   `created_at`, `verdict`, `exit_code`, `approval` and `stale`. `plan_id` is
   its first 12 hex digits. The same inputs give the same id.

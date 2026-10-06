@@ -28,8 +28,10 @@ How a plan is made:
    the data it touches (the risk table is in ``docs/plan.md``).
 4. Read the box receipt (skip with ``--no-remote``).
 5. Only with ``--remote``: run today's deploy in check mode with the plan-only
-   switch against the compiled file. Without it, the steps come from the diff
-   alone and ``box_checked`` is false.
+   switch against the compiled file. Each box hands back its prediction (one
+   entry per container: action and reasons). A predicted change the diff does
+   not explain becomes a step with ``source: box`` (:func:`box_steps`).
+   Without it, the steps come from the diff alone and ``box_checked`` is false.
 
 The plan JSON is ``schemas/plan.schema.json``. A plan is saved to
 ``<fleet>/plans/<plan_id>.json``. ``plan_id`` is the first 12 hex digits of
@@ -75,8 +77,10 @@ UNPLANNED_NOTE = (
 
 #: ``(cx, box_env) -> [{"env", "box", "receipt", "error"}]``, as receipts.fetch_receipts.
 ReceiptReader = Callable[[Context, str], list[dict[str, Any]]]
-#: ``(cx, box_env, compiled_services_file) -> None``; raises on failure.
-BoxCheck = Callable[[Context, str, Path], None]
+#: ``(cx, box_env, compiled_services_file) -> [{"box", "report", "error"}]``,
+#: one entry per box of the env; ``report`` is the plan-only JSON the box
+#: printed (``python -m bay_reconcile --plan-only``). Raises on failure.
+BoxCheck = Callable[[Context, str, Path], list[dict[str, Any]] | None]
 
 
 # ── Project ─────────────────────────────────────────────────────────────────
@@ -536,6 +540,7 @@ def _step(
     container: str | None = None,
     resource: str | None = None,
     project: str | None = None,
+    source: str = "compile",
 ) -> dict[str, Any]:
     return {
         "id": "",
@@ -546,6 +551,7 @@ def _step(
         "action": action,
         "risk": risk,
         "reason": reason,
+        "source": source,
     }
 
 
@@ -895,31 +901,142 @@ def default_receipt_reader(cx: Context, box_env: str) -> list[dict[str, Any]]:
     return fetch_receipts(cx, box_env)
 
 
-def default_box_check(cx: Context, box_env: str, services_file: Path) -> None:
+def default_box_check(
+    cx: Context, box_env: str, services_file: Path
+) -> list[dict[str, Any]] | None:
     """Today's deploy, in check mode, with the plan-only switch, against the compiled file.
 
     ``-e @file`` puts the compiled services, accessories and webhook above
     the fleet's own file, so the box is asked about WANTED, not PINNED.
+
+    Each box writes its plan-only JSON into a temporary directory on this
+    machine (``bay_reconciler_plan_report_dir``, see
+    ``roles/container_lifecycle/tasks/reconcile.yml``). The files are read
+    back here, one per box.
     """
     from bay_cli.commands.ops import _run_playbook
 
-    _run_playbook(
-        cx,
-        "deploy",
-        box_env,
-        "deploy_stack",
-        [
-            "-e",
-            f"@{services_file}",
-            "-e",
-            "bay_reconciler_plan_only=true",
-            "-e",
-            "_rig_mode=true",
-            "-e",
-            "_rig_write=false",
-            "--check",
-        ],
+    with tempfile.TemporaryDirectory(prefix="bay-box-plan-") as tmp:
+        _run_playbook(
+            cx,
+            "deploy",
+            box_env,
+            "deploy_stack",
+            [
+                "-e",
+                f"@{services_file}",
+                "-e",
+                "bay_reconciler_plan_only=true",
+                "-e",
+                json.dumps({"bay_reconciler_plan_report_dir": tmp}),
+                "-e",
+                "_rig_mode=true",
+                "-e",
+                "_rig_write=false",
+                "--check",
+            ],
+        )
+        return read_box_predictions(Path(tmp))
+
+
+def read_box_predictions(directory: Path) -> list[dict[str, Any]]:
+    """``[{"box", "report", "error"}]`` from the per-box plan-only files in ``directory``."""
+    out: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.json")):
+        try:
+            report = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            out.append({"box": path.stem, "report": None, "error": f"unreadable: {exc}"})
+            continue
+        if not isinstance(report, dict):
+            out.append({"box": path.stem, "report": None, "error": "not a JSON object"})
+            continue
+        out.append({"box": path.stem, "report": report, "error": None})
+    return out
+
+
+#: Box actions that change a container. ``noop`` is left out of the steps.
+_BOX_RISK = {"create": "safe", "start": "safe", "recreate": "safe", "remove": "destructive"}
+
+
+def box_prediction(entries: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """The plan's ``box_prediction``: every container each box reported."""
+    containers: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for entry in entries or []:
+        box = str(entry.get("box"))
+        report = entry.get("report")
+        if entry.get("error") or not isinstance(report, Mapping):
+            errors.append(f"box {box}: {entry.get('error') or 'no report'}")
+            continue
+        listed = report.get("containers")
+        if not isinstance(listed, list):
+            errors.append(
+                f"box {box}: the report lists no containers (the box runs an older Bay)"
+            )
+            continue
+        for c in listed:
+            if not isinstance(c, Mapping) or not c.get("name"):
+                continue
+            containers.append(
+                {
+                    "box": box,
+                    "name": str(c["name"]),
+                    "action": str(c.get("action") or "noop"),
+                    "reasons": [str(r) for r in c.get("reasons") or []],
+                }
+            )
+    containers.sort(key=lambda c: (c["box"], c["name"]))
+    return {"checked": bool(containers) and not errors, "containers": containers, "errors": errors}
+
+
+def _reason_codes(reasons: list[str]) -> set[str]:
+    return {r.split(":", 1)[0] for r in reasons}
+
+
+def env_order_recreates(prediction: Mapping[str, Any]) -> list[str]:
+    """Containers the box recreates only because the env file bytes moved (line order)."""
+    return sorted(
+        {
+            c["name"]
+            for c in prediction.get("containers") or []
+            if c["action"] == "recreate" and "env_order" in _reason_codes(c["reasons"])
+        }
     )
+
+
+def box_steps(
+    prediction: Mapping[str, Any],
+    explained: set[str],
+    *,
+    project: str,
+    mine: set[str],
+) -> list[dict[str, Any]]:
+    """Steps for what the box will change that the compile diff does not explain.
+
+    A container the compile diff already has a step for is left alone: the
+    diff names the cause. Everything else the box predicts (a recreate after
+    an env file or image change, a missing container, an orphan removal) is a
+    step with ``source: box``. Risk: remove is destructive, the rest is safe.
+    """
+    steps: list[dict[str, Any]] = []
+    for c in prediction.get("containers") or []:
+        risk = _BOX_RISK.get(c["action"])
+        if risk is None or c["name"] in explained:
+            continue
+        why = "; ".join(c["reasons"]) or "no reason given"
+        steps.append(
+            _step(
+                "container",
+                c["action"],
+                risk,
+                f"box {c['box']} predicts {c['action']}: {why}",
+                container=c["name"],
+                project=project if c["name"] in mine else None,
+                source="box",
+            )
+        )
+    return steps
 
 
 # ── Plan ────────────────────────────────────────────────────────────────────
@@ -1053,6 +1170,8 @@ def make_plan(
     unsupported: list[str] = []
     missing: list[dict[str, Any]] = []
     box_checked = False
+    prediction: dict[str, Any] = {"checked": False, "containers": [], "errors": []}
+    env_order: list[str] = []
     pins = {proj.name: wanted.commit} if wanted.commit else {}
     if wanted.doc is not None and not wanted.problems:
         with compiled_fleet(cx, pins) as comp:
@@ -1089,15 +1208,27 @@ def make_plan(
                     services_file = comp.services_file()
                     assert services_file is not None
                     try:
-                        (check_box or default_box_check)(cx, box_env, services_file)
+                        entries = (check_box or default_box_check)(cx, box_env, services_file)
                         box_checked = True
                     except (BayError, OSError, SystemExit) as exc:
                         blockers.append(f"the check on the box failed: {exc}")
+                    else:
+                        prediction = box_prediction(entries)
+                        blockers.extend(
+                            f"the check on the box gave no prediction: {e}"
+                            for e in prediction["errors"]
+                        )
+                        if not prediction["containers"] and not prediction["errors"]:
+                            blockers.append("the check on the box gave no prediction")
+                        explained = {str(s["container"]) for s in steps if s["container"]}
+                        steps.extend(box_steps(prediction, explained, project=proj.name, mine=mine))
+                        env_order = env_order_recreates(prediction)
     if fleet_is_git:
         t_step = tailnet_step(cx, proj.fleet)
         if t_step is not None:
-            t_step["id"] = f"s{len(steps) + 1}"
             steps.append(t_step)
+    for i, step in enumerate(steps, start=1):
+        step["id"] = f"s{i}"
     if not box_checked:
         notes.append(
             "the steps come from the compiled files alone; pass --remote to check them on the box"
@@ -1133,6 +1264,8 @@ def make_plan(
         "pinned": {"commit": pinned_commit, "lock_sha256": lock_sha},
         "running": running,
         "box_checked": box_checked,
+        "box_prediction": prediction,
+        "env_order_recreates": env_order,
         "steps": steps,
         "unsupported": unsupported,
         "missing_secrets": missing,
@@ -1343,19 +1476,34 @@ def render(plan: Mapping[str, Any]) -> str:
         "",
     ]
     if plan["steps"]:
-        rows = [("STEP", "RISK", "ACTION", "WHAT", "WHY")]
+        rows = [("STEP", "FROM", "RISK", "ACTION", "WHAT", "WHY")]
         for s in plan["steps"]:
             what = s["kind"] + " " + (s["resource"] or s["container"] or "")
             if s["kind"] in ("volume", "database", "database_user", "secret") and s["container"]:
                 what += f" ({s['container']})"
-            rows.append((s["id"], s["risk"], s["action"], what, s["reason"]))
-        widths = [max(len(row[i]) for row in rows) for i in range(4)]
+            rows.append(
+                (s["id"], s.get("source", "compile"), s["risk"], s["action"], what, s["reason"])
+            )
+        widths = [max(len(row[i]) for row in rows) for i in range(5)]
         for row in rows:
             lines.append(
-                "  " + "  ".join(row[i].ljust(widths[i]) for i in range(4)) + "  " + row[4]
+                "  " + "  ".join(row[i].ljust(widths[i]) for i in range(5)) + "  " + row[5]
             )
     else:
         lines.append("  no changes")
+    prediction = plan.get("box_prediction") or {}
+    if plan.get("box_checked") and prediction.get("containers"):
+        counts: dict[str, int] = {}
+        for c in prediction["containers"]:
+            counts[c["action"]] = counts.get(c["action"], 0) + 1
+        lines.append(
+            "box prediction: "
+            + ", ".join(f"{n} {a}" for a, n in sorted(counts.items()))
+        )
+    if plan.get("env_order_recreates"):
+        from bay_cli.roundtrip import env_order_line
+
+        lines.append(env_order_line(plan["env_order_recreates"]))
     for b in plan["blockers"]:
         lines.append(f"blocked: {b}")
     for s in plan.get("stale") or []:

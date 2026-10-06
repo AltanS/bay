@@ -118,4 +118,22 @@ def parse_state(
         port_bindings=observed_port_tuples(host_config.get("PortBindings")),
         image_id=attrs.get("Image") or None,
         local_image_id=local_image_id or None,
+        env=_env_dict(config.get("Env")),
+        labels={str(k): str(v) for k, v in labels.items()},
+        volumes=(
+            tuple(sorted(str(b) for b in host_config["Binds"]))
+            if isinstance(host_config.get("Binds"), list)
+            else None
+        ),
     )
+
+
+def _env_dict(env: object) -> dict[str, str] | None:
+    """docker's ``Config.Env`` list (``KEY=value``) -> dict. None when absent."""
+    if not isinstance(env, list):
+        return None
+    out: dict[str, str] = {}
+    for item in env:
+        key, _, value = str(item).partition("=")
+        out[key] = value
+    return out

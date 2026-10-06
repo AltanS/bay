@@ -6,7 +6,8 @@
   "type": "object",
   "required": [
     "plan_version", "plan_id", "plan_sha256", "created_at", "project", "env", "box", "box_env",
-    "fleet", "wanted", "pinned", "running", "box_checked", "steps", "unsupported",
+    "fleet", "wanted", "pinned", "running", "box_checked", "box_prediction",
+    "env_order_recreates", "steps", "unsupported",
     "missing_secrets", "blockers", "notes", "verdict", "exit_code", "approval", "stale"
   ],
   "properties": {
@@ -77,6 +78,35 @@
       }
     },
     "box_checked": { "type": "boolean" },
+    "box_prediction": {
+      "description": "With --remote: what the box will do to every container, from its own plan-only run. Empty without --remote.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checked", "containers", "errors"],
+      "properties": {
+        "checked": { "type": "boolean" },
+        "containers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["box", "name", "action", "reasons"],
+            "properties": {
+              "box": { "type": "string" },
+              "name": { "type": "string" },
+              "action": { "enum": ["noop", "create", "recreate", "start", "remove"] },
+              "reasons": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        },
+        "errors": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "env_order_recreates": {
+      "description": "Containers the box recreates only because their env file changed in line order (all values equal). From box_prediction; empty without --remote.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
     "unsupported": { "type": "array", "items": { "type": "string" } },
     "missing_secrets": {
@@ -124,7 +154,9 @@
     "step": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "container", "resource", "project", "action", "risk", "reason"],
+      "required": [
+        "id", "kind", "container", "resource", "project", "action", "risk", "reason", "source"
+      ],
       "properties": {
         "id": { "type": "string", "pattern": "^s[1-9][0-9]*$" },
         "kind": {
@@ -133,9 +165,10 @@
         "container": { "type": ["string", "null"] },
         "resource": { "type": ["string", "null"] },
         "project": { "type": ["string", "null"] },
-        "action": { "enum": ["create", "update", "remove", "rename", "move"] },
+        "action": { "enum": ["create", "update", "remove", "rename", "move", "recreate", "start"] },
         "risk": { "enum": ["safe", "shared", "destructive"] },
-        "reason": { "type": "string", "minLength": 1 }
+        "reason": { "type": "string", "minLength": 1 },
+        "source": { "enum": ["compile", "box"] }
       }
     }
   }

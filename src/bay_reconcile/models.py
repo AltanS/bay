@@ -148,6 +148,16 @@ class ContainerState:
     # re-pulled underneath a container that is still running the old layers.
     image_id: str | None = None
     local_image_id: str | None = None
+    # What the container runs with now, read from the same list call. Only the
+    # plan-only report reads these, to name WHY a container recreates; the
+    # decision itself stays on the config hash. ``env`` holds values (secrets
+    # included), so it is never printed: the report names keys only. None
+    # means docker did not report the field. Excluded from repr, eq and hash.
+    env: Mapping[str, str] | None = field(default=None, repr=False, compare=False, hash=False)
+    labels: Mapping[str, str] = field(
+        default_factory=dict, repr=False, compare=False, hash=False
+    )
+    volumes: tuple[str, ...] | None = field(default=None, compare=False, hash=False)
 
     @property
     def running(self) -> bool:

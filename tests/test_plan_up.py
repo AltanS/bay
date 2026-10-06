@@ -1034,3 +1034,141 @@ def test_log_file_takes_progress_and_child_output(
     assert "ANSIBLE-PRINT-NOISE" in text and "ANSIBLE-CHILD-NOISE" in text
     assert "fleet commit" in text
     assert "NOISE" not in result.stdout and "NOISE" not in result.stderr
+
+
+# ── bay plan --remote: the box prediction becomes steps ─────────────────────
+
+
+def _box_report(*containers: tuple[str, str, list[str]]) -> list[dict[str, Any]]:
+    """What default_box_check returns: one plan-only report per box."""
+    return [
+        {
+            "box": "box-1",
+            "error": None,
+            "report": {
+                "ok": True,
+                "plan_only": True,
+                "containers": [
+                    {"name": n, "action": a, "reasons": r} for n, a, r in containers
+                ],
+            },
+        }
+    ]
+
+
+_ENV_ORDER = (
+    "env_order: env, labels, ports, volumes and image match; the env file likely "
+    "changed in line order or format only"
+)
+
+
+def _remote(world: dict[str, Path], entries: list[dict[str, Any]] | None) -> dict[str, Any]:
+    calls: list[Path] = []
+
+    def check(cx: Context, box_env: str, services_file: Path) -> list[dict[str, Any]] | None:
+        calls.append(services_file)
+        return entries
+
+    plan = planmod.make_plan(
+        project(world), planmod.PlanOptions(box_check=True), check_box=check
+    )
+    assert len(calls) == 1
+    return plan
+
+
+def test_box_predicts_recreates_the_compile_diff_misses(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    do_up(world)
+    assert [s for s in make(world)["steps"]] == []  # the compile diff is empty
+    plan = _remote(
+        world,
+        _box_report(
+            ("webapp", "recreate", ["config_hash: changed (aaa -> bbb)", _ENV_ORDER]),
+            ("postgres", "recreate", ["config_hash: changed (ccc -> ddd)", _ENV_ORDER]),
+            ("traefik", "noop", []),
+        ),
+    )
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    assert plan["box_checked"] is True
+    steps = plan["steps"]
+    assert [(s["id"], s["container"], s["action"], s["source"], s["risk"]) for s in steps] == [
+        ("s1", "postgres", "recreate", "box", "safe"),
+        ("s2", "webapp", "recreate", "box", "safe"),
+    ]
+    assert steps[0]["project"] is None and steps[1]["project"] == "webapp"
+    assert "env_order" in steps[1]["reason"] and "box box-1 predicts recreate" in steps[1]["reason"]
+    assert plan["verdict"] == "auto"
+    assert plan["env_order_recreates"] == ["postgres", "webapp"]
+    assert plan["box_prediction"]["checked"] is True
+    assert {c["name"] for c in plan["box_prediction"]["containers"]} == {
+        "webapp",
+        "postgres",
+        "traefik",
+    }
+    text = planmod.render(plan)
+    assert "box prediction: 1 noop, 2 recreate" in text
+    assert "in another order" in text and "postgres, webapp" in text
+    assert not BANNED.search(text), BANNED.search(text)
+
+
+def test_box_remove_is_destructive(world: dict[str, Path], box: FakeBox) -> None:
+    do_up(world)
+    plan = _remote(world, _box_report(("old-thing", "remove", ["orphan: gone from the list"])))
+    assert [(s["action"], s["risk"], s["source"]) for s in plan["steps"]] == [
+        ("remove", "destructive", "box")
+    ]
+    assert plan["verdict"] == "approve"
+
+
+def test_box_prediction_explained_by_the_compile_diff_adds_no_step(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    do_up(world)
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    plan = _remote(world, _box_report(("webapp", "recreate", ["env: values differ for X"])))
+    assert [(s["container"], s["source"]) for s in plan["steps"]] == [("webapp", "compile")]
+    assert plan["env_order_recreates"] == []
+
+
+def test_box_check_without_a_prediction_blocks(world: dict[str, Path], box: FakeBox) -> None:
+    do_up(world)
+    plan = _remote(world, [])
+    assert plan["verdict"] == "blocked"
+    assert any("gave no prediction" in b for b in plan["blockers"])
+    old = _remote(world, [{"box": "box-1", "error": None, "report": {"ok": True}}])
+    assert any("older Bay" in b for b in old["blockers"])
+
+
+def test_without_remote_the_prediction_is_empty(world: dict[str, Path], box: FakeBox) -> None:
+    plan = make(world)
+    assert plan["box_prediction"] == {"checked": False, "containers": [], "errors": []}
+    assert plan["env_order_recreates"] == []
+    assert {s["source"] for s in plan["steps"]} == {"compile"}
+
+
+def test_default_box_check_reads_the_per_box_files(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bay_cli.commands import ops
+
+    seen: list[list[str]] = []
+
+    def fake_run(cx: Context, playbook: str, env: str, tags: Any, extra: list[str]) -> None:
+        seen.append(extra)
+        assert "--check" in extra and "bay_reconciler_plan_only=true" in extra
+        report_dir = next(
+            json.loads(a)["bay_reconciler_plan_report_dir"]
+            for a in extra
+            if a.startswith("{") and "bay_reconciler_plan_report_dir" in a
+        )
+        report = {"ok": True, "containers": [{"name": "webapp", "action": "noop", "reasons": []}]}
+        (Path(report_dir) / "box-1.json").write_text(json.dumps(report))
+        (Path(report_dir) / "box-2.json").write_text("{not json")
+
+    monkeypatch.setattr(ops, "_run_playbook", fake_run)
+    entries = planmod.default_box_check(cx_of(world), "production", world["fleet"] / "x.yml")
+    assert seen
+    assert entries is not None
+    assert [(e["box"], e["error"] is None) for e in entries] == [("box-1", True), ("box-2", False)]
+    assert entries[0]["report"]["containers"][0]["name"] == "webapp"

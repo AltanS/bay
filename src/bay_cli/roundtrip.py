@@ -90,11 +90,21 @@ class GateResult:
         for box, container, key in self.excepted:
             out.append(f"accepted: {container} on box {box}: {key}")
         if self.env_order_only:
-            out.append(
-                "env files with the same variables in another order (the deploy hashes "
-                f"the file, so these recreate once): {', '.join(sorted(set(self.env_order_only)))}"
-            )
+            out.append(env_order_line(self.env_order_only))
         return out
+
+
+def env_order_line(names: list[str]) -> str:
+    """The env-order recreate list, worded the same in ``bay import --check`` and ``bay plan``.
+
+    ``bay import --check`` finds these by rendering today's file and the
+    compiled one; ``bay plan --remote`` by the box's own prediction. The same
+    line in both lets the operator compare the two lists.
+    """
+    return (
+        "env files with the same variables in another order (the deploy hashes "
+        f"the file, so these recreate once): {', '.join(sorted(set(names)))}"
+    )
 
 
 def framework_root() -> Path:

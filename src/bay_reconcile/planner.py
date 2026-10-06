@@ -18,6 +18,7 @@ from .models import (
     Plan,
     Recreate,
     Remove,
+    action_target,
 )
 from .observe import desired_port_tuples
 
@@ -78,6 +79,120 @@ def plan(
                 actions.append(Remove(name, "orphaned — not in desired set"))
 
     return Plan(tuple(actions))
+
+
+#: Reason codes in :func:`describe`. Each reason is ``"<code>: <detail>"``; the
+#: CLI reads the code (``bay plan --remote``), a person reads the detail.
+REASON_CODES = (
+    "missing",
+    "orphan",
+    "config_hash",
+    "image",
+    "env",
+    "labels",
+    "ports",
+    "volumes",
+    "env_order",
+    "stopped",
+)
+
+_ACTION_WORD = {
+    NoOp: "noop",
+    Create: "create",
+    Recreate: "recreate",
+    CanarySwap: "recreate",
+    Remove: "remove",
+}
+
+_MAX_KEYS = 8
+
+
+def describe(
+    the_plan: Plan,
+    desired: Sequence[ContainerSpec],
+    observed: Mapping[str, ContainerState],
+) -> list[dict[str, object]]:
+    """One entry per container of the plan: ``{name, action, reasons}``.
+
+    ``action`` is ``noop``, ``create``, ``recreate`` (a canary swap counts as
+    one), ``start`` or ``remove``. The planner never emits ``start`` today: a
+    stopped container whose hash matches is a NoOp and stays stopped, which the
+    ``stopped`` reason says.
+
+    The decision is the planner's (the config hash and the image id). The
+    reasons go further and say what differs, from what docker reports for the
+    running container: the image reference, env values (KEY NAMES only, never a
+    value), labels, ports and volumes. When the hash changed and none of those
+    differ, the reason is ``env_order``: the env file bytes changed while every
+    value stayed the same (line order or quoting). Other hashed settings
+    (command, memory, healthcheck, networks, log options) are not read, so
+    ``env_order`` is the likely cause, not a proof.
+    """
+    by_name = {spec.name: spec for spec in desired}
+    out: list[dict[str, object]] = []
+    for action in the_plan.actions:
+        name = action_target(action)
+        state = observed.get(name)
+        reasons: list[str] = []
+        if isinstance(action, Create):
+            reasons.append("missing: no container with this name on the box")
+        elif isinstance(action, Remove):
+            reasons.append("orphan: a managed container that the deploy no longer lists")
+        elif isinstance(action, NoOp):
+            if state is not None and state.status and not state.running:
+                reasons.append(
+                    f"stopped: the container is {state.status}; the deploy leaves it as it is"
+                )
+        else:
+            assert state is not None
+            reasons = _diff_reasons(by_name[name], state)
+            if isinstance(action, CanarySwap):
+                reasons.append("zero_downtime: a canary takes over before the old one stops")
+        out.append({"name": name, "action": _ACTION_WORD[type(action)], "reasons": reasons})
+    return out
+
+
+def _keys(keys: Sequence[str]) -> str:
+    shown = ", ".join(keys[:_MAX_KEYS])
+    more = len(keys) - _MAX_KEYS
+    return shown + (f" and {more} more" if more > 0 else "")
+
+
+def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
+    reasons: list[str] = []
+    hash_changed = state.config_hash != spec.config_hash
+    if not state.config_hash:
+        reasons.append("config_hash: the container has no config-hash label")
+    elif hash_changed:
+        reasons.append(
+            f"config_hash: changed ({state.config_hash[:12]} -> {spec.config_hash[:12]})"
+        )
+    detail: list[str] = []
+    if state.image and state.image != spec.image:
+        detail.append(f"image: reference changed ({state.image} -> {spec.image})")
+    if state.image_drifted:
+        detail.append(f"image: {_image_reason(state)}")
+    if state.env is not None:
+        changed = sorted(k for k, v in spec.env.items() if state.env.get(k) != str(v))
+        if changed:
+            detail.append(f"env: values differ for {_keys(changed)}")
+    labels = sorted(k for k, v in spec.labels.items() if state.labels.get(k) != str(v))
+    if labels:
+        detail.append(f"labels: differ for {_keys(labels)}")
+    if desired_port_tuples(spec.ports) != state.port_bindings:
+        detail.append(
+            "ports: the published ports differ"
+            + (" (a canary is unsafe, so a plain recreate)" if spec.zero_downtime else "")
+        )
+    if state.volumes is not None and tuple(sorted(spec.volumes)) != state.volumes:
+        detail.append("volumes: the mounts differ")
+    reasons.extend(detail)
+    if hash_changed and state.config_hash and not detail and state.env is not None:
+        reasons.append(
+            "env_order: env, labels, ports, volumes and image match; the env file "
+            "likely changed in line order or format only"
+        )
+    return reasons
 
 
 def _change_reason(spec: ContainerSpec, state: ContainerState) -> str:
