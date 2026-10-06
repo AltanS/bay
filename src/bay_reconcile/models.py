@@ -158,6 +158,11 @@ class ContainerState:
         default_factory=dict, repr=False, compare=False, hash=False
     )
     volumes: tuple[str, ...] | None = field(default=None, compare=False, hash=False)
+    # The memory cap and the memory-plus-swap cap in bytes, from docker's
+    # ``HostConfig.Memory`` and ``HostConfig.MemorySwap``. 0 is "no cap" and -1
+    # on swap is "unlimited swap". None means docker did not report the field.
+    memory: int | None = field(default=None, compare=False, hash=False)
+    memory_swap: int | None = field(default=None, compare=False, hash=False)
 
     @property
     def running(self) -> bool:

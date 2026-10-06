@@ -6,6 +6,7 @@ is pinned by the same parity-oracle assertions (S3).
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 
 from .models import (
@@ -92,7 +93,7 @@ REASON_CODES = (
     "labels",
     "ports",
     "volumes",
-    "env_order",
+    "memory",
     "stopped",
 )
 
@@ -122,11 +123,13 @@ def describe(
     The decision is the planner's (the config hash and the image id). The
     reasons go further and say what differs, from what docker reports for the
     running container: the image reference, env values (KEY NAMES only, never a
-    value), labels, ports and volumes. When the hash changed and none of those
-    differ, the reason is ``env_order``: the env file bytes changed while every
-    value stayed the same (line order or quoting). Other hashed settings
-    (command, memory, healthcheck, networks, log options) are not read, so
-    ``env_order`` is the likely cause, not a proof.
+    value), labels, ports, volumes and the memory caps (``memory``). When the
+    hash changed and none of those differ, the reason is ``config_hash`` alone.
+    The hash folds in the env FILE bytes and other settings (command,
+    healthcheck, networks, log options) that docker inspect does not report,
+    so the cause is not observable and the report does not guess one. In
+    particular it never says the env file changed in line order: the old file
+    is not on the box to compare.
     """
     by_name = {spec.name: spec for spec in desired}
     out: list[dict[str, object]] = []
@@ -161,12 +164,6 @@ def _keys(keys: Sequence[str]) -> str:
 def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
     reasons: list[str] = []
     hash_changed = state.config_hash != spec.config_hash
-    if not state.config_hash:
-        reasons.append("config_hash: the container has no config-hash label")
-    elif hash_changed:
-        reasons.append(
-            f"config_hash: changed ({state.config_hash[:12]} -> {spec.config_hash[:12]})"
-        )
     detail: list[str] = []
     if state.image and state.image != spec.image:
         detail.append(f"image: reference changed ({state.image} -> {spec.image})")
@@ -186,13 +183,74 @@ def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
         )
     if state.volumes is not None and tuple(sorted(spec.volumes)) != state.volumes:
         detail.append("volumes: the mounts differ")
+    memory = _memory_reason(spec, state)
+    if memory:
+        detail.append(memory)
+    if not state.config_hash:
+        reasons.append("config_hash: the container has no config-hash label")
+    elif hash_changed:
+        text = f"config_hash: changed ({state.config_hash[:12]} -> {spec.config_hash[:12]})"
+        if not detail:
+            text += (
+                "; image, env, labels, ports, volumes and memory match, and the cause "
+                "(the env file bytes, command, healthcheck or another hashed setting) "
+                "is not readable from docker inspect"
+            )
+        reasons.append(text)
     reasons.extend(detail)
-    if hash_changed and state.config_hash and not detail and state.env is not None:
-        reasons.append(
-            "env_order: env, labels, ports, volumes and image match; the env file "
-            "likely changed in line order or format only"
-        )
     return reasons
+
+
+_SIZE = re.compile(r"^(\d+)([bkmg]?)b?$", re.IGNORECASE)
+_UNITS = {"": 1, "b": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
+
+
+def _bytes(value: str | None) -> int | None:
+    """Bytes in a docker size string (``512m``); 0 for unset; None when unreadable."""
+    if value is None or value == "":
+        return 0
+    match = _SIZE.match(str(value).strip())
+    if match is None:
+        return None
+    return int(match.group(1)) * _UNITS[match.group(2).lower()]
+
+
+def _fmt_bytes(n: int) -> str:
+    if n < 0:
+        return "unlimited"
+    if n == 0:
+        return "none"
+    for unit, size in (("g", 1024**3), ("m", 1024**2), ("k", 1024)):
+        if n % size == 0:
+            return f"{n // size}{unit}"
+    return f"{n}b"
+
+
+def _memory_reason(spec: ContainerSpec, state: ContainerState) -> str | None:
+    """Name a difference in the memory cap or the memory-plus-swap cap.
+
+    The running container reports both in bytes. A spec with no memswap_limit
+    leaves swap to docker, which sets the swap cap to twice the memory cap
+    (0 when there is no memory cap), so those two values count as a match.
+    """
+    want_mem, want_swap = _bytes(spec.mem_limit), _bytes(spec.memswap_limit)
+    if want_mem is None or want_swap is None:
+        return None
+    parts: list[str] = []
+    if state.memory is not None and state.memory != want_mem:
+        parts.append(f"mem_limit {_fmt_bytes(state.memory)} -> {_fmt_bytes(want_mem)}")
+    if state.memory_swap is not None:
+        if spec.memswap_limit:
+            swap_ok = state.memory_swap == want_swap
+        else:
+            swap_ok = state.memory_swap in (0, 2 * (state.memory or 0))
+        if not swap_ok:
+            now = _fmt_bytes(state.memory_swap)
+            then = _fmt_bytes(want_swap) if spec.memswap_limit else "docker's default"
+            parts.append(f"memswap_limit {now} -> {then}")
+    if not parts:
+        return None
+    return "memory: " + ", ".join(parts)
 
 
 def _change_reason(spec: ContainerSpec, state: ContainerState) -> str:

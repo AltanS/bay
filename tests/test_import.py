@@ -42,7 +42,11 @@ BANNED = re.compile(
 
 #: The differences the fixture keeps on purpose, so the gate is seen to catch them.
 FIXTURE_EXCEPTIONS = (
-    roundtrip.Exception_("fleet-a", "mailer", "memswap_limit", "swap-off ships in 2.x"),
+    roundtrip.Exception_("fleet-a", "mailer", "memswap_limit", "a different swap cap is not expressible"),
+    *(
+        roundtrip.Exception_("fleet-a", name, "memswap_limit", "swap-off ruling: memory implies memswap_limit")
+        for name in ("shop", "shop-staging", "cache")
+    ),
     roundtrip.Exception_("fleet-a", "blog-prod", "log_retention", "compress has no bay.toml key"),
 )
 
@@ -287,11 +291,28 @@ def test_templates_resolve_per_box(imported: tuple[importer.ImportResult, Path])
 def test_flags(imported: tuple[importer.ImportResult, Path]) -> None:
     result, _ = imported
     flags = "\n".join(result.flags)
-    assert "services.mailer.memswap_limit" in flags
+    assert "services.mailer.memswap_limit: 512m differs from mem_limit 256m" in flags
+    # a service with no memswap_limit, or one equal to mem_limit, needs no flag
+    assert "services.shop.memswap_limit" not in flags
     assert "services.shop.env.clear.REPORT_URL" in flags
     assert "services.blog-prod.log_retention: compress" in flags
     assert "webhook.domain: differs per box" not in flags
     assert "API_URL" not in flags
+
+
+@pytest.mark.parametrize(
+    ("block", "flagged"),
+    [
+        ({"mem_limit": "512m"}, False),  # gains memswap_limit: a one-time recreate
+        ({"mem_limit": "512m", "memswap_limit": "512m"}, False),
+        ({"mem_limit": "512m", "memswap_limit": "1g"}, True),
+        ({"memswap_limit": "512m"}, True),
+    ],
+)
+def test_swap_flag_only_for_what_bay_toml_cannot_say(block: dict[str, str], flagged: bool) -> None:
+    flags: list[str] = []
+    importer._swap_flag(block, "services.x", flags)
+    assert bool(flags) is flagged
 
 
 def test_report_uses_no_banned_words(imported: tuple[importer.ImportResult, Path]) -> None:
@@ -311,7 +332,10 @@ def gate(tmp_path_factory: pytest.TempPathFactory) -> roundtrip.GateResult:
 def test_roundtrip_fixture_finds_only_the_known_differences(gate: roundtrip.GateResult) -> None:
     assert gate.unsupported == []
     assert {(d.container, tuple(d.keys)) for d in gate.diffs} == {
-        ("mailer", ("memswap_limit",)),
+        ("mailer", ("memswap_limit",)),  # today allows swap, the compile never does
+        ("shop", ("memswap_limit",)),  # gains the cap: a one-time recreate
+        ("shop-staging", ("memswap_limit",)),
+        ("cache", ("memswap_limit",)),
         ("blog-prod", ("log_retention",)),
     }, "\n".join(d.diff for d in gate.diffs)
     assert gate.containers >= 15
@@ -323,7 +347,10 @@ def test_roundtrip_fixture_with_exceptions_is_identical(gate: roundtrip.GateResu
     assert diffs == []
     assert sorted(excepted) == [
         ("eu", "blog-prod", "log_retention"),
+        ("eu", "cache", "memswap_limit"),
         ("eu", "mailer", "memswap_limit"),
+        ("eu", "shop", "memswap_limit"),
+        ("eu", "shop-staging", "memswap_limit"),
     ]
 
 

@@ -347,7 +347,9 @@ class _Compiler:
         if "command" in res:
             entry["command"] = res["command"]
         if "memory" in res:
+            # Swap is never allowed: memswap_limit equals the memory limit.
             entry["mem_limit"] = res["memory"]
+            entry["memswap_limit"] = res["memory"]
         update = _UPDATE[res.get("update", "notify")]
         if update is not None:
             entry["update"] = update
@@ -473,9 +475,11 @@ class _Compiler:
             if files_public:
                 entry["config_files_mode"] = "public"
         if "memory" in level:
-            # Only the memory limit. Swap-off (memswap_limit equal to memory)
-            # ships in a 2.x release, so a compile today recreates nothing.
+            # Swap is never allowed: memswap_limit equals the memory limit. A
+            # container that runs today with only mem_limit gains the swap cap,
+            # so its first deploy from a compiled file recreates it once.
             entry["mem_limit"] = level["memory"]
+            entry["memswap_limit"] = level["memory"]
         rotation = level.get("log_rotation")
         if rotation:
             entry["log_rotation"] = dict(rotation)

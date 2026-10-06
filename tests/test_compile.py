@@ -272,8 +272,8 @@ def test_ports_health_memory_logs(data: dict[str, Any]) -> None:
     assert s["shop-api"]["healthcheck_path"] == "/health"
     assert "healthcheck_path" not in s["gatus"], 'health = "none" sets no probe path'
     assert all("healthcheck" not in svc for svc in s.values())
-    # swap-off ships in 2.x: memory sets only the memory limit today
-    assert s["shop"]["mem_limit"] == "512m" and "memswap_limit" not in s["shop"]
+    # swap is never allowed: memory sets both limits to the same value
+    assert s["shop"]["mem_limit"] == "512m" and s["shop"]["memswap_limit"] == "512m"
     assert s["shop"]["log_retention"] == {"days": 7}
     assert "log_retention" not in s["gatus"], "fleet default logs = off"
 
@@ -498,7 +498,13 @@ def test_resources_compile_to_accessories(data: dict[str, Any]) -> None:
     assert pg["healthcheck"]["test"] == ["CMD", "pg_isready", "-U", "app"]
     assert pg["backup"]["method"] == "pg_dump"
     redis = data["accessories"]["redis"]
-    assert redis == {"image": "redis:7", "mem_limit": "256m", "regions": ["eu"], "update": False}
+    assert redis == {
+        "image": "redis:7",
+        "mem_limit": "256m",
+        "memswap_limit": "256m",
+        "regions": ["eu"],
+        "update": False,
+    }
 
 
 def test_webhook_and_regions(data: dict[str, Any]) -> None:
@@ -846,7 +852,8 @@ def test_compile_fixture_fleet_feeds_build_specs(fleet: Path, tmp_path: Path) ->
     assert "gatus" not in by_name, "gatus runs on the na box"
     assert by_name["shop"]["type"] == "service"
     assert by_name["shop"]["ports"] == ["100.64.0.3:3000:3000"]
-    assert by_name["shop"]["mem_limit"] == "512m" and "memswap_limit" not in by_name["shop"]
+    assert by_name["shop"]["mem_limit"] == "512m"
+    assert by_name["shop"]["memswap_limit"] == "512m"
     labels = by_name["shop"]["labels"]
     assert labels["traefik.http.routers.shop-health.rule"].startswith("(Host(`shop.example.com`)")
     assert "shop-basicauth" in labels["traefik.http.routers.shop.middlewares"]

@@ -125,7 +125,15 @@ def parse_state(
             if isinstance(host_config.get("Binds"), list)
             else None
         ),
+        memory=_int_or_none(host_config.get("Memory")),
+        memory_swap=_int_or_none(host_config.get("MemorySwap")),
     )
+
+
+def _int_or_none(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _env_dict(env: object) -> dict[str, str] | None:

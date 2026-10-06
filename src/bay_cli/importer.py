@@ -94,6 +94,7 @@ _ACCESSORY_KEYS = {
     "healthcheck",
     "image",
     "mem_limit",
+    "memswap_limit",
     "network_mode",
     "port",
     "regions",
@@ -620,6 +621,7 @@ class _Importer:
             "ports",
             "healthcheck_path",
             "mem_limit",
+            "memswap_limit",
             "command",
             "database",
             "update",
@@ -706,6 +708,7 @@ class _Importer:
             res["command"] = acc["command"]
         if "mem_limit" in acc:
             res["memory"] = _size(acc["mem_limit"], f"{where} mem_limit", self.flags)
+        _swap_flag(acc, where, self.flags)
         update = _UPDATE.get(acc.get("update"))
         if update is None:
             self.flags.append(
@@ -1006,10 +1009,7 @@ class _Importer:
         doc["health"] = svc.get("healthcheck_path") or "none"
         if "mem_limit" in svc:
             doc["memory"] = _size(svc["mem_limit"], f"{where}.mem_limit", flags)
-        if "memswap_limit" in svc:
-            flags.append(
-                f"{where}.memswap_limit: swap-off ships in a 2.x release; not carried over"
-            )
+        _swap_flag(svc, where, flags)
         update = _UPDATE.get(svc.get("update"))
         if update is None:
             flags.append(
@@ -1471,6 +1471,30 @@ def _size(value: Any, where: str, flags: list[str]) -> str:
     if not _SIZE_RE.match(s):
         flags.append(f"{where}: {value} is not a size bay.toml accepts")
     return s
+
+
+def _swap_flag(block: dict[str, Any], where: str, flags: list[str]) -> None:
+    """Flag a swap setting bay.toml cannot say.
+
+    ``memory = "X"`` means mem_limit X and memswap_limit X: swap is never
+    allowed. So no memswap_limit, or one equal to mem_limit, needs no flag (the
+    first gains the cap at its first deploy, which recreates it once). Anything
+    else allows swap, or has no memory limit to cap, and is dropped.
+    """
+    if "memswap_limit" not in block:
+        return
+    swap = str(block["memswap_limit"]).lower()
+    mem = block.get("mem_limit")
+    if mem is None:
+        flags.append(
+            f"{where}.memswap_limit: {swap} has no mem_limit to match; "
+            "swap-off is not expressible; dropped"
+        )
+    elif swap != str(mem).lower():
+        flags.append(
+            f"{where}.memswap_limit: {swap} differs from mem_limit {str(mem).lower()}; "
+            "swap is allowed here, bay.toml never allows it; written as no swap"
+        )
 
 
 def _need_names(doc: dict[str, Any]) -> list[str]:

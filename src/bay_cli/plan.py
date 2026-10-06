@@ -1012,21 +1012,6 @@ def box_prediction(entries: list[dict[str, Any]] | None) -> dict[str, Any]:
     return {"checked": bool(containers) and not errors, "containers": containers, "errors": errors}
 
 
-def _reason_codes(reasons: list[str]) -> set[str]:
-    return {r.split(":", 1)[0] for r in reasons}
-
-
-def env_order_recreates(prediction: Mapping[str, Any]) -> list[str]:
-    """Containers the box recreates only because the env file bytes moved (line order)."""
-    return sorted(
-        {
-            c["name"]
-            for c in prediction.get("containers") or []
-            if c["action"] == "recreate" and "env_order" in _reason_codes(c["reasons"])
-        }
-    )
-
-
 def box_steps(
     prediction: Mapping[str, Any],
     explained: set[str],
@@ -1193,7 +1178,6 @@ def make_plan(
     missing: list[dict[str, Any]] = []
     box_checked = False
     prediction: dict[str, Any] = {"checked": False, "containers": [], "errors": []}
-    env_order: list[str] = []
     pins = {proj.name: wanted.commit} if wanted.commit else {}
     if wanted.doc is not None and not wanted.problems:
         with compiled_fleet(cx, pins) as comp:
@@ -1244,7 +1228,6 @@ def make_plan(
                             blockers.append("the check on the box gave no prediction")
                         explained = {str(s["container"]) for s in steps if s["container"]}
                         steps.extend(box_steps(prediction, explained, project=proj.name, mine=mine))
-                        env_order = env_order_recreates(prediction)
     if fleet_is_git:
         t_step = tailnet_step(cx, proj.fleet)
         if t_step is not None:
@@ -1287,7 +1270,6 @@ def make_plan(
         "running": running,
         "box_checked": box_checked,
         "box_prediction": prediction,
-        "env_order_recreates": env_order,
         "steps": steps,
         "unsupported": unsupported,
         "missing_secrets": missing,
@@ -1522,10 +1504,6 @@ def render(plan: Mapping[str, Any]) -> str:
             "box prediction: "
             + ", ".join(f"{n} {a}" for a, n in sorted(counts.items()))
         )
-    if plan.get("env_order_recreates"):
-        from bay_cli.roundtrip import env_order_line
-
-        lines.append(env_order_line(plan["env_order_recreates"]))
     for b in plan["blockers"]:
         lines.append(f"blocked: {b}")
     for s in plan.get("stale") or []:

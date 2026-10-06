@@ -124,7 +124,7 @@ Each reason is `<code>: <detail>`:
 | `image` | The image name changed, or a new image arrived under the same name. |
 | `env` | Env values differ. The reason names the keys, never a value. |
 | `labels`, `ports`, `volumes` | That part of the settings differs. |
-| `env_order` | The hash changed, but env, labels, ports, volumes and image match. The env file most likely changed in line order or format only. |
+| `memory` | `mem_limit` or `memswap_limit` differs. Bay sets both to the `memory` value, so swap is never allowed. |
 | `stopped` | The container does not run. The deploy leaves it as it is. |
 | `zero_downtime` | The new container takes over before the old one stops. |
 
@@ -139,9 +139,11 @@ Bay merges the prediction into `steps`:
   the compiled step sets the risk.
 - `noop` adds no step.
 
-`env_order_recreates` lists the containers whose only reason is
-`env_order`. `bay plan` prints the list with the same words as
-`bay import --check`, so you can compare the two lists.
+When the hash changed and nothing above differs, the reason is `config_hash`
+alone. The hash covers the env file bytes and other settings that
+`docker inspect` does not report, and the old env file is not on the box, so
+Bay does not guess a cause. `bay import --check` can still name env files
+that only changed in line order, because it renders both files.
 
 When the check runs but a box returns no report, or a report with no
 container list (an older Bay on the box), the plan is blocked.
@@ -309,11 +311,10 @@ know.
       {"box": "box-1", "name": "webapp", "action": "recreate",
        "reasons": ["config_hash: changed (1a2b3c4d5e6f -> 6f5e4d3c2b1a)"]},
       {"box": "box-1", "name": "postgres", "action": "recreate",
-       "reasons": ["config_hash: changed (...)", "env_order: env, labels, ports, ..."]}
+       "reasons": ["config_hash: changed (...)", "memory: memswap_limit 1g -> 512m"]}
     ],
     "errors": []
   },
-  "env_order_recreates": ["postgres"],
   "steps": [
     {"id": "s1", "kind": "container", "container": "webapp", "resource": null,
      "project": "webapp", "action": "update", "risk": "safe",
@@ -324,7 +325,7 @@ know.
      "source": "compile"},
     {"id": "s3", "kind": "container", "container": "postgres", "resource": null,
      "project": null, "action": "recreate", "risk": "safe",
-     "reason": "box box-1 predicts recreate: config_hash: changed (...); env_order: ...",
+     "reason": "box box-1 predicts recreate: config_hash: changed (...); memory: memswap_limit 1g -> 512m",
      "source": "box"}
   ],
   "unsupported": [],
@@ -350,7 +351,7 @@ know.
   and `start`.
 - `source` is `compile` for a step from the compiled diff, `box` for a step
   from the box prediction.
-- `box_prediction` and `env_order_recreates` are empty without `--remote`.
+- `box_prediction` is empty without `--remote`.
 - `plan_sha256` is the SHA-256 of the plan without `plan_id`, `plan_sha256`,
   `created_at`, `verdict`, `exit_code`, `approval` and `stale`. `plan_id` is
   its first 12 hex digits. The same inputs give the same id.

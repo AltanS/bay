@@ -7,7 +7,7 @@
   "required": [
     "plan_version", "plan_id", "plan_sha256", "created_at", "project", "env", "box", "box_env",
     "fleet", "wanted", "pinned", "running", "box_checked", "box_prediction",
-    "env_order_recreates", "steps", "unsupported",
+    "steps", "unsupported",
     "missing_secrets", "blockers", "notes", "verdict", "exit_code", "approval", "stale"
   ],
   "properties": {
@@ -101,11 +101,6 @@
         },
         "errors": { "type": "array", "items": { "type": "string" } }
       }
-    },
-    "env_order_recreates": {
-      "description": "Containers the box recreates only because their env file changed in line order (all values equal). From box_prediction; empty without --remote.",
-      "type": "array",
-      "items": { "type": "string" }
     },
     "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
     "unsupported": { "type": "array", "items": { "type": "string" } },

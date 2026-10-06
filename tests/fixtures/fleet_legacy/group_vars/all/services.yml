@@ -183,7 +183,7 @@ services:
       - /v1/webhooks
     regions:
       - eu
-    memswap_limit: 256m
+    memswap_limit: 512m
     mem_limit: 256m
     env:
       secret:

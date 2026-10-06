@@ -84,10 +84,56 @@ def test_env_value_change_names_the_key_never_the_value() -> None:
     assert SECRET not in json.dumps(entry)
 
 
-def test_hash_change_with_nothing_visible_is_env_order() -> None:
+def test_hash_change_with_nothing_visible_is_config_hash_alone() -> None:
+    # The env file bytes are not on the box, so env_order cannot be claimed.
     entry = _one(_spec(), _state())
     assert entry["action"] == "recreate"
-    assert _codes(entry) == {"config_hash", "env_order"}
+    assert _codes(entry) == {"config_hash"}
+    assert "not readable from docker inspect" in str(entry["reasons"])
+
+
+_G = 1024**3
+_M = 1024**2
+
+
+def test_swap_cap_added_is_a_memory_reason() -> None:
+    # Running: mem_limit 512m, no memswap_limit (docker doubles it). Wanted: both 512m.
+    spec = _spec(mem_limit="512m", memswap_limit="512m")
+    entry = _one(spec, _state(memory=512 * _M, memory_swap=1024 * _M))
+    assert entry["action"] == "recreate"
+    assert _codes(entry) == {"config_hash", "memory"}
+    assert any("memswap_limit 1g -> 512m" in r for r in entry["reasons"])  # type: ignore[union-attr]
+    assert not any("mem_limit" in r for r in entry["reasons"] if r.startswith("memory"))  # type: ignore[union-attr]
+
+
+def test_memory_cap_change_is_a_memory_reason() -> None:
+    spec = _spec(mem_limit="1g", memswap_limit="1g")
+    entry = _one(spec, _state(memory=512 * _M, memory_swap=512 * _M))
+    assert _codes(entry) == {"config_hash", "memory"}
+    assert any("mem_limit 512m -> 1g" in r for r in entry["reasons"])  # type: ignore[union-attr]
+
+
+def test_matching_memory_is_not_named() -> None:
+    spec = _spec(mem_limit="512m", memswap_limit="512m")
+    entry = _one(spec, _state(memory=512 * _M, memory_swap=512 * _M))
+    assert _codes(entry) == {"config_hash"}
+    # With no memswap_limit wanted, docker's doubled swap cap is a match.
+    spec = _spec(mem_limit="512m")
+    entry = _one(spec, _state(memory=512 * _M, memory_swap=1024 * _M))
+    assert _codes(entry) == {"config_hash"}
+
+
+def test_unreported_memory_is_not_named() -> None:
+    entry = _one(_spec(mem_limit="512m", memswap_limit="512m"), _state())
+    assert "memory" not in _codes(entry)
+
+
+def test_parse_state_reads_the_memory_caps() -> None:
+    state = parse_state(
+        {"Name": "/web", "Config": {}, "State": {}, "HostConfig": {"Memory": 5, "MemorySwap": 10}},
+        managed_label="bay.managed",
+    )
+    assert (state.memory, state.memory_swap) == (5, 10)
 
 
 def test_image_label_port_and_volume_changes_are_named() -> None:
@@ -109,7 +155,7 @@ def test_image_drift_under_the_same_hash() -> None:
 
 def test_no_hash_label_is_named() -> None:
     entry = _one(_spec(), _state(config_hash=None))
-    assert "config_hash" in _codes(entry) and "env_order" not in _codes(entry)
+    assert "config_hash" in _codes(entry)
 
 
 def test_canary_swap_is_a_recreate() -> None:

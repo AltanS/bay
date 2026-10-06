@@ -1056,10 +1056,7 @@ def _box_report(*containers: tuple[str, str, list[str]]) -> list[dict[str, Any]]
     ]
 
 
-_ENV_ORDER = (
-    "env_order: env, labels, ports, volumes and image match; the env file likely "
-    "changed in line order or format only"
-)
+_MEMORY = "memory: memswap_limit 1g -> 512m"
 
 
 def _remote(world: dict[str, Path], entries: list[dict[str, Any]] | None) -> dict[str, Any]:
@@ -1084,8 +1081,8 @@ def test_box_predicts_recreates_the_compile_diff_misses(
     plan = _remote(
         world,
         _box_report(
-            ("webapp", "recreate", ["config_hash: changed (aaa -> bbb)", _ENV_ORDER]),
-            ("postgres", "recreate", ["config_hash: changed (ccc -> ddd)", _ENV_ORDER]),
+            ("webapp", "recreate", ["config_hash: changed (aaa -> bbb)", _MEMORY]),
+            ("postgres", "recreate", ["config_hash: changed (ccc -> ddd)", _MEMORY]),
             ("traefik", "noop", []),
         ),
     )
@@ -1097,9 +1094,8 @@ def test_box_predicts_recreates_the_compile_diff_misses(
         ("s2", "webapp", "recreate", "box", "safe"),
     ]
     assert steps[0]["project"] is None and steps[1]["project"] == "webapp"
-    assert "env_order" in steps[1]["reason"] and "box box-1 predicts recreate" in steps[1]["reason"]
+    assert "memory:" in steps[1]["reason"] and "box box-1 predicts recreate" in steps[1]["reason"]
     assert plan["verdict"] == "auto"
-    assert plan["env_order_recreates"] == ["postgres", "webapp"]
     assert plan["box_prediction"]["checked"] is True
     assert {c["name"] for c in plan["box_prediction"]["containers"]} == {
         "webapp",
@@ -1108,7 +1104,6 @@ def test_box_predicts_recreates_the_compile_diff_misses(
     }
     text = planmod.render(plan)
     assert "box prediction: 1 noop, 2 recreate" in text
-    assert "in another order" in text and "postgres, webapp" in text
     assert not BANNED.search(text), BANNED.search(text)
 
 
@@ -1128,7 +1123,6 @@ def test_box_prediction_explained_by_the_compile_diff_adds_no_step(
     edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
     plan = _remote(world, _box_report(("webapp", "recreate", ["env: values differ for X"])))
     assert [(s["container"], s["source"]) for s in plan["steps"]] == [("webapp", "compile")]
-    assert plan["env_order_recreates"] == []
 
 
 def test_box_check_without_a_prediction_blocks(world: dict[str, Path], box: FakeBox) -> None:
@@ -1143,7 +1137,6 @@ def test_box_check_without_a_prediction_blocks(world: dict[str, Path], box: Fake
 def test_without_remote_the_prediction_is_empty(world: dict[str, Path], box: FakeBox) -> None:
     plan = make(world)
     assert plan["box_prediction"] == {"checked": False, "containers": [], "errors": []}
-    assert plan["env_order_recreates"] == []
     assert {s["source"] for s in plan["steps"]} == {"compile"}
 
 

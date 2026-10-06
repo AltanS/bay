@@ -43,8 +43,19 @@ repo, the `.bay/` clone and the `bin/bay` wrapper are gone.
 - With no fleet selected, a command stops and lists the three ways to pick
   one.
 - The deploy version gate tells you to run `bay self update`.
+- `memory = "X"` in `bay.toml` sets `mem_limit` and `memswap_limit` to X,
+  so a container never uses swap. The compile now writes both keys, for a
+  project, a service and a `[resources.*]` entry. `bay import` carries a
+  `mem_limit` with no `memswap_limit`, or with one equal to it, and flags a
+  `memswap_limit` that differs, because `bay.toml` cannot allow swap.
 - The webhook receiver lists its build services in name order, so its
   `SERVICE_BRANCHES` value no longer depends on the order of `services.yml`.
+- `bay plan --remote` names a memory difference with the reason `memory`
+  (`mem_limit` or `memswap_limit` against what the container runs with). It
+  no longer reports `env_order`: the old env file is not on the box, so the
+  cause of a bare hash change is not observable and the reason stays
+  `config_hash`. The `env_order_recreates` plan field is gone.
+  `bay import --check` still names env files that only changed in line order.
 
 ### Removed
 
@@ -84,6 +95,8 @@ repo, the `.bay/` clone and the `bin/bay` wrapper are gone.
 - The webhook receiver recreates once at the first deploy, because its
   `SERVICE_BRANCHES` value is now sorted by service name and its config hash
   changes.
+- A container that has `mem_limit` and no `memswap_limit` gains the swap cap
+  at its first deploy from a compiled file, so it recreates once.
 
 ## [1.0.0] - 2026-10-06
 
