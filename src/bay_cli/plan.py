@@ -291,6 +291,13 @@ class Compiled:
     errors: list[str]
     workdir: Path
     notes: list[str] = field(default_factory=list)
+    #: ``{project: commit}`` for every project the compile read: a repo
+    #: project's pinned commit, or for a project in the fleet the last fleet
+    #: commit that touched ``projects/<name>/`` at or before the commit read
+    #: (the same form as its WANTED commit). ``bay up`` pins these.
+    commits: dict[str, str] = field(default_factory=dict)
+    #: Repo projects left out because their lock pins no commit yet.
+    unpinned: list[str] = field(default_factory=list)
 
     def services_file(self) -> Path | None:
         if self.result is None:
@@ -317,6 +324,8 @@ class _Copy:
     problems: list[str]
     notes: list[str]
     labels: dict[str, str]
+    commits: dict[str, str] = field(default_factory=dict)
+    unpinned: list[str] = field(default_factory=list)
 
 
 def _materialize(cx: Context, tmp: Path, pins: Mapping[str, str]) -> _Copy:
@@ -380,6 +389,7 @@ def _materialize(cx: Context, tmp: Path, pins: Mapping[str, str]) -> _Copy:
         commit = pins.get(name) or raw.get("commit")
         if not commit:
             out.notes.append(f"{name} has no pinned commit yet, so it is left out")
+            out.unpinned.append(name)
             continue
         if not gitrepo.is_repo(checkout):
             out.problems.append(f"{name}: the checkout {checkout} is not a git repo")
@@ -412,6 +422,7 @@ def _materialize(cx: Context, tmp: Path, pins: Mapping[str, str]) -> _Copy:
         pinned["local_path"] = str(dest)
         pinned["commit"] = full
         (projects_dst / f"{stem}.lock").write_text(json.dumps(pinned, indent=2) + "\n")
+        out.commits[name] = full
     return out
 
 
@@ -465,6 +476,8 @@ def _copy_in_fleet(
         gitrepo.extract(src, full, [scope], out.root)
     except gitrepo.GitError as exc:
         out.problems.append(f"{name}: cannot read fleet commit {full[:12]}: {exc}")
+        return
+    out.commits[name] = gitrepo.last_change(src, scope, full) or full
 
 
 @contextmanager
@@ -488,7 +501,14 @@ def compiled_fleet(cx: Context, pins: Mapping[str, str] | None = None) -> Iterat
             for path, label in made.labels.items():
                 line = line.replace(path, label)
             cleaned.append(line.replace(str(made.root) + "/", ""))
-        yield Compiled(result=result, errors=cleaned, workdir=work, notes=made.notes)
+        yield Compiled(
+            result=result,
+            errors=cleaned,
+            workdir=work,
+            notes=made.notes,
+            commits=dict(made.commits),
+            unpinned=list(made.unpinned),
+        )
 
 
 # ── PINNED on disk ──────────────────────────────────────────────────────────

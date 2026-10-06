@@ -11,8 +11,11 @@
 3. Compile the fleet into its services file (hash header).
 4. Commit the fleet repo: ``bay: up <name> <env> <short sha>``.
 5. Run today's deploy for the box env, limited to the ``deploy_stack`` tag.
-6. Read the receipt back, record ``result``, ``deployed_at`` and
-   ``last_receipt_sha256``, and commit again: ``bay: receipt <name> <env>``.
+6. Read the receipt back. The deploy covered the whole box env, so every
+   project the compile read that has a ``[deploy.<env>]`` on that box env is
+   pinned (:func:`_pin_deployed`): ``commit``, ``result``, ``deployed_at``,
+   ``plan_id``, ``last_receipt_sha256`` and ``previous``. One commit:
+   ``bay: receipt <box env> (<n> projects)``.
 7. Push the fleet repo when it has a remote (not with ``--no-push``). A
    failed push is a warning. A fleet that is a subdirectory of a larger repo
    is committed but never pushed (``push_skipped`` says why).
@@ -187,6 +190,8 @@ def up(
                 "compile failed after the lock was written:\n  " + "\n  ".join(comp.errors)
             )
         services = _write_services(cx, comp.result.text())
+        compiled_commits = dict(comp.commits)
+        left_out = list(comp.unpinned)
 
     # 4. commit
     paths = [proj.lock_file, services, planmod.plan_file(cx, plan["plan_id"])]
@@ -231,15 +236,35 @@ def up(
     )
     if failure is None and receipt_failed:
         failure = "the box receipt says the deploy failed"
+    word = "failed" if failure else "ok"
+    deployed_at = planmod._now()
     record = dict(lock["envs"][env])
-    record["result"] = "failed" if failure else "ok"
-    record["deployed_at"] = planmod._now()
+    record["result"] = word
+    record["deployed_at"] = deployed_at
     record["last_receipt_sha256"] = slice_["receipt_sha256"]
     lock["envs"][env] = record
     lockfile.write(proj.lock_file, lock)
+    pinned = [{"project": proj.name, "env": env, "commit": commit, "result": word}]
+    lock_files = [proj.lock_file]
+    more_files, more_rows = _pin_deployed(
+        cx,
+        skip=proj.name,
+        box_env=box_env,
+        commits=compiled_commits,
+        entries=entries,
+        stamp={"result": word, "deployed_at": deployed_at, "plan_id": plan["plan_id"]},
+    )
+    lock_files += more_files
+    pinned += more_rows
+    notes = [
+        f"{name} has no pinned commit, so this deploy left it out and its lock is unchanged"
+        for name in left_out
+    ]
+    for note in notes:
+        say(f"note: {note}")
     try:
         receipt_commit = gitrepo.commit_paths(
-            cx.fleet_root, [proj.lock_file], f"bay: receipt {proj.name} {env}"
+            cx.fleet_root, lock_files, f"bay: receipt {box_env} ({len(lock_files)} projects)"
         )
     except gitrepo.GitError as exc:
         raise BayError(f"cannot commit the fleet repo: {exc}") from None
@@ -262,6 +287,8 @@ def up(
         "push_error": None,
         "push_skipped": None,
         "steps": plan["steps"],
+        "pinned": pinned,
+        "notes": notes,
     }
     if push and not gitrepo.is_toplevel(cx.fleet_root):
         # A fleet that is a directory inside a bigger repo (a workspace with
@@ -283,6 +310,85 @@ def up(
     if failure:
         raise DeployFailed(result)
     return result
+
+
+def _pin_deployed(
+    cx: Context,
+    *,
+    skip: str,
+    box_env: str,
+    commits: Mapping[str, str],
+    entries: list[dict[str, Any]],
+    stamp: Mapping[str, Any],
+) -> tuple[list[Path], list[dict[str, Any]]]:
+    """Record the deploy in the lock of every other project it deployed.
+
+    ``bay up`` deploys the whole box env, so every project the compile read
+    (``commits``) that has a ``[deploy.<env>]`` resolving to ``box_env`` runs
+    what the compile read. For each such env:
+
+    * ``commit``: the commit the compile read. For a project in the fleet
+      that is the last fleet commit that touched ``projects/<name>/``; for a
+      repo project, the commit its lock already pins (it keeps it). The
+      top-level ``commit`` moves with it.
+    * ``previous``: the pin it replaces, when there was one and it differs.
+    * ``result``, ``deployed_at``, ``plan_id`` from ``stamp``, and
+      ``last_receipt_sha256`` from this project's part of the receipt.
+
+    A repo project with no pinned commit was not compiled, so it is not in
+    ``commits`` and its lock stays as it is. Returns the lock files written
+    and one row per env pinned.
+    """
+    files: list[Path] = []
+    rows: list[dict[str, Any]] = []
+    for name in sorted(commits):
+        if name == skip:
+            continue
+        try:
+            other = planmod.load_project(cx, name)
+        except BayError:
+            continue
+        commit = commits[name]
+        doc = planmod.doc_at(other, commit)
+        if not doc:
+            continue
+        lock = copy.deepcopy(other.lock)
+        envs = lock.setdefault("envs", {})
+        touched = False
+        for env in sorted(doc.get("deploy") or {}):
+            box, env_box_env = planmod.resolve_box(other, env, doc)
+            if env_box_env != box_env:
+                continue
+            record = dict(envs.get(env, {}))
+            old_pin = lockfile.env_pin(other.lock, env)
+            if old_pin and old_pin != commit:
+                previous = _previous_for(record, other.lock)
+                if previous is not None:
+                    record["previous"] = previous
+            if not record.get("box") and box:
+                record["box"] = box
+            names = set(
+                planmod.project_containers(name, doc, lock, other.primary_env)
+                .get(env, {})
+                .values()
+            )
+            record.update(
+                {
+                    "commit": commit,
+                    **stamp,
+                    "last_receipt_sha256": planmod.running_slice(entries, names)[
+                        "receipt_sha256"
+                    ],
+                }
+            )
+            envs[env] = record
+            rows.append({"project": name, "env": env, "commit": commit, "result": stamp["result"]})
+            touched = True
+        if touched:
+            lock["commit"] = commit
+            lockfile.write(other.lock_file, lock)
+            files.append(other.lock_file)
+    return files, rows
 
 
 class DeployFailed(Exception):

@@ -258,8 +258,9 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    prints the fleet commit.
 6. Bay runs today's deploy for the box's environment, limited to
    `--tags deploy_stack` (the same work as `bay deploy <env> --tags deploy_stack`).
-7. Bay reads the receipt back, records `result`, `deployed_at` and
-   `last_receipt_sha256`, and commits again: `bay: receipt <name> <env>`.
+7. Bay reads the receipt back and pins every project that the deploy
+   covered (see below). Bay commits all those locks once:
+   `bay: receipt <box env> (<n> projects)`.
 8. When the fleet repo has a remote, Bay pushes it. `--no-push` skips this.
    A failed push is a warning, never a failed deploy. The JSON result says
    `pushed: true|false` and `push_error`. Bay pushes only when the fleet
@@ -270,6 +271,30 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
 When the deploy fails, the lock keeps the new pin and records
 `result: failed`. Bay still commits and pushes that record. `bay show` then
 says `HALF` until a deploy succeeds.
+
+#### Every deployed project is pinned
+
+`bay up` deploys the whole box environment, not only one project. So after
+the deploy, OK or failed, Bay updates the lock of every project that has a
+`[deploy.<env>]` on the same box environment:
+
+| Project | `commit` |
+|---|---|
+| The project you ran `bay up` for | The planned commit. |
+| A project in the fleet (`repo: null`) | The commit the compile read it at: its pin, or, with no pin, the last fleet commit that changed `projects/<name>/` at the fleet's HEAD. |
+| A repo project with a pinned commit | Its pin. It does not move. |
+| A repo project with no pinned commit | Not deployed. Its lock does not change. A note in the result names it. |
+
+Each pinned environment gets `result`, `deployed_at`, `plan_id` and its own
+`last_receipt_sha256`. When the commit replaces a different earlier pin,
+`previous` holds the earlier one. `bay show` then says `ok` for each of these
+projects, or `HALF` after a failed deploy.
+
+A project in the fleet that is pinned moves only with its own `bay up`. A
+deploy through another project reads it at its pin.
+
+The JSON result lists the pinned environments in `pinned`
+(`project`, `env`, `commit`, `result`) and the left-out projects in `notes`.
 
 ### bay rollback
 

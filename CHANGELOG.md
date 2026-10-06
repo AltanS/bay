@@ -69,6 +69,14 @@ repo, the `.bay/` clone and the `bin/bay` wrapper are gone.
   are removed afterwards. Before, a deploy wrote `.reconcile-report/` into the
   framework checkout. `.reconcile-report/` is gitignored for a playbook run by
   hand.
+- `bay up` pins every project it deployed. The deploy covers the whole box
+  environment, so Bay now updates the lock of every project with a
+  `[deploy.<env>]` on that box environment: a project in the fleet gets the
+  commit the compile read, a pinned repo project keeps its commit, and each
+  gets `result`, `deployed_at`, `plan_id`, `last_receipt_sha256` and
+  `previous`. An unpinned repo project is left out and named in `notes`. One
+  commit: `bay: receipt <box env> (<n> projects)`. `bay show` reports `ok`
+  for all of them, not `unknown` for all but one.
 
 ### Removed
 

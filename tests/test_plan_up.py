@@ -307,7 +307,7 @@ def test_destructive_step_requires_approve(world: dict[str, Path], box: FakeBox)
     assert done.exit_code == 0, done.output
     assert len(box.deploys) == deploys_before + 1
     msgs = git(world["fleet"], "log", "--format=%s", "-3").splitlines()
-    assert msgs[0] == "bay: receipt webapp production"
+    assert msgs[0] == "bay: receipt production (1 projects)"
     assert msgs[1].startswith("bay: up webapp production ")
     tracked = git(world["fleet"], "ls-files", "plans")
     assert f"{plan['plan_id']}.approved" in tracked
@@ -1609,3 +1609,110 @@ def test_the_report_hand_off_honours_the_report_dir_var() -> None:
     ):
         assert "bay_reconciler_report_dir | default(" in json.dumps(tasks[name]), name
     assert ".reconcile-report/" in (ROOT / ".gitignore").read_text().splitlines()
+
+
+# ── bay up pins every project it deployed ───────────────────────────────────
+
+
+def _three_in_fleet(world: dict[str, Path]) -> dict[str, str]:
+    """Three projects in the fleet, compiled and committed, none pinned yet.
+
+    The state right after a cutover: the services file holds all three, no
+    lock pins a commit. Returns ``{name: last fleet commit of projects/<name>/}``.
+    """
+    for name in ("alpha", "beta", "status"):
+        path = world["fleet"] / "projects" / name / "bay.toml"
+        path.parent.mkdir()
+        path.write_text(STATUS_TOML.replace("status", name))
+        commit_all(world["fleet"], f"add {name}")
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        (world["fleet"] / GENERATED_SERVICES).write_text(comp.result.text())
+    commit_all(world["fleet"], "compile")
+    return {
+        n: git(world["fleet"], "log", "-1", "--format=%H", "--", f"projects/{n}")
+        for n in ("alpha", "beta", "status")
+    }
+
+
+def test_up_pins_every_in_fleet_project_it_deployed(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    commits = _three_in_fleet(world)
+    anywhere = tmp_path / "anywhere"
+    anywhere.mkdir()
+
+    up = cli(world, "up", "--json", "--project", "status", cwd=anywhere)
+    assert up.exit_code == 0, up.output
+    doc = json.loads(up.stdout)
+    assert box.deploys == ["production"]
+    assert sorted((r["project"], r["env"], r["commit"]) for r in doc["pinned"]) == [
+        (n, "production", commits[n]) for n in ("alpha", "beta", "status")
+    ]
+    assert any(n.startswith("webapp has no pinned commit") for n in doc["notes"])
+    assert git(world["fleet"], "log", "-1", "--format=%s") == "bay: receipt production (3 projects)"
+    assert git(world["fleet"], "status", "--porcelain") == ""
+
+    for name in ("alpha", "beta", "status"):
+        raw = lockfile.read(lockfile.lock_path(world["fleet"], name))
+        assert raw is not None, name
+        record = raw["envs"]["production"]
+        assert raw["commit"] == record["commit"] == commits[name]
+        assert record["result"] == "ok" and record["plan_id"] == doc["plan_id"]
+        assert record["deployed_at"] and record["last_receipt_sha256"]
+        assert "previous" not in record  # no earlier pin
+        shown = json.loads(cli(world, "show", name, "--json", cwd=anywhere).stdout)
+        assert shown["envs"][0]["status"] == "ok", (name, shown["envs"][0]["reason"])
+
+    # the unpinned repo project stays unpinned
+    assert lock_of(world)["commit"] is None and lock_of(world)["envs"] == {}
+
+    # Once pinned, a project in the fleet moves only with its own bay up: a
+    # deploy through beta reads alpha at its pin, and alpha keeps it.
+    path = world["fleet"] / "projects" / "alpha" / "bay.toml"
+    path.write_text(path.read_text().replace('MODE = "one"', 'MODE = "two"'))
+    second = commit_all(world["fleet"], "alpha two")
+    assert cli(world, "up", "--json", "--project", "beta", cwd=anywhere).exit_code == 0
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "alpha"))
+    assert raw is not None and raw["commit"] == commits["alpha"]
+    shown = json.loads(cli(world, "show", "alpha", "--json", cwd=anywhere).stdout)
+    assert shown["envs"][0]["status"] == "behind"
+
+    assert cli(world, "up", "--json", "--project", "alpha", cwd=anywhere).exit_code == 0
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "alpha"))
+    assert raw is not None
+    assert raw["commit"] == raw["envs"]["production"]["commit"] == second
+    assert raw["envs"]["production"]["previous"]["commit"] == commits["alpha"]
+    for name in ("alpha", "beta", "status"):
+        shown = json.loads(cli(world, "show", name, "--json", cwd=anywhere).stdout)
+        assert shown["envs"][0]["status"] == "ok", (name, shown["envs"][0]["reason"])
+
+
+def test_a_failed_deploy_marks_every_deployed_project_half(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    _three_in_fleet(world)
+    anywhere = tmp_path / "anywhere"
+    anywhere.mkdir()
+    box.fail = True
+    assert cli(world, "up", "--json", "--project", "status", cwd=anywhere).exit_code == 1
+    for name in ("alpha", "beta", "status"):
+        raw = lockfile.read(lockfile.lock_path(world["fleet"], name))
+        assert raw is not None and raw["envs"]["production"]["result"] == "failed"
+        shown = json.loads(cli(world, "show", name, "--json", cwd=anywhere).stdout)
+        assert shown["envs"][0]["status"] == "HALF"
+
+
+def test_a_pinned_repo_project_keeps_its_commit(world: dict[str, Path], box: FakeBox) -> None:
+    pinned = git(world["app"], "rev-parse", "HEAD")
+    do_up(world)
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')  # committed, not pinned
+    _three_in_fleet(world)
+    up = applymod.up(planmod.load_project(cx_of(world), "status"), planmod.PlanOptions())
+    assert up["result"] == "ok"
+    raw = lock_of(world)
+    assert raw["commit"] == raw["envs"]["production"]["commit"] == pinned
+    assert raw["envs"]["production"]["plan_id"] == up["plan_id"]
+    assert ("webapp", "production", pinned) in {
+        (r["project"], r["env"], r["commit"]) for r in up["pinned"]
+    }

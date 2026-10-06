@@ -363,6 +363,14 @@ def _apply(
         f"{len(result['steps'])} step(s), fleet commit {result['receipt_commit'][:12]}"
         + (", pushed" if result["pushed"] else "")
     )
+    others = [r for r in result.get("pinned") or [] if r["project"] != result["project"]]
+    if others:
+        console.info(
+            f"also pinned {len(others)} other project env(s) on {result['box_env']}: "
+            + ", ".join(f"{r['project']} {r['env']}" for r in others)
+        )
+    for note in result.get("notes") or []:
+        console.info(f"note: {note}")
     if result["push_error"]:
         console.warning(f"the fleet repo was not pushed: {result['push_error']}")
     if result.get("push_skipped"):
