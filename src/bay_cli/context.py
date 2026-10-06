@@ -1,7 +1,7 @@
 """The Context object: every path a command needs, resolved once.
 
-A command used to call ``paths.find_bay_dir()`` and ``paths.consumer_root()``
-itself, which scattered 100+ copies of "where is the project?" through the CLI.
+A command used to find the project on its own, which scattered 100+ copies of
+"where is the project?" through the CLI.
 Now the CLI builds one :class:`Context` in :meth:`Context.resolve` and every
 command and helper receives it as a parameter (commands get it from
 ``typer.Context.obj`` through :func:`context_from`).
@@ -9,12 +9,11 @@ command and helper receives it as a parameter (commands get it from
 Vocabulary:
 
 ``fleet_root``
-    The directory holding ``group_vars/``, ``hosts/`` and ``.vault_pass``.
-    Today that is the consumer repo root.
+    The directory holding ``group_vars/``, ``hosts/`` and ``.vault_pass``:
+    the fleet repo.
 ``framework_root``
-    The Bay framework checkout (roles, playbooks, ``version.yml``). Today that
-    is the consumer's ``.bay/`` clone. When the fleet was found by path, the
-    CLI is installed on the machine and the framework is the repo this very
+    The Bay framework checkout (playbooks, ``version.yml``). The CLI is
+    installed once per machine from that checkout, so it is the repo this very
     package runs from.
 """
 
@@ -38,11 +37,11 @@ FLEET_NAME_ENV = "BAY_FLEET_NAME"
 # Where the CLI keeps the fleets it manages (discovery step 3).
 _FLEETS_DIR = Path(".config") / "bay" / "fleets"
 
-#: Where a Context came from. Shown by ``bay status`` when it matters.
+#: Where a Context came from. Shown by ``bay status`` and ``bay status --json``.
 SOURCE_FLAG = "--fleet"
 SOURCE_ENV = "BAY_FLEET"
+SOURCE_BAY_TOML = "bay.toml"
 SOURCE_FLEETS_DIR = "~/.config/bay/fleets"
-SOURCE_WALK_UP = "walk-up"
 SOURCE_CWD = "cwd"
 
 
@@ -57,7 +56,7 @@ class Context:
 
     fleet_root: Path
     framework_root: Path
-    source: str = SOURCE_WALK_UP
+    source: str = SOURCE_FLAG
 
     # ── Derived locations ────────────────────────────────────────────────
     @property
@@ -128,24 +127,17 @@ class Context:
 
         1. ``fleet``, the value of the global ``--fleet <path>`` option.
         2. The ``BAY_FLEET`` environment variable.
-        3. ``~/.config/bay/fleets/<name>``, only when ``BAY_FLEET_NAME`` is
-           set. There is no auto-pick of a lone fleet while step 4 exists:
-           the first fleet dir on a machine would otherwise capture every
-           command run inside a consumer repo.
-        4. TRANSITION ONLY: walk up from the working directory to a ``.bay/``
-           framework clone (the consumer layout). This keeps every current
-           consumer command working unchanged until the cutover. Step 4 is
-           removed in S08, together with ``find_bay_dir`` and ``consumer_root``.
+        3. The fleet that the nearest ``bay.toml`` (the working directory or a
+           parent) names with ``fleet = "<name>"``, found at
+           ``~/.config/bay/fleets/<name>``.
+        4. ``~/.config/bay/fleets/<name>``, when ``BAY_FLEET_NAME`` is set.
 
-        Steps 1 to 3 give a fleet that carries no framework clone, so the
-        framework root is the repo this package runs from. Step 4 keeps the
-        ``.bay/`` clone as the framework root.
+        With none of these, raise a :class:`BayError` that lists the ways to
+        pick a fleet. There is no walking up to a framework clone and no
+        auto-pick of a lone fleet.
+
+        The framework root is always the repo this package runs from.
         """
-        # Imported here, not at module scope, so `paths` stays off the import
-        # path of commands that never resolve a Context. Reached through the
-        # module attribute so a test can patch `bay_cli.paths.find_bay_dir`.
-        from bay_cli import paths
-
         if fleet is not None:
             return cls._from_fleet_path(Path(fleet), SOURCE_FLAG)
 
@@ -153,17 +145,15 @@ class Context:
         if env_fleet:
             return cls._from_fleet_path(Path(env_fleet), SOURCE_ENV)
 
+        in_toml = _fleet_named_by_bay_toml(Path.cwd())
+        if in_toml is not None:
+            return cls._from_fleet_path(fleet_dir_for_name(in_toml), SOURCE_BAY_TOML)
+
         named = _fleet_from_fleets_dir()
         if named is not None:
             return cls._from_fleet_path(named, SOURCE_FLEETS_DIR)
 
-        # Step 4 (transition only, removed in S08).
-        bay_dir = paths.find_bay_dir()
-        return cls(
-            fleet_root=paths.consumer_root(bay_dir),
-            framework_root=bay_dir,
-            source=SOURCE_WALK_UP,
-        )
+        raise BayError(NO_FLEET_MESSAGE, hint=NO_FLEET_HINT)
 
     @classmethod
     def for_fleet_name(cls, name: str) -> Context:
@@ -182,15 +172,47 @@ class Context:
                 f"fleet directory not found: {fleet_root} (from {source})",
                 hint="Pass an existing directory to --fleet, or unset BAY_FLEET.",
             )
+        # Every Ansible command of this run now works on this fleet, whatever
+        # the working directory is. See bay_cli/ansible.py.
+        from bay_cli import ansible
+
+        ansible.bind_fleet(fleet_root)
         return cls(fleet_root=fleet_root, framework_root=package_root(), source=source)
 
 
-def _fleet_from_fleets_dir() -> Path | None:
-    """Discovery step 3: ``~/.config/bay/fleets/<name>``, only if ``BAY_FLEET_NAME`` is set.
+NO_FLEET_MESSAGE = "no fleet selected"
+NO_FLEET_HINT = (
+    "Pick one of three ways: pass --fleet <path> before the command, "
+    f"set {FLEET_ENV}=<path>, or set {FLEET_NAME_ENV}=<name> "
+    "(a fleet in ~/.config/bay/fleets; `bay fleet ls` lists them). "
+    "Inside an app repo, the fleet named in bay.toml is used. "
+    "No fleet yet? Run `bay fleet init <name>`."
+)
 
-    S08 may reinstate "use the one fleet that exists" once the walk-up (step 4)
-    is gone. Until then it would hijack consumer-repo runs, so it is off.
+
+def _fleet_named_by_bay_toml(start: Path) -> str | None:
+    """The ``fleet`` of the nearest bay.toml at or above ``start``, or None.
+
+    A bay.toml that cannot be read, or has no ``fleet`` string, is skipped
+    here: ``bay toml validate`` is the place that reports a broken file.
     """
+    import tomllib
+
+    for directory in [start, *start.parents]:
+        candidate = directory / "bay.toml"
+        if not candidate.is_file():
+            continue
+        try:
+            doc = tomllib.loads(candidate.read_text())
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+        name = doc.get("fleet")
+        return name if isinstance(name, str) and name else None
+    return None
+
+
+def _fleet_from_fleets_dir() -> Path | None:
+    """Discovery step 4: ``~/.config/bay/fleets/<name>``, only if ``BAY_FLEET_NAME`` is set."""
     name = os.environ.get(FLEET_NAME_ENV)
     if not name:
         return None
@@ -248,19 +270,24 @@ def context_from(ctx: typer.Context | None) -> Context:
 def _fleet_is_explicit(ctx: typer.Context | None) -> bool:
     obj = ctx.find_root().obj if ctx is not None else None
     if isinstance(obj, Context):
-        return obj.source in (SOURCE_FLAG, SOURCE_ENV, SOURCE_FLEETS_DIR)
+        return obj.source in (SOURCE_FLAG, SOURCE_ENV, SOURCE_BAY_TOML, SOURCE_FLEETS_DIR)
     if isinstance(obj, GlobalOptions) and obj.fleet is not None:
         return True
-    return bool(os.environ.get(FLEET_ENV) or os.environ.get(FLEET_NAME_ENV))
+    return bool(
+        os.environ.get(FLEET_ENV)
+        or os.environ.get(FLEET_NAME_ENV)
+        or _fleet_named_by_bay_toml(Path.cwd())
+    )
 
 
 def context_or_cwd(ctx: typer.Context | None) -> Context:
     """Like :func:`context_from`, but a project-less directory means "here".
 
-    For the commands that edit ``services.yml`` and work before any framework
-    checkout exists (``bay service add`` in a fresh directory). A fleet the
-    operator named on purpose (``--fleet``, ``BAY_FLEET``, ``BAY_FLEET_NAME``)
-    is never replaced by the working directory: that error is raised.
+    For the commands that edit ``services.yml`` and work before any fleet is
+    set up (``bay service add`` in a fresh directory). A fleet the operator
+    named on purpose (``--fleet``, ``BAY_FLEET``, ``BAY_FLEET_NAME``, or the
+    ``fleet`` of a bay.toml) is never replaced by the working directory: that
+    error is raised.
     """
     try:
         return context_from(ctx)

@@ -12,11 +12,13 @@ HTTP calls are mocked — tests never hit real endpoints.
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import patch
 
 import json
 import pytest
 
+from helpers import patch_fleet
 from bay_cli.healthcheck import (
     is_gated,
     purge_reconcile_reports,
@@ -336,7 +338,7 @@ class TestSummarize:
 
 class TestCliNonzeroExit:
     """The `healthcheck` subcommand must exit non-zero when any probe
-    fails, so `bin/bay deploy` (which calls it post-deploy) surfaces
+    fails, so `bay deploy` (which calls it post-deploy) surfaces
     user-visible outages loud."""
 
     def test_healthcheck_nonzero_on_failure(self):
@@ -348,8 +350,7 @@ class TestCliNonzeroExit:
             "svc": {"access": "public", "domains": ["example.com"]},
         }
 
-        with patch("bay_cli.paths.find_bay_dir", return_value="/tmp/bay"), \
-             patch("bay_cli.paths.consumer_root", return_value="/tmp/consumer"), \
+        with patch_fleet(Path("/tmp/consumer"), Path("/tmp/bay")), \
              patch("bay_cli.commands.healthcheck.StackConfig") as sc_cls, \
              patch("bay_cli.commands.healthcheck.run_healthcheck") as run:
             instance = sc_cls.return_value
@@ -371,8 +372,7 @@ class TestCliNonzeroExit:
             "svc": {"access": "public", "domains": ["example.com"]},
         }
 
-        with patch("bay_cli.paths.find_bay_dir", return_value="/tmp/bay"), \
-             patch("bay_cli.paths.consumer_root", return_value="/tmp/consumer"), \
+        with patch_fleet(Path("/tmp/consumer"), Path("/tmp/bay")), \
              patch("bay_cli.commands.healthcheck.StackConfig") as sc_cls, \
              patch("bay_cli.commands.healthcheck.run_healthcheck") as run:
             instance = sc_cls.return_value
@@ -396,8 +396,7 @@ class TestCliNonzeroExit:
             "svc": {"access": "public", "domains": ["example.com"]},
         }
 
-        with patch("bay_cli.paths.find_bay_dir", return_value="/tmp/bay"), \
-             patch("bay_cli.paths.consumer_root", return_value="/tmp/consumer"), \
+        with patch_fleet(Path("/tmp/consumer"), Path("/tmp/bay")), \
              patch("bay_cli.commands.healthcheck.StackConfig") as sc_cls, \
              patch("bay_cli.commands.healthcheck.run_healthcheck") as run:
             instance = sc_cls.return_value
@@ -541,8 +540,7 @@ class TestOutputProbedUrl:
         from bay_cli.cli import app
 
         services = {"svc": {"access": "public", "domains": ["example.com"]}}
-        with patch("bay_cli.paths.find_bay_dir", return_value="/tmp/bay"), \
-             patch("bay_cli.paths.consumer_root", return_value="/tmp/consumer"), \
+        with patch_fleet(Path("/tmp/consumer"), Path("/tmp/bay")), \
              patch("bay_cli.commands.healthcheck.StackConfig") as sc_cls, \
              patch("bay_cli.commands.healthcheck.run_healthcheck") as run:
             sc_cls.return_value.get_services.return_value = services
@@ -646,7 +644,7 @@ class TestOutputProbedUrl:
 #
 # services.yml documents `{{ domain_base }}` as the multi-region idiom, but
 # healthcheck parses services.yml as plain YAML and renders no Jinja. The
-# template used to reach check_domain verbatim, so `bin/bay healthcheck
+# template used to reach check_domain verbatim, so `bay healthcheck
 # production --include-vpn` probed `https://status.{{ domain_base }}/` and
 # reported a false RED (exit 1) for a hostname that never existed.
 
@@ -655,15 +653,15 @@ class TestOutputProbedUrl:
 # and those endpoints must be probed, not skipped.
 _RVARS = {
     "eu": {
-        "domain_base": "eu.argo.example.com",  # legacy-argo: DNS zone example, non-goal per rename-map
+        "domain_base": "eu.argo.example.com",  # kept-argo: DNS zone example, non-goal per rename-map
         "domain_base_next": "eu.bay.example.com",
     },
     "na": {
-        "domain_base": "na.argo.example.com",  # legacy-argo: DNS zone example, non-goal per rename-map
+        "domain_base": "na.argo.example.com",  # kept-argo: DNS zone example, non-goal per rename-map
         "domain_base_next": "na.bay.example.com",
     },
     "infra": {
-        "domain_base": "infra.argo.example.com",  # legacy-argo: DNS zone example, non-goal per rename-map
+        "domain_base": "infra.argo.example.com",  # kept-argo: DNS zone example, non-goal per rename-map
         "domain_base_next": "infra.bay.example.com",
     },
 }
@@ -684,7 +682,7 @@ class TestExpandDomain:
     def test_expands_for_the_services_single_region(self) -> None:
         """The real gatus case: regions: [infra] -> infra's base, not eu's."""
         assert expand_domain("status.{{ domain_base }}", ["infra"], _RVARS) == [
-            "status.infra.argo.example.com"  # legacy-argo: DNS zone example, non-goal per rename-map
+            "status.infra.argo.example.com"  # kept-argo: DNS zone example, non-goal per rename-map
         ]
 
     def test_any_per_region_variable_resolves_not_just_domain_base(self) -> None:
@@ -700,7 +698,7 @@ class TestExpandDomain:
     def test_multiple_variables_in_one_domain(self) -> None:
         assert expand_domain(
             "{{ domain_base_next }}.via.{{ domain_base }}", ["eu"], _RVARS
-        ) == ["eu.bay.example.com.via.eu.argo.example.com"]  # legacy-argo: DNS zone example, non-goal per rename-map
+        ) == ["eu.bay.example.com.via.eu.argo.example.com"]  # kept-argo: DNS zone example, non-goal per rename-map
 
     def test_region_missing_one_referenced_variable_is_skipped_not_half_rendered(
         self,
@@ -720,21 +718,21 @@ class TestExpandDomain:
 
     def test_expands_across_regions_when_service_spans_them(self) -> None:
         assert expand_domain("api.{{ domain_base }}", ["eu", "na"], _RVARS) == [
-            "api.eu.argo.example.com",  # legacy-argo: DNS zone example, non-goal per rename-map
-            "api.na.argo.example.com",  # legacy-argo: DNS zone example, non-goal per rename-map
+            "api.eu.argo.example.com",  # kept-argo: DNS zone example, non-goal per rename-map
+            "api.na.argo.example.com",  # kept-argo: DNS zone example, non-goal per rename-map
         ]
 
     def test_no_regions_key_expands_everywhere(self) -> None:
         """No `regions:` means deploy everywhere (docs/services.md)."""
         assert expand_domain("api.{{ domain_base }}", None, _RVARS) == [
-            "api.eu.argo.example.com",  # legacy-argo: DNS zone example, non-goal per rename-map
-            "api.na.argo.example.com",  # legacy-argo: DNS zone example, non-goal per rename-map
-            "api.infra.argo.example.com",  # legacy-argo: DNS zone example, non-goal per rename-map
+            "api.eu.argo.example.com",  # kept-argo: DNS zone example, non-goal per rename-map
+            "api.na.argo.example.com",  # kept-argo: DNS zone example, non-goal per rename-map
+            "api.infra.argo.example.com",  # kept-argo: DNS zone example, non-goal per rename-map
         ]
 
     def test_whitespace_variants(self) -> None:
         for tpl in ("x.{{domain_base}}", "x.{{  domain_base  }}"):
-            assert expand_domain(tpl, ["eu"], _RVARS) == ["x.eu.argo.example.com"]  # legacy-argo: DNS zone example, non-goal per rename-map
+            assert expand_domain(tpl, ["eu"], _RVARS) == ["x.eu.argo.example.com"]  # kept-argo: DNS zone example, non-goal per rename-map
 
     def test_region_without_a_base_yields_no_expansion(self) -> None:
         """Left templated on purpose — the backstop skips it."""
@@ -743,8 +741,8 @@ class TestExpandDomain:
         ]
 
     def test_single_region_consumer_maps_under_env(self) -> None:
-        assert expand_domain("x.{{ domain_base }}", None, {"production": {"domain_base": "argo.example.de"}}) == [  # legacy-argo: DNS zone example, non-goal per rename-map
-            "x.argo.example.de"  # legacy-argo: DNS zone example, non-goal per rename-map
+        assert expand_domain("x.{{ domain_base }}", None, {"production": {"domain_base": "argo.example.de"}}) == [  # kept-argo: DNS zone example, non-goal per rename-map
+            "x.argo.example.de"  # kept-argo: DNS zone example, non-goal per rename-map
         ]
 
 
@@ -758,7 +756,7 @@ class TestCollectTargetsDomainBase:
             }
         }
         targets = _collect_targets(services, include_vpn=True, region_vars=_RVARS)
-        assert [t[1] for t in targets] == ["status.infra.argo.example.com"]  # legacy-argo: DNS zone example, non-goal per rename-map
+        assert [t[1] for t in targets] == ["status.infra.argo.example.com"]  # kept-argo: DNS zone example, non-goal per rename-map
         # include_vpn=True -> actually probed, so it MUST be resolved.
         assert targets[0][3] is False
 
@@ -1096,8 +1094,7 @@ class TestReadinessNoteRendering:
             service="svc", domain="example.com", status=200, ok=True,
             attempts=7, elapsed_ms=44_350, probed_url="https://example.com/",
         )
-        with patch("bay_cli.paths.find_bay_dir", return_value="/tmp/bay"), \
-             patch("bay_cli.paths.consumer_root", return_value="/tmp/consumer"), \
+        with patch_fleet(Path("/tmp/consumer"), Path("/tmp/bay")), \
              patch("bay_cli.commands.healthcheck.StackConfig") as sc_cls, \
              patch("bay_cli.commands.healthcheck.run_healthcheck") as run:
             sc_cls.return_value.get_services.return_value = services

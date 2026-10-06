@@ -7,7 +7,7 @@ Regression context:
 
   In `--check` mode the command module does not run, so `stdout` is empty and
   `from_json` raises on an empty string. That is not a warning — the play dies
-  with exit 2, which made `bin/bay deploy ... -- --check --diff` unusable as a
+  with exit 2, which made `bay deploy ... -- --check --diff` unusable as a
   pre-deploy dry run.
 
   The guard has to be `_reconcile_result is not skipped`. An `rc is defined`

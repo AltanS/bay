@@ -129,18 +129,3 @@ def is_dirty(path: Path) -> bool | None:
     if out is None:
         return None
     return bool(out)
-
-
-def ref_name(path: Path) -> str | None:
-    """Exact tag at HEAD, else the short SHA, else None. Never prints."""
-    return _quiet(path, "describe", "--tags", "--exact-match") or (
-        _quiet(path, "rev-parse", "--short", "HEAD") or None
-    )
-
-
-def newest_tag(path: Path) -> str | None:
-    """Highest tag by version sort, or None. Never prints."""
-    out = _quiet(path, "tag", "--sort=-v:refname")
-    if not out:
-        return None
-    return out.splitlines()[0].strip() or None

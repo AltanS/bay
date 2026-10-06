@@ -4,7 +4,7 @@
 # Print the name of the buildx builder the next build should use.
 #
 # One implementation, two callers: rebuild.sh (webhook auto-builds) and
-# remote_build.yml (`bin/bay deploy`). Contract:
+# remote_build.yml (`bay deploy`). Contract:
 #   stdout  exactly one line, the builder name
 #   stderr  exactly one line, the reason for the choice
 #   exit    0 in every handled case; a caller never has to treat a probe

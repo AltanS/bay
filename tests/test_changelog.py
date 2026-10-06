@@ -1,6 +1,6 @@
 """The changelog must document the version being shipped.
 
-Consumers pin a framework version and move with `bin/bay update`. A release
+Machines move between framework versions with `bay self update`. A release
 that lands without a changelog entry is invisible to them — they get new
 behaviour with no way to find out what changed short of reading git log.
 

@@ -178,11 +178,11 @@ class TestValidatorRobustness:
         assert any("postgres" in f for f in failures)
 
 
-# ── `bin/bay validate` exit-code integration ───────────────────────
+# ── `bay validate` exit-code integration ───────────────────────
 
 
 def test_validate_command_exits_nonzero_on_binding_mismatch(tmp_path):
-    """Smoke test: `bin/bay validate` in a consumer where accessory
+    """Smoke test: `bay validate` in a consumer where accessory
     has expose: loopback but a hardcoded 0.0.0.0 port must exit
     non-zero. The full CLI invocation is covered by the subcommand
     tests — here we just confirm the _validate_accessory_bindings

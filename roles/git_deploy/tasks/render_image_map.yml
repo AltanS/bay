@@ -2,7 +2,7 @@
 # Render image-map.json for the webhook receiver.
 #
 # This task file is tagged for both [build, git_deploy] and [deploy_stack] so
-# that standard service-config deploys (`bin/bay deploy --tags deploy_stack`)
+# that standard service-config deploys (`bay deploy --tags deploy_stack`)
 # re-render image-map.json whenever services.yml changes — without dragging in
 # the rest of the git_deploy role (systemd path units, rebuild.sh,
 # build_server bootstrap).

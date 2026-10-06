@@ -7,10 +7,10 @@
 #
 # Manage this file with the CLI rather than by hand:
 #
-#   bin/bay alerts list            # every alert and where it would go
-#   bin/bay alerts doctor          # diagnose a silent alert surface
-#   bin/bay alerts test <id>       # show where one alert would be delivered
-#   bin/bay alerts disable <id> --for 24h   # mute, with an expiry
+#   bay alerts list            # every alert and where it would go
+#   bay alerts doctor          # diagnose a silent alert surface
+#   bay alerts test <id>       # show where one alert would be delivered
+#   bay alerts disable <id> --for 24h   # mute, with an expiry
 #
 # An empty list means alerts are generated but delivered nowhere.
 # See docs/alerting.md for the adapters and the severity ladder.

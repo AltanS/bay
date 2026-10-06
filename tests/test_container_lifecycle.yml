@@ -1,10 +1,10 @@
 ---
 # Integration test for container_lifecycle role
 #
-# Run from a consumer with dev-link:
-#   bin/bay dev-link
-#   cd .bay && uv run ansible-playbook tests/test_container_lifecycle.yml \
-#     -i ../hosts/production -l eu -e target_host=eu
+# Run from the framework checkout, against a fleet (group_vars must sit next
+# to the playbook or the inventory, see bay_cli/ansible.py):
+#   uv run ansible-playbook tests/test_container_lifecycle.yml \
+#     -i <fleet>/hosts/production -l eu -e target_host=eu
 #
 # NOTE: container_lifecycle now delegates to the bay_reconcile
 # engine (reconcile.yml); the per-container Ansible deploy loops were retired.

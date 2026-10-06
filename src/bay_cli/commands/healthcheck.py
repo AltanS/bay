@@ -2,7 +2,7 @@
 
 Hits every public service's domains via HTTPS and reports 2xx/3xx as
 pass, 4xx/5xx/timeout/TLS-error as fail. Runs automatically after every
-successful `bin/bay deploy` unless `--skip-healthcheck` is passed.
+successful `bay deploy` unless `--skip-healthcheck` is passed.
 
 See src/bay_cli/healthcheck.py for the probe logic.
 """
@@ -80,9 +80,9 @@ def healthcheck(
 
     Examples:
 
-        bin/bay healthcheck production
-        bin/bay healthcheck production --service myapp
-        bin/bay healthcheck production --include-vpn
+        bay healthcheck production
+        bay healthcheck production --service myapp
+        bay healthcheck production --include-vpn
     """
     root = context_from(ctx).fleet_root
     # Consumer name for the header — use the root dir's folder name.

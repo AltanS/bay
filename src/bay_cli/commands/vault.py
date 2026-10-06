@@ -18,7 +18,8 @@ app = typer.Typer(help="Manage encrypted secrets (ansible-vault).")
 
 def _vault_file(cx: Context, env: str, file: Optional[str]) -> str:
     if file:
-        return file
+        # Resolved here, against where the operator is: Ansible runs in the fleet.
+        return str(Path(file).resolve())
     return str(cx.secrets_file(env))
 
 
@@ -39,8 +40,8 @@ def edit(
 
     Examples:
 
-        bin/bay vault edit production
-        bin/bay vault edit eu --file group_vars/eu/secrets.yml
+        bay vault edit production
+        bay vault edit eu --file group_vars/eu/secrets.yml
     """
     cx = context_from(ctx)
     ansible.vault_cmd("edit", _vault_file(cx, env, file), bay_dir=cx.framework_root)
@@ -56,7 +57,7 @@ def view(
 
     Examples:
 
-        bin/bay vault view production
+        bay vault view production
     """
     cx = context_from(ctx)
     ansible.vault_cmd("view", _vault_file(cx, env, file), bay_dir=cx.framework_root)
@@ -72,7 +73,7 @@ def encrypt(
 
     Examples:
 
-        bin/bay vault encrypt production
+        bay vault encrypt production
     """
     cx = context_from(ctx)
     ansible.vault_cmd("encrypt", _vault_file(cx, env, file), bay_dir=cx.framework_root)
@@ -86,12 +87,12 @@ def decrypt(
 ) -> None:
     """Decrypt a secrets file in place — leaves PLAINTEXT on disk.
 
-    Re-encrypt with `bin/bay vault encrypt` before committing. For a
-    read-only look use `bin/bay vault view` instead.
+    Re-encrypt with `bay vault encrypt` before committing. For a
+    read-only look use `bay vault view` instead.
 
     Examples:
 
-        bin/bay vault decrypt production
+        bay vault decrypt production
     """
     cx = context_from(ctx)
     ansible.vault_cmd("decrypt", _vault_file(cx, env, file), bay_dir=cx.framework_root)
@@ -130,7 +131,7 @@ def set_key(
     """Set one secret key non-interactively (decrypt, modify, re-encrypt).
 
     Writes under the `secrets:` dict, creating it if missing. Mind the
-    casing convention (see `bin/bay vault edit --help`).
+    casing convention (see `bay vault edit --help`).
 
     Prefer stdin. A value passed as an argument lands in the operator's shell
     history and is readable in /proc/<pid>/cmdline by any local user for as
@@ -143,9 +144,9 @@ def set_key(
 
     Examples:
 
-        printf %s 's3cret' | bin/bay vault set production POSTGRES_PASSWORD
-        bin/bay vault set production GITHUB_TOKEN < token.txt
-        bin/bay vault set production POSTGRES_PASSWORD 's3cret'   # deprecated
+        printf %s 's3cret' | bay vault set production POSTGRES_PASSWORD
+        bay vault set production GITHUB_TOKEN < token.txt
+        bay vault set production POSTGRES_PASSWORD 's3cret'   # deprecated
     """
     if value is None:
         if sys.stdin.isatty():

@@ -73,3 +73,17 @@ def typer_ctx(cx):
     import typer
 
     return typer.Context(click.Command("bay"), obj=cx)
+
+
+def patch_fleet(root: Path, framework: Path | None = None):
+    """Make ``Context.resolve`` (what every command calls) return this fleet.
+
+    Use as a context manager around a CLI invocation. The framework root
+    defaults to ``<root>/.bay``, a path that only needs to exist as a name.
+    """
+    from unittest.mock import patch
+
+    from bay_cli.context import Context
+
+    cx = Context.for_fleet_root(root, framework if framework is not None else root / ".bay")
+    return patch.object(Context, "resolve", classmethod(lambda cls, fleet=None: cx))

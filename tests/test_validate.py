@@ -640,7 +640,6 @@ def test_run_validation_returns_result(tmp_path):
     hosts_dir.mkdir()
     (hosts_dir / "production").write_text("[production]\n10.0.0.1\n")
 
-    # Need .bay dir for find_bay_dir — just mock the paths
     with _JsonMode():
         result = run_validation(tmp_path, "production", show_banner=False)
 

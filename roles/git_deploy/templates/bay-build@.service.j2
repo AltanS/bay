@@ -10,7 +10,7 @@ User={{ app_user }}
 OOMScoreAdjust=1000
 # Caps the rebuild.sh wrapper's cgroup. The buildkit sidecar runs in its
 # own cgroup and is sized independently via git_deploy_buildkit_memory_max
-# (applied with `docker update --memory` on buildx_buildkit_argo-builder0).  # legacy-argo: live buildx builder name on hosts, migrate separately
+# (applied with `docker update --memory` on buildx_buildkit_argo-builder0).  # kept-argo: live buildx builder name on hosts, migrate separately
 {% if git_deploy_build_mem_limit | default('') | length > 0 %}
 MemoryMax={{ git_deploy_build_mem_limit }}
 {% endif %}

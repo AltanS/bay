@@ -1,7 +1,7 @@
 """Guard the packaging metadata that a public repo is judged on.
 
-`version.yml` is the framework's real version — consumers pin to it via
-`.bay-version` and Ansible does minimum-version checks against it.
+`version.yml` is the framework's real version — `bay self update` moves between its
+tags and Ansible does minimum-version checks against it.
 `pyproject.toml` carries its own version, and `uv.lock` records that version
 a third time. All three must agree:
 

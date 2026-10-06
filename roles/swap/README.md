@@ -31,7 +31,7 @@ This role is **provision-time** (one-time setup) — wire it into
 Run once per host:
 
 ```bash
-bin/bay provision <env> --tags swap
+bay provision <env> --tags swap
 ```
 
 To disable on a host, set `swap_enabled: false` and re-run — the role

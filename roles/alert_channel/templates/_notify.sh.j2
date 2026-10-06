@@ -5,7 +5,7 @@
   has one. It lives in roles/alert_channel/templates/ and is SYMLINKED into
   each consuming role's templates/ directory, because Ansible's template
   loader searches only the current role's templates/ — there is no cross-role
-  include path. Git stores the links as mode 120000 and `bin/bay install`
+  include path. Git stores the links as mode 120000 and `bay self update`
   restores them (it is a `git clone` + `git checkout`, both symlink-safe).
 
   A rendered-in snippet rather than a library installed on the host: it is

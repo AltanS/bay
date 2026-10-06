@@ -65,11 +65,11 @@ def test_git_deploy_builds_with_the_shared_variable() -> None:
     ]
     for path in sites:
         contents = path.read_text()
-        assert "--builder argo-builder" not in contents, (  # legacy-argo: live buildx builder default, migrate separately
+        assert "--builder argo-builder" not in contents, (  # kept-argo: live buildx builder default, migrate separately
             f"{path.name} hardcodes the builder name; use "
             f"{{{{ bay_buildx_builder }}}} so cronjobs prunes the same builder."
         )
-        assert "--name argo-builder" not in contents, (  # legacy-argo: live buildx builder default, migrate separately
+        assert "--name argo-builder" not in contents, (  # kept-argo: live buildx builder default, migrate separately
             f"{path.name} creates a hardcoded builder name; use "
             f"{{{{ bay_buildx_builder }}}}."
         )
@@ -134,7 +134,7 @@ def _render(**overrides) -> str:
 
 def test_rendered_script_sweeps_both_builders() -> None:
     rendered = _render()
-    assert "PRUNE_BUILDERS=(default argo-builder )" in rendered, rendered  # legacy-argo: live buildx builder default, migrate separately
+    assert "PRUNE_BUILDERS=(default argo-builder )" in rendered, rendered  # kept-argo: live buildx builder default, migrate separately
     assert "docker buildx prune -af --builder" in rendered
     assert 'KEEP=2G' in rendered
 
@@ -147,8 +147,8 @@ def test_rendered_script_honours_a_renamed_builder() -> None:
 
 
 def test_rendered_script_deduplicates_builders() -> None:
-    rendered = _render(docker_prune_builders=["default", "default", "argo-builder"])  # legacy-argo: live buildx builder default, migrate separately
-    assert "PRUNE_BUILDERS=(default argo-builder )" in rendered  # legacy-argo: live buildx builder default, migrate separately
+    rendered = _render(docker_prune_builders=["default", "default", "argo-builder"])  # kept-argo: live buildx builder default, migrate separately
+    assert "PRUNE_BUILDERS=(default argo-builder )" in rendered  # kept-argo: live buildx builder default, migrate separately
 
 
 # --- buildx registrations are per-user --------------------------------------
@@ -195,14 +195,14 @@ def test_unreachable_builder_is_loud_not_silent() -> None:
     assert 'docker inspect "buildx_buildkit_${builder}0"' in rendered
 
 
-# --- `bin/bay prune`, the manual escape hatch, had the same blind spot ------
+# --- `bay prune`, the manual escape hatch, had the same blind spot ------
 
 
 def test_cli_prune_builder_name_matches_role_defaults() -> None:
     from bay_cli.commands import prune
 
     assert prune._BUILDER_NAME == _defaults(_GIT_DEPLOY_DEFAULTS)["bay_buildx_builder"], (
-        "bin/bay prune targets a different builder than git_deploy builds "
+        "bay prune targets a different builder than git_deploy builds "
         "with — it would reclaim nothing (GH#34)."
     )
 
@@ -229,7 +229,7 @@ def test_cli_dry_run_shows_the_honest_cache_number() -> None:
 
 
 def test_cli_resolves_the_builder_owner() -> None:
-    """`bin/bay prune` runs under --become; the builder is registered to the
+    """`bay prune` runs under --become; the builder is registered to the
     app user, so root alone cannot see it (verified live on a consumer host)."""
     from bay_cli.commands import prune
 

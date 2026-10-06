@@ -485,13 +485,14 @@ def test_prune_webhooks_dry_run_lists_without_deleting(tmp_path, monkeypatch):
         resp.raise_for_status = MagicMock()
         return resp
 
-    # Patch find_bay_dir so CLI doesn't fail on missing .bay/
-    import bay_cli.paths as bay_paths
+    # Point Context.resolve at the fixture so the CLI finds a fleet
+    from bay_cli.context import Context
     import bay_cli.github_webhook as gw_mod
     import requests as req_mod
 
-    monkeypatch.setattr(bay_paths, "find_bay_dir", lambda: root / ".bay")
-    monkeypatch.setattr(bay_paths, "consumer_root", lambda d: root)
+    monkeypatch.setattr(
+        Context, "resolve", classmethod(lambda cls, fleet=None: Context.for_fleet_root(root, root / ".bay"))
+    )
     monkeypatch.setattr(req_mod, "get", mock_get)
     monkeypatch.setattr(req_mod, "delete", mock_delete)
 

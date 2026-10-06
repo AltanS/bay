@@ -9,7 +9,7 @@
 # Enabled per-container via `log_retention:` in services.yml. When no
 # container opts in, this role is a no-op.
 
-log_archive_group: argo-logreaders  # legacy-argo: unix group on hosts
+log_archive_group: argo-logreaders  # kept-argo: unix group on hosts
 log_archive_bin_dir: "{{ stack_dir }}/bin"
 log_archive_log_root: "{{ stack_dir }}/logs/services"
 

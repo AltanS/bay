@@ -11,7 +11,7 @@ def test(ctx: typer.Context) -> None:
 
     Examples:
 
-        bin/bay test
+        bay test
     """
     root = context_from(ctx).fleet_root
     runner.run(

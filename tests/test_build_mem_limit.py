@@ -5,7 +5,7 @@ Two distinct knobs are guarded here:
   * `git_deploy_build_mem_limit` — drives systemd `MemoryMax=` on
     bay-build@.service. Caps the rebuild.sh wrapper cgroup.
   * `git_deploy_buildkit_memory_max` — applied via `docker update --memory`
-    on `buildx_buildkit_argo-builder0`. Caps the actual build process,  # legacy-argo: live buildx builder name on hosts, migrate separately
+    on `buildx_buildkit_argo-builder0`. Caps the actual build process,  # kept-argo: live buildx builder name on hosts, migrate separately
     which runs in a separate cgroup from the wrapper.
 
 Regression context:

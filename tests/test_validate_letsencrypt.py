@@ -1,4 +1,4 @@
-"""`bin/bay validate` must hard-fail on a missing Let's Encrypt email.
+"""`bay validate` must hard-fail on a missing Let's Encrypt email.
 
 Traefik uses `letsencrypt_email` unconditionally for the ACME resolver -- the
 framework has no `acme_enabled` opt-out -- so every routed service asks Let's

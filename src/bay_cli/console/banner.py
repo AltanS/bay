@@ -41,8 +41,7 @@ def banner(*, subtitle: str = "", version: str = "") -> None:
 def show_banner(cx: Context | None = None, *, subtitle: str = "") -> None:
     """Print banner with the framework version read from ``cx``.
 
-    Without a Context there is no framework to ask, so the version and the
-    dev-link warning are left out.
+    Without a Context there is no framework to ask, so the version is left out.
     """
     if is_json_mode():
         return
@@ -50,27 +49,6 @@ def show_banner(cx: Context | None = None, *, subtitle: str = "") -> None:
         banner(subtitle=subtitle)
         return
     banner(subtitle=subtitle, version=_get_version(cx))
-    _show_dev_link_warning(cx)
-
-
-def _show_dev_link_warning(cx: Context) -> None:
-    """Show a prominent warning if dev-link mode is active."""
-    try:
-        from bay_cli.paths import is_dev_linked
-
-        if is_dev_linked(cx.fleet_root):
-            from rich.panel import Panel
-
-            console.print(
-                Panel(
-                    "[bold yellow]DEV-LINK ACTIVE[/bold yellow] — .bay/ is symlinked to local framework\n"
-                    "[dim]Run 'bin/bay dev-unlink' to restore pinned version[/dim]",
-                    border_style="yellow",
-                    expand=False,
-                )
-            )
-    except Exception:
-        pass
 
 
 def _get_version(cx: Context) -> str:

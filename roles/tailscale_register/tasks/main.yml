@@ -5,7 +5,7 @@
 #
 # Breaking change: headscale_server_user now defaults to stack_name
 # instead of "server". Existing deployments with nodes registered under user
-# "server" should run `bin/bay gateway migrate-namespace` to rename the old
+# "server" should run `bay gateway migrate-namespace` to rename the old
 # user. Re-deploying without migrating creates a new user (stack_name) but the
 # VPS node stays connected under "server" until its next registration.
 
@@ -108,7 +108,7 @@
   ansible.builtin.fail:
     msg: >-
       headscale_api_key is required in the secrets dict for remote region registration.
-      Generate one with: bin/bay gateway apikey
+      Generate one with: bay gateway apikey
   when: >-
     (_needs_registration | default(false)) and
     not (headscale_server | default(true) | bool) and

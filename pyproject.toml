@@ -24,7 +24,6 @@ dependencies = [
     "rich>=13",
     "jinja2>=3",
     "jsonschema>=4.20",
-    "questionary>=2",
     "ansible-core>=2.17",
     "ruamel-yaml>=0.18",
     "docker>=7",
@@ -46,13 +45,11 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 bay = "bay_cli.cli:_main"
-argo = "bay_cli.cli:_main"  # legacy-argo: remove in 1.1
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"bay_cli.wizard" = ["templates/*.j2"]
 "bay_cli.schemas" = ["*.json"]
 "bay_reconcile" = ["py.typed"]
 

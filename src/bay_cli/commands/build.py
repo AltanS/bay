@@ -379,9 +379,9 @@ def status(
 
     Examples:
 
-        bin/bay build status
-        bin/bay build status --service myapp
-        bin/bay build status --region na --verbose
+        bay build status
+        bay build status --service myapp
+        bay build status --region na --verbose
     """
     from bay_cli.commands.ops import (
         _read_stack_name,
@@ -456,10 +456,10 @@ def reset(
 
     Examples:
 
-        bin/bay build reset myapp
-        bin/bay build reset myapp --keep-history
-        bin/bay build reset myapp --region na
-        bin/bay build reset --all --force
+        bay build reset myapp
+        bay build reset myapp --keep-history
+        bay build reset myapp --region na
+        bay build reset --all --force
     """
     from bay_cli.commands.ops import (
         _all_service_names,

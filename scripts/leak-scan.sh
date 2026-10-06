@@ -152,7 +152,7 @@ pattern=$(IFS='|'; echo "${TERMS[*]}")
 # the identifier check. Naming the repo that hosts the project is not a leak
 # — it is the clone URL every adopter needs — but a bare `SPRQVNTRS` or a
 # bare account name ANYWHERE ELSE still fails, which is the point.
-REPO_SLUG_RE='(github\.com[:/])?(SPRQVNTRS|AltanS)/(argo|bay)(\.git)?'  # legacy-argo: old slug still a leak vector
+REPO_SLUG_RE='(github\.com[:/])?(SPRQVNTRS|AltanS)/(argo|bay)(\.git)?'  # kept-argo: old slug still a leak vector
 hits=$(ggrep -IinE "$pattern" -- "${EXCLUDES[@]}" 2>/dev/null \
         | strip_ref \
         | sed -E "s#${REPO_SLUG_RE}##g" \

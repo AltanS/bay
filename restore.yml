@@ -2,7 +2,7 @@
 # Restore playbook — streams restic snapshot data into containers
 #
 # Usage:
-#   bin/bay backup restore <env> <accessory> [--snapshot ID]
+#   bay backup restore <env> <accessory> [--snapshot ID]
 #
 # Direct ansible-playbook usage:
 #   ansible-playbook restore.yml -e target_host=production -e accessory=postgres -e confirm=yes
@@ -128,7 +128,7 @@
             that: confirm | default('no') | bool
             fail_msg: >-
               Restore requires explicit confirmation. Re-run with -e confirm=yes
-              or use 'bin/bay backup restore' for interactive confirmation.
+              or use 'bay backup restore' for interactive confirmation.
 
         # -- Pre-restore backup ------------------------------------------------
 

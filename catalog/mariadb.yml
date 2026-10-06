@@ -5,7 +5,7 @@ meta:
   category: accessory
   dependencies: []
   post_add_instructions:
-    - "Add MARIADB_ROOT_PASSWORD and MARIADB_PASSWORD to vault: bin/bay vault edit <environment>"
+    - "Add MARIADB_ROOT_PASSWORD and MARIADB_PASSWORD to vault: bay vault edit <environment>"
 
 defaults:
   regions: []

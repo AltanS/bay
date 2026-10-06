@@ -31,10 +31,10 @@ from bay_cli import ansible, console, runner
 from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
-# Mirrors `argo_buildx_builder` in roles/{git_deploy,cronjobs}/defaults/main.yml.  # legacy-argo: live host artifact name, migrate separately
+# Mirrors `argo_buildx_builder` in roles/{git_deploy,cronjobs}/defaults/main.yml.  # kept-argo: live host artifact name, migrate separately
 # Ad-hoc shell has no access to Ansible vars, so the name is repeated here;
 # tests/test_builder_prune.py pins it equal to the role defaults.
-_BUILDER_NAME = "argo-builder"  # legacy-argo: live host artifact name, migrate separately
+_BUILDER_NAME = "argo-builder"  # kept-argo: live host artifact name, migrate separately
 _KEEP_STORAGE = "2G"
 
 # `docker builder prune` only reaches the DEFAULT builder. git_deploy builds
@@ -50,13 +50,13 @@ _KEEP_STORAGE = "2G"
 # spelling first — an unsupported flag errors out without pruning anything, so
 # retrying with the old one is safe.
 # buildx builder registrations are PER-USER, and these commands run under
-# `--become` (root). git_deploy creates the argo builder as the app user, so  # legacy-argo: live host artifact name, migrate separately
-# root's `docker buildx inspect argo-builder` reports "no builder found" even  # legacy-argo: live host artifact name, migrate separately
+# `--become` (root). git_deploy creates the argo builder as the app user, so  # kept-argo: live host artifact name, migrate separately
+# root's `docker buildx inspect argo-builder` reports "no builder found" even  # kept-argo: live host artifact name, migrate separately
 # though the buildkit container is running and its cache volume is on disk.
 # Naming the builder from a root shell is therefore not enough — probe root
 # first, then the users below. `app_user` is a consumer var not available to
 # ad-hoc shell, so the candidates are the conventional names.
-_BUILDER_USERS = "bay argo"  # legacy-argo: pre-1.0 app_user on existing hosts
+_BUILDER_USERS = "bay argo"  # kept-argo: pre-1.0 app_user on existing hosts
 
 # Emits `$owner` = the user whose buildx registry knows $b ("" for root), or
 # returns non-zero. Shared by the prune and the dry run so they never disagree
@@ -94,8 +94,8 @@ _PRUNE_CMD = (
     "docker system prune -af && "
     "if [ -x /usr/local/bin/bay-docker-builder-prune ]; then "
     "  /usr/local/bin/bay-docker-builder-prune; "
-    "elif [ -x /usr/local/bin/argo-docker-builder-prune ]; then "  # legacy-argo: pre-migration host, remove in a future major release
-    "  /usr/local/bin/argo-docker-builder-prune; "  # legacy-argo: pre-migration host, remove in a future major release
+    "elif [ -x /usr/local/bin/argo-docker-builder-prune ]; then "  # kept-argo: pre-migration host, remove in a future major release
+    "  /usr/local/bin/argo-docker-builder-prune; "  # kept-argo: pre-migration host, remove in a future major release
     "else "
     + _RESOLVE_OWNER
     + f"  for b in default {_BUILDER_NAME}; do "
@@ -236,13 +236,13 @@ def prune(
 
     `--volumes` is intentionally omitted to prevent accidental loss of
     postgres / other service data. If you need to prune volumes, do it by
-    hand via `ssh argo-admin@<host> "docker volume prune"`.  # legacy-argo: live host artifact name, migrate separately
+    hand via `ssh argo-admin@<host> "docker volume prune"`.  # kept-argo: live host artifact name, migrate separately
 
     Examples:
 
-        bin/bay prune production --dry-run
-        bin/bay prune production
-        bin/bay prune production --target all
+        bay prune production --dry-run
+        bay prune production
+        bay prune production --target all
     """
     if target not in {"build", "all"}:
         raise BayError(

@@ -45,11 +45,11 @@ def test_skill_md_covers_the_top_level_commands():
     """A generator that silently emitted an empty tree would still be 'in sync'."""
     text = _SKILL.read_text()
     for command in ("deploy", "provision", "validate", "vault edit", "gateway enroll"):
-        assert f"`bin/bay {command}" in text, f"{command} missing from SKILL.md"
+        assert f"`bay {command}" in text, f"{command} missing from SKILL.md"
 
 
 def test_generated_summaries_carry_no_source_comments():
-    """Docstrings carry `# legacy-argo:`-style tags; SKILL.md ships to consumers.
+    """Docstrings carry `# kept-argo:`-style tags; SKILL.md ships to consumers.
 
     One of these leaked into the first cut of the file, so the stripping is
     asserted rather than assumed.
@@ -57,7 +57,7 @@ def test_generated_summaries_carry_no_source_comments():
     generated = _SKILL.read_text().split("BEGIN GENERATED CLI REFERENCE")[1]
     offenders = [
         line for line in generated.splitlines()
-        if line.startswith("- `bin/bay") and " # " in line
+        if line.startswith("- `bay") and " # " in line
     ]
     assert not offenders, f"source comments leaked into SKILL.md: {offenders}"
 

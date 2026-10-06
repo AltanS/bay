@@ -1,6 +1,6 @@
 """Validate's network probe cache (M111-04 / audit P2).
 
-`bin/bay validate` runs `git ls-remote` per build service and `skopeo inspect`
+`bay validate` runs `git ls-remote` per build service and `skopeo inspect`
 per image service, on every invocation — including the implicit validate that
 every deploy runs. The cache turns a repeat run inside the TTL into zero
 subprocesses.

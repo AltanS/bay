@@ -25,13 +25,13 @@ def doctor(
     DNS resolution of your first service domain and the headscale domain,
     gateway configuration, and (when configured) GitHub webhook health.
     Exits 1 when issues are found.
-    Complements `bin/bay validate`, which checks config files rather than
+    Complements `bay validate`, which checks config files rather than
     the environment.
 
     Examples:
 
-        bin/bay doctor
-        bin/bay doctor testing
+        bay doctor
+        bay doctor testing
     """
     cx = context_from(ctx)
     root = cx.fleet_root

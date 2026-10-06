@@ -63,7 +63,7 @@ def test_list_marks_muted_alerts(consumer, capsys):
 
 def test_list_shows_alerts_test_still_delivered_by_default(consumer, capsys):
     """alerts.test is the one info alert that stays enabled_by_default: true —
-    `bin/bay alerts test` (and its dry run) depend on that. A sibling info
+    `bay alerts test` (and its dry run) depend on that. A sibling info
     alert (deploy.complete) must show the opt-in "default off" state instead."""
     _write(consumer, {"alert_recipients": [_webhook("chat", "https://c.invalid", "info")]})
     alerts.list_alerts(_c(consumer), recipient=None, level=None, as_json=True)

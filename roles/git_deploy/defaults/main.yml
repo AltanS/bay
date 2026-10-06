@@ -7,10 +7,10 @@
 # `docker builder prune` only touches the *default* builder, so a mismatch
 # means the build cache is never reclaimed (GH#34). tests/test_builder_prune.py
 # asserts the two defaults agree.
-bay_buildx_builder: "argo-builder"  # legacy-argo: live buildx builder / image prefix on hosts, migrate separately
+bay_buildx_builder: "argo-builder"  # kept-argo: live buildx builder / image prefix on hosts, migrate separately
 
 git_deploy_build_dir: "{{ stack_dir }}/builds"
-git_deploy_image_prefix: "argo-{{ stack_name }}"  # legacy-argo: live buildx builder / image prefix on hosts, migrate separately
+git_deploy_image_prefix: "argo-{{ stack_name }}"  # kept-argo: live buildx builder / image prefix on hosts, migrate separately
 
 # Default build strategy for services with build: blocks.
 # Per-service build.strategy overrides this. Values: local | remote | registry
@@ -31,7 +31,7 @@ git_deploy_build_mem_limit: "2G"
 
 # Hard memory limit for the buildx builder container (the buildkit sidecar
 # that does the actual `docker build`). Applied via `docker update --memory`
-# on `buildx_buildkit_argo-builder0`. The wrapper cgroup (above) typically  # legacy-argo: live buildx builder / image prefix on hosts, migrate separately
+# on `buildx_buildkit_argo-builder0`. The wrapper cgroup (above) typically  # kept-argo: live buildx builder / image prefix on hosts, migrate separately
 # uses 30–100 MB; all real build memory pressure is in this container.
 # Defaults to the wrapper var so consumers who already overrode
 # git_deploy_build_mem_limit (e.g. infra hosts that bumped it to 3G) keep a
@@ -92,7 +92,7 @@ git_deploy_registry_cache: false
 # per build: the remote one when it answers, the local docker-container
 # builder (bay_buildx_builder) when it does not. One script makes that choice,
 # {{ stack_dir }}/bin/select-builder.sh, and both build paths call it:
-# rebuild.sh (webhook auto-builds) and remote_build.yml (`bin/bay deploy`).
+# rebuild.sh (webhook auto-builds) and remote_build.yml (`bay deploy`).
 #
 # Endpoint. Empty turns the feature off: no cert files, no remote builder,
 # and select-builder.sh always prints the local builder name. Example:
@@ -143,7 +143,7 @@ git_deploy_webhook_peer_timeout: 10
 # Circuit breaker: max consecutive build failures before disabling auto-builds.
 # After this many failures, rebuild.sh blocks subsequent pushes and emits a
 # rate-limited Telegram alert (see the Phase 3 visibility fix).
-# Reset with: bin/bay build reset <service>
+# Reset with: bay build reset <service>
 # Bumped from 3 -> 5 after the 2026-04-16 incident: 3 was too aggressive
 # during active dev/debug — a single broken commit pushed three times in
 # rapid succession would silently trip the breaker. 5 leaves operators headroom

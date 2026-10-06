@@ -106,7 +106,7 @@
         "healthcheck_path": {
           "type": "string",
           "pattern": "^/.+",
-          "description": "Path probed by `bin/bay healthcheck`. Use a route that exercises the dynamic backend (e.g. `/healthcheck`) when nginx and the app share a container — probing `/` would return nginx's static response even if the app process is dead."
+          "description": "Path probed by `bay healthcheck`. Use a route that exercises the dynamic backend (e.g. `/healthcheck`) when nginx and the app share a container — probing `/` would return nginx's static response even if the app process is dead."
         },
         "middleware": {
           "type": "object",
@@ -220,7 +220,7 @@
         },
         "expose_host_ack": {
           "type": "boolean",
-          "description": "Required acknowledgement for `expose: host`. A host-published port is DNAT'd in PREROUTING and never reaches the nftables `input` chain, so it is never seen by the CrowdSec bouncer. `bin/bay validate` fails on `expose: host` unless this flag is true. Setting it changes nothing about the rendered port binding — it records a reviewed acceptance of the bypass."
+          "description": "Required acknowledgement for `expose: host`. A host-published port is DNAT'd in PREROUTING and never reaches the nftables `input` chain, so it is never seen by the CrowdSec bouncer. `bay validate` fails on `expose: host` unless this flag is true. Setting it changes nothing about the rendered port binding — it records a reviewed acceptance of the bypass."
         },
         "env": {
           "$ref": "#/$defs/env_block"
@@ -393,7 +393,7 @@
         },
         "expose_host_ack": {
           "type": "boolean",
-          "description": "Required acknowledgement for `ports.expose: host`. A host-published port is DNAT'd in PREROUTING and never reaches the nftables `input` chain, so it is never seen by the CrowdSec bouncer. `bin/bay validate` fails on `expose: host` unless this flag is true. Setting it changes nothing about the rendered port binding — it records a reviewed acceptance of the bypass."
+          "description": "Required acknowledgement for `ports.expose: host`. A host-published port is DNAT'd in PREROUTING and never reaches the nftables `input` chain, so it is never seen by the CrowdSec bouncer. `bay validate` fails on `expose: host` unless this flag is true. Setting it changes nothing about the rendered port binding — it records a reviewed acceptance of the bypass."
         }
       },
       "additionalProperties": false

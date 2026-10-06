@@ -1283,7 +1283,7 @@ def bay_spec_hash(spec, env_digest=None):
     HASH_LABEL = "com.bay.config-hash"
     # The pre-1.0 spelling is excluded too, so a spec that still carries it
     # hashes identically to one that does not.
-    LEGACY_HASH_LABEL = "com.argo.config-hash"  # legacy-argo: dual-read, remove in a future major release
+    LEGACY_HASH_LABEL = "com.argo.config-hash"  # kept-argo: dual-read, remove in a future major release
 
     # Exclude transient / meta fields that should not drive recreation
     _EXCLUDED = {"type", "build", "zero_downtime", "health_check_timeout", "env_file"}

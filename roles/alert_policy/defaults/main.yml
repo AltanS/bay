@@ -19,7 +19,7 @@
 #
 # The role is included by BOTH provision.yml and deploy.yml. That is the actual
 # fix for the GH#33 class of bug: outbound_monitor lives in provision.yml, so
-# `bin/bay deploy` never re-rendered it and it shipped an empty webhook URL
+# `bay deploy` never re-rendered it and it shipped an empty webhook URL
 # for ~3 months while every other emitter worked.
 alert_policy_path: /etc/bay/alert-overrides
 
@@ -34,6 +34,6 @@ alert_policy_mute_until: 0
 
 # Bumped only on an incompatible change to the file format. A reader that does
 # not recognise the major ignores the file entirely and falls back to baked
-# behaviour, because `bin/bay install` can check out an older framework while
-# the host keeps a newer file.
+# behaviour, because `bay self update --to <tag>` can move the framework back
+# to an older release while the host keeps a newer file.
 alert_policy_schema_version: 1

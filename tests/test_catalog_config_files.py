@@ -1,7 +1,7 @@
 """Every catalog `config_files` entry must have a file behind it.
 
 `catalog/gatus/definition.yml` declared `config_files: [gatus/config.yaml]`
-for its whole life and no such file was ever shipped. `bin/bay service add`
+for its whole life and no such file was ever shipped. `bay service add`
 copied nothing (its source directory did not exist), the wizard copied
 nothing at all, and the failure surfaced on the server, mid-deploy, at the
 "Deploy config files" task — for the wizard's *default* service.
@@ -57,7 +57,7 @@ def test_gatus_config_is_one_60s_http_endpoint() -> None:
 
 
 def test_example_ships_the_files_it_declares() -> None:
-    """`setup --no-interactive` copies example/ verbatim, gaps included."""
+    """The example tree must ship every file its services.yml declares."""
     import yaml
 
     services = yaml.safe_load(

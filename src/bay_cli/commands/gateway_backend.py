@@ -143,7 +143,7 @@ def _user_not_found(name: str) -> BayError:
 #
 # `GatewayBackend` is minted from LocalHeadscaleBackend's existing method
 # list rather than designed fresh — that class was already the de facto
-# interface, so this only writes down what `bin/bay gateway` had always
+# interface, so this only writes down what `bay gateway` had always
 # assumed. A backend with EQUIVALENT semantics (a remote-headscale or a
 # tailscale.com control plane) can be dropped in as a new class with no
 # change to gateway.py's command logic.
@@ -161,7 +161,7 @@ def _user_not_found(name: str) -> BayError:
 # concept would be speculative generality with zero second implementations.
 @runtime_checkable
 class GatewayBackend(Protocol):
-    """Operations `bin/bay gateway` needs from an access-gateway backend."""
+    """Operations `bay gateway` needs from an access-gateway backend."""
 
     def list_nodes(self) -> list[dict]: ...
     def list_users(self) -> list[dict]: ...

@@ -227,8 +227,8 @@ def list_snapshots(
 
     Examples:
 
-        bin/bay backup list postgres
-        bin/bay backup list headscale
+        bay backup list postgres
+        bay backup list headscale
     """
     cx = context_from(ctx)
     bay_dir = cx.framework_root
@@ -292,8 +292,8 @@ def run(
 
     Examples:
 
-        bin/bay backup run postgres
-        bin/bay backup run
+        bay backup run postgres
+        bay backup run
     """
     cx = context_from(ctx)
     bay_dir = cx.framework_root
@@ -339,8 +339,8 @@ def restore(
 
     Examples:
 
-        bin/bay backup restore production postgres
-        bin/bay backup restore production postgres --snapshot ab12cd34
+        bay backup restore production postgres
+        bay backup restore production postgres --snapshot ab12cd34
     """
     cx = context_from(ctx)
     bay_dir = cx.framework_root
@@ -425,7 +425,7 @@ def status(
 
     Examples:
 
-        bin/bay backup status
+        bay backup status
     """
     cx = context_from(ctx)
     bay_dir = cx.framework_root
@@ -502,7 +502,7 @@ def status(
     # Both spellings: a host that has not yet run the rename_migration role
     # still has the pre-1.0 backup timers.
     timer_cmd = (
-        "systemctl list-timers 'bay-backup@*' 'argo-backup@*' "  # legacy-argo: dual-read, remove in a future major release
+        "systemctl list-timers 'bay-backup@*' 'argo-backup@*' "  # kept-argo: dual-read, remove in a future major release
         "--no-pager --plain 2>/dev/null | head -5"
     )
     try:
@@ -511,7 +511,7 @@ def status(
         timer_lines = [
             line
             for line in timer_out.split("\n")
-            if "bay-backup" in line or "argo-backup" in line  # legacy-argo: dual-read, remove in a future major release
+            if "bay-backup" in line or "argo-backup" in line  # kept-argo: dual-read, remove in a future major release
         ]
         if timer_lines:
             _console.print(f"\n[dim]Next timer: {timer_lines[0].strip()}[/dim]")
@@ -530,8 +530,8 @@ def check(
 
     Examples:
 
-        bin/bay backup check postgres
-        bin/bay backup check postgres --read-data
+        bay backup check postgres
+        bay backup check postgres --read-data
     """
     cx = context_from(ctx)
     bay_dir = cx.framework_root

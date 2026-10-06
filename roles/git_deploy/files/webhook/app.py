@@ -41,7 +41,7 @@ IS_BUILD_SERVER = os.environ.get("IS_BUILD_SERVER", "").lower() in ("1", "true",
 FORWARD_HEADER = "X-Bay-Webhook-Forwarded"
 # A peer still running the pre-1.0 receiver forwards under the old header
 # name; accept it on receive so a half-upgraded fleet cannot bounce forever.
-LEGACY_FORWARD_HEADER = "X-Argo-Webhook-Forwarded"  # legacy-argo: dual-read, remove in a future major release
+LEGACY_FORWARD_HEADER = "X-Argo-Webhook-Forwarded"  # kept-argo: dual-read, remove in a future major release
 
 # Header sent by the build server after a successful remote build+push.
 # When a deployment server receives this, it skips branch/path filtering
@@ -50,7 +50,7 @@ LEGACY_FORWARD_HEADER = "X-Argo-Webhook-Forwarded"  # legacy-argo: dual-read, re
 # Pull signals are inherently terminal — they are NEVER forwarded again.
 PULL_SIGNAL_HEADER = "X-Bay-Pull-Signal"
 # A build server still on the pre-1.0 rebuild.sh sends the old header.
-LEGACY_PULL_SIGNAL_HEADER = "X-Argo-Pull-Signal"  # legacy-argo: dual-read, remove in a future major release
+LEGACY_PULL_SIGNAL_HEADER = "X-Argo-Pull-Signal"  # kept-argo: dual-read, remove in a future major release
 
 CONFIG_FILE = Path(os.environ.get("CONFIG_FILE", "/config/services.json"))
 IMAGE_MAP_FILE = Path(os.environ.get("IMAGE_MAP_FILE", "/config/image-map.json"))
@@ -469,7 +469,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         # Writes "pull" to the trigger file so rebuild.sh runs the pull-only path.
         if (
             self.headers.get(PULL_SIGNAL_HEADER) == "1"
-            or self.headers.get(LEGACY_PULL_SIGNAL_HEADER) == "1"  # legacy-argo: dual-read, remove in a future major release
+            or self.headers.get(LEGACY_PULL_SIGNAL_HEADER) == "1"  # kept-argo: dual-read, remove in a future major release
         ):
             TRIGGER_DIR.mkdir(parents=True, exist_ok=True)
             trigger_path = TRIGGER_DIR / f"{service}.trigger"
@@ -569,7 +569,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
             peer_urls = svc_config.get("peer_urls") or {}
             is_forwarded = (
                 self.headers.get(FORWARD_HEADER) == "1"
-                or self.headers.get(LEGACY_FORWARD_HEADER) == "1"  # legacy-argo: dual-read, remove in a future major release
+                or self.headers.get(LEGACY_FORWARD_HEADER) == "1"  # kept-argo: dual-read, remove in a future major release
             )
             write_local, forward_targets = compute_routing(
                 LOCAL_REGION, service_regions, peer_urls, is_forwarded

@@ -10,7 +10,7 @@
 # Runs as root (via systemd) with UMask=0027 so new files are
 # group-readable but not world-readable. Live log files are created
 # once by the Ansible role with per-mode ownership (0640
-# app_user:argo-logreaders for normal, 0600 root:root for sensitive);  # legacy-argo: unix group on hosts
+# app_user:argo-logreaders for normal, 0600 root:root for sensitive);  # kept-argo: unix group on hosts
 # this script only APPENDS to them, preserving the Ansible-set perms.
 # Malformed sidecar files created here get their final ownership
 # applied via explicit chown/chmod based on the service mode arg.

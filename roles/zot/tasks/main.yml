@@ -91,7 +91,7 @@
     path: /etc/hosts
     # Matches the pre-1.0 marker spelling too, so a host pinned before the
     # rename still gets its stale line removed.
-    regexp: '^.*# (argo|bay)-managed: zot registry tailnet pin.*$'  # legacy-argo: dual-read, remove in a future major release
+    regexp: '^.*# (argo|bay)-managed: zot registry tailnet pin.*$'  # kept-argo: dual-read, remove in a future major release
     state: absent
   become: true
   become_user: root

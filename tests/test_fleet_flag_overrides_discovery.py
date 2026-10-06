@@ -1,9 +1,10 @@
-"""Fleet discovery: `--fleet`, `BAY_FLEET`, the fleets dir, and the walk-up fallback.
+"""Fleet discovery: `--fleet`, `BAY_FLEET`, the fleet a bay.toml names, `BAY_FLEET_NAME`.
 
-`Context.resolve` is the one place that finds the project. The order is
-`--fleet`, then `BAY_FLEET`, then `~/.config/bay/fleets/<name>` (only with
-`BAY_FLEET_NAME` set), then (this
-transition only, removed in S08) walking up from the working directory.
+`Context.resolve` is the one place that finds the fleet. The order is
+`--fleet`, then `BAY_FLEET`, then the fleet named by the nearest bay.toml,
+then `~/.config/bay/fleets/<name>` (only with `BAY_FLEET_NAME` set). With none
+of these there is no fleet and the error lists the ways to pick one. Nothing
+walks up to a framework clone.
 """
 
 from __future__ import annotations
@@ -16,11 +17,11 @@ from typer.testing import CliRunner
 
 from bay_cli import cli
 from bay_cli.context import (
+    SOURCE_BAY_TOML,
     SOURCE_CWD,
     SOURCE_ENV,
     SOURCE_FLAG,
     SOURCE_FLEETS_DIR,
-    SOURCE_WALK_UP,
     Context,
     context_from,
     context_or_cwd,
@@ -57,11 +58,12 @@ def _probe_app() -> typer.Typer:
     return app
 
 
-def _fake_consumer(tmp_path: Path) -> Path:
-    """A consumer repo with a `.bay/` framework clone (what walk-up looks for)."""
-    root = tmp_path / "consumer"
-    (root / ".bay" / ".git").mkdir(parents=True)
+def _app_repo(tmp_path: Path, fleet: str | None = "acme") -> Path:
+    """An app repo with a bay.toml (naming a fleet, unless ``fleet`` is None)."""
+    root = tmp_path / "app"
     (root / "sub" / "dir").mkdir(parents=True)
+    named = f'fleet = "{fleet}"\n' if fleet else ""
+    (root / "bay.toml").write_text(f'name = "app"\n{named}')
     return root
 
 
@@ -78,11 +80,11 @@ def _lines(output: str) -> dict[str, str]:
 def test_fleet_flag_overrides_discovery(
     tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`bay --fleet <dir> <cmd>` wins over BAY_FLEET and over walk-up."""
-    consumer = _fake_consumer(tmp_path)
+    """`bay --fleet <dir> <cmd>` wins over BAY_FLEET and over a bay.toml."""
+    app = _app_repo(tmp_path)
     flag_fleet = _fleet_dir(tmp_path, "flag-fleet")
     env_fleet = _fleet_dir(tmp_path, "env-fleet")
-    monkeypatch.chdir(consumer / "sub" / "dir")
+    monkeypatch.chdir(app / "sub" / "dir")
     monkeypatch.setenv("BAY_FLEET", str(env_fleet))
 
     result = CliRunner().invoke(_probe_app(), ["--fleet", str(flag_fleet), "probe"])
@@ -93,7 +95,7 @@ def test_fleet_flag_overrides_discovery(
     assert out["source"] == SOURCE_FLAG
     assert out["group_vars"] == str(flag_fleet.resolve() / "group_vars")
     assert out["vault_pass"] == str(flag_fleet.resolve() / ".vault_pass")
-    # A fleet found by path carries no .bay/ clone: the framework is this package's repo.
+    # The framework is the repo this package runs from.
     assert out["framework"] == str(package_root())
 
 
@@ -114,8 +116,7 @@ def test_bay_fleet_env_var_resolves_to_the_given_dir(
 def test_missing_fleet_dir_is_an_error_not_a_fallback(
     tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    consumer = _fake_consumer(tmp_path)
-    monkeypatch.chdir(consumer)
+    monkeypatch.chdir(tmp_path)
     with pytest.raises(BayError, match="fleet directory not found"):
         Context.resolve(tmp_path / "nope")
     monkeypatch.setenv("BAY_FLEET", str(tmp_path / "nope"))
@@ -123,30 +124,38 @@ def test_missing_fleet_dir_is_an_error_not_a_fallback(
         Context.resolve(None)
 
 
-def test_a_lone_fleet_is_not_auto_picked_over_walk_up(
+def test_a_lone_fleet_is_not_auto_picked(
     tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One fleet dir and no BAY_FLEET_NAME: a consumer repo must still win.
-
-    Otherwise the first fleet created on a machine would capture every
-    `bin/bay` run inside fleet-a or fleet-b. S08 may reinstate it.
-    """
+    """One fleet dir and no name anywhere: still an error, never a guess."""
     (home / ".config" / "bay" / "fleets" / "acme").mkdir(parents=True)
-    consumer = _fake_consumer(tmp_path)
-    monkeypatch.chdir(consumer / "sub")
+    monkeypatch.chdir(tmp_path)
 
-    cx = Context.resolve(None)
-
-    assert cx.source == SOURCE_WALK_UP
-    assert cx.fleet_root == consumer
+    with pytest.raises(BayError, match="no fleet selected"):
+        Context.resolve(None)
 
 
-def test_bay_fleet_name_selects_a_fleet_over_walk_up(
+def test_the_error_lists_the_ways_to_pick_a_fleet(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(BayError) as caught:
+        Context.resolve(None)
+
+    hint = caught.value.hint or ""
+    assert "--fleet <path>" in hint
+    assert "BAY_FLEET=<path>" in hint
+    assert "BAY_FLEET_NAME=<name>" in hint
+    assert "bay fleet init" in hint
+
+
+def test_bay_fleet_name_selects_a_fleet(
     tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     only = home / ".config" / "bay" / "fleets" / "acme"
     only.mkdir(parents=True)
-    monkeypatch.chdir(_fake_consumer(tmp_path))
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BAY_FLEET_NAME", "acme")
 
     cx = Context.resolve(None)
@@ -162,6 +171,7 @@ def test_bay_fleet_name_picks_one_of_several(
     base = home / ".config" / "bay" / "fleets"
     (base / "acme").mkdir(parents=True)
     (base / "beta").mkdir()
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BAY_FLEET_NAME", "beta")
 
     assert Context.resolve(None).fleet_root == (base / "beta").resolve()
@@ -171,46 +181,81 @@ def test_bay_fleet_name_picks_one_of_several(
         Context.resolve(None)
 
 
-def test_fleets_without_a_name_do_not_guess(
+def test_the_fleet_named_in_bay_toml_is_found_from_a_subdirectory(
     tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Several fleets and no name: step 3 is off, so walk-up decides (the transition)."""
     base = home / ".config" / "bay" / "fleets"
     (base / "acme").mkdir(parents=True)
     (base / "beta").mkdir()
-    consumer = _fake_consumer(tmp_path)
-    monkeypatch.chdir(consumer)
-
-    cx = Context.resolve(None)
-
-    assert cx.source == SOURCE_WALK_UP
-    assert cx.fleet_root == consumer
-
-
-def test_walk_up_fallback_still_works_from_a_consumer_tree(
-    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Transition fallback: every current consumer command keeps resolving unchanged."""
-    consumer = _fake_consumer(tmp_path)
-    monkeypatch.chdir(consumer / "sub" / "dir")
+    app = _app_repo(tmp_path, fleet="acme")
+    monkeypatch.chdir(app / "sub" / "dir")
 
     result = CliRunner().invoke(_probe_app(), ["probe"])
 
     assert result.exit_code == 0, result.output
     out = _lines(result.output)
-    assert out["fleet"] == str(consumer)
-    assert out["framework"] == str(consumer / ".bay")
-    assert out["source"] == SOURCE_WALK_UP
+    assert out["fleet"] == str((base / "acme").resolve())
+    assert out["source"] == SOURCE_BAY_TOML
+    assert out["framework"] == str(package_root())
 
 
-def test_walk_up_fails_outside_a_consumer_tree(
+def test_bay_toml_beats_bay_fleet_name_and_loses_to_bay_fleet(
     tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    empty = tmp_path / "empty"
-    empty.mkdir()
-    monkeypatch.chdir(empty)
-    with pytest.raises(BayError, match="bay not found"):
+    base = home / ".config" / "bay" / "fleets"
+    (base / "acme").mkdir(parents=True)
+    (base / "beta").mkdir()
+    env_fleet = _fleet_dir(tmp_path, "env-fleet")
+    monkeypatch.chdir(_app_repo(tmp_path, fleet="acme"))
+    monkeypatch.setenv("BAY_FLEET_NAME", "beta")
+
+    assert Context.resolve(None).fleet_root == (base / "acme").resolve()
+
+    monkeypatch.setenv("BAY_FLEET", str(env_fleet))
+    assert Context.resolve(None).fleet_root == env_fleet.resolve()
+
+
+def test_a_bay_toml_without_a_fleet_does_not_select_one(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(_app_repo(tmp_path, fleet=None))
+    with pytest.raises(BayError, match="no fleet selected"):
         Context.resolve(None)
+
+
+def test_a_bay_toml_naming_a_missing_fleet_is_an_error(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(_app_repo(tmp_path, fleet="ghost"))
+    with pytest.raises(BayError, match="fleet 'ghost' not found"):
+        Context.resolve(None)
+
+
+def test_a_framework_clone_in_the_tree_is_not_walked_up_to(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The old consumer layout (a `.bay/` clone above the working directory) finds nothing."""
+    legacy = tmp_path / "legacy"
+    (legacy / ".bay" / ".git").mkdir(parents=True)
+    (legacy / "sub").mkdir()
+    monkeypatch.chdir(legacy / "sub")
+
+    with pytest.raises(BayError, match="no fleet selected"):
+        Context.resolve(None)
+
+
+def test_resolving_a_fleet_binds_ansible_to_it(
+    tmp_path: Path, home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bay_cli import ansible
+
+    fleet = _fleet_dir(tmp_path)
+    assert "--directory" not in ansible._uv_run_cmd(tmp_path)
+
+    Context.resolve(fleet)
+
+    cmd = ansible._uv_run_cmd(tmp_path)
+    assert cmd[cmd.index("--directory") + 1] == str(fleet.resolve())
 
 
 def test_derived_paths_come_from_the_fleet_root(tmp_path: Path) -> None:

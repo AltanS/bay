@@ -6,7 +6,7 @@ meta:
   domain_prefix: vault
   dependencies: []
   post_add_instructions:
-    - "Add ADMIN_TOKEN to vault: bin/bay vault edit <environment>"
+    - "Add ADMIN_TOKEN to vault: bay vault edit <environment>"
 
 defaults:
   access: vpn

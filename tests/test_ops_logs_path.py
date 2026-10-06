@@ -1,4 +1,4 @@
-"""Tests for the `bin/bay logs --path` CLI subcommand.
+"""Tests for the `bay logs --path` CLI subcommand.
 
 Covers:
 - `_is_date_shaped()` — YYYY-MM-DD detection, duration rejection.
@@ -28,6 +28,7 @@ from bay_cli.commands.ops import (
     _is_date_shaped,
     logs,
 )
+from helpers import patch_fleet
 
 
 # ── pure-function tests ──────────────────────────────────────────────
@@ -110,12 +111,8 @@ accessories: {}
 
 
 def _patch_paths(root: Path):
-    """Patch paths.find_bay_dir + paths.consumer_root to point at our fixture."""
-    return patch.multiple(
-        "bay_cli.commands.ops.paths",
-        find_bay_dir=lambda: root / ".bay",
-        consumer_root=lambda bay_dir: root,
-    )
+    """Point Context.resolve at our fixture."""
+    return patch_fleet(root)
 
 
 # --path — happy path

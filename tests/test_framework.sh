@@ -179,59 +179,6 @@ check_var example/group_vars/all/vpn_access.yml vpn_allowed_ips
 check_var example/group_vars/production/domains.yml letsencrypt_email
 check_var example/group_vars/production/secrets.yml secrets
 
-# ── Wizard templates vs example ──────────────────────────────────────────
-section "Wizard/example sync"
-
-# `setup --no-interactive` copies example/ verbatim; the wizard renders
-# wizard/templates/*.j2 instead. Both paths must produce the same consumer, so
-# any file shipped in both places has to stay byte-identical. Every pair below
-# is a STATIC duplicate — 7 of the 8 contain no Jinja at all and are ".j2" in
-# name only — which is exactly the shape that drifts unnoticed. Three had
-# already diverged when this guard was written: test_infra.sh.j2 was missing a
-# diagnostic block, gitignore.j2 was missing `.first_deploy_done` (a real
-# runtime marker, so wizard-scaffolded consumers committed it), and
-# ansible_cfg.j2 was missing a comment that itself asked for these to be kept
-# in sync. An honor-system comment is what failed; this check replaces it.
-#
-# `raw` pairs are example/ wrapped in {% raw %}…{% endraw %} (needed when the
-# content contains Jinja-looking text); `direct` pairs are byte-for-byte copies.
-check_j2_sync() {
-  local mode="$1" src="$2" j2="$3"
-  if [[ ! -f "$BAY_DIR/$src" || ! -f "$BAY_DIR/$j2" ]]; then
-    fail "sync check: missing $src or $j2"
-    return
-  fi
-
-  local actual regen
-  if [[ "$mode" == raw ]]; then
-    # Note the '%s' forms: printf treats a bare {% raw %} as a format string and
-    # mangles it ("%r" -> invalid, "%e" -> 0.000000e+00). This message is only
-    # ever read mid-drift, so a command that corrupts the file it is meant to
-    # repair is worse than no message at all.
-    actual=$(sed -e 's/^{% raw %}//' -e '/^{% endraw %}$/d' "$BAY_DIR/$j2")
-    regen="{ printf '%s' '{% raw %}'; cat $src; printf '%s\\n' '{% endraw %}'; } > $j2"
-  else
-    actual=$(cat "$BAY_DIR/$j2")
-    regen="cp $src $j2"
-  fi
-
-  if diff -q <(printf '%s\n' "$actual") "$BAY_DIR/$src" >/dev/null 2>&1; then
-    pass "$j2 matches $src"
-  else
-    fail "$j2 has drifted from $src (regenerate: $regen)"
-  fi
-}
-
-check_j2_sync raw    example/tests/test_infra.sh src/bay_cli/wizard/templates/test_infra.sh.j2
-check_j2_sync direct example/.gitignore          src/bay_cli/wizard/templates/gitignore.j2
-check_j2_sync direct example/ansible.cfg         src/bay_cli/wizard/templates/ansible_cfg.j2
-check_j2_sync direct example/deploy.yml          src/bay_cli/wizard/templates/deploy.yml.j2
-check_j2_sync direct example/provision.yml       src/bay_cli/wizard/templates/provision.yml.j2
-check_j2_sync direct example/restore.yml         src/bay_cli/wizard/templates/restore.yml.j2
-check_j2_sync direct example/webhook.yml         src/bay_cli/wizard/templates/webhook.yml.j2
-check_j2_sync direct example/Makefile            src/bay_cli/wizard/templates/makefile.j2
-check_j2_sync direct example/group_vars/all/alerts.yml src/bay_cli/wizard/templates/alerts.yml.j2
-
 # ── Summary ──────────────────────────────────────────────────────────────
 section "Results"
 printf "  %d passed, %d failed\n" "$PASS" "$FAIL"

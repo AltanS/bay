@@ -145,9 +145,9 @@ def _apply_hint() -> None:
     happened in the first place.
     """
     console.info("Apply with:")
-    console.info("  bin/bay validate")
-    console.info("  bin/bay deploy <env> --tags alert_policy")
-    console.info("  bin/bay provision <env> --tags alert_policy")
+    console.info("  bay validate")
+    console.info("  bay deploy <env> --tags alert_policy")
+    console.info("  bay provision <env> --tags alert_policy")
 
 
 # ── list ─────────────────────────────────────────────────────────────────
@@ -250,7 +250,7 @@ def _match_ids(registry: dict[str, Any], pattern: str) -> list[str]:
     matched = sorted(a for a in registry if fnmatch.fnmatchcase(a, pattern))
     if not matched:
         raise BayError(
-            f"No alert matches {pattern!r}. See `bin/bay alerts list` for valid IDs."
+            f"No alert matches {pattern!r}. See `bay alerts list` for valid IDs."
         )
     return matched
 
@@ -378,7 +378,7 @@ def doctor(ctx: typer.Context) -> None:
         elif until and until <= now:
             console.info(
                 f"{len(mutes)} mute(s) listed but expired — they are inert. "
-                f"Run `bin/bay alerts enable '*'` to clear the list."
+                f"Run `bay alerts enable '*'` to clear the list."
             )
         else:
             problems.append(
@@ -418,7 +418,7 @@ def test_alert(
     registry = _load_registry()
     if alert_id not in registry:
         raise BayError(
-            f"Unknown alert {alert_id!r}. See `bin/bay alerts list` for valid IDs."
+            f"Unknown alert {alert_id!r}. See `bay alerts list` for valid IDs."
         )
 
     cx = context_from(ctx)

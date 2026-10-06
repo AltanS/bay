@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scrub-logs.sh — GDPR erasure for archived logs (ADR-002).
 #
-# Called on-host by `bin/bay logs --scrub <svc> --pattern <regex> --yes`.
+# Called on-host by `bay logs --scrub <svc> --pattern <regex> --yes`.
 # Removes lines matching <pattern> from:
 #   - live.log (pauses archiver timer during the edit)
 #   - every <date>.log.gz in the service directory (decompress → filter →

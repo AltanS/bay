@@ -14,7 +14,7 @@
 # legacy Telegram + webhook variables directly, guarded only by "is the URL
 # set". That made them unroutable and unmutable. `_bay_alert_id` was set beside
 # them purely to satisfy the registry drift test — nothing ever read it, so
-# `bin/bay alerts disable deploy.complete` silently did nothing.
+# `bay alerts disable deploy.complete` silently did nothing.
 #
 # Now the same three inputs decide delivery here as on the host: the registry's
 # enabled_by_default, the recipient's min_level, and the alerts_disabled /

@@ -3,7 +3,7 @@
 Before this, `send_alert()` in roles/git_deploy/files/webhook/app.py read only
 the LEGACY pair (TELEGRAM_* and ALERT_WEBHOOK_URL). A consumer on
 `alert_recipients` has those empty, so `webhook.fanout_failed` (warn, on by
-default) reached nobody while `bin/bay alerts list` said it was delivered.
+default) reached nobody while `bay alerts list` said it was delivered.
 
 These tests render the real bay-webhook.env template, feed it through the
 reconciler's own env-file parser into the environment, load a fresh copy of

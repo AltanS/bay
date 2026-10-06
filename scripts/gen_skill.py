@@ -53,14 +53,14 @@ SKIP_DOCS = {
     "docs/README.md",  # the source of the map
     "docs/external-tailscale-research.md",  # superseded research
     "docs/external-tailscale-implementation-plan.md",  # never built
-    "docs/rename-map.md",  # legacy-argo: rename working doc, dies when the transition shim is finally removed (a future major release, not v1.1)
+    "docs/rename-map.md",  # kept-argo: rename working doc, dies when the transition shim is finally removed (a future major release, not v1.1)
 }
 
 
 def _summary(cmd: click.Command) -> str:
     """First sentence of the command's help, collapsed to one line.
 
-    Source comments ride along in docstrings (`legacy-argo:` tags, milestone
+    Source comments ride along in docstrings (`kept-argo:` tags, milestone
     notes) and this text ships to consumers and, eventually, to the public
     repo — so a trailing ` # ...` is stripped rather than published.
     """
@@ -116,7 +116,7 @@ def _walk(group: click.Group, prefix: str = "") -> list[tuple[str, click.Command
 def render_cli() -> str:
     """One line per command: the inventory, not the manual.
 
-    Flags are deliberately omitted. `bin/bay <cmd> --help` is live and always
+    Flags are deliberately omitted. `bay <cmd> --help` is live and always
     correct, so a compiled copy of it buys nothing but context; what --help
     cannot tell an agent is which commands *exist*. The handful of flags that
     change what a command means (--rig, --skip-validate, ...) are called out
@@ -147,7 +147,7 @@ def render_cli() -> str:
         out.append(f"### {panel}\n")
         for path, cmd in panels[panel]:
             sig = _signature(cmd)
-            invocation = f"bin/bay {path}{' ' + sig if sig else ''}"
+            invocation = f"bay {path}{' ' + sig if sig else ''}"
             summary = _summary(cmd)
             out.append(f"- `{invocation}`{' — ' + summary if summary else ''}")
         out.append("")

@@ -1,7 +1,7 @@
 # Multi-region inventory example
-# bin/bay deploy eu       → targets EU server only
-# bin/bay deploy na       → targets NA server only
-# bin/bay deploy production → targets all regions
+# bay deploy eu       → targets EU server only
+# bay deploy na       → targets NA server only
+# bay deploy production → targets all regions
 # See docs/multi-region.md for the full pattern.
 
 [eu]

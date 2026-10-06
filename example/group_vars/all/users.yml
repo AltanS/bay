@@ -3,7 +3,7 @@
 # Each user gets created with the specified groups and authorized keys
 #
 # Apply just this role:
-#   make bay:provision <env> tags=users
+#   bay provision <env> --tags users
 
 users:
   # Automation account — used by Ansible (ansible_user / admin_user)

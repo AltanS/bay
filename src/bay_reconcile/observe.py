@@ -23,8 +23,8 @@ STACK_LABEL = "bay.stack"
 # post-rename deploy. New containers are only ever stamped with the new keys.
 # Both tags below are dual-read only; removal is deferred to a future major
 # release, not v1.1 (see docs/rename-map.md).
-LEGACY_HASH_LABEL = "com.argo.config-hash"  # legacy-argo: dual-read
-LEGACY_MANAGED_LABEL = "argo.managed"  # legacy-argo: dual-read
+LEGACY_HASH_LABEL = "com.argo.config-hash"  # kept-argo: dual-read
+LEGACY_MANAGED_LABEL = "argo.managed"  # kept-argo: dual-read
 
 
 def port_binding_tuple(entry: Mapping[str, Any]) -> str:

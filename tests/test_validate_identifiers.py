@@ -2,7 +2,7 @@
 
 Layer two (quoting in the templates) is tested by tests/test_hostile_render.py.
 This is layer one: the door. Two doors, in fact — the JSON schema, which is
-what `bin/bay validate` and the pre-deploy gate actually run, and
+what `bay validate` and the pre-deploy gate actually run, and
 `_validate_identifier_safety`, which restates the same contract in a message
 an operator can act on and adds the one rule a regex cannot express: a bare
 `/` in `public_routes` is valid syntax and makes an entire `access: vpn`

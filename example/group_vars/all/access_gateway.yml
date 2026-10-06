@@ -13,7 +13,7 @@
 #   headscale  — Bay deploys and manages Headscale (self-hosted
 #                Tailscale control server) and a Tailscale node on the
 #                VPS. Users install the Tailscale app and enroll via
-#                OIDC or pre-auth key. Manage via `bin/bay gateway`.
+#                OIDC or pre-auth key. Manage via `bay gateway`.
 
 # Three backends are available:
 #
@@ -22,7 +22,7 @@
 #                `access: vpn` services are rejected at validation time.
 #   wireguard  — plain WireGuard, peers configured by hand below. (default)
 #   headscale  — self-hosted Tailscale control plane: managed tunnels,
-#                split-DNS, ACLs, and the `bin/bay gateway` CLI.
+#                split-DNS, ACLs, and the `bay gateway` CLI.
 #
 # See docs/access-gateways.md — "The adapter contract" — to add a backend.
 access_gateway: wireguard
@@ -56,7 +56,7 @@ vpn_allowed_ips:
 
 # OIDC (optional) — enables self-service user enrollment via SSO.
 # Without OIDC, users enroll via pre-auth keys generated with
-# `bin/bay gateway key <username>`.
+# `bay gateway key <username>`.
 # headscale_oidc_issuer: https://auth.example.com
 # headscale_oidc_client_id: headscale
 # headscale_oidc_client_secret: "{{ vault_headscale_oidc_secret }}"

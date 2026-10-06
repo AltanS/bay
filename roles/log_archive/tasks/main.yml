@@ -24,7 +24,7 @@
   when: _log_archive_containers | length > 0
   block:
 
-    # ── argo-logreaders group ────────────────────────────────────────  # legacy-argo: unix group on hosts
+    # ── argo-logreaders group ────────────────────────────────────────  # kept-argo: unix group on hosts
     # Group membership is explicit. Operators who want `debugbot` to read
     # archives add it manually — we never add it automatically because the
     # archive can contain PII once log_retention is enabled on any
@@ -126,9 +126,9 @@
   block:
 
     # ── per-service artefacts, one server-side pass ─────────────────
-    # `normal` mode → 0750 app_user:argo-logreaders on dirs, 0640 on files.  # legacy-argo: unix group on hosts
+    # `normal` mode → 0750 app_user:argo-logreaders on dirs, 0640 on files.  # kept-argo: unix group on hosts
     # `sensitive` mode → 0700 root:root on dirs, 0600 on files — the
-    # argo-logreaders group is locked out by design.  # legacy-argo: unix group on hosts
+    # argo-logreaders group is locked out by design.  # kept-argo: unix group on hosts
     #
     # This used to be sixteen looped tasks (dir, .malformed, live.log,
     # .cursor, .prune-log, today.log, .retention — each doubled for the

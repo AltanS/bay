@@ -12,7 +12,7 @@ docker_prune_builder_keep_storage: "2G"           # Retain recent build cache
 
 # Name of the buildx builder git_deploy builds with. Mirrors the default in
 # roles/git_deploy/defaults/main.yml — override in group_vars to change both.
-bay_buildx_builder: "argo-builder"  # legacy-argo: live buildx builder name on hosts, migrate separately
+bay_buildx_builder: "argo-builder"  # kept-argo: live buildx builder name on hosts, migrate separately
 
 # Builders the prune sweeps, in order. `default` catches cache from plain
 # `docker build`; the bay builder uses the docker-container driver, whose

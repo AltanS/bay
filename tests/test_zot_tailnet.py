@@ -308,7 +308,7 @@ class TestZotHostsPinTaskShape:
         # pre-1.0 marker, and its stale line must still be removable.
         assert (
             task["ansible.builtin.lineinfile"]["regexp"]
-            == r"^.*# (argo|bay)-managed: zot registry tailnet pin.*$"  # legacy-argo: dual-read, remove in a future major release
+            == r"^.*# (argo|bay)-managed: zot registry tailnet pin.*$"  # kept-argo: dual-read, remove in a future major release
         )
         assert task["become"] is True
         assert task["become_user"] == "root"
@@ -372,7 +372,7 @@ class TestZotHostsPinRegexBehavior:
     def test_removal_matches_the_legacy_marker_line(self) -> None:
         legacy = (
             "100.64.0.5 registry.example.com  "
-            "# argo-managed: zot registry tailnet pin (see roles/zot)"  # legacy-argo: pre-1.0 marker
+            "# argo-managed: zot registry tailnet pin (see roles/zot)"  # kept-argo: pre-1.0 marker
         )
         assert self._removal_pattern().match(legacy)
 

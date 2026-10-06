@@ -17,7 +17,7 @@
 #   only the service's region (`--tags deploy_stack`), the headscale
 #   split-DNS records on the control server are not updated. Always
 #   redeploy the headscale tag on the control region after adding/changing
-#   VPN services: `bin/bay deploy production --tags headscale`.
+#   VPN services: `bay deploy production --tags headscale`.
 # - **`bay logs` and `bay restart` don't work for infrastructure
 #   containers** — Headscale and Traefik are not in
 #   `services.yml`, so CLI commands that validate against it will reject
@@ -51,7 +51,7 @@ headscale_oidc_client_secret: ""
 # Headscale applies NO allowlist of its own. With `headscale_oidc_issuer` set
 # and all three lists empty, ANY account the issuer will authenticate can
 # enrol a node — with a public issuer (Google, GitHub) that is the whole
-# internet. `bin/bay validate` therefore FAILS when the issuer is set and all
+# internet. `bay validate` therefore FAILS when the issuer is set and all
 # three lists are empty. Set at least one.
 #
 #   headscale_oidc_allowed_domains: ["example.com"]   # email domain suffix
@@ -60,7 +60,7 @@ headscale_oidc_client_secret: ""
 #
 # Each list renders into the `oidc:` block of config.yaml only when non-empty.
 # Pair this with `headscale_acl_policy` below: an allowlist decides WHO may
-# enrol, an ACL decides what an enrolled node may reach. `bin/bay validate`
+# enrol, an ACL decides what an enrolled node may reach. `bay validate`
 # warns when OIDC is on and no ACL policy is defined.
 headscale_oidc_allowed_domains: []
 headscale_oidc_allowed_users: []

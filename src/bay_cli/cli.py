@@ -7,7 +7,7 @@ import typer
 from bay_cli import console
 from bay_cli.commands import compile_cmd, fleet_cmd, import_cmd, project_cmd, self_cmd, toml_cmd
 from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault, webhook
-from bay_cli.context import GlobalOptions, context_from
+from bay_cli.context import GlobalOptions, package_root
 from bay_cli.errors import BayError
 
 app = typer.Typer(
@@ -35,29 +35,26 @@ def version_callback(ctx: typer.Context, value: bool) -> None:
     if value:
         import subprocess
 
-        try:
-            bay_dir = context_from(ctx).framework_root
+        bay_dir = package_root()
 
-            # Prefer git tag (source of truth)
-            result = subprocess.run(
-                ["git", "-C", str(bay_dir), "describe", "--tags", "--exact-match"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                typer.echo(f"bay {result.stdout.strip()}")
-                raise typer.Exit()
+        # Prefer git tag (source of truth)
+        result = subprocess.run(
+            ["git", "-C", str(bay_dir), "describe", "--tags", "--exact-match"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            typer.echo(f"bay {result.stdout.strip()}")
+            raise typer.Exit()
 
-            result = subprocess.run(
-                ["git", "-C", str(bay_dir), "describe", "--tags"],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                typer.echo(f"bay {result.stdout.strip()}")
-                raise typer.Exit()
-        except BayError:
-            pass
+        result = subprocess.run(
+            ["git", "-C", str(bay_dir), "describe", "--tags"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            typer.echo(f"bay {result.stdout.strip()}")
+            raise typer.Exit()
         typer.echo("bay (version unknown)")
         raise typer.Exit()
 
@@ -65,24 +62,18 @@ def version_callback(ctx: typer.Context, value: bool) -> None:
 def skill_callback(ctx: typer.Context, value: bool) -> None:
     """Print SKILL.md — the framework's single-file orientation document.
 
-    Written straight to stdout, unformatted: the consumer is usually an agent
+    Written straight to stdout, unformatted: the reader is usually an agent
     piping it somewhere, not a terminal.
     """
     if not value:
         return
     # The package lives at <framework>/src/bay_cli, so the framework root is
-    # two levels up — resolved from the import, not the cwd, so this works in
-    # a consumer (.bay/), in dev-link mode, and from the framework repo alike.
-    skill = Path(__file__).resolve().parents[2] / "SKILL.md"
-    if not skill.is_file():
-        try:
-            skill = context_from(ctx).framework_root / "SKILL.md"
-        except BayError:
-            pass
+    # two levels up, resolved from the import and not from the working directory.
+    skill = package_root() / "SKILL.md"
     if not skill.is_file():
         raise BayError(
             "SKILL.md not found in the framework checkout",
-            hint="Update to a framework version that ships it (bin/bay update).",
+            hint="Update to a version that ships it: bay self update.",
         )
     typer.echo(skill.read_text(), nl=False)
     raise typer.Exit()
@@ -138,13 +129,7 @@ app.command(rich_help_panel="Daily")(project_cmd.show)
 app.command(rich_help_panel="Daily")(project_cmd.rollback)
 
 # Framework commands (top-level)
-app.command(rich_help_panel="Framework")(framework.setup)
-app.command(rich_help_panel="Framework")(framework.install)
-app.command(rich_help_panel="Framework")(framework.update)
 app.command(rich_help_panel="Framework")(framework.status)
-app.command(rich_help_panel="Framework")(framework.guide)
-app.command(rich_help_panel="Framework")(framework.dev_link)
-app.command(rich_help_panel="Framework")(framework.dev_unlink)
 
 # Install and fleets on this machine
 app.add_typer(self_cmd.app, name="self", rich_help_panel="Framework")
@@ -213,18 +198,6 @@ app.command(rich_help_panel="Utilities")(test.test)
 def _main() -> None:
     """Entry point that catches BayError for clean output."""
     import sys
-
-    # legacy-argo: the `argo` console-script alias (pyproject.toml) forwards
-    # here unchanged; warn once so un-migrated consumer wrappers fail soft,
-    # not weird. Removed in a future major release, along with the alias
-    # itself — not v1.1 as an earlier draft of this comment said.
-    invoked_as = Path(sys.argv[0]).name if sys.argv else ""
-    if invoked_as == "argo":  # legacy-argo: alias detection, remove in a future major release
-        print(
-            "warning: 'argo' has been renamed to bay; this alias will be "  # legacy-argo: warning text, remove in a future major release
-            "removed in a future release — invoke 'bay' instead",
-            file=sys.stderr,
-        )
 
     try:
         app()

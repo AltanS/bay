@@ -118,7 +118,7 @@ class TestSpecHashExcludedFields:
 
         spec_with_label = dict(_WEBHOOK_SPEC)
         spec_with_label["labels"] = dict(_WEBHOOK_SPEC["labels"])
-        spec_with_label["labels"]["com.argo.config-hash"] = h_base  # legacy-argo: exercises dual-read hash-label exclusion
+        spec_with_label["labels"]["com.argo.config-hash"] = h_base  # kept-argo: exercises dual-read hash-label exclusion
 
         assert bay_spec_hash(spec_with_label) == h_base
 

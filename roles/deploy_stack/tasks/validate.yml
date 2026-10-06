@@ -164,7 +164,7 @@
       IPAllowList, no middleware). This is almost always wrong for a
       Traefik-fronted service; confirm the bind is intentional. The port
       is DNAT'd in PREROUTING, so it never reaches the nftables input
-      chain and CrowdSec never sees it. `bin/bay validate` requires
+      chain and CrowdSec never sees it. `bay validate` requires
       `expose_host_ack: true` alongside it.
     verbosity: 0
   loop: "{{ active_services | dict2items }}"
@@ -234,7 +234,7 @@
       publicly reachable on every interface. Confirm this is intentional
       and that the accessory requires authentication. The port is DNAT'd
       in PREROUTING, so it never reaches the nftables input chain and
-      CrowdSec never sees it. `bin/bay validate` requires
+      CrowdSec never sees it. `bay validate` requires
       `expose_host_ack: true` alongside it.
     verbosity: 0
   loop: "{{ active_accessories | dict2items }}"
@@ -414,7 +414,7 @@
     - (_budget_total | int) > (_budget_ceiling | int)
 
 # ── config_files_mode ─────────────────────────────────────────────────
-# `bin/bay validate` refuses other values through the schema enum. This is
+# `bay validate` refuses other values through the schema enum. This is
 # the deploy-time twin: an unknown value must never fall back to either mode
 # silently, since one reading exposes files and the other locks a container
 # out of them.
@@ -468,7 +468,7 @@
 # ── Traefik split entrypoints ────────────────────────────────────────
 # `traefik_public_bind_ip` defaults to `netplan_address | default('')`, a
 # host fact the control node cannot see, so this gate lives here rather
-# than in `bin/bay validate`. traefik_split_entrypoints must fail closed:
+# than in `bay validate`. traefik_split_entrypoints must fail closed:
 
 - name: Validate split entrypoints have a resolvable public bind IP
   ansible.builtin.fail:

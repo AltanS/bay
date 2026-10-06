@@ -2,7 +2,7 @@
 
 Hits every public service's `domains:` with an HTTPS GET in parallel and
 reports 2xx/3xx as pass, 4xx/5xx/timeout/TLS-error as fail. Designed to
-run right after `ansible-playbook` exits zero, so `bin/bay deploy` can
+run right after `ansible-playbook` exits zero, so `bay deploy` can
 bubble up user-visible outages that ansible's container-level health
 doesn't catch.
 
@@ -596,7 +596,7 @@ def render_results(
 ) -> None:
     """Print the probe table, the totals line and the failure block.
 
-    ONE renderer, deliberately. `bin/bay healthcheck` and the post-deploy
+    ONE renderer, deliberately. `bay healthcheck` and the post-deploy
     summary used to keep separate copies of this loop, and they had already
     drifted apart on glyphs and on the wording of the headline — so the same
     fleet could be described two different ways depending on which command

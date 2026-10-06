@@ -6,7 +6,7 @@
 # Runs during `provision` and `deploy` (tagged `crowdsec,allowlist`). Reads
 # every host in `groups[crowdsec_inventory_allowlist_group]` (default:
 # `all`) — INCLUDING `inventory_hostname` itself — and full-syncs the
-# `argo-inventory` allowlist in the local CrowdSec LAPI. For each host it  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+# `argo-inventory` allowlist in the local CrowdSec LAPI. For each host it  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
 # collects the public IP (`ansible_host`, or the inventory hostname itself
 # when that is already a bare IP — the normal consumer inventory shape),
 # `netplan_address` (the framework's canonical per-host public IP), and
@@ -22,14 +22,14 @@
 #
 # Verify the allowlist:
 #
-#   ssh debugbot@<host> "sudo cscli allowlists inspect argo-inventory"  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+#   ssh debugbot@<host> "sudo cscli allowlists inspect argo-inventory"  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
 #   # Should list every host's IPs, self included. On demo infra, all six:
 #   #   infra 203.0.113.14 / 100.64.0.5,
 #   #   EU    203.0.113.11   / 100.64.0.1,
 #   #   NA    203.0.113.12  / 100.64.0.2.
 #
 # Warning — fully managed list: Manual entries added with
-# `cscli allowlists add argo-inventory <ip>` will be PRUNED on the next  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+# `cscli allowlists add argo-inventory <ip>` will be PRUNED on the next  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
 # provision or deploy. To make an entry permanent, add the IP to the
 # inventory (as `ansible_host`, `netplan_address`, or
 # an access-gateway overlay IP on a host) or override

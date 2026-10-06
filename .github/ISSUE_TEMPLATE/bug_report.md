@@ -14,7 +14,7 @@ scrubbed of that data on purpose and a leak scan runs in CI.
 
 ## Version
 
-Output of `bin/bay status` (from your consumer repo), or the framework tag you
+Output of `bay status` (from your consumer repo), or the framework tag you
 are on:
 
 ```
@@ -23,7 +23,7 @@ are on:
 ## Where it happens
 
 - [ ] Framework (this repo)
-- [ ] Consumer repo (`.bay/` clone, `bin/bay` wrapper)
+- [ ] Fleet repo (hosts, group_vars, bay.fleet.toml)
 - [ ] Not sure
 
 ## The exact command
@@ -42,7 +42,7 @@ Describe the failure. Paste the relevant output, redacted.
 
 ## Diagnostics
 
-Output of `bin/bay validate` and/or `bin/bay doctor`, redacted:
+Output of `bay validate` and/or `bay doctor`, redacted:
 
 ```
 ```

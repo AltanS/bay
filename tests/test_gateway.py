@@ -16,7 +16,6 @@ import pytest
 from click.exceptions import Exit as ClickExit
 from typer.testing import CliRunner
 
-from bay_cli import paths as bay_paths
 from bay_cli.cli import app
 from bay_cli.commands import gateway
 from bay_cli.commands.gateway import (
@@ -912,7 +911,9 @@ class _RecordingBackend:
 def gateway_stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _RecordingBackend:
     """Stub out config/host resolution so commands reach the backend."""
     backend = _RecordingBackend()
-    monkeypatch.setattr(bay_paths, "find_bay_dir", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(
+        Context, "resolve", classmethod(lambda cls, fleet=None: Context.for_fleet_root(tmp_path, tmp_path))
+    )
     monkeypatch.setattr(
         gateway,
         "_get_gateway_config",

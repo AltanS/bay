@@ -206,7 +206,7 @@ def test_task_file_tolerates_image_in_use_errors() -> None:
 
 
 def test_rebuild_sh_also_prunes_after_push() -> None:
-    """The Ansible cleanup task only runs during `bin/bay deploy`, but
+    """The Ansible cleanup task only runs during `bay deploy`, but
     webhook auto-builds execute rebuild.sh directly and never reach it.
     Without an equivalent pruning block in the generated bash script, the
     disk bloat that this cleanup logic is meant to fix returns on the auto-build path.

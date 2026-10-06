@@ -1,7 +1,7 @@
 # {{ ansible_managed }}
 server_url: "https://{{ headscale_domain }}"
 # Suppress the "an updated version has been found" notice — it pollutes the stdout
-# of `headscale` CLI calls run via `docker exec` (e.g. `bin/bay gateway apikey`).
+# of `headscale` CLI calls run via `docker exec` (e.g. `bay gateway apikey`).
 disable_check_updates: true
 listen_addr: 0.0.0.0:8080
 metrics_listen_addr: 127.0.0.1:9090

@@ -116,8 +116,8 @@ def list_services(
 
     Examples:
 
-        bin/bay service list
-        bin/bay --json service list
+        bay service list
+        bay --json service list
     """
     cfg = _get_config(ctx)
     services = cfg.get_services()
@@ -239,8 +239,8 @@ def show(ctx: typer.Context, name: str = typer.Argument(help="Service or accesso
 
     Examples:
 
-        bin/bay service show myapp
-        bin/bay --json service show postgres
+        bay service show myapp
+        bay --json service show postgres
     """
     cfg = _get_config(ctx)
     svc = cfg.get_service(name)
@@ -297,12 +297,12 @@ def catalog(
 ) -> None:
     """List available service/accessory definitions from the catalog.
 
-    Catalog IDs feed `bin/bay service add <id>`.
+    Catalog IDs feed `bay service add <id>`.
 
     Examples:
 
-        bin/bay service catalog
-        bin/bay service catalog --filter accessory
+        bay service catalog
+        bay service catalog --filter accessory
     """
     entries = _get_catalog(ctx)
 
@@ -605,19 +605,19 @@ def add(
 ) -> None:
     """Add a service or accessory from the catalog or a custom definition.
 
-    Edits services.yml only — run `bin/bay deploy <env>` to apply.
+    Edits services.yml only — run `bay deploy <env>` to apply.
     Catalog adds resolve dependencies automatically (--no-deps to skip)
     and copy starter config files. Custom services need --image or
     --build-repo, plus --port.
 
     Examples:
 
-        bin/bay service add gatus
-        bin/bay service add n8n --region eu --link postgres:eu
-        bin/bay service add --name myapp --image nginx:alpine --port 8080
-        bin/bay service add --name api --port 3000 \\
+        bay service add gatus
+        bay service add n8n --region eu --link postgres:eu
+        bay service add --name myapp --image nginx:alpine --port 8080
+        bay service add --name api --port 3000 \\
             --build-repo git@github.com:me/api.git --build-token GITHUB_TOKEN
-        bin/bay service add postgres --dry-run
+        bay service add postgres --dry-run
     """
     from bay_cli.catalog import resolve_dependencies
 
@@ -985,14 +985,14 @@ def edit(
 ) -> None:
     """Edit an existing service's configuration in services.yml.
 
-    Edits services.yml only — run `bin/bay deploy <env>` to apply.
+    Edits services.yml only — run `bay deploy <env>` to apply.
 
     Examples:
 
-        bin/bay service edit myapp --access vpn
-        bin/bay service edit myapp --image nginx:1.27
-        bin/bay service edit n8n --link postgres:eu --unlink redis
-        bin/bay service edit myapp --domain app.example.com --dry-run
+        bay service edit myapp --access vpn
+        bay service edit myapp --image nginx:1.27
+        bay service edit n8n --link postgres:eu --unlink redis
+        bay service edit myapp --domain app.example.com --dry-run
     """
     from rich.prompt import Confirm
 
@@ -1174,16 +1174,16 @@ def remove(
 ) -> None:
     """Remove a service or accessory from services.yml.
 
-    Edits services.yml only — run `bin/bay deploy <env>` to apply. Docker
+    Edits services.yml only — run `bay deploy <env>` to apply. Docker
     volumes, env files, and backup timers are left behind (the warnings
     list them). For build services it also offers to delete the matching
     GitHub webhook (--keep-webhook to skip).
 
     Examples:
 
-        bin/bay service remove myapp
-        bin/bay service remove myapp --dry-run
-        bin/bay service remove myapp --keep-webhook
+        bay service remove myapp
+        bay service remove myapp --dry-run
+        bay service remove myapp --keep-webhook
     """
     from rich.prompt import Confirm
 
@@ -1225,7 +1225,7 @@ def remove(
         f"Docker volumes for '{name}' remain on the server",
         "Env files remain in the consumer repo",
         "Backup timers remain until next deploy",
-        "Run `bin/bay deploy` to apply changes, then manually clean up if needed",
+        "Run `bay deploy` to apply changes, then manually clean up if needed",
     ]
 
     # ── Determine whether webhook deletion applies ────────────────
@@ -1328,7 +1328,7 @@ def remove(
                         if not do_delete:
                             console.warning(
                                 f"Skipped webhook deletion. Run "
-                                f"'bin/bay service prune-webhooks {owner}/{repo_name}' "
+                                f"'bay service prune-webhooks {owner}/{repo_name}' "
                                 f"later to clean up."
                             )
 
@@ -1448,8 +1448,8 @@ def prune_webhooks(
 
     Examples:
 
-        bin/bay service prune-webhooks MyOrg/myapp --dry-run
-        bin/bay service prune-webhooks MyOrg/myapp
+        bay service prune-webhooks MyOrg/myapp --dry-run
+        bay service prune-webhooks MyOrg/myapp
     """
     from rich.prompt import Confirm
     from rich.table import Table as RichTable
@@ -1477,7 +1477,7 @@ def prune_webhooks(
     if not token:
         raise BayError.config(
             "github_admin_token not found in vault",
-            hint=f"Add a read-only GitHub PAT with 'repo' scope via 'bin/bay vault edit {env}'",
+            hint=f"Add a read-only GitHub PAT with 'repo' scope via 'bay vault edit {env}'",
         )
 
     # 3. Parse repo argument

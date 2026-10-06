@@ -7,7 +7,7 @@ meta:
   dependencies:
     - postgres
   post_add_instructions:
-    - "Add APP_SECRET and DB_PASSWORD to vault: bin/bay vault edit <environment>"
+    - "Add APP_SECRET and DB_PASSWORD to vault: bay vault edit <environment>"
 
 defaults:
   access: public

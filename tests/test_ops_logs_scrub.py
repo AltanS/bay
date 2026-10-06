@@ -1,4 +1,4 @@
-"""Tests for `bin/bay logs --scrub` (GDPR erasure).
+"""Tests for `bay logs --scrub` (GDPR erasure).
 
 Covers:
 - `--scrub` requires `--pattern`; exits 1 without it.
@@ -22,6 +22,7 @@ from bay_cli.commands.ops import (
     _operator_identity,
     logs,
 )
+from helpers import patch_fleet
 
 
 def _make_app() -> typer.Typer:
@@ -53,11 +54,7 @@ accessories: {}
 
 
 def _patch_paths(root: Path):
-    return patch.multiple(
-        "bay_cli.commands.ops.paths",
-        find_bay_dir=lambda: root / ".bay",
-        consumer_root=lambda bay_dir: root,
-    )
+    return patch_fleet(root)
 
 
 # ── --pattern is required ────────────────────────────────────────────

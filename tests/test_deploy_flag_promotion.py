@@ -6,7 +6,7 @@ ctx.args. Declared Typer options therefore keep their default unless deploy
 explicitly promotes them back.
 
 `--check-token-scope` was declared, and filtered out of the ansible passthrough,
-but never promoted — so `bin/bay deploy production --check-token-scope` was
+but never promoted — so `bay deploy production --check-token-scope` was
 silently DROPPED: it reached neither run_validation nor ansible. The operator
 asked for a token-scope check, saw a clean validation, and got no check. Worse
 than an error, because it looks like a pass.

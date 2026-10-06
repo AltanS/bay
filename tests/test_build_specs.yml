@@ -4,12 +4,13 @@
 # Verifies that container specs are correctly generated from services.yml.
 # Does NOT deploy anything — only builds specs and asserts their structure.
 #
-# Run from a consumer with dev-link:
-#   uv run --project .bay ansible-playbook .bay/tests/test_build_specs.yml \
-#     -i ../hosts/production -l eu -e target_host=eu
+# Run from the framework checkout, against a fleet:
+#   uv run ansible-playbook tests/test_build_specs.yml \
+#     -i <fleet>/hosts/production -l eu -e target_host=eu
 #
-# NOTE: Must be symlinked/copied to .bay/ level for group_vars auto-discovery.
-# The wrapper .bay/test_build_specs.yml handles this.
+# NOTE: Ansible loads group_vars from the directory of the playbook and of the
+# inventory. Link <fleet>/group_vars next to the playbook, or use an inventory
+# directory that holds the fleet's group_vars (see bay_cli/ansible.py).
 
 - name: Test container spec generation
   hosts: "{{ target_host | default('eu') }}"

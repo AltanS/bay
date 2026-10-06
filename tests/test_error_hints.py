@@ -1,11 +1,7 @@
 """Error hints must name a command that can actually run.
 
-The "bay not found" hint used to say `run 'bin/bay setup' first`. That cannot
-work: `setup()` resolves the framework through `find_bay_dir()` itself, and the
-`bin/bay` wrapper refuses to exec without `.bay/`. The hint named the one
-command guaranteed to fail. The version-drift hints had a milder version of the
-same problem — they named a Makefile alias for something `bin/bay install`
-already does.
+The "no fleet" hint must offer the ways that exist today, and the version
+messages in the playbooks must point at the command that updates Bay.
 """
 
 from __future__ import annotations
@@ -14,29 +10,27 @@ from pathlib import Path
 
 import pytest
 
-from bay_cli import paths
-from bay_cli.errors import BayError
+from bay_cli.context import NO_FLEET_HINT, NO_FLEET_MESSAGE
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: The removed consumer wrapper. Written in two pieces so a grep for the old
+#: name finds nothing in the tree.
+OLD_WRAPPER = "bin/" "bay"
 
-def test_bay_not_found_hint_is_not_circular(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("BAY_DIR", raising=False)
-    with pytest.raises(BayError) as excinfo:
-        paths.find_bay_dir(start=tmp_path)
-    message = str(excinfo.value)
-    assert "bay not found" in message
-    # The bootstrap sequence, not the command that needs .bay/ to already exist.
-    assert ".bay/bootstrap.sh" in message
-    assert "git clone" in message
-    assert "run 'bin/bay setup' first" not in message
+
+def test_no_fleet_hint_names_commands_that_exist() -> None:
+    assert NO_FLEET_MESSAGE == "no fleet selected"
+    assert "bay fleet init" in NO_FLEET_HINT
+    for gone in (OLD_WRAPPER, "setup", ".bay/"):
+        assert gone not in NO_FLEET_HINT
 
 
 @pytest.mark.parametrize("playbook", ["provision.yml", "deploy.yml"])
-def test_version_drift_hint_names_the_cli(playbook: str) -> None:
+def test_version_hint_names_the_update_command(playbook: str) -> None:
     text = (_REPO_ROOT / playbook).read_text()
     assert "make bay:install" not in text, (
         f"{playbook} points at a Makefile alias instead of the CLI"
     )
-    assert text.count("bin/bay install") == 1
+    assert "bay install" not in text
+    assert text.count("bay self update") == 1

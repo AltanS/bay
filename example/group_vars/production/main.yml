@@ -4,6 +4,6 @@
 # Docker registry credentials live in the docker_registries list in
 # group_vars/all/registry.yml — see docs/services.md.
 
-# Alerts are configured in group_vars/all/alerts.yml — see `bin/bay alerts`
+# Alerts are configured in group_vars/all/alerts.yml — see `bay alerts`
 # and docs/alerting.md. Do not add alert sinks here: env-level group_vars
 # outrank group_vars/all, so they would silently override that file.

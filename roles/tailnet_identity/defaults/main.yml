@@ -13,7 +13,7 @@
 tailnet_identity_enabled: false
 
 # Built on-host like the webhook receiver (bay-webhook): local image, never pulled.
-tailnet_identity_image: "argo-tailnet-identity:latest"  # legacy-argo: live image tag on hosts, migrate separately
+tailnet_identity_image: "argo-tailnet-identity:latest"  # kept-argo: live image tag on hosts, migrate separately
 
 # Port the sidecar listens on inside the docker network (no host port published).
 tailnet_identity_port: 9100

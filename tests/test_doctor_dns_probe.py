@@ -1,4 +1,4 @@
-"""`bin/bay doctor` must resolve a name the wildcard record covers.
+"""`bay doctor` must resolve a name the wildcard record covers.
 
 The probe used to resolve `domain_base` -- the bare apex. The wizard tells the
 operator to create `*.example.com`, and a wildcard does not cover the apex, so

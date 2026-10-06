@@ -5,7 +5,7 @@
 # docker_monitor_telegram_* variables. This role adds a SECOND, generic
 # webhook sink that fires alongside it, so a consumer can point alerts at
 # Campfire/Basecamp, Slack, or anything that accepts an HTTP POST without
-# patching role templates inside .bay/ (patches `bin/bay update` destroys).
+# patching role templates inside the Bay checkout (patches `bay self update` can destroy).
 #
 # Both sinks are best-effort: a dead sink can never fail a deploy, backup or
 # build.

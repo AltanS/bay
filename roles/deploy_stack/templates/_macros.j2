@@ -2,7 +2,7 @@
 
 {%- macro container_base(name, cfg) %}
 {% if cfg.build is defined %}
-    image: argo-{{ stack_name }}-{{ name }}:latest  # legacy-argo: live image tag on hosts, migrate separately
+    image: argo-{{ stack_name }}-{{ name }}:latest  # kept-argo: live image tag on hosts, migrate separately
     pull_policy: never
 {% else %}
     image: {{ cfg.image }}

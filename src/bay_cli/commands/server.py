@@ -27,7 +27,7 @@ def _get_inventory(env: str, cx: Context) -> tuple[InventoryConfig, Path]:
     if not inv_path.is_file():
         raise BayError.config(
             f"Inventory file not found: {inv_path}",
-            hint=f"Create {inv_path} or run 'bin/bay setup'",
+            hint=f"Create {inv_path}",
         )
 
     inv = InventoryConfig()
@@ -59,8 +59,8 @@ def list_servers(
 
     Examples:
 
-        bin/bay server list
-        bin/bay server list production --check
+        bay server list
+        bay server list production --check
     """
     cx = context_or_cwd(ctx)
     inv, root = _get_inventory(env, cx)
@@ -137,13 +137,13 @@ def add(
     Single-server inventories replace the existing host (with
     confirmation). Multi-region inventories require --region; a missing
     region's group_vars stub is created automatically. Provision the new
-    host afterwards: `bin/bay provision <env>`.
+    host afterwards: `bay provision <env>`.
 
     Examples:
 
-        bin/bay server add 203.0.113.10
-        bin/bay server add 198.51.100.20 --region na
-        bin/bay server add 198.51.100.20 --region na --dry-run
+        bay server add 203.0.113.10
+        bay server add 198.51.100.20 --region na
+        bay server add 198.51.100.20 --region na --dry-run
     """
     from rich.prompt import Confirm, Prompt
 
@@ -268,8 +268,8 @@ def remove(
 
     Examples:
 
-        bin/bay server remove 198.51.100.20
-        bin/bay server remove 198.51.100.20 --dry-run
+        bay server remove 198.51.100.20
+        bay server remove 198.51.100.20 --dry-run
     """
     from rich.prompt import Confirm
 
@@ -530,13 +530,13 @@ def inspect(
     Detects MAC address, IP, gateway, prefix length, and DNS servers.
     Compares against existing network.yml, flags drift, and prints a
     ready-to-paste YAML block for new hosts (then run
-    `bin/bay provision <env> --tags netplan`).
+    `bay provision <env> --tags netplan`).
 
     Examples:
 
-        bin/bay server inspect
-        bin/bay server inspect production --region eu
-        bin/bay server inspect production --interface ens3
+        bay server inspect
+        bay server inspect production --region eu
+        bay server inspect production --interface ens3
     """
     cx = context_from(ctx)
     bay_dir, root = cx.framework_root, cx.fleet_root

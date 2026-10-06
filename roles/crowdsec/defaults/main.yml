@@ -395,7 +395,7 @@ ip_whitelist:
 # carries the VPN chain (`<svc>-vpn@docker` or `<proxy>-tailnet@file`). An
 # app's own 403, a 404 on a VPN path, and every public router are still
 # detected. Set to false to let the VPN 403s count again; the next
-# `bin/bay provision <env> --tags crowdsec` removes the file.
+# `bay provision <env> --tags crowdsec` removes the file.
 # See docs/crowdsec.md ("Requests refused by the VPN allowlist").
 crowdsec_ignore_vpn_refusals: true
 
@@ -461,7 +461,7 @@ crowdsec_nftables_blocklist: true
 #       remediation: true
 #
 # Removing or renaming an entry removes the rendered file from the host and
-# flushes that scenario's decisions on the next `bin/bay provision --tags crowdsec`.
+# flushes that scenario's decisions on the next `bay provision --tags crowdsec`.
 crowdsec_custom_scenarios: []
 
 # =============================================================================

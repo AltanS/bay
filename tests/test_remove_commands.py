@@ -96,7 +96,7 @@ def _patch_server_module(
 
             raise BayError.config(
                 f"Inventory file not found: {inv_path}",
-                hint=f"Create {inv_path} or run 'bin/bay setup'",
+                hint=f"Create {inv_path}",
             )
         inv = InventoryConfig()
         inv.load(inv_path)

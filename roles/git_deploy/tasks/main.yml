@@ -11,7 +11,7 @@
 # ── issue #13 — image-map.json re-render on deploy_stack ──────────────
 # image-map.json drives the webhook receiver's post-build pull-signal
 # fan-out. Without this include, the file is only refreshed under
-# --tags build|git_deploy, so a routine `bin/bay deploy --tags
+# --tags build|git_deploy, so a routine `bay deploy --tags
 # deploy_stack` after a services.yml change leaves the receiver loading a
 # stale recipient list and silently drops new services from fan-out.
 #

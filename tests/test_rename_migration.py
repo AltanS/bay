@@ -1,17 +1,17 @@
 """Structural guards for the rename_migration role.
 
 The role can only be exercised end-to-end against a host provisioned before
-the Argo -> Bay rename, so what is pinned here is everything that can drift  # legacy-argo: describes the Argo->Bay migration by name
+the Argo -> Bay rename, so what is pinned here is everything that can drift  # kept-argo: describes the Argo->Bay migration by name
 in the repo:
 
-- it is wired into *both* playbooks (outbound_monitor and common own argo-*  # legacy-argo: pre-1.0 unit prefix
+- it is wired into *both* playbooks (outbound_monitor and common own argo-*  # kept-argo: pre-1.0 unit prefix
   artifacts and live in provision.yml only — a deploy-only cleanup would never
   reach them; that is the GH#33 shape of bug)
 - its explicit unit list still covers every unit template the framework
   renders, so adding a unit without adding its pre-1.0 name to the migration
   list fails here rather than leaving an orphan on every host
 - every destructive task is guarded, which is what makes a second run a no-op
-- every task is named and every old-name literal is tagged `legacy-argo:`
+- every task is named and every old-name literal is tagged `kept-argo:`
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ def test_rename_migration_unit_list_covers_every_unit_template() -> None:
         unit = template.name[: -len(".j2")]
         if not unit.endswith(_UNIT_SUFFIXES):
             continue
-        legacy = "argo-" + unit[len("bay-") :]  # legacy-argo: pre-1.0 unit basename
+        legacy = "argo-" + unit[len("bay-") :]  # kept-argo: pre-1.0 unit basename
         if legacy not in listed:
             missing.append(legacy)
     assert not missing, (
@@ -85,7 +85,7 @@ def test_rename_migration_covers_every_rendered_script() -> None:
         if name.endswith(_UNIT_SUFFIXES) or name in _POST_RENAME_SCRIPTS:
             continue
         stem = name[len("bay-") :].removesuffix(".sh")
-        if f"argo-{stem}" not in covered:  # legacy-argo: pre-1.0 script name
+        if f"argo-{stem}" not in covered:  # kept-argo: pre-1.0 script name
             missing.append(name)
     assert not missing, f"script templates with no rename_migration entry: {missing}"
 
@@ -99,7 +99,7 @@ def test_rename_migration_moves_the_old_config_dir() -> None:
     declare.
     """
     moves = {m["src"]: m["dest"] for m in _defaults()["rename_migration_moves"]}
-    assert moves.get("/etc/argo") == "/etc/bay", (  # legacy-argo: pre-1.0 config dir
+    assert moves.get("/etc/argo") == "/etc/bay", (  # kept-argo: pre-1.0 config dir
         "the pre-1.0 config dir must be moved, not left behind"
     )
 
@@ -144,13 +144,13 @@ def test_rename_migration_runs_as_root() -> None:
 
 def test_rename_migration_old_names_are_tagged() -> None:
     """The sweep guard's mechanism, asserted at the source: every pre-1.0
-    literal in this role carries the `legacy-argo:` tag."""
+    literal in this role carries the `kept-argo:` tag."""
     for path in sorted(ROLE.rglob("*.yml")):
         for line_no, line in enumerate(path.read_text().splitlines(), start=1):
-            if "argo" in line.lower() and "legacy-argo" not in line:
+            if "argo" in line.lower() and "kept-argo" not in line:
                 raise AssertionError(
                     f"{path.relative_to(REPO)}:{line_no} names a pre-1.0 artifact "
-                    f"without a `legacy-argo:` tag: {line.strip()}"
+                    f"without a `kept-argo:` tag: {line.strip()}"
                 )
 
 
@@ -179,10 +179,10 @@ def _fact(task_name: str, var: str) -> str:
 # `systemctl stop` on it errors out. That is the v1.0.1 brick — the role is
 # tagged `always`, so the error failed every later deploy *and* --check run.
 _LIST_UNITS = [
-    "argo-backup@pg.timer loaded active running backup",  # legacy-argo: fixture
-    "● argo-build@whoami.service not-found failed failed",  # legacy-argo: fixture
-    "argo-custom@x.service not-found failed failed",  # legacy-argo: fixture
-    "argo-build@.service                        enabled",  # legacy-argo: fixture
+    "argo-backup@pg.timer loaded active running backup",  # kept-argo: fixture
+    "● argo-build@whoami.service not-found failed failed",  # kept-argo: fixture
+    "argo-custom@x.service not-found failed failed",  # kept-argo: fixture
+    "argo-build@.service                        enabled",  # kept-argo: fixture
     "bay-backup@pg.timer loaded active running backup",
 ]
 
@@ -220,14 +220,14 @@ def test_rename_migration_splits_not_found_units_out_of_the_stop_list() -> None:
     """A not-found unit must never reach `systemd_service: state=stopped`."""
     units, orphans = _split_discovered(_LIST_UNITS)
 
-    assert "argo-build@whoami.service" not in units, (  # legacy-argo: fixture
+    assert "argo-build@whoami.service" not in units, (  # kept-argo: fixture
         "a resident not-found instance handed to systemctl stop errors with "
         "'Could not find the requested service' and bricks every later run"
     )
-    assert "argo-build@whoami.service" in orphans  # legacy-argo: fixture
-    assert "argo-backup@pg.timer" in units  # legacy-argo: fixture
-    assert "argo-backup@pg.timer" not in orphans  # legacy-argo: fixture
-    assert "argo-build@.service" not in units + orphans, (  # legacy-argo: fixture
+    assert "argo-build@whoami.service" in orphans  # kept-argo: fixture
+    assert "argo-backup@pg.timer" in units  # kept-argo: fixture
+    assert "argo-backup@pg.timer" not in orphans  # kept-argo: fixture
+    assert "argo-build@.service" not in units + orphans, (  # kept-argo: fixture
         "a bare template unit would make `systemctl stop` fail"
     )
     assert not any(u.startswith("bay-") for u in units + orphans)
@@ -245,10 +245,10 @@ def test_rename_migration_orphan_clear_is_gated_to_framework_units() -> None:
 
     units, orphans = _split_discovered(_LIST_UNITS)
     assert _managed(orphans, reset["when"]) == [
-        "argo-build@whoami.service",  # legacy-argo: fixture
+        "argo-build@whoami.service",  # kept-argo: fixture
     ], "an operator-created not-found unit must never be touched"
     assert _managed(units, stop_guard) == [
-        "argo-backup@pg.timer",  # legacy-argo: fixture
+        "argo-backup@pg.timer",  # kept-argo: fixture
     ]
 
 
@@ -278,7 +278,7 @@ def test_rename_migration_stop_tolerates_a_vanished_unit() -> None:
         "failed": True,
         "msg": (
             "Could not find the requested service "
-            "argo-build@whoami.service: host"  # legacy-argo: fixture
+            "argo-build@whoami.service: host"  # kept-argo: fixture
         ),
     }
     other = {"failed": True, "msg": "Job for unit failed with result 'timeout'."}
@@ -301,21 +301,21 @@ def test_rename_migration_selects_only_framework_units() -> None:
     guard = tasks["Stop and disable pre-1.0 systemd units"]["when"]
 
     systemctl_output = [
-        "argo-backup@pg.timer loaded active waiting backup",  # legacy-argo: fixture
-        "argo-build@.service                        enabled",  # legacy-argo: fixture
-        "argo-disk-alert.timer loaded active waiting probe",  # legacy-argo: fixture
-        "argo-operators-own-thing.service loaded active running",  # legacy-argo: fixture
+        "argo-backup@pg.timer loaded active waiting backup",  # kept-argo: fixture
+        "argo-build@.service                        enabled",  # kept-argo: fixture
+        "argo-disk-alert.timer loaded active waiting probe",  # kept-argo: fixture
+        "argo-operators-own-thing.service loaded active running",  # kept-argo: fixture
         "bay-backup@pg.timer loaded active waiting backup",
     ]
     candidates, orphans = _split_discovered(systemctl_output)
     assert not orphans, "nothing in this fixture is resident-but-not-found"
-    assert "argo-build@.service" not in candidates, (  # legacy-argo: bare template
+    assert "argo-build@.service" not in candidates, (  # kept-argo: bare template
         "a bare template unit would make `systemctl stop` fail"
     )
     assert "bay-backup@pg.timer" not in candidates, "new-name units are not touched"
 
     kept = _managed(candidates, guard)
     assert kept == [
-        "argo-backup@pg.timer",  # legacy-argo: fixture
-        "argo-disk-alert.timer",  # legacy-argo: fixture
+        "argo-backup@pg.timer",  # kept-argo: fixture
+        "argo-disk-alert.timer",  # kept-argo: fixture
     ], f"operator-created units must be dropped, got {kept}"

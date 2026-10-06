@@ -26,8 +26,8 @@ def webhook(
 
     Examples:
 
-        bin/bay webhook production
-        bin/bay webhook production --keys-only
+        bay webhook production
+        bay webhook production --keys-only
     """
     cx = context_from(ctx)
     bay_dir, root = cx.framework_root, cx.fleet_root

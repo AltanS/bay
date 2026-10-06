@@ -724,7 +724,7 @@ fi
 # Multiple bay-build@*.path units can fire in the same instant — most
 # commonly from a monorepo push that matches several services' path globs.
 # Without serialization, two rebuild.sh runs hit the shared
-# buildx_buildkit_argo-builder0 container concurrently and OOM-kill it.  # legacy-argo: live buildx builder name on hosts, migrate separately
+# buildx_buildkit_argo-builder0 container concurrently and OOM-kill it.  # kept-argo: live buildx builder name on hosts, migrate separately
 # fd-based flock here means the kernel releases the lock on process exit
 # (no stale-lockfile cleanup needed). A 1-hour timeout bounds deadlocks if
 # any single build legitimately hangs that long.
@@ -896,7 +896,7 @@ fi
 
 # ── Builder selection (optional remote BuildKit over the tailnet) ──
 # select-builder.sh is the ONE implementation of the probe; remote_build.yml
-# (`bin/bay deploy`) calls the same script. It prints a builder name on stdout,
+# (`bay deploy`) calls the same script. It prints a builder name on stdout,
 # its reason on stderr, and exits 0 in every handled case.
 SELECT_BUILDER="${STACK_DIR}/bin/select-builder.sh"
 LOCAL_BUILDER={{ bay_buildx_builder | quote }}

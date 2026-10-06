@@ -103,7 +103,7 @@ def cscli_allowlist_inspect(name: str, run_fn=subprocess.run) -> list[str]:
 def cscli_allowlist_add(name: str, ip: str, run_fn=subprocess.run) -> int:
     """Add a single IP to the allowlist. Returns cscli return code."""
     result = run_fn(
-        ["cscli", "allowlists", "add", name, ip, "-d", f"Argo peer {ip}"],  # legacy-argo: live CrowdSec allowlist entry description on hosts
+        ["cscli", "allowlists", "add", name, ip, "-d", f"Argo peer {ip}"],  # kept-argo: live CrowdSec allowlist entry description on hosts
         capture_output=True,
         text=True,
     )

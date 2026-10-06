@@ -1,4 +1,4 @@
-"""`bin/bay doctor` must probe SSH as a user the server actually accepts.
+"""`bay doctor` must probe SSH as a user the server actually accepts.
 
 The probe first ran `ssh <host> true` with no user, so it authenticated as
 the local account name. The fix for that put `root` first, which was worse:

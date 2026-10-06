@@ -25,24 +25,24 @@ def secret(
     hash: Optional[str] = typer.Option(
         None,
         "--hash",
-        help="Hash a password: argon2 or bcrypt.",  # legacy-argo: argon2 lib name, substring match only, not a rename
+        help="Hash a password: argon2 or bcrypt.",  # kept-argo: argon2 lib name, substring match only, not a rename
     ),
 ) -> None:
     """Generate random secrets or hash passwords.
 
     Prints passwords, hex tokens, and base64 keys on an ephemeral screen —
     nothing lands in scrollback. With --hash, prompts for a password and
-    prints an argon2id or bcrypt hash (e.g. for Traefik basicauth).  # legacy-argo: argon2 lib name, substring match only, not a rename
+    prints an argon2id or bcrypt hash (e.g. for Traefik basicauth).  # kept-argo: argon2 lib name, substring match only, not a rename
 
     `bay secret missing <env>` lists the secret names the services need
     that the env's vault does not hold (names only, never values).
 
     Examples:
 
-        bin/bay secret
-        bin/bay secret --hash argon2  # legacy-argo: argon2 lib name, substring match only, not a rename
-        bin/bay secret --hash bcrypt
-        bin/bay secret missing production
+        bay secret
+        bay secret --hash argon2  # kept-argo: argon2 lib name, substring match only, not a rename
+        bay secret --hash bcrypt
+        bay secret missing production
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -67,8 +67,8 @@ def missing(
 
     Examples:
 
-        bin/bay secret missing production
-        bin/bay secret missing production --json
+        bay secret missing production
+        bay secret missing production --json
     """
     from bay_cli import secrets_check
 
@@ -92,7 +92,7 @@ def missing(
     elif found:
         for item in found:
             console.error(f"{item.name}  (used by {', '.join(item.used_by)})")
-        console.info(f"{len(found)} secret name(s) missing in {env}. Add them with: bin/bay vault edit {env}")
+        console.info(f"{len(found)} secret name(s) missing in {env}. Add them with: bay vault edit {env}")
     else:
         console.success(f"No secret name is missing in {env}")
     if found:
@@ -124,15 +124,15 @@ def _generate_secrets() -> None:
         "\n  [dim]Base64 key (64 bytes):[/dim]"
         f"\n    {b64_64}"
         "\n"
-        "\n  Paste into secrets with: [bold]bin/bay vault edit <env>[/bold]"
+        "\n  Paste into secrets with: [bold]bay vault edit <env>[/bold]"
         "\n"
     )
     show_ephemeral(content)
 
 
 def _hash_password(algorithm: str) -> None:
-    if algorithm not in ("argon2", "bcrypt"):  # legacy-argo: argon2 lib name, substring match only, not a rename
-        raise BayError(f"Unknown hash type '{algorithm}'. Valid options: argon2, bcrypt")  # legacy-argo: argon2 lib name, substring match only, not a rename
+    if algorithm not in ("argon2", "bcrypt"):  # kept-argo: argon2 lib name, substring match only, not a rename
+        raise BayError(f"Unknown hash type '{algorithm}'. Valid options: argon2, bcrypt")  # kept-argo: argon2 lib name, substring match only, not a rename
 
     import getpass
 
@@ -141,15 +141,15 @@ def _hash_password(algorithm: str) -> None:
     if pw1 != pw2:
         raise BayError("Passwords do not match")
 
-    if algorithm == "argon2":  # legacy-argo: argon2 lib name, substring match only, not a rename
-        _hash_argon2(pw1)  # legacy-argo: argon2 lib name, substring match only, not a rename
+    if algorithm == "argon2":  # kept-argo: argon2 lib name, substring match only, not a rename
+        _hash_argon2(pw1)  # kept-argo: argon2 lib name, substring match only, not a rename
     else:
         _hash_bcrypt(pw1)
 
 
-def _hash_argon2(password: str) -> None:  # legacy-argo: argon2 lib name, substring match only, not a rename
+def _hash_argon2(password: str) -> None:  # kept-argo: argon2 lib name, substring match only, not a rename
     try:
-        from argon2 import PasswordHasher, Type  # legacy-argo: argon2 lib name, substring match only, not a rename
+        from argon2 import PasswordHasher, Type  # kept-argo: argon2 lib name, substring match only, not a rename
 
         ph = PasswordHasher(
             time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, type=Type.ID
@@ -159,8 +159,8 @@ def _hash_argon2(password: str) -> None:  # legacy-argo: argon2 lib name, substr
         # Fall back to uv run --with
         r = runner.run(
             [
-                "uv", "run", "--with", "argon2-cffi", "python3", "-c",  # legacy-argo: argon2 lib name, substring match only, not a rename
-                "from argon2 import PasswordHasher, Type; "  # legacy-argo: argon2 lib name, substring match only, not a rename
+                "uv", "run", "--with", "argon2-cffi", "python3", "-c",  # kept-argo: argon2 lib name, substring match only, not a rename
+                "from argon2 import PasswordHasher, Type; "  # kept-argo: argon2 lib name, substring match only, not a rename
                 "ph = PasswordHasher(time_cost=3, memory_cost=65536, parallelism=4, hash_len=32, type=Type.ID); "
                 f"print(ph.hash({password!r}))",
             ],
@@ -169,11 +169,11 @@ def _hash_argon2(password: str) -> None:  # legacy-argo: argon2 lib name, substr
         result = r.stdout.strip()
 
     content = (
-        "\n  [bold]Argon2id hash:[/bold]"  # legacy-argo: argon2 lib name, substring match only, not a rename
+        "\n  [bold]Argon2id hash:[/bold]"  # kept-argo: argon2 lib name, substring match only, not a rename
         "\n"
         f"\n  {result}"
         "\n"
-        "\n  Paste into secrets with: [bold]bin/bay vault edit <env>[/bold]"
+        "\n  Paste into secrets with: [bold]bay vault edit <env>[/bold]"
         "\n"
     )
     show_ephemeral(content, clipboard=result)
@@ -200,7 +200,7 @@ def _hash_bcrypt(password: str) -> None:
         "\n"
         f"\n  {result}"
         "\n"
-        "\n  Paste into secrets with: [bold]bin/bay vault edit <env>[/bold]"
+        "\n  Paste into secrets with: [bold]bay vault edit <env>[/bold]"
         "\n"
     )
     show_ephemeral(content, clipboard=result)

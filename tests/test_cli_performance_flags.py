@@ -27,6 +27,7 @@ from typer.testing import CliRunner
 from bay_cli import ansible
 from bay_cli.commands import ops
 from bay_cli.console import output as console_output
+from helpers import patch_fleet
 
 CALLBACKS = "ansible.posix.profile_tasks,ansible.posix.timer"
 
@@ -185,9 +186,7 @@ def test_provision_passes_profile_through(tmp_path):
         seen["extra_args"] = extra_args
         seen["profile"] = kwargs.get("profile")
 
-    with patch.object(ops.paths, "find_bay_dir", lambda: tmp_path / ".bay"), patch.object(
-        ops, "_run_playbook", fake_run_playbook
-    ):
+    with patch_fleet(tmp_path), patch.object(ops, "_run_playbook", fake_run_playbook):
         result = CliRunner().invoke(_app(ops.provision), ["--profile", "production"])
 
     assert result.exit_code == 0, result.output
@@ -202,9 +201,7 @@ def test_provision_rescues_profile_after_env(tmp_path):
         seen["extra_args"] = extra_args
         seen["profile"] = kwargs.get("profile")
 
-    with patch.object(ops.paths, "find_bay_dir", lambda: tmp_path / ".bay"), patch.object(
-        ops, "_run_playbook", fake_run_playbook
-    ):
+    with patch_fleet(tmp_path), patch.object(ops, "_run_playbook", fake_run_playbook):
         result = CliRunner().invoke(_app(ops.provision), ["production", "--profile"])
 
     assert result.exit_code == 0, result.output

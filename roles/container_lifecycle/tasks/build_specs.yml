@@ -62,14 +62,14 @@
     _svc_internal: "{{ _svc_ports.get('internal', 0) }}"
     # `expose: host` renders 0.0.0.0 — a bypass of nftables/CrowdSec that
     # requires `expose_host_ack: true` in services.yml. The ack is enforced
-    # by `bin/bay validate`; it does not change the rendered binding, so
+    # by `bay validate`; it does not change the rendered binding, so
     # nothing is read here. Second line of defence: deploy_stack/tasks/validate.yml.
     _svc_port_rendered: >-
       {%- if _svc_expose == 'loopback' -%}127.0.0.1:{{ _svc_internal }}:{{ _svc_internal }}{%- elif _svc_expose in ['gateway', 'tailnet'] -%}{{ gateway_bind_ip }}:{{ _svc_internal }}:{{ _svc_internal }}{%- elif _svc_expose == 'host' -%}0.0.0.0:{{ _svc_internal }}:{{ _svc_internal }}{%- endif -%}
     _base:
       name: "{{ _name }}"
       type: service
-      image: "{{ _svc.image | default('argo-' ~ stack_name ~ '-' ~ _name ~ ':latest') }}"  # legacy-argo: live image tag on hosts, migrate separately
+      image: "{{ _svc.image | default('argo-' ~ stack_name ~ '-' ~ _name ~ ':latest') }}"  # kept-argo: live image tag on hosts, migrate separately
       restart_policy: unless-stopped
       networks:
         - "{{ traefik_docker_network | default('services') }}"
@@ -132,7 +132,7 @@
     _acc_port_pair: "{{ _acc.port | default('') | regex_replace('^\\d+\\.\\d+\\.\\d+\\.\\d+:', '') }}"
     _acc_expose: "{{ _acc.expose | default('loopback') }}"
     # As above: `expose: host` (0.0.0.0) requires `expose_host_ack: true`,
-    # enforced by `bin/bay validate`, not by this render.
+    # enforced by `bay validate`, not by this render.
     _acc_port_rendered: >-
       {%- if _acc_expose == 'loopback' -%}127.0.0.1:{{ _acc_port_pair }}{%- elif _acc_expose in ['gateway', 'tailnet'] -%}{{ gateway_bind_ip }}:{{ _acc_port_pair }}{%- elif _acc_expose == 'host' -%}0.0.0.0:{{ _acc_port_pair }}{%- endif -%}
     _base:
@@ -484,7 +484,7 @@
     _tailnet_identity_spec:
       name: tailnet-identity
       type: infra
-      image: "{{ tailnet_identity_image | default('argo-tailnet-identity:latest') }}"  # legacy-argo: live image tag on hosts, migrate separately
+      image: "{{ tailnet_identity_image | default('argo-tailnet-identity:latest') }}"  # kept-argo: live image tag on hosts, migrate separately
       build: true
       restart_policy: unless-stopped
       networks:

@@ -47,7 +47,7 @@ def test_issue_templates_bug_report_warns_about_real_infrastructure() -> None:
     assert "do not paste" in body
     for term in ("domain", "ip address", "token"):
         assert term in body, f"bug_report.md does not warn about {term}s"
-    assert "bin/bay status" in body, "bug_report.md must ask for the version string"
+    assert "bay status" in body, "bug_report.md must ask for the version string"
 
 
 def test_pull_request_template_names_the_checklist() -> None:

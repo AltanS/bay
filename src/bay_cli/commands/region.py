@@ -231,7 +231,7 @@ def add(
 
     Examples:
 
-        bin/bay region add
+        bay region add
     """
     from rich.prompt import Prompt
 
@@ -246,7 +246,7 @@ def add(
     if not _validate_inventory_structure(inventory_path):
         console.error(
             f"hosts/{env} is not a multi-region inventory (no [production:children] group). "
-            "Use 'bin/bay setup --multi-region' to set up multi-region first."
+            "Add the [production:children] group to the file first."
         )
         raise typer.Exit(1)
 
@@ -310,15 +310,15 @@ def add(
     step_num = 2
     if access_gateway == "headscale":
         steps.append(f"  {step_num}. Ensure headscale_api_key is in vault secrets:")
-        steps.append(f"     [dim]bin/bay vault edit {env}[/dim]")
+        steps.append(f"     [dim]bay vault edit {env}[/dim]")
         step_num += 1
 
     steps.append(f"  {step_num}. Provision the new server:")
-    steps.append(f"     [dim]bin/bay provision {region_name}[/dim]")
+    steps.append(f"     [dim]bay provision {region_name}[/dim]")
     step_num += 1
 
     steps.append(f"  {step_num}. Deploy services:")
-    steps.append(f"     [dim]bin/bay deploy {region_name}[/dim]")
+    steps.append(f"     [dim]bay deploy {region_name}[/dim]")
 
     console.console.print()
     console.console.print(Panel("\n".join(steps), expand=False))

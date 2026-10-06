@@ -37,8 +37,9 @@ docker_compose_file: "{{ stack_dir }}/docker-compose.yml"
 # See docs/backups.md for setup instructions
 # backup_enabled: true
 
-# Minimum framework version required by this consumer (optional)
-# Deploys will fail fast if .bay/ has an older version than this
+# Minimum framework version required by this fleet (optional)
+# Deploys will fail fast if the installed Bay is older than this
+# (update it with `bay self update`)
 # bay_minimum_version: "0.1.0"
 
 # Build strategy configuration (optional — uncomment to override defaults)

@@ -4,7 +4,7 @@ Rich word-wraps by inserting real newlines. A headscale pre-auth key is a
 single long token, so in a normal-width terminal it was split across lines;
 copying it yielded a corrupted key, and because the key is single-use the
 join failed with nothing pointing back at the copy as the cause. The
-documented workaround was `COLUMNS=400 bin/bay gateway key <user>`.
+documented workaround was `COLUMNS=400 bay gateway key <user>`.
 
 `soft_wrap=True` leaves the line intact and lets the terminal wrap it
 visually, so a selection still carries the whole token.

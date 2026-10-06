@@ -78,7 +78,7 @@ def test_snippet_is_symlinked_into_consuming_role(role):
 
 @pytest.mark.parametrize("role", _CONSUMING_ROLES)
 def test_symlink_is_committed_as_a_symlink(role):
-    """Git must store mode 120000, or `bin/bay install`'s clone breaks sharing."""
+    """Git must store mode 120000, or a clone made by `bay self update` breaks sharing."""
     rel = f"roles/{role}/templates/_notify.sh.j2"
     out = subprocess.run(
         ["git", "-C", str(_REPO_ROOT), "ls-files", "-s", rel],

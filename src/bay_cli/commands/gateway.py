@@ -340,7 +340,7 @@ def _warn_default_deny(acl_file: Path, cx: Context, node_name: str | None, env: 
         f"\n"
         f"\n  [bold]1.[/bold] Get its tailnet IP once the device has joined:"
         f"\n"
-        f"\n       [dim]bin/bay gateway nodes[/dim]"
+        f"\n       [dim]bay gateway nodes[/dim]"
         f"\n"
         f"\n  [bold]2.[/bold] Add to [bold]headscale_acl_policy[/bold] in [bold]{rel}[/bold]:"
         f"\n"
@@ -359,8 +359,8 @@ def _warn_default_deny(acl_file: Path, cx: Context, node_name: str | None, env: 
         f"\n"
         f"\n  [bold]3.[/bold] Deploy the policy to the control host, then verify:"
         f"\n"
-        f"\n       [dim]bin/bay deploy {env} --tags headscale[/dim]"
-        f"\n       [dim]bin/bay gateway acl audit[/dim]"
+        f"\n       [dim]bay deploy {env} --tags headscale[/dim]"
+        f"\n       [dim]bay gateway acl audit[/dim]"
         f"\n"
     )
 
@@ -390,15 +390,15 @@ def _report_tagged_enrollment(
         f"\n  dead on arrival as an untagged one. The tag has to appear in BOTH"
         f"\n  [bold]tagOwners[/bold] and in accept rules in [bold]{rel}[/bold] first — as"
         f"\n  [dim]dst[/dim] for what may reach it, and as [dim]src[/dim] for what it must reach"
-        f"\n  itself. Then [dim]bin/bay deploy {env} --tags headscale[/dim]."
+        f"\n  itself. Then [dim]bay deploy {env} --tags headscale[/dim]."
         f"\n"
         f"\n  [bold]Ownership:[/bold] on headscale v0.29.x a key-stamped node registers"
         f"\n  under the synthetic [bold]tagged-devices[/bold] user, NOT '{alias}' — verified"
         f"\n  against v0.29.2. The tag still shows in the Tags column of"
-        f"\n  [dim]bin/bay gateway nodes[/dim]; only the owner moves. Anything keyed on the"
+        f"\n  [dim]bay gateway nodes[/dim]; only the owner moves. Anything keyed on the"
         f"\n  user (per-user ACL rules) will not match this node — key off the tag."
         f"\n"
-        f"\n  [bold]Verifying:[/bold] [dim]bin/bay gateway acl audit[/dim] resolves"
+        f"\n  [bold]Verifying:[/bold] [dim]bay gateway acl audit[/dim] resolves"
         f"\n  [dim]tag:[/dim] targets against live headscale state, so once the device has"
         f"\n  joined it will show as reachable via the class rule — and it names any tag"
         f"\n  no node carries. It still only checks the inbound (dst) side. For the"
@@ -680,8 +680,8 @@ def status(
 
     Examples:
 
-        bin/bay gateway status
-        bin/bay gateway status --region eu
+        bay gateway status
+        bay gateway status --region eu
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -731,12 +731,12 @@ def nodes(
     A node missing from THIS list never joined. But a node missing from
     another machine's `tailscale status` may still be enrolled fine: under a
     default-deny ACL policy an ungranted node is not distributed as a peer
-    at all. Run `bin/bay gateway acl audit` before re-enrolling anything.
+    at all. Run `bay gateway acl audit` before re-enrolling anything.
 
     Examples:
 
-        bin/bay gateway nodes
-        bin/bay gateway nodes --region eu
+        bay gateway nodes
+        bay gateway nodes --region eu
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -840,8 +840,8 @@ def acl_audit(
 
     Examples:
 
-        bin/bay gateway acl audit
-        bin/bay gateway acl audit --region eu
+        bay gateway acl audit
+        bay gateway acl audit --region eu
     """
     import yaml
 
@@ -903,7 +903,7 @@ def acl_audit(
             f"{tag} matches no node — rules granting it are inert. "
             f"The policy looks correct and grants nothing: either no node carries "
             f"the tag yet, or it is a typo. Check the Tags column of "
-            f"`bin/bay gateway nodes`."
+            f"`bay gateway nodes`."
         )
 
     if unresolvable:
@@ -932,7 +932,7 @@ def acl_audit(
         f"\n  enrollment. Add a [bold]hosts:[/bold] alias and a rule naming it in"
         f"\n  [bold]{rel}[/bold], then:"
         f"\n"
-        f"\n       [dim]bin/bay deploy {env} --tags headscale[/dim]"
+        f"\n       [dim]bay deploy {env} --tags headscale[/dim]"
         f"\n"
     )
     raise typer.Exit(1)
@@ -948,11 +948,11 @@ def add_user(
     """Create a new headscale user (headscale only).
 
     Users own devices; pre-auth keys are minted per user. For the common
-    enroll-a-device flow, `bin/bay gateway enroll` does this step for you.
+    enroll-a-device flow, `bay gateway enroll` does this step for you.
 
     Examples:
 
-        bin/bay gateway add-user alice
+        bay gateway add-user alice
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -985,7 +985,7 @@ def key(
     """Generate a pre-auth key for a user (headscale only).
 
     The key is single-use and expires on headscale's own default lifetime
-    (1h as of headscale 0.28) — use `bin/bay gateway enroll --expiry` for
+    (1h as of headscale 0.28) — use `bay gateway enroll --expiry` for
     a longer window. An unused key needs no revoking — it just expires.
 
     With --tag the node joins ALREADY tagged, so tag-granted ACL rules apply
@@ -996,8 +996,8 @@ def key(
 
     Examples:
 
-        bin/bay gateway key alice
-        bin/bay gateway key ci-runner --tag tag:agent
+        bay gateway key alice
+        bay gateway key ci-runner --tag tag:agent
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -1045,8 +1045,8 @@ def apikey(
 
     Examples:
 
-        bin/bay gateway apikey
-        bin/bay gateway apikey --expiration 90d
+        bay gateway apikey
+        bay gateway apikey --expiration 90d
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -1073,7 +1073,7 @@ def apikey(
             f"\n  [bold]Multi-region deployment:[/bold]"
             f"\n     Add to vault so remote regions can register via API:"
             f"\n"
-            f"\n       bin/bay vault edit {env}"
+            f"\n       bay vault edit {env}"
             f"\n"
             f'\n     Then set: [bold]headscale_api_key: "{key}"[/bold]'
             f"\n"
@@ -1127,8 +1127,8 @@ def enroll(
     naming it as dst (so you can reach it), AND rules naming it as src for
     anything it must reach itself. Then apply and verify:
 
-        bin/bay deploy production --tags headscale
-        bin/bay gateway acl audit
+        bay deploy production --tags headscale
+        bay gateway acl audit
 
     --tag is the exception, and the pattern for agent boxes: the tag is
     stamped on the pre-auth key, so the node joins ALREADY tagged and any
@@ -1147,9 +1147,9 @@ def enroll(
 
     Examples:
 
-        bin/bay gateway enroll --user alice --hostname alice-laptop
-        bin/bay gateway enroll --user alice --hostname alice-phone --expiry 7d
-        bin/bay gateway enroll --user ci-runner --tag tag:agent --reusable --expiry 30d
+        bay gateway enroll --user alice --hostname alice-laptop
+        bay gateway enroll --user alice --hostname alice-phone --expiry 7d
+        bay gateway enroll --user ci-runner --tag tag:agent --reusable --expiry 30d
     """
     from rich.prompt import Prompt
 
@@ -1237,11 +1237,11 @@ def enroll(
             user_id, expiry=expiry, reusable=reusable, tags=tags
         )
     except BayError:
-        hint = f"User created but key generation failed. Run `bin/bay gateway key {user}` to retry."
+        hint = f"User created but key generation failed. Run `bay gateway key {user}` to retry."
         raise BayError.remote("Failed to generate pre-auth key", hint=hint)
 
     if not auth_key:
-        hint = f"User created but key generation failed. Run `bin/bay gateway key {user}` to retry."
+        hint = f"User created but key generation failed. Run `bay gateway key {user}` to retry."
         raise BayError.remote("No key returned from headscale", hint=hint)
 
     # -- Step 3: Build enrollment command --
@@ -1307,7 +1307,7 @@ def users(
 
     Examples:
 
-        bin/bay gateway users
+        bay gateway users
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -1371,7 +1371,7 @@ def user_info(
 
     Examples:
 
-        bin/bay gateway user-info alice
+        bay gateway user-info alice
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -1443,11 +1443,11 @@ def rename_user(
     """Rename a headscale user.
 
     The user's devices keep their tailnet names — rename those separately
-    with `bin/bay gateway rename-node`.
+    with `bay gateway rename-node`.
 
     Examples:
 
-        bin/bay gateway rename-user alice bob
+        bay gateway rename-user alice bob
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -1488,8 +1488,8 @@ def delete_user(
 
     Examples:
 
-        bin/bay gateway delete-user alice
-        bin/bay gateway delete-user alice --force -y
+        bay gateway delete-user alice
+        bay gateway delete-user alice --force -y
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -1573,8 +1573,8 @@ def delete_node(
 
     Examples:
 
-        bin/bay gateway delete-node myphone
-        bin/bay gateway delete-node myphone -y
+        bay gateway delete-node myphone
+        bay gateway delete-node myphone -y
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -1632,7 +1632,7 @@ def rename_node(
 
     Examples:
 
-        bin/bay gateway rename-node myphone phone
+        bay gateway rename-node myphone phone
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -1667,8 +1667,8 @@ def routes(
 
     Examples:
 
-        bin/bay gateway routes
-        bin/bay gateway routes --node myserver
+        bay gateway routes
+        bay gateway routes --node myserver
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -1741,12 +1741,12 @@ def route_approve(
     """Approve or revoke an advertised route for a node.
 
     The route must already be advertised by the node (it appears as
-    'pending' in `bin/bay gateway routes`) before it can be approved.
+    'pending' in `bay gateway routes`) before it can be approved.
 
     Examples:
 
-        bin/bay gateway route-approve mynode 10.0.0.0/8
-        bin/bay gateway route-approve mynode 10.0.0.0/8 --revoke
+        bay gateway route-approve mynode 10.0.0.0/8
+        bay gateway route-approve mynode 10.0.0.0/8 --revoke
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
@@ -1854,9 +1854,9 @@ def migrate_namespace(
 
     Examples:
 
-        bin/bay gateway migrate-namespace                    # server -> stack_name
-        bin/bay gateway migrate-namespace --from old --to new
-        bin/bay gateway migrate-namespace --dry-run
+        bay gateway migrate-namespace                    # server -> stack_name
+        bay gateway migrate-namespace --from old --to new
+        bay gateway migrate-namespace --dry-run
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)

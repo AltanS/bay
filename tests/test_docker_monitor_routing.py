@@ -4,7 +4,7 @@ Before this, `send_alert` in docker-monitor.py.j2 threw its alert ID away and
 sent only through the LEGACY pair (TELEGRAM_* and ALERT_WEBHOOK_URL). A
 consumer that had moved to `alert_recipients`, as docs/alerting.md tells it
 to, has those empty, so container.crash, container.restart_loop and
-container.health_check_failed went nowhere while `bin/bay alerts list` said
+container.health_check_failed went nowhere while `bay alerts list` said
 they were delivered. A legacy consumer, meanwhile, could not mute them.
 
 These tests render the real template, import the result as a module, drive

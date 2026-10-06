@@ -4,7 +4,7 @@ These tests are static structural assertions over the git_deploy role files.
 They lock the wiring that fixes the stale cross-region image map:
 
 1. image-map.json must be re-rendered under the deploy_stack tag (not just
-   build/git_deploy). Background: `bin/bay deploy --tags deploy_stack` is the
+   build/git_deploy). Background: `bay deploy --tags deploy_stack` is the
    common service-config deploy and previously left image-map.json stale,
    silently dropping new services from the post-build pull-signal fan-out.
    See spec 02 — the producer/pull-signal fanout spec.

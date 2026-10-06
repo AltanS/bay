@@ -15,13 +15,6 @@ exclude_paths:
   - .ansible/
   - .claude/
   - vendor/
-  # Example CONSUMER wrappers — each is a one-line `import_playbook:
-  # .bay/<x>.yml`, which only resolves inside a real consumer where .bay/ is
-  # the framework clone. Unlintable from here by construction. The framework's
-  # own provision/deploy/restore.yml are linted directly (see kinds: below).
-  - example/deploy.yml
-  - example/provision.yml
-  - example/restore.yml
   - example/webhook.yml
 
 # File type mappings

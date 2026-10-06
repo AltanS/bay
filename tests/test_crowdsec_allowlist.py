@@ -68,7 +68,7 @@ def _version_json(version: str = "v1.6.2") -> str:
 def _inspect_json(ips: list[str]) -> str:
     return json.dumps(
         {
-            "name": "argo-inventory",  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+            "name": "argo-inventory",  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
             "description": "Peer hosts from Ansible inventory",
             "items": [{"value": ip, "description": f"peer {ip}"} for ip in ips],
         }
@@ -282,7 +282,7 @@ class TestEmptyPeerList:
                 result.stdout = ""
             return result
 
-        outcome = sync_allowlist("argo-inventory", desired_ips=[], run_fn=_run)  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+        outcome = sync_allowlist("argo-inventory", desired_ips=[], run_fn=_run)  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
 
         assert outcome["added"] == []
         assert outcome["removed"] == []
@@ -318,7 +318,7 @@ class TestMalformedJson:
 
         # Should not raise
         outcome = sync_allowlist(
-            "argo-inventory",  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+            "argo-inventory",  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
             desired_ips=["10.0.0.5"],
             run_fn=_run,
         )
@@ -342,7 +342,7 @@ class TestMalformedJson:
             return result
 
         outcome = sync_allowlist(
-            "argo-inventory",  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+            "argo-inventory",  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
             desired_ips=["10.0.0.6"],
             run_fn=_run,
         )
@@ -366,7 +366,7 @@ class TestMalformedJson:
             return result
 
         outcome = sync_allowlist(
-            "argo-inventory",  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+            "argo-inventory",  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
             desired_ips=["10.0.0.7"],
             run_fn=_run,
         )
@@ -381,7 +381,7 @@ class TestMalformedJson:
             result.stderr = ""
             return result
 
-        result = cscli_allowlist_inspect("argo-inventory", run_fn=_bad_run)  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+        result = cscli_allowlist_inspect("argo-inventory", run_fn=_bad_run)  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
         assert result == []
 
 
@@ -400,7 +400,7 @@ class TestCscliNotFound:
             return result
 
         with pytest.raises(RuntimeError, match="CrowdSec >= 1.5.0"):
-            sync_allowlist("argo-inventory", desired_ips=["1.2.3.4"], run_fn=_run)  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+            sync_allowlist("argo-inventory", desired_ips=["1.2.3.4"], run_fn=_run)  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
 
     def test_raises_on_old_version(self) -> None:
         def _run(cmd, **kwargs):
@@ -411,7 +411,7 @@ class TestCscliNotFound:
             return result
 
         with pytest.raises(RuntimeError, match="CrowdSec >= 1.5.0"):
-            sync_allowlist("argo-inventory", desired_ips=["1.2.3.4"], run_fn=_run)  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+            sync_allowlist("argo-inventory", desired_ips=["1.2.3.4"], run_fn=_run)  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
 
     def test_minimum_supported_version_passes(self) -> None:
         """CrowdSec 1.5.0 exactly should not raise."""
@@ -429,7 +429,7 @@ class TestCscliNotFound:
             return result
 
         # Should not raise
-        sync_allowlist("argo-inventory", desired_ips=[], run_fn=_run)  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+        sync_allowlist("argo-inventory", desired_ips=[], run_fn=_run)  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
 
 
 # ── Case 4: Stale-entry pruning ───────────────────────────────────────────────
@@ -439,8 +439,8 @@ class TestStaleEntryPruning:
     """Current list has 10.0.0.1 and 10.0.0.2; desired has 10.0.0.2 and 10.0.0.3.
 
     Expected:
-    - cscli allowlists remove argo-inventory 10.0.0.1   (stale)  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
-    - cscli allowlists add argo-inventory 10.0.0.3       (missing)  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+    - cscli allowlists remove argo-inventory 10.0.0.1   (stale)  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
+    - cscli allowlists add argo-inventory 10.0.0.3       (missing)  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
     - 10.0.0.2 is NOT touched (already present)
     """
 
@@ -457,7 +457,7 @@ class TestStaleEntryPruning:
             elif "inspect" in cmd:
                 result.stdout = _inspect_json(["10.0.0.1", "10.0.0.2"])
             elif "add" in cmd:
-                # cmd is e.g. ["cscli", "allowlists", "add", "argo-inventory", "<ip>", ...]  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+                # cmd is e.g. ["cscli", "allowlists", "add", "argo-inventory", "<ip>", ...]  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
                 ip_idx = cmd.index("add") + 2
                 self._add_calls.append(cmd[ip_idx])
                 result.stdout = ""
@@ -473,7 +473,7 @@ class TestStaleEntryPruning:
 
     def test_stale_ip_is_removed(self) -> None:
         sync_allowlist(
-            "argo-inventory",  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+            "argo-inventory",  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
             desired_ips=["10.0.0.2", "10.0.0.3"],
             run_fn=self._run_fn,
         )
@@ -483,7 +483,7 @@ class TestStaleEntryPruning:
 
     def test_missing_ip_is_added(self) -> None:
         sync_allowlist(
-            "argo-inventory",  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+            "argo-inventory",  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
             desired_ips=["10.0.0.2", "10.0.0.3"],
             run_fn=self._run_fn,
         )
@@ -493,7 +493,7 @@ class TestStaleEntryPruning:
 
     def test_unchanged_ip_not_touched(self) -> None:
         sync_allowlist(
-            "argo-inventory",  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+            "argo-inventory",  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
             desired_ips=["10.0.0.2", "10.0.0.3"],
             run_fn=self._run_fn,
         )
@@ -506,7 +506,7 @@ class TestStaleEntryPruning:
 
     def test_sync_returns_correct_sets(self) -> None:
         outcome = sync_allowlist(
-            "argo-inventory",  # legacy-argo: live CrowdSec allowlist name on hosts, migrate separately
+            "argo-inventory",  # kept-argo: live CrowdSec allowlist name on hosts, migrate separately
             desired_ips=["10.0.0.2", "10.0.0.3"],
             run_fn=self._run_fn,
         )

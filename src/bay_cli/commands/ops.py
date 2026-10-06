@@ -135,7 +135,6 @@ def _run_playbook(
     bay_dir, root = cx.framework_root, cx.fleet_root
 
     _validate_env(env, root)
-    guards.check_bay_version(bay_dir, root)
     if not skip_git_health:
         guards.check_git_health(bay_dir)
 
@@ -145,12 +144,11 @@ def _run_playbook(
         playbook,
         env,
         bay_dir=bay_dir,
+        fleet_root=root,
         tags=tag_list,
         extra_args=extra_args or None,
         profile=profile,
     )
-
-    guards.show_update_notice(bay_dir, root)
 
 
 def _show_headscale_onboarding(cx: Context) -> None:
@@ -177,16 +175,16 @@ def _show_headscale_onboarding(cx: Context) -> None:
         f"\n"
         f"  Quick-start: enroll your first device\n"
         f"\n"
-        f"  1. Enroll a device:     [dim]bin/bay gateway enroll[/dim]\n"
+        f"  1. Enroll a device:     [dim]bay gateway enroll[/dim]\n"
         f"  2. On your device:      [dim]tailscale up --login-server=https://{hs_domain} --authkey=KEY[/dim]\n"
         f"\n"
         f"  Or step by step:\n"
-        f"  1. Create a user:       [dim]bin/bay gateway add-user alice[/dim]\n"
-        f"  2. Generate auth key:   [dim]bin/bay gateway key alice[/dim]\n"
+        f"  1. Create a user:       [dim]bay gateway add-user alice[/dim]\n"
+        f"  2. Generate auth key:   [dim]bay gateway key alice[/dim]\n"
         f"  3. On your device:      [dim]tailscale up --login-server=https://{hs_domain} --authkey=KEY[/dim]\n"
         f"\n"
         f"  Manage nodes / users / keys (no admin UI):\n"
-        f"  • [dim]bin/bay gateway nodes[/dim]   [dim]bin/bay gateway users[/dim]\n"
+        f"  • [dim]bay gateway nodes[/dim]   [dim]bay gateway users[/dim]\n"
         f"\n"
         f"  Your VPN-protected services will be accessible once your device joins the tailnet."
     )
@@ -219,13 +217,13 @@ def _read_admin_user(root: Path) -> str:
 
     This is the privileged unix account the framework provisions
     (`roles/users` writes its sudoers entry from the same var), so the CLI
-    must not second-guess it. `admin-shell` used to hard-code the legacy-argo
+    must not second-guess it. `admin-shell` used to hard-code the kept-argo
     account name,
     which meant a new consumer following `example/group_vars` — where the
     account is `bay-admin` — got an SSH session to an account that does not
     exist, with no hint as to why.
 
-    The fallback stays the legacy-argo account rather than the example's
+    The fallback stays the kept-argo account rather than the example's
     `bay-admin`:
     every existing consumer predates the rename, and a fallback that changed
     the account out from under them would be a worse bug than the one being
@@ -238,7 +236,7 @@ def _read_admin_user(root: Path) -> str:
             user = data.get("admin_user")
             if user:
                 return str(user)
-    return "argo-admin"  # legacy-argo: pre-1.0 default account on existing hosts
+    return "argo-admin"  # kept-argo: pre-1.0 default account on existing hosts
 
 
 _RIG_CACHE_MAX_AGE = 3600  # 1 hour
@@ -460,13 +458,13 @@ def deploy(
 
     Examples:
 
-        bin/bay deploy production
-        bin/bay deploy production --tags deploy_stack
-        bin/bay deploy production --tags headscale
-        bin/bay deploy --rig production
-        bin/bay deploy production --region eu
-        bin/bay deploy production -- --check --diff
-        bin/bay deploy production -- -e bay_reconciler_plan_only=true
+        bay deploy production
+        bay deploy production --tags deploy_stack
+        bay deploy production --tags headscale
+        bay deploy --rig production
+        bay deploy production --region eu
+        bay deploy production -- --check --diff
+        bay deploy production -- -e bay_reconciler_plan_only=true
     """
     cx = context_from(ctx)
     console.show_banner(cx, subtitle=f"Deploy \u2192 {env}")
@@ -662,9 +660,9 @@ def provision(
 
     Examples:
 
-        bin/bay provision production
-        bin/bay provision production --tags nftables,crowdsec
-        bin/bay provision eu -- --check --diff
+        bay provision production
+        bay provision production --tags nftables,crowdsec
+        bay provision eu -- --check --diff
     """
     cx = context_from(ctx)
     console.show_banner(cx, subtitle=f"Provision \u2192 {env}")
@@ -688,14 +686,14 @@ def restore(
 ) -> None:
     """Run the restore playbook directly (low-level).
 
-    Prefer `bin/bay backup restore <env> <accessory>` \u2014 it lists
+    Prefer `bay backup restore <env> <accessory>` \u2014 it lists
     snapshots, prompts for confirmation, and passes the right variables.
     This command runs the playbook as-is and expects them as extra args.
 
     Examples:
 
-        bin/bay backup restore production postgres
-        bin/bay restore production -- -e accessory=postgres -e confirm=yes
+        bay backup restore production postgres
+        bay restore production -- -e accessory=postgres -e confirm=yes
     """
     cx = context_from(ctx)
     console.show_banner(cx, subtitle=f"Restore \u2192 {env}")
@@ -1050,19 +1048,19 @@ def logs(
     Only names from services.yml are accepted. Rig containers (traefik,
     headscale, bay-webhook, zot) are framework plumbing, not services —
     use `ssh debugbot@<host> "docker logs <name>"` for those, or
-    `bin/bay gateway status` for headscale health.
+    `bay gateway status` for headscale health.
 
     Date-shaped --since values (YYYY-MM-DD) address the archive and require
     --path; durations (1h, 30m, 2d) forward to `docker logs --since`.
 
     Examples:
 
-        bin/bay logs myapp --tail 200
-        bin/bay logs myapp -f
-        bin/bay logs myapp --since 2h
-        bin/bay logs myapp --path --since 2026-04-20
-        bin/bay logs myapp --scrub --pattern 'user@example\\.com'
-        bin/bay logs myapp --scrub --pattern 'user@example\\.com' --yes
+        bay logs myapp --tail 200
+        bay logs myapp -f
+        bay logs myapp --since 2h
+        bay logs myapp --path --since 2026-04-20
+        bay logs myapp --scrub --pattern 'user@example\\.com'
+        bay logs myapp --scrub --pattern 'user@example\\.com' --yes
     """
     cx = context_from(ctx)
     bay_dir, root = cx.framework_root, cx.fleet_root
@@ -1141,7 +1139,7 @@ def logs(
     if since and _is_date_shaped(since):
         console.error(
             f"--since '{since}' looks like a date. Archive search requires --path. "
-            f"Try:  bin/bay logs {service} --path --since {since}"
+            f"Try:  bay logs {service} --path --since {since}"
         )
         raise typer.Exit(code=1)
 
@@ -1181,7 +1179,7 @@ def restart(
 
     Uses `docker restart`, which reuses the EXISTING container — changed
     config, env files, images, and labels are NOT picked up. To apply
-    config changes, run `bin/bay deploy <env> --tags deploy_stack`
+    config changes, run `bay deploy <env> --tags deploy_stack`
     (recreates changed containers) instead.
 
     Only names from services.yml are accepted; rig containers (traefik,
@@ -1190,9 +1188,9 @@ def restart(
 
     Examples:
 
-        bin/bay restart myapp
-        bin/bay restart myapp worker --env production
-        bin/bay restart --yes
+        bay restart myapp
+        bay restart myapp worker --env production
+        bay restart --yes
     """
     cx = context_from(ctx)
     bay_dir, root = cx.framework_root, cx.fleet_root
@@ -1264,8 +1262,8 @@ def admin_shell(
 
     Examples:
 
-        bin/bay admin-shell eu
-        bin/bay admin-shell 203.0.113.10 --yes
+        bay admin-shell eu
+        bay admin-shell 203.0.113.10 --yes
     """
     cx = context_from(ctx)
     root = cx.fleet_root

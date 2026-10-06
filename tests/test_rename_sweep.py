@@ -32,7 +32,7 @@ _ARGO_RE = re.compile(r"argo", re.IGNORECASE)
 # to the old name (e.g. a dual-read shim, an alias, or migration-role code
 # that must literally name the old artifact to remove/migrate it). Matching
 # is case-sensitive and exact -- this is a mechanism, not free text.
-_LEGACY_TAG = "legacy-argo"
+_LEGACY_TAG = "kept-argo"
 
 # Exact paths / path prefixes excused from the sweep entirely. Keep this
 # short and deliberate -- do NOT add directories here to make the guard pass;
@@ -40,7 +40,7 @@ _LEGACY_TAG = "legacy-argo"
 ALLOWLIST: tuple[str, ...] = (
     "CHANGELOG.md",
     # Generated from the CLI by scripts/gen_skill.py, which strips the
-    # trailing `# legacy-argo:` tags its sources carry. The real surface is
+    # trailing `# kept-argo:` tags its sources carry. The real surface is
     # src/bay_cli/, which IS swept and IS tagged — guarding the artifact too
     # would only ever fail for a violation already excused upstream.
     "SKILL.md",
@@ -99,7 +99,7 @@ def scan(root: Path, *, excuse_pending: bool = True) -> list[Violation]:
     - the file path matches a PENDING prefix (only when excuse_pending is
       True -- the "still needed" self-check calls this with False to see
       the raw violation set), or
-    - the line itself contains the `legacy-argo` tag.
+    - the line itself contains the `kept-argo` tag.
     """
     violations: list[Violation] = []
     for rel_path in _tracked_files(root):

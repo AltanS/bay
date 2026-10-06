@@ -11,7 +11,8 @@
 # script cannot prove the destination is <allowed-user>@host, it says no.
 #
 # Setup:
-# 1. Copy to your consumer project: cp .bay/files/hooks/validate-ssh.sh .claude/hooks/
+# 1. Copy it into your project: cp <bay checkout>/files/hooks/validate-ssh.sh .claude/hooks/
+#    (the checkout is ~/.local/share/bay/framework for a standard install)
 # 2. Register in .claude/settings.json:
 #    {
 #      "hooks": {

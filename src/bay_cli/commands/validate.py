@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import typer
 
-from bay_cli import console, paths
+from bay_cli import console
 from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
@@ -199,7 +199,7 @@ def _check_config_age_remote(
         result.warn(
             "Config freshness   sentinel not found on host "
             f"({sentinel}) -- git_deploy hasn't run since sentinel "
-            "support was added (deploy once with `bin/bay deploy`)"
+            "support was added (deploy once with `bay deploy`)"
         )
         return
 
@@ -207,7 +207,7 @@ def _check_config_age_remote(
         result.warn(
             f"Config freshness   {len(missing)} config file(s) missing on host: "
             + ", ".join(missing)
-            + " -- run `bin/bay deploy` to create them"
+            + " -- run `bay deploy` to create them"
         )
 
     if stale:
@@ -259,42 +259,6 @@ class ValidationResult:
             "total_failed": len(self.failed),
             "total_warnings": len(self.warnings),
         }
-
-
-# ── Framework version drift ─────────────────────────────────────────────
-
-def _validate_version_drift(
-    root: Path, bay_dir: Path, result: ValidationResult
-) -> None:
-    """Check that the installed framework version matches ``.argo-version``."""  # legacy-argo: .argo/.argo-version convention, rename lands in S03
-    # Dev-link mode: version pinning is intentionally bypassed
-    if paths.is_dev_linked(root):
-        result.warn(
-            "Framework version  dev-link active -- version pinning bypassed"
-        )
-        return
-
-    pinned = paths.read_pinned_version(root)
-    if pinned is None:
-        result.warn(
-            "Framework version  .argo-version not found, skipping drift check"  # legacy-argo: .argo/.argo-version convention, rename lands in S03
-        )
-        return
-
-    installed = paths.read_installed_version(bay_dir)
-    if installed is None:
-        result.fail(
-            "Framework version  .argo/version.yml missing or unreadable"  # legacy-argo: .argo/.argo-version convention, rename lands in S03
-        )
-        return
-
-    if installed.lstrip("v") == pinned.lstrip("v"):
-        result.ok(f"Framework version  {pinned} matches installed")
-    else:
-        result.fail(
-            f"Framework version  mismatch: .argo-version={pinned}, "  # legacy-argo: .argo/.argo-version convention, rename lands in S03
-            f"installed={installed} -- run 'bin/bay install' to sync"
-        )
 
 
 # ── YAML parsing validation ─────────────────────────────────────────────
@@ -804,7 +768,7 @@ def _validate_service_links(
 
     Catches the same-stack link trap that lets a stray `links:`
     entry silently expose an accessory via the deploy_stack port
-    rewrite. Running here blocks `bin/bay deploy` at its pre-deploy
+    rewrite. Running here blocks `bay deploy` at its pre-deploy
     validation step.
     """
     from bay_cli.links import validate_links
@@ -910,7 +874,7 @@ def _validate_backup_config(
         for key in missing:
             result.fail(
                 f"Backup config      missing secret: '{key}' "
-                f"-- add to vault via 'bin/bay vault edit production'"
+                f"-- add to vault via 'bay vault edit production'"
             )
     else:
         result.ok(
@@ -1158,7 +1122,7 @@ def _validate_cross_references(
             result.warn(
                 f"{rel_path}  services.{svc_name} uses strategy 'registry' "
                 f"with webhook configured -- webhook pushes will notify but "
-                f"not auto-build. Use external CI or 'bin/bay deploy'."
+                f"not auto-build. Use external CI or 'bay deploy'."
             )
 
         # Global warning: all build services use registry strategy
@@ -1429,7 +1393,7 @@ def _check_vault_keys(
             result.fail(f"Vault keys         missing: {m}")
         for e in empty:
             result.fail(
-                f"Vault keys         empty: {e} -- generate one with 'bin/bay secret'"
+                f"Vault keys         empty: {e} -- generate one with 'bay secret'"
             )
     elif check_missing:
         result.ok(f"Vault keys         all {len(required_keys)} referenced secret(s) present")
@@ -1524,7 +1488,7 @@ def _validate_build_tokens(
             errors.append(
                 f"services.{name}.build.token: unrecognised format — "
                 f"expected '{{{{ secrets.KEY }}}}' "
-                f"(hint: use bin/bay service add --build-token to set this correctly)"
+                f"(hint: use bay service add --build-token to set this correctly)"
             )
             continue
 
@@ -2325,7 +2289,7 @@ def _probe_webhook_health(
     - Ignores non-bay hooks (Slack, CI, other tools) on the same repo.
     - Checks last_response.code (200 = ok, null = informational note, other = fail).
     - Flags orphan hooks that belong to this consumer's webhook_domain but have
-      no matching service (safe to remove with ``bin/bay service prune-webhooks``).
+      no matching service (safe to remove with ``bay service prune-webhooks``).
     """
     import requests
 
@@ -2439,7 +2403,7 @@ def _probe_webhook_health(
                 orphan_url = orphan.get("config", {}).get("url", "(unknown)")
                 result.warn(
                     f"Webhook health     orphan hook on {repo_key}: {orphan_url} "
-                    f"— run 'bin/bay service prune-webhooks {repo_key}' to remove"
+                    f"— run 'bay service prune-webhooks {repo_key}' to remove"
                 )
 
 
@@ -2887,7 +2851,7 @@ def run_validation(
     Args:
         root: Consumer project root directory.
         env: Target environment (e.g., ``"production"``).
-        bay_dir: Path to the ``.argo/`` framework directory.  When  # legacy-argo: .argo/.argo-version convention, rename lands in S03
+        bay_dir: Path to the ``.argo/`` framework directory.  When  # kept-argo: .argo/.argo-version convention, rename lands in S03
             ``None`` the version drift check is skipped silently (for
             unit tests that don't set up a framework directory).
         show_banner: Whether to print the Bay banner header.
@@ -2912,11 +2876,6 @@ def run_validation(
         console.show_banner(banner_cx, subtitle="Validate")
 
     result = ValidationResult()
-
-    # 0. Framework version drift check
-    if bay_dir is not None:
-        console.header("Framework Version")
-        _validate_version_drift(root, bay_dir, result)
 
     # 1. YAML syntax validation
     parsed = _validate_yaml_files(root, env, result)
@@ -3080,10 +3039,10 @@ def validate(
 
     Examples:
 
-        bin/bay validate
-        bin/bay validate --env testing
-        bin/bay validate --check-token-scope --check-webhook-health
-        bin/bay validate --check-config-age --region eu
+        bay validate
+        bay validate --env testing
+        bay validate --check-token-scope --check-webhook-health
+        bay validate --check-config-age --region eu
     """
     cx = context_from(ctx)
     bay_dir, root = cx.framework_root, cx.fleet_root

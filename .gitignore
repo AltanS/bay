@@ -12,7 +12,7 @@ vendor/collections/
 # Retry files
 *.retry
 
-# Dep-sync marker (written by bay install/update)
+# Dep-sync marker (written by bay self update)
 .deps-synced
 
 # Rig-state cache (written by deploy auto-rig detection)

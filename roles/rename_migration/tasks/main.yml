@@ -190,7 +190,7 @@
 # unknown file under the old dir survive — that is all it guarantees.
 #
 # It specifically does NOT preserve the alert-override file: mutes live in the
-# consumer's group_vars (`bin/bay alerts disable` writes them there), and
+# consumer's group_vars (`bay alerts disable` writes them there), and
 # alert_policy re-renders `alert-overrides` from those vars LATER IN THE SAME
 # RUN, in both playbooks. Whatever this move copies to the new path is
 # overwritten minutes later by the declared state. The file is derived, not

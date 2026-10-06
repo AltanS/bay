@@ -1,6 +1,6 @@
 """The one secret generator.
 
-Both ``bin/bay secret`` and the setup wizard mint passwords here, so a
+Both ``bay secret`` and the setup wizard mint passwords here, so a
 scaffolded project and a hand-generated secret have identical strength.
 Anything that writes a secret into a consumer's vault must call this —
 never ``secrets.token_urlsafe`` directly.
