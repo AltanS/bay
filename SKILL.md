@@ -104,114 +104,108 @@ to reproduce it. The flags that change what a command *means*:
 
 ### Framework
 
-- `bin/bay dev-link [path]` — Link .bay/ to a local framework checkout for development.
-- `bin/bay dev-unlink` — Remove the dev link and restore the pinned framework clone.
-- `bin/bay fleet` — Create, clone and list the fleets on this machine.
-- `bin/bay fleet init <name>` — Create a fleet at ~/.config/bay/fleets/<name>, or clone one with --from.
-- `bin/bay fleet ls` — List the fleets in ~/.config/bay/fleets.
-- `bin/bay guide` — Show tailored next steps for this project's current state.
-- `bin/bay install` — Install the framework version pinned in .bay-version.
-- `bin/bay self` — Show or change the Bay version installed on this machine.
-- `bin/bay self update` — Move this machine to the newest Bay release, or to the tag given by --to.
-- `bin/bay self version` — Print the installed Bay version and where the checkout lives.
-- `bin/bay setup` — Run the interactive setup wizard to configure your project.
-- `bin/bay status` — Show the pinned framework version, update status, and feature flags.
-- `bin/bay update` — Update to the latest framework release (bumps .bay-version).
+- `bay fleet` — Create, clone and list the fleets on this machine.
+- `bay fleet init <name>` — Create a fleet at ~/.config/bay/fleets/<name>, or clone one with --from.
+- `bay fleet ls` — List the fleets in ~/.config/bay/fleets.
+- `bay self` — Show or change the Bay version installed on this machine.
+- `bay self update` — Move this machine to the newest Bay release, or to the tag given by --to.
+- `bay self version` — Print the installed Bay version and where the checkout lives.
+- `bay status` — Show the installed Bay version, the fleet it works on, and the feature flags.
 
 ### Operations
 
-- `bin/bay admin-shell <host>` — Open an SSH session as the configured admin user on the named host.
-- `bin/bay alerts` — Inspect and configure Bay's alert surface.
-- `bin/bay alerts disable <pattern>` — Mute one or more alerts.
-- `bin/bay alerts doctor` — Diagnose the failure modes that have actually bitten.
-- `bin/bay alerts enable <pattern>` — Un-mute one or more alerts.
-- `bin/bay alerts list` — Show every alert with its effective per-recipient state.
-- `bin/bay alerts test [alert_id]` — Show — or with --live, prove — where an alert would be delivered.
-- `bin/bay build` — Inspect and reset the webhook build circuit breaker.
-- `bin/bay build reset [service]` — Reset the build circuit breaker after fixing the underlying issue.
-- `bin/bay build status` — Show circuit breaker state for all services on the target host(s).
-- `bin/bay deploy <env>` — Deploy services to the target environment.
-- `bin/bay gateway` — Manage the access gateway (headscale tailnet / wireguard).
-- `bin/bay gateway acl` — Inspect the tailnet ACL policy.
-- `bin/bay gateway acl audit` — Flag tailnet nodes that no accept rule can reach.
-- `bin/bay gateway add-user <name>` — Create a new headscale user (headscale only).
-- `bin/bay gateway apikey` — Generate a Headscale API key (headscale only).
-- `bin/bay gateway delete-node <name>` — Delete a node from the tailnet.
-- `bin/bay gateway delete-user <name>` — Delete a headscale user.
-- `bin/bay gateway enroll` — Enroll a device: create user, generate key, print the join command.
-- `bin/bay gateway key <name>` — Generate a pre-auth key for a user (headscale only).
-- `bin/bay gateway nodes` — List tailnet nodes with user, IP, and last-seen time (headscale only).
-- `bin/bay gateway rename-node <old_name> <new_name>` — Rename a node in the tailnet.
-- `bin/bay gateway rename-user <old_name> <new_name>` — Rename a headscale user.
-- `bin/bay gateway route-approve <node_name> <route>` — Approve or revoke an advertised route for a node.
-- `bin/bay gateway routes` — List all advertised routes across the tailnet.
-- `bin/bay gateway status` — Show access gateway status.
-- `bin/bay gateway user-info <name>` — Show details for a user and their nodes.
-- `bin/bay gateway users` — List all headscale users with node counts.
-- `bin/bay healthcheck <env>` — Hit every public service's domains and report reachability.
-- `bin/bay logs <service>` — Show container logs for a service, or operate on its log archive.
-- `bin/bay provision <env>` — Provision and harden a server (base OS, users, firewall, Docker).
-- `bin/bay prune <env>` — Reclaim disk space by pruning unused Docker images and build cache.
-- `bin/bay region` — Manage deployment regions (multi-region inventories).
-- `bin/bay region add` — Add a new region to an existing multi-region deployment (interactive).
-- `bin/bay restart [service...]` — Restart service containers without a full deploy.
-- `bin/bay restore <env>` — Run the restore playbook directly (low-level).
-- `bin/bay webhook <env>` — Deploy webhook infrastructure and show GitHub setup instructions.
+- `bay admin-shell <host>` — Open an SSH session as the configured admin user on the named host.
+- `bay alerts` — Inspect and configure Bay's alert surface.
+- `bay alerts disable <pattern>` — Mute one or more alerts.
+- `bay alerts doctor` — Diagnose the failure modes that have actually bitten.
+- `bay alerts enable <pattern>` — Un-mute one or more alerts.
+- `bay alerts list` — Show every alert with its effective per-recipient state.
+- `bay alerts test [alert_id]` — Show — or with --live, prove — where an alert would be delivered.
+- `bay build` — Inspect and reset the webhook build circuit breaker.
+- `bay build reset [service]` — Reset the build circuit breaker after fixing the underlying issue.
+- `bay build status` — Show circuit breaker state for all services on the target host(s).
+- `bay deploy <env>` — Deploy services to the target environment.
+- `bay gateway` — Manage the access gateway (headscale tailnet / wireguard).
+- `bay gateway acl` — Inspect the tailnet ACL policy.
+- `bay gateway acl audit` — Flag tailnet nodes that no accept rule can reach.
+- `bay gateway add-user <name>` — Create a new headscale user (headscale only).
+- `bay gateway apikey` — Generate a Headscale API key (headscale only).
+- `bay gateway delete-node <name>` — Delete a node from the tailnet.
+- `bay gateway delete-user <name>` — Delete a headscale user.
+- `bay gateway enroll` — Enroll a device: create user, generate key, print the join command.
+- `bay gateway key <name>` — Generate a pre-auth key for a user (headscale only).
+- `bay gateway nodes` — List tailnet nodes with user, IP, and last-seen time (headscale only).
+- `bay gateway rename-node <old_name> <new_name>` — Rename a node in the tailnet.
+- `bay gateway rename-user <old_name> <new_name>` — Rename a headscale user.
+- `bay gateway route-approve <node_name> <route>` — Approve or revoke an advertised route for a node.
+- `bay gateway routes` — List all advertised routes across the tailnet.
+- `bay gateway status` — Show access gateway status.
+- `bay gateway user-info <name>` — Show details for a user and their nodes.
+- `bay gateway users` — List all headscale users with node counts.
+- `bay healthcheck <env>` — Hit every public service's domains and report reachability.
+- `bay logs <service>` — Show container logs for a service, or operate on its log archive.
+- `bay provision <env>` — Provision and harden a server (base OS, users, firewall, Docker).
+- `bay prune <env>` — Reclaim disk space by pruning unused Docker images and build cache.
+- `bay region` — Manage deployment regions (multi-region inventories).
+- `bay region add` — Add a new region to an existing multi-region deployment (interactive).
+- `bay restart [service...]` — Restart service containers without a full deploy.
+- `bay restore <env>` — Run the restore playbook directly (low-level).
+- `bay webhook <env>` — Deploy webhook infrastructure and show GitHub setup instructions.
 
 ### Stack Manager
 
-- `bin/bay server` — Manage inventory servers.
-- `bin/bay server add <ip>` — Add a server to the inventory.
-- `bin/bay server inspect [env]` — Inspect live network configuration from servers via SSH.
-- `bin/bay server list [env]` — List servers from the inventory.
-- `bin/bay server remove <ip>` — Remove a server from the inventory.
-- `bin/bay service` — Manage services and accessories in services.yml.
-- `bin/bay service add [catalog_id]` — Add a service or accessory from the catalog or a custom definition.
-- `bin/bay service catalog` — List available service/accessory definitions from the catalog.
-- `bin/bay service edit <name>` — Edit an existing service's configuration in services.yml.
-- `bin/bay service list` — List all configured services and accessories.
-- `bin/bay service prune-webhooks <repo>` — List and optionally delete orphan GitHub webhooks for a repository.
-- `bin/bay service remove <name>` — Remove a service or accessory from services.yml.
-- `bin/bay service show <name>` — Show the full configuration for a service or accessory.
+- `bay server` — Manage inventory servers.
+- `bay server add <ip>` — Add a server to the inventory.
+- `bay server inspect [env]` — Inspect live network configuration from servers via SSH.
+- `bay server list [env]` — List servers from the inventory.
+- `bay server remove <ip>` — Remove a server from the inventory.
+- `bay service` — Manage services and accessories in services.yml.
+- `bay service add [catalog_id]` — Add a service or accessory from the catalog or a custom definition.
+- `bay service catalog` — List available service/accessory definitions from the catalog.
+- `bay service edit <name>` — Edit an existing service's configuration in services.yml.
+- `bay service list` — List all configured services and accessories.
+- `bay service prune-webhooks <repo>` — List and optionally delete orphan GitHub webhooks for a repository.
+- `bay service remove <name>` — Remove a service or accessory from services.yml.
+- `bay service show <name>` — Show the full configuration for a service or accessory.
 
 ### Vault
 
-- `bin/bay vault` — Manage encrypted secrets (ansible-vault).
-- `bin/bay vault decrypt <env>` — Decrypt a secrets file in place — leaves PLAINTEXT on disk.
-- `bin/bay vault edit <env>` — Edit encrypted secrets in $EDITOR (decrypt, edit, re-encrypt).
-- `bin/bay vault encrypt <env>` — Encrypt a plaintext secrets file in place.
-- `bin/bay vault set <env> <key> [value]` — Set one secret key non-interactively (decrypt, modify, re-encrypt).
-- `bin/bay vault view <env>` — View encrypted secrets (read-only, no temp files).
+- `bay vault` — Manage encrypted secrets (ansible-vault).
+- `bay vault decrypt <env>` — Decrypt a secrets file in place — leaves PLAINTEXT on disk.
+- `bay vault edit <env>` — Edit encrypted secrets in $EDITOR (decrypt, edit, re-encrypt).
+- `bay vault encrypt <env>` — Encrypt a plaintext secrets file in place.
+- `bay vault set <env> <key> [value]` — Set one secret key non-interactively (decrypt, modify, re-encrypt).
+- `bay vault view <env>` — View encrypted secrets (read-only, no temp files).
 
 ### Backup
 
-- `bin/bay backup` — Manage restic backups (list, run, restore, status, check).
-- `bin/bay backup check <accessory>` — Verify backup repository integrity (restic check).
-- `bin/bay backup list <accessory>` — List backup snapshots for an accessory (newest first).
-- `bin/bay backup restore <env> <accessory>` — Restore an accessory from a backup snapshot (interactive).
-- `bin/bay backup run [accessory]` — Trigger a backup now (one accessory, or all).
-- `bin/bay backup status` — Show the backup status dashboard (last backup, snapshots, repo size).
+- `bay backup` — Manage restic backups (list, run, restore, status, check).
+- `bay backup check <accessory>` — Verify backup repository integrity (restic check).
+- `bay backup list <accessory>` — List backup snapshots for an accessory (newest first).
+- `bay backup restore <env> <accessory>` — Restore an accessory from a backup snapshot (interactive).
+- `bay backup run [accessory]` — Trigger a backup now (one accessory, or all).
+- `bay backup status` — Show the backup status dashboard (last backup, snapshots, repo size).
 
 ### Utilities
 
-- `bin/bay compile` — Compile bay.fleet.toml and every pinned bay.toml into services.yml.
-- `bin/bay doctor [env]` — Run pre-flight checks on your project before deploying.
-- `bin/bay import` — Import a fleet from today's YAML files into bay.fleet.toml, bay.toml files and lockfiles.
-- `bin/bay secret` — Generate random secrets or hash passwords.
-- `bin/bay secret missing <env>` — List secret NAMES the services need that the env's vault lacks.
-- `bin/bay test` — Run the consumer's infrastructure tests (tests/test_infra.sh).
-- `bin/bay toml` — Work with bay.toml files.
-- `bin/bay toml validate [path]` — Check a bay.toml file against schema v3; print one line per violation.
-- `bin/bay validate` — Validate configuration files before deploying.
+- `bay compile` — Compile bay.fleet.toml and every pinned bay.toml into services.yml.
+- `bay doctor [env]` — Run pre-flight checks on your project before deploying.
+- `bay import` — Import a fleet from today's YAML files into bay.fleet.toml, bay.toml files and lockfiles.
+- `bay secret` — Generate random secrets or hash passwords.
+- `bay secret missing <env>` — List secret NAMES the services need that the env's vault lacks.
+- `bay test` — Run the consumer's infrastructure tests (tests/test_infra.sh).
+- `bay toml` — Work with bay.toml files.
+- `bay toml validate [path]` — Check a bay.toml file against schema v3; print one line per violation.
+- `bay validate` — Validate configuration files before deploying.
 
 ### Daily
 
-- `bin/bay approve <plan_id>` — Approve a saved plan with destructive or shared steps.
-- `bin/bay init` — Draft a bay.toml in this app repo and register the app in the fleet.
-- `bin/bay plan [env]` — Compare WANTED (bay.toml at HEAD), PINNED (the lock) and RUNNING (the box).
-- `bin/bay rollback [env]` — Return an environment to its previous pin and deploy it.
-- `bin/bay show [name]` — Print WANTED, PINNED and RUNNING for a project, and a status per environment.
-- `bin/bay up [env]` — Pin the project's commit in the fleet and deploy it.
+- `bay approve <plan_id>` — Approve a saved plan with destructive or shared steps.
+- `bay init` — Draft a bay.toml in this app repo and register the app in the fleet.
+- `bay plan [env]` — Compare WANTED (bay.toml at HEAD), PINNED (the lock) and RUNNING (the box).
+- `bay rollback [env]` — Return an environment to its previous pin and deploy it.
+- `bay show [name]` — Print WANTED, PINNED and RUNNING for a project, and a status per environment.
+- `bay up [env]` — Pin the project's commit in the fleet and deploy it.
 
 <!-- END GENERATED CLI REFERENCE -->
 
@@ -223,10 +217,10 @@ Paths are relative to the framework root (`.bay/` in a consumer).
 
 **Start here**
 
-- `CHANGELOG.md` — What changed in each release, with upgrade notes. Read this before `bin/bay update`.
+- `CHANGELOG.md` — What changed in each release, with upgrade notes. Read this before `bay update`.
 - `docs/install.md` — Install the `bay` command once per machine, update it with `bay self update`, and make or clone a fleet.
 - `docs/features.md` — What Bay is, the full feature set, and how it compares to alternatives.
-- `docs/onboarding.md` — The `bin/bay setup` wizard, the files it generates, and your first deploy.
+- `docs/onboarding.md` — The `bay setup` wizard, the files it generates, and your first deploy.
 
 **Configuration**
 

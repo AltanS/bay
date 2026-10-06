@@ -27,3 +27,20 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("_TYPER_FORCE_DISABLE_TERMINAL", "1")
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _unbind_fleet():
+    """`Context.resolve` binds the fleet for Ansible commands (bay_cli/ansible.py).
+
+    That is process state, right for a CLI run and wrong across tests, so every
+    test starts and ends unbound.
+    """
+    from bay_cli import ansible
+
+    ansible.bind_fleet(None)
+    yield
+    ansible.bind_fleet(None)

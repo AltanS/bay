@@ -71,17 +71,18 @@ def _run(
 ) -> subprocess.CompletedProcess[str]:
     """Run validate.yml then config_files.yml on localhost.
 
-    Layout mirrors a consumer: the playbook sits in <root>/.bay/ so the copy
-    task's `playbook_dir | dirname`/files resolves to <root>/files.
+    The copy task reads from `bay_fleet_root`/files, which the CLI passes as
+    an extra var; here <root> plays the fleet.
     """
-    root = tmp_path / "consumer"
+    root = tmp_path / "fleet"
     for rel, body in (files or {}).items():
         target = root / "files" / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(body)
-    bay = root / ".bay"
+    bay = root / "run"
     bay.mkdir(parents=True, exist_ok=True)
     extra = {
+        "bay_fleet_root": str(root),
         "app_user": getpass.getuser(),
         "stack_dir": str(tmp_path / "stack"),
         "active_services": services,
@@ -175,7 +176,7 @@ def test_config_dirs_spells_entries_like_ansible_dirname():
     assert "./x" in bay_config_dirs(["./x/y"])
 
 
-# ── bin/bay validate: the schema enum ────────────────────────────────────
+# ── bay validate: the schema enum ────────────────────────────────────
 
 
 def _schema_failures(tmp_path: Path, mode: object, kind: str = "services") -> list[str]:

@@ -69,7 +69,7 @@
 
 - name: Deploy config files
   ansible.builtin.copy:
-    src: "{{ playbook_dir | dirname }}/files/{{ item }}"
+    src: "{{ bay_fleet_root }}/files/{{ item }}"
     dest: "{{ stack_dir }}/config/{{ item }}"
     owner: "{{ app_user }}"
     group: docker

@@ -1,18 +1,100 @@
-"""Ansible operations for bay framework."""
+"""Ansible operations for bay framework.
 
+Ansible runs from the framework checkout (roles, playbooks, vendored
+collections) against a fleet (``hosts/``, ``group_vars/``, ``.vault_pass``).
+The two are different directories, and the working directory is neither, so
+nothing here reads the working directory:
+
+* A playbook run gets an inventory directory built for the run, so Ansible
+  finds the fleet's ``group_vars`` next to its hosts files (``_fleet_inventory``).
+  The playbook learns where the fleet is from the extra var ``bay_fleet_root``.
+* Every Ansible command runs with ``uv run --directory <fleet>`` once the CLI
+  has resolved the fleet (``bind_fleet``), so ad-hoc commands see the fleet as
+  their working directory.
+* The settings a fleet used to keep in ``ansible.cfg`` (roles path, vault
+  password, SSH options) travel as environment variables (``fleet_env``).
+"""
+
+import json
 import shutil
-
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from bay_cli import console, runner
 
+#: The fleet the running CLI command works on. Set once by ``bind_fleet`` when
+#: the CLI resolves its Context. A process runs one command, so one fleet.
+_bound_fleet: Path | None = None
+
+
+def bind_fleet(fleet_root: Path | None) -> None:
+    """Make every Ansible command below run for this fleet. ``None`` unbinds."""
+    global _bound_fleet
+    _bound_fleet = fleet_root
+
 
 def _uv_run_cmd(bay_dir: Path) -> list[str]:
-    return ["uv", "run", "--project", str(bay_dir)]
+    cmd = ["uv", "run", "--project", str(bay_dir)]
+    if _bound_fleet is not None:
+        cmd += ["--directory", str(_bound_fleet)]
+    return cmd
 
 
 def _collections_env(bay_dir: Path) -> dict[str, str]:
-    return {"ANSIBLE_COLLECTIONS_PATH": str(bay_dir / "vendor" / "collections")}
+    """Environment for an Ansible command: the vendored collections, plus the fleet's settings."""
+    env = {"ANSIBLE_COLLECTIONS_PATH": str(bay_dir / "vendor" / "collections")}
+    if _bound_fleet is not None:
+        env.update(fleet_env(bay_dir, _bound_fleet))
+    return env
+
+
+def fleet_env(bay_dir: Path, fleet_root: Path) -> dict[str, str]:
+    """What a fleet's ansible.cfg used to say, as environment variables.
+
+    Environment variables beat ansible.cfg, so a fleet that still has the
+    old file (with ``.bay/`` paths in it) is not misled by it.
+    """
+    env = {
+        "ANSIBLE_ROLES_PATH": f"{bay_dir / 'vendor' / 'roles'}:{bay_dir / 'roles'}",
+        "ANSIBLE_INVENTORY": str(fleet_root / "hosts"),
+        "ANSIBLE_FORCE_COLOR": "True",
+        "ANSIBLE_SSH_ARGS": "-o ForwardAgent=yes -o ControlMaster=auto -o ControlPersist=60s",
+        "ANSIBLE_PIPELINING": "True",
+        "ANSIBLE_SSH_RETRIES": "1",
+    }
+    vault_pass = fleet_root / ".vault_pass"
+    if vault_pass.is_file():
+        env["ANSIBLE_VAULT_PASSWORD_FILE"] = str(vault_pass)
+    return env
+
+
+@contextmanager
+def _fleet_inventory(fleet_root: Path | None) -> Iterator[Path | None]:
+    """A directory Ansible can use as ``-i``: the fleet's hosts files and group_vars.
+
+    Ansible loads ``group_vars/`` from the directory of an inventory source,
+    and from the directory of the playbook. The playbook is in the framework
+    checkout, not in the fleet, and the fleet keeps its hosts files in
+    ``hosts/`` and its group_vars one level up. So the run gets a directory of
+    links: one per hosts file, plus ``group_vars`` and ``host_vars``.
+    """
+    if fleet_root is None:
+        yield None
+        return
+    with tempfile.TemporaryDirectory(prefix="bay-inventory-") as tmp:
+        inventory = Path(tmp)
+        hosts = fleet_root / "hosts"
+        if hosts.is_dir():
+            for entry in sorted(hosts.iterdir()):
+                if entry.is_file() and not entry.name.startswith("."):
+                    (inventory / entry.name).symlink_to(entry.resolve())
+        for name in ("group_vars", "host_vars"):
+            source = fleet_root / name
+            if source.is_dir():
+                (inventory / name).symlink_to(source.resolve())
+        yield inventory
 
 
 PROFILE_CALLBACKS = "ansible.posix.profile_tasks,ansible.posix.timer"
@@ -101,7 +183,6 @@ def _stale_venv_reason(venv: Path, bay_dir: Path) -> str | None:
         return None
 
     expected_bin = bin_dir.resolve() if bin_dir.exists() else bin_dir
-    inspected = 0
     try:
         entries = sorted(bin_dir.iterdir())
     except OSError:
@@ -118,27 +199,9 @@ def _stale_venv_reason(venv: Path, bay_dir: Path) -> str | None:
         interp_path = Path(interp)
         if not interp_path.is_absolute() or not interp_path.name.startswith("python"):
             continue
-        inspected += 1
         if interp_path.parent != expected_bin and interp_path.parent != bin_dir:
             return f"{entry.name} points at {interp} — directory was moved"
 
-    if inspected == 0:
-        # No console script could be read (a stripped or half-built venv).
-        # Fall back to pyvenv.cfg's `prompt`, which uv writes from the
-        # project name: a venv built before the 1.0 rename still says the
-        # pre-1.0 project name while the framework dir is now `.bay`.
-        cfg = venv / "pyvenv.cfg"
-        try:
-            text = cfg.read_text()
-        except OSError:
-            return None
-        for line in text.splitlines():
-            key, _, value = line.partition("=")
-            if key.strip() != "prompt":
-                continue
-            prompt = value.strip()
-            if prompt in ("argo", ".argo") and bay_dir.name != prompt:  # legacy-argo: pre-1.0 project name
-                return f"pyvenv.cfg prompt is {prompt!r} — venv predates the 1.0 rename"
     return None
 
 
@@ -204,42 +267,55 @@ def run_playbook(
     env: str,
     *,
     bay_dir: Path,
+    fleet_root: Path | None = None,
     tags: list[str] | None = None,
     extra_args: list[str] | None = None,
     profile: bool = False,
 ) -> None:
-    """Run an ansible-playbook with live output streaming."""
-    cmd = [
-        *_uv_run_cmd(bay_dir),
-        "ansible-playbook", f"{playbook}.yml",
-        "-e", f"target_host={env}",
-    ]
-    if tags:
-        cmd.extend(["--tags", ",".join(tags)])
-    if extra_args:
-        cmd.extend(extra_args)
+    """Run a framework playbook against a fleet, with live output streaming.
 
-    mitogen = _mitogen_env(bay_dir)
+    ``fleet_root`` is the fleet: its hosts files, group_vars and vault password
+    are used, wherever the command is run from. Without it (tests), the
+    framework's own ansible.cfg and inventory apply.
+    """
+    with _fleet_inventory(fleet_root) as inventory:
+        cmd = [
+            *_uv_run_cmd(bay_dir),
+            "ansible-playbook", str(bay_dir / f"{playbook}.yml"),
+            "-e", f"target_host={env}",
+        ]
+        if fleet_root is not None:
+            cmd.extend(["-e", json.dumps({"bay_fleet_root": str(fleet_root)})])
+        if inventory is not None:
+            cmd.extend(["-i", str(inventory)])
+        if tags:
+            cmd.extend(["--tags", ",".join(tags)])
+        if extra_args:
+            cmd.extend(extra_args)
 
-    # One line, before the playbook starts: which connection strategy is live.
-    # Mitogen prints nothing itself, so a purged venv or BAY_NO_MITOGEN=1
-    # silently costs ~3 SSH execs per task with no way to notice.
-    if not console.is_json_mode():
-        strategy = mitogen.get("ANSIBLE_STRATEGY")
-        console.info(
-            f"strategy: {strategy}" if strategy
-            else "strategy: linear (mitogen unavailable)"
+        mitogen = _mitogen_env(bay_dir)
+
+        # One line, before the playbook starts: which connection strategy is live.
+        # Mitogen prints nothing itself, so a purged venv or BAY_NO_MITOGEN=1
+        # silently costs ~3 SSH execs per task with no way to notice.
+        if not console.is_json_mode():
+            strategy = mitogen.get("ANSIBLE_STRATEGY")
+            console.info(
+                f"strategy: {strategy}" if strategy
+                else "strategy: linear (mitogen unavailable)"
+            )
+
+        runner.run(
+            cmd,
+            capture=False,
+            cwd=fleet_root,
+            env={
+                **_collections_env(bay_dir),
+                **(fleet_env(bay_dir, fleet_root) if fleet_root is not None else {}),
+                **mitogen,
+                **_profile_env(profile),
+            },
         )
-
-    runner.run(
-        cmd,
-        capture=False,
-        env={
-            **_collections_env(bay_dir),
-            **mitogen,
-            **_profile_env(profile),
-        },
-    )
 
 
 def vault_cmd(
@@ -252,4 +328,5 @@ def vault_cmd(
     runner.run(
         [*_uv_run_cmd(bay_dir), "ansible-vault", action, vault_file],
         capture=False,
+        env=_collections_env(bay_dir),
     )
