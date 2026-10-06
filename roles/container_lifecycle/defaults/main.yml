@@ -34,3 +34,9 @@ container_lifecycle_stack_label: "bay.stack"
 
 # Remove containers not in current specs after deploy
 container_lifecycle_cleanup: true
+
+# Where tasks/reconcile.yml writes the deploy receipt, one file per
+# environment (<env>.json, plus <env>.prev.json). `bay status --json` reads
+# this path, so changing it hides every receipt from the CLI.
+# Format: docs/deploy-receipt.md.
+container_lifecycle_receipts_dir: /var/lib/bay/receipts

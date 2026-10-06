@@ -253,6 +253,12 @@
         group: docker
         mode: "0640"
 
+# `failed_when: false` so a failed pass still reaches the deploy receipt
+# below, which records `result: failed`. The deploy is NOT allowed to pass:
+# "Stop the deploy when the reconciler failed" re-raises it right after the
+# receipt is written. `changed_when` reads stdout only when there is any, so a
+# reconciler that crashed before printing its report still reaches that task
+# instead of dying here on `from_json` of an empty string.
 - name: Run server-side reconciler
   ansible.builtin.command:
     cmd: >-
@@ -261,8 +267,10 @@
   environment:
     PYTHONPATH: "{{ stack_dir }}/.reconcile"
   register: _reconcile_result
-  changed_when: "(_reconcile_result.stdout | from_json).changed | default(false)"
-  failed_when: _reconcile_result.rc != 0
+  changed_when: >-
+    (_reconcile_result.stdout | default('') | trim | length > 0)
+    and ((_reconcile_result.stdout | from_json).changed | default(false))
+  failed_when: false
 
 # ── The container plan under --check ────────────────────────────────────
 # Check mode skips the command task above, so a dry run used to print no
@@ -391,6 +399,90 @@
       check_mode: false
       changed_when: false
       when: _reconcile_check_dir.path is defined
+
+# ── Deploy receipt ─────────────────────────────────────────────────────────
+# The box's own record of what this deploy left running:
+# /var/lib/bay/receipts/<env>.json, read back by `bay status --json`. Format:
+# docs/deploy-receipt.md. Written by `python -m bay_reconcile.receipt` (the
+# package shipped above), which writes a temp file and renames it, and keeps
+# the receipt it replaces as <env>.prev.json.
+#
+# Written on a failed pass too (`result: failed`), which is why the run above
+# has `failed_when: false`. Skipped when:
+#   - the run was skipped (--check). `is not skipped`, never `rc is defined`:
+#     a check-mode-skipped command still registers rc 0.
+#   - this is a partial pass (`container_lifecycle_only`, the git_deploy
+#     webhook pass). Its bundle lists one container, not the box.
+#   - the run was --plan-only. Nothing was deployed.
+#
+# `become_user: root` explicitly: deploy.yml runs this play as app_user, and a
+# task-level `become: true` alone keeps that user. The env is `target_host`,
+# the inventory group the CLI passes (`-e target_host=production`). The fleet
+# and framework commits arrive from the CLI as extra vars and are null when a
+# playbook is run by hand. A receipt that cannot be written is a warning, not
+# a failed deploy: the containers are already in place.
+- name: Write the deploy receipt
+  when:
+    - _reconcile_result is not skipped
+    - container_lifecycle_only | default([]) | length == 0
+    - not (bay_reconciler_plan_only | default(false) | bool)
+  become: true
+  become_user: root
+  block:
+    - name: Ensure the receipts directory exists
+      ansible.builtin.file:
+        path: "{{ container_lifecycle_receipts_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Write the receipt for this environment
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -m
+          - bay_reconcile.receipt
+          - --dir
+          - "{{ container_lifecycle_receipts_dir }}"
+          - --bundle
+          - "{{ stack_dir }}/.reconcile-bundle.json"
+          - --meta
+          - >-
+            {{ {
+              'env': target_host | default(group_names | reject('equalto', 'all') | first | default('default')),
+              'box': inventory_hostname,
+              'framework_version': bay_version | default(none),
+              'framework_commit': bay_receipt_framework_commit | default(none),
+              'fleet_commit': bay_receipt_fleet_commit | default(none),
+              'fleet_dirty': bay_receipt_fleet_dirty | default(none),
+              'reconcile_rc': _reconcile_result.rc | int
+            } | to_json }}
+        stdin: "{{ _reconcile_result.stdout | default('') }}"
+      environment:
+        PYTHONPATH: "{{ stack_dir }}/.reconcile"
+      register: _reconcile_receipt
+      # A record of the deploy, not a change to it: an idempotent deploy
+      # keeps a recap with changed=0.
+      changed_when: false
+
+  rescue:
+    - name: Warn that the deploy receipt was not written
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: the deploy receipt was not written
+          ({{ ansible_failed_result.msg | default('unknown error') }}).
+          `bay status --json` will show the previous receipt for this box.
+
+- name: Stop the deploy when the reconciler failed
+  ansible.builtin.fail:
+    msg: >-
+      the reconciler exited {{ _reconcile_result.rc }}.
+      Report: {{ _reconcile_result.stdout | default('') }}
+      {{ _reconcile_result.stderr | default('') }}
+  when:
+    - _reconcile_result is not skipped
+    - _reconcile_result.rc != 0
 
 # In --check mode the command task above is skipped, so `stdout` is empty and
 # `from_json` raises (exit 2, the whole play dies). Guard on `is not skipped`,

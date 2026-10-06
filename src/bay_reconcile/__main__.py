@@ -34,7 +34,31 @@ def reconcile(
         }
 
     report = execute(the_plan, client, config=bundle.config)
-    return (0 if report.ok else 1), {"plan": the_plan.summary(), **report.to_dict()}
+    return (0 if report.ok else 1), {
+        "plan": the_plan.summary(),
+        **report.to_dict(),
+        "state": _state_after(bundle, client),
+    }
+
+
+def _state_after(bundle: Bundle, client: DockerClient) -> dict[str, dict[str, str | None]]:
+    """Status and health of every desired container once the pass is done.
+
+    One more batched observe, read only. The deploy receipt
+    (``bay_reconcile.receipt``) turns it into each container's ``healthy``
+    field. A failed read is reported as no state, never as a failed deploy:
+    the containers are already in place by now.
+    """
+    try:
+        observed = client.observe(bundle.managed_label)
+    except Exception:  # noqa: BLE001 - a status read must not fail the deploy
+        return {}
+    out: dict[str, dict[str, str | None]] = {}
+    for spec in bundle.containers:
+        current = observed.get(spec.name)
+        if current is not None and current.exists:
+            out[spec.name] = {"status": current.status, "health": current.health}
+    return out
 
 
 def main(argv: Sequence[str] | None = None) -> int:
