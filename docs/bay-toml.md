@@ -28,6 +28,28 @@ bay toml validate --json bay.toml
 The check reads only the file. It needs no fleet, no network and no repo checkout. The
 schema itself is `src/bay_cli/schemas/bay_toml.schema.json` (JSON Schema draft 2020-12).
 
+## Import a fleet from today's YAML files
+
+```bash
+bay import --fleet ./fleet --out ./new-fleet   # writes the new layout, reads ./fleet only
+bay import --fleet ./fleet --check             # writes nothing; exit 1 on a difference
+bay import --fleet ./fleet --check --diff      # also prints the diff of each container
+```
+
+- `bay import` writes `bay.fleet.toml`, `projects/<name>/bay.toml` for every project,
+  `projects/<name>.lock` with every adopted name, and a copy of the config files under
+  `files/`. `--out` must be empty or new.
+- Each container becomes a project with the same name. `<name>-prod`, `-staging` and
+  `-dev` become an environment of `<name>`. `<name>-<suffix>` with the same repo or
+  image becomes `[services.<suffix>]` when the result is exact. The report lists every
+  decision.
+- A value `http://<container>:<port>` that reaches another project becomes a need with
+  `env` set to today's variable name, and the other project gets `publish = true`.
+- The report lists each secret to add (for example a password that is plain text
+  today) and each value it cannot carry over exactly (`FLAG:`). It never prints a value.
+- `--check` imports into a scratch directory, compiles, and renders today's file and the
+  compiled one through the deploy code. It prints each container whose settings differ.
+
 ## Rules
 
 1. No templating. No variables, no `${}`, no `{{ }}`. A value is a literal or a name.

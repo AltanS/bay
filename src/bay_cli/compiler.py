@@ -570,7 +570,8 @@ class _Compiler:
         # The local build tag build_specs.yml:72 and git_deploy_image_prefix
         # derive. The prefix is the live tag on the boxes and stays until a
         # separate image migration.
-        return "argo-{{ stack_name }}-" + web + ":latest", None  # legacy-argo: live image tag on boxes
+        local = "argo-{{ stack_name }}-" + web + ":latest"  # legacy-argo: live tag on boxes
+        return local, None
 
     def _build(
         self, unit: _Unit, service: str, table: dict[str, Any], base: str, name: str

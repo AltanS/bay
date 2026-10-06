@@ -190,6 +190,7 @@ to reproduce it. The flags that change what a command *means*:
 
 - `bin/bay compile` — Compile bay.fleet.toml and every pinned bay.toml into services.yml.
 - `bin/bay doctor [env]` — Run pre-flight checks on your project before deploying.
+- `bin/bay import` — Import a fleet from today's YAML files into bay.fleet.toml, bay.toml files and lockfiles.
 - `bin/bay secret` — Generate random secrets or hash passwords.
 - `bin/bay secret missing <env>` — List secret NAMES the services need that the env's vault lacks.
 - `bin/bay test` — Run the consumer's infrastructure tests (tests/test_infra.sh).

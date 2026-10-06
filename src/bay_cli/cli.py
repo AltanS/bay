@@ -5,7 +5,7 @@ from pathlib import Path
 import typer
 
 from bay_cli import console
-from bay_cli.commands import compile_cmd, toml_cmd
+from bay_cli.commands import compile_cmd, import_cmd, toml_cmd
 from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault, webhook
 from bay_cli.context import GlobalOptions, context_from
 from bay_cli.errors import BayError
@@ -184,6 +184,9 @@ app.add_typer(toml_cmd.app, name="toml", rich_help_panel="Utilities")
 
 # Compile (top-level)
 app.command("compile", rich_help_panel="Utilities")(compile_cmd.compile_fleet)
+
+# Import (top-level)
+app.command("import", rich_help_panel="Utilities")(import_cmd.import_fleet)
 
 # Doctor (top-level)
 app.command(rich_help_panel="Utilities")(doctor.doctor)
