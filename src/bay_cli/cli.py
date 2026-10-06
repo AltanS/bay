@@ -188,8 +188,8 @@ app.command("compile", rich_help_panel="Utilities")(compile_cmd.compile_fleet)
 # Doctor (top-level)
 app.command(rich_help_panel="Utilities")(doctor.doctor)
 
-# Secret (top-level)
-app.command(rich_help_panel="Utilities")(secret.secret)
+# Secret (sub-app: `bay secret` still generates; `bay secret missing <env>`)
+app.add_typer(secret.app, name="secret", rich_help_panel="Utilities")
 
 # Test (top-level)
 app.command(rich_help_panel="Utilities")(test.test)

@@ -1251,7 +1251,10 @@ def _validate_connectivity(
     _check_depends_on(services, accessories, result)
 
     # ── Vault key validation ───────────────────────────────────────────
-    _check_vault_keys(services, accessories, parsed_files, result)
+    # Empty values only. Whether a name is present at all is the env-aware
+    # "Secret Names" check (_validate_secret_names), which reads the vault of
+    # the env being validated rather than the first secrets.yml found.
+    _check_vault_keys(services, accessories, parsed_files, result, check_missing=False)
 
     # ── Build token vault presence ─────────────────────────────────────
     # Extract vault_data for _validate_build_tokens (same logic as _check_vault_keys)
@@ -1348,10 +1351,14 @@ def _check_vault_keys(
     accessories: dict[str, Any],
     parsed_files: dict[str, Any],
     result: ValidationResult,
+    *,
+    check_missing: bool = True,
 ) -> None:
-    """Verify env.secret keys exist in the decrypted vault.
+    """Verify env.secret keys exist in the decrypted vault and are not empty.
 
     If vault was not decryptable (not in parsed_files), skip with warning.
+    ``check_missing=False`` checks emptiness only; ``run_validation`` passes
+    it because ``_validate_secret_names`` owns presence.
     """
     # Collect all required secret key names from services + accessories
     required_keys: dict[str, list[str]] = {}  # key_name -> [svc_names]
@@ -1410,7 +1417,8 @@ def _check_vault_keys(
     for key_name in sorted(required_keys.keys()):
         users = ", ".join(sorted(set(required_keys[key_name])))
         if key_name not in vault_data:
-            missing.append(f"'{key_name}' (used by {users})")
+            if check_missing:
+                missing.append(f"'{key_name}' (used by {users})")
             continue
         value = vault_data[key_name]
         if value is None or (isinstance(value, str) and not value.strip()):
@@ -1423,8 +1431,60 @@ def _check_vault_keys(
             result.fail(
                 f"Vault keys         empty: {e} -- generate one with 'bin/bay secret'"
             )
-    else:
+    elif check_missing:
         result.ok(f"Vault keys         all {len(required_keys)} referenced secret(s) present")
+    else:
+        result.ok(f"Vault keys         no referenced secret is empty ({len(required_keys)} checked)")
+
+
+def _validate_secret_names(
+    root: Path,
+    bay_dir: Path | None,
+    env: str,
+    services_data: dict[str, Any],
+    parsed_files: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Fail for every secret NAME a service needs that ``env``'s vault lacks.
+
+    Names only (src/bay_cli/secrets_check.py): no value is read into a
+    message. Reuses the vault the YAML pass already decrypted when it is
+    there; otherwise decrypts it once more. No vault password is a warning.
+    """
+    from bay_cli import secrets_check
+
+    console.header("Secret Names")
+    cx = Context.for_fleet_root(root, bay_dir)
+    required = secrets_check.required_secrets(
+        services_data.get("services") or {},
+        services_data.get("accessories") or {},
+        include_build_token=False,
+    )
+    if not required:
+        result.ok("Secret names       no secret references to check")
+        return
+
+    held: set[str] | None = None
+    path = secrets_check.secrets_file_for(cx, env)
+    if path is not None:
+        rel = str(path.relative_to(root))
+        if rel in parsed_files:
+            held = secrets_check.names_in(parsed_files[rel])
+    try:
+        if held is None:
+            held = secrets_check.vault_names(cx, env)
+    except secrets_check.SecretsUncheckable as exc:
+        result.warn(f"Secret names       cannot check: {exc}")
+        return
+
+    missing = secrets_check.compare(required, held)
+    for item in missing:
+        result.fail(
+            f"Secret names       missing in {env}: {item.name} "
+            f"(used by {', '.join(item.used_by)})"
+        )
+    if not missing:
+        result.ok(f"Secret names       all {len(required)} needed name(s) present in {env}")
 
 
 def _validate_build_tokens(
@@ -2898,6 +2958,10 @@ def run_validation(
     if services_data is not None:
         probe_cache = ProbeCache(bay_dir, enabled=use_probe_cache)
         _validate_connectivity(root, services_data, parsed, result, probe_cache)
+
+    # 6b. Every secret name the services need exists in this env's vault
+    if services_data is not None:
+        _validate_secret_names(root, bay_dir, env, services_data, parsed, result)
 
     # 7. Deprecation warnings
     _validate_deprecations(parsed, result)
