@@ -1,0 +1,4 @@
+---
+# A hand-maintained file next to the generated services.yml. compile never
+# writes it; it only checks that no services:/accessories: key collides.
+stack_name: minfleet

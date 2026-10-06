@@ -1,0 +1,94 @@
+# The shop app: builds from its repo, publishes itself, needs postgres and redis.
+name = "shop"
+fleet = "minfleet"
+publish = true
+port = 3000
+command = "node server.js"
+health = "/healthz"
+memory = "512m"
+update = "auto"
+zero_downtime = true
+logs = "7d"
+secrets = ["SESSION_SECRET"]
+
+[needs.postgres]
+env = "SHOP_DATABASE_URL"
+
+[needs.redis]
+
+[build]
+dockerfile = "Dockerfile"
+strategy = "remote"
+memory = "2g"
+watch = ["src/**", "package.json"]
+ignore = ["*.md"]
+
+[build.args]
+NODE_ENV = "production"
+
+[build.secrets]
+npmrc = "NPMRC"
+
+[env]
+LOG_LEVEL = "info"
+
+[fleet_secrets]
+TURNSTILE_SECRET_KEY = "TURNSTILE_SECRET_KEY"
+
+[access]
+mode = "public"
+locked = ["/admin"]
+
+[access.limits]
+rate = "100/s"
+burst = 50
+
+[access.password]
+users = ["admin"]
+realm = "Staff only"
+
+[[mounts]]
+path = "/app/data"
+volume = "data"
+backup = false
+
+[[mounts]]
+path = "/etc/shop/config.yaml"
+from = "deploy/config.yaml"
+mode = "0644"
+
+[services.api]
+build = { dockerfile = "apps/api/Dockerfile", context = "apps/api", strategy = "local" }
+port = 4000
+domain = "api.shop.example.com"
+health = "/health"
+replicas = 2
+update = "off"
+
+[services.api.access]
+mode = "tailnet"
+open = ["/webhooks"]
+
+[services.warmer]
+inherit = false
+image = "ghcr.io/acme/warmer:1"
+port = 9000
+command = "warm --every 5m"
+memory = "128m"
+
+[deploy.production]
+box = "eu-1"
+domain = "shop.example.com"
+aliases = ["www.shop.example.com"]
+redirect = false
+branch = "main"
+
+[deploy.staging]
+box = "eu-1"
+domain = "staging.shop.example.com"
+branch = "develop"
+access.mode = "tailnet"
+services.api.domain = "api-staging.shop.example.com"
+
+[deploy.staging.env]
+LOG_LEVEL = "debug"

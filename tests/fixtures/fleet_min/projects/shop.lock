@@ -1,0 +1,22 @@
+{
+  "lock_version": 1,
+  "name": "shop",
+  "repo": "git@github.com:acme/shop.git",
+  "commit": "0123456789ab",
+  "toml_path": "bay.toml",
+  "local_path": "checkouts/shop",
+  "envs": {
+    "production": {
+      "box": "eu-1",
+      "adopted": {
+        "database": "shop_prod",
+        "role": "shop_app",
+        "volumes": {"data": "shop_data"},
+        "images": {"web": "registry.example.com/minfleet/shop-web:latest"}
+      }
+    },
+    "staging": {
+      "box": "eu-1"
+    }
+  }
+}

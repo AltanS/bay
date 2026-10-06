@@ -1,0 +1,32 @@
+# Gatus has no repo of its own, so it lives in the fleet repo.
+name = "gatus"
+fleet = "minfleet"
+image = "twinproduction/gatus:latest"
+port = 8080
+health = "none"
+memory = "256m"
+update = "auto"
+needs = ["shop"]
+
+[env]
+GATUS_CONFIG = "/config/config.yaml"
+
+[fleet_secrets]
+TELEGRAM_BOT_TOKEN = "TELEGRAM_BOT_TOKEN"
+
+[access]
+mode = "tailnet"
+open = ["/api/v1/endpoints"]
+
+[[mounts]]
+path = "/config/config.yaml"
+from = "config.yaml"
+
+[[mounts]]
+path = "/data"
+volume = "data"
+backup = false
+
+[deploy.production]
+box = "na-1"
+domain = "status.example.com"

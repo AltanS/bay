@@ -188,6 +188,7 @@ to reproduce it. The flags that change what a command *means*:
 
 ### Utilities
 
+- `bin/bay compile` — Compile bay.fleet.toml and every pinned bay.toml into services.yml.
 - `bin/bay doctor [env]` — Run pre-flight checks on your project before deploying.
 - `bin/bay secret` — Generate random secrets or hash passwords.
 - `bin/bay test` — Run the consumer's infrastructure tests (tests/test_infra.sh).

@@ -1,0 +1,64 @@
+# Minimal fleet for the compiler tests: two boxes, shared postgres and redis,
+# one project pinned by lockfile (checkouts/shop) and one that lives here
+# (projects/gatus).
+name = "minfleet"
+default_box = "eu-1"
+default_domain = "example.com"
+primary_env = "production"
+
+[defaults]
+build_strategy = "local"
+build_memory = "2g"
+registry = "registry.example.com/minfleet"
+logs = "off"
+
+[defaults.limits]
+concurrent = 100
+
+[defaults.backup]
+keep = "30d"
+hour = 3
+
+[boxes.eu-1]
+env = "production"
+group = "eu"
+tailnet_ip = "100.64.0.3"
+
+[boxes.na-1]
+env = "production"
+group = "na"
+tailnet_ip = "100.64.0.4"
+
+[resources.postgres]
+kind = "postgres"
+box = ["eu-1", "na-1"]
+image = "postgres:16"
+port = 5432
+expose = "loopback"
+volumes = ["pg_data:/var/lib/postgresql/data"]
+health = { test = ["CMD", "pg_isready", "-U", "app"], interval = "5s", retries = 5 }
+backup = { method = "pg_dump", schedule = "0 3 * * *", retain = 7 }
+
+[resources.postgres.env]
+POSTGRES_DB = "app"
+POSTGRES_USER = "app"
+
+[resources.postgres.secrets]
+POSTGRES_PASSWORD = "POSTGRES_PASSWORD"
+
+[resources.redis]
+kind = "redis"
+box = "eu-1"
+image = "redis:7"
+memory = "256m"
+update = "off"
+
+[tailnet]
+allowlist = ["100.64.0.0/10"]
+
+[webhook]
+domain = "deploy.example.com"
+secret = "WEBHOOK_SECRET"
+
+[repo_tokens]
+"git@github.com:acme/" = "ACME_GIT_TOKEN"
