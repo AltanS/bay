@@ -8,7 +8,7 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
-## [2.0.0] - unreleased
+## [2.0.0] - 2026-10-07
 
 Bay 2.0 is a machine-level tool. You install it once per machine, a fleet
 repo holds your boxes, and each app repo holds a `bay.toml`. The consumer
@@ -122,6 +122,13 @@ repo, the `.bay/` clone and the `bin/bay` wrapper are gone.
   changes.
 - A container that has `mem_limit` and no `memswap_limit` gains the swap cap
   at its first deploy from a compiled file, so it recreates once.
+- All three operator fleets were cut over on 2026-10-06 and 2026-10-07.
+  Each cut-over used `bay import`, `bay compile --adopt` and `bay up`.
+- The first `bay up` on a cut-over fleet recreates some containers. This
+  happens when the env file order, the swap cap or the webhook env changed.
+  The plan now predicts these recreations, so you can read them first.
+- Install the CLI once per machine. See `docs/install.md`. The `bin/bay`
+  wrapper is gone.
 
 ## [1.0.0] - 2026-10-06
 
