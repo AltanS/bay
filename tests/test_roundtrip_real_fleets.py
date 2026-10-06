@@ -15,6 +15,10 @@ fixture, so the code path has CI coverage.
 
 Each exception is ``(fleet, container, key, reason)``. An exception that no
 longer matches a real difference fails the test, so the list can only shrink.
+
+A fleet whose root holds ``bay.fleet.toml`` is cut over: its services file is
+now compiled output, so there is no YAML layout left to compare. It skips with
+that reason. Delete its exceptions from the private file when it cuts over.
 """
 
 from __future__ import annotations
@@ -42,14 +46,26 @@ EXCEPTIONS = tuple(
     roundtrip.Exception_(e["fleet"], e["container"], e["key"], e["reason"])
     for e in _CFG.get("exception", [])
 )
+
+
+def _marks(path: Path) -> list[pytest.MarkDecorator]:
+    return [
+        pytest.mark.skipif(
+            not (path / "group_vars" / "all").is_dir(), reason="fleet checkout not present"
+        ),
+        pytest.mark.skipif(
+            (path / "bay.fleet.toml").is_file(),
+            reason="fleet is cut over (bay.fleet.toml present): its services file is compiled "
+            "output, so there is no YAML layout to compare",
+        ),
+    ]
+
+
 FLEETS = [
     pytest.param(
         f["name"],
         CONFIG.parent / f["path"],
-        marks=pytest.mark.skipif(
-            not (CONFIG.parent / f["path"] / "group_vars" / "all").is_dir(),
-            reason="fleet checkout not present",
-        ),
+        marks=_marks(CONFIG.parent / f["path"]),
         id=f"fleet{i}",
     )
     for i, f in enumerate(_CFG.get("fleet", []))
