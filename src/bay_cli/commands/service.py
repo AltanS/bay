@@ -13,6 +13,7 @@ from typing import Any
 import typer
 from rich.table import Table
 
+from bay_cli import ansible as _ansible
 from bay_cli import console
 from bay_cli.catalog import CatalogEntry
 from bay_cli.context import context_or_cwd
@@ -1398,7 +1399,7 @@ def _read_vault_token(root: Path, env: str, key: str) -> str | None:
             try:
                 proc = subprocess.run(
                     [
-                        "ansible-vault", "decrypt",
+                        _ansible.tool("ansible-vault"), "decrypt",
                         "--vault-password-file", str(vault_pass),
                         "--output=-",
                         str(path),

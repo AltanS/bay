@@ -34,6 +34,7 @@ from typing import Any
 
 import yaml
 
+from bay_cli import ansible as _ansible
 from bay_cli.context import Context
 
 _SECRET_REF_RE = re.compile(
@@ -180,7 +181,7 @@ def vault_names(cx: Context, env: str) -> set[str]:
         try:
             proc = subprocess.run(
                 [
-                    "ansible-vault",
+                    _ansible.tool("ansible-vault"),
                     "decrypt",
                     "--vault-password-file",
                     str(cx.vault_pass),

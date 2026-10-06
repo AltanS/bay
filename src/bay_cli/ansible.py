@@ -17,6 +17,7 @@ nothing here reads the working directory:
 
 import json
 import shutil
+import sysconfig
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -27,6 +28,22 @@ from bay_cli import console, runner
 #: The fleet the running CLI command works on. Set once by ``bind_fleet`` when
 #: the CLI resolves its Context. A process runs one command, so one fleet.
 _bound_fleet: Path | None = None
+
+
+def tool(name: str) -> str:
+    """The path of an Ansible command that ships with the running CLI.
+
+    ``uv tool install`` puts only ``bay`` on PATH; ``ansible-vault`` and the
+    other entry points stay in the tool's own scripts directory. A bare
+    ``ansible-vault`` then fails with "not found" on a machine-wide install,
+    and ``bay plan`` blocks on every project with a secret. Look next to the
+    interpreter first, then on PATH.
+    """
+    scripts = Path(sysconfig.get_path("scripts"))
+    candidate = scripts / name
+    if candidate.is_file():
+        return str(candidate)
+    return shutil.which(name) or name
 
 
 def bind_fleet(fleet_root: Path | None) -> None:

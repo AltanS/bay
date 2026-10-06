@@ -465,7 +465,8 @@ def _fake_decrypt(monkeypatch) -> list:
 
     def run(argv, **kwargs):
         seen.append(argv)
-        assert argv[:2] == ["ansible-vault", "decrypt"] and "--output=-" in argv
+        assert Path(argv[0]).name == "ansible-vault" and argv[1] == "decrypt"
+        assert "--output=-" in argv
         return subprocess.CompletedProcess(argv, 0, stdout=yaml.safe_dump(_VAULT), stderr="")
 
     monkeypatch.setattr(secrets_check.subprocess, "run", run)

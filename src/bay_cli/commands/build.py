@@ -12,6 +12,7 @@ import typer
 import yaml
 from rich.table import Table
 
+from bay_cli import ansible as _ansible
 from bay_cli import console
 from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
@@ -36,7 +37,7 @@ def _decrypt_vault(cx: Context, env: str) -> dict:
     try:
         proc = subprocess.run(
             [
-                "ansible-vault", "decrypt",
+                _ansible.tool("ansible-vault"), "decrypt",
                 "--vault-password-file", str(vault_pass),
                 "--output=-",
                 str(vault_file),
