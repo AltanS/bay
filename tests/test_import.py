@@ -462,3 +462,40 @@ def test_env_name_collision_keeps_the_plain_names(tmp_path: Path) -> None:
     assert any("is also the name of another environment" in f for f in result.flags)
     gate = roundtrip.run_gate(legacy, name="small", workdir=tmp_path / "gate")
     assert gate.ok, "\n".join(gate.summary_lines())
+
+
+# ── the lock's repo is the build source, never the image's registry ─────────
+
+
+def test_image_project_lock_has_no_repo(tmp_path: Path) -> None:
+    legacy = _small_fleet(
+        tmp_path / "legacy",
+        "[production]\n192.0.2.40\n",
+        {
+            "plain": _svc(3000),
+            "built": {
+                **_svc(3001),
+                "image": "registry.example.com/small/built:latest",
+                "build": {"repo": "git@github.com:acme/built.git"},
+            },
+        },
+        ["production"],
+    )
+    result = importer.import_fleet(legacy, "small")
+    out = tmp_path / "fleet"
+    result.write(out)
+    assert lock(out, "plain")["repo"] is None
+    assert "image" in toml(out, "projects/plain/bay.toml")
+    assert lock(out, "built")["repo"] == "git@github.com:acme/built.git"
+    assert lock(out, "built")["envs"]["production"]["adopted"]["images"] == {
+        "web": "registry.example.com/small/built:latest"
+    }
+
+
+def test_fixture_image_projects_have_no_repo(imported: tuple[importer.ImportResult, Path]) -> None:
+    _, out = imported
+    for path in sorted((out / "projects").glob("*.lock")):
+        raw = json.loads(path.read_text())
+        doc = toml(out, f"projects/{raw['name']}/bay.toml")
+        builds = "build" in doc or any("build" in s for s in (doc.get("services") or {}).values())
+        assert (raw["repo"] is not None) == builds, raw["name"]
