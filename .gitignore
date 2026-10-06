@@ -22,6 +22,10 @@ vendor/collections/
 # Network probe cache (written by validate's git/image reachability checks)
 .validate-probe-cache
 
+# Reconciler report fallback (a playbook run by hand without
+# bay_reconciler_report_dir; the CLI always uses a temp dir)
+.reconcile-report/
+
 # Implementation tracker — lives in the workspace repo, never in the framework
 .tracker/
 

@@ -25,6 +25,7 @@ A failed deploy keeps the new pin and records ``result: failed``, so
 from __future__ import annotations
 
 import copy
+import shutil
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -53,17 +54,31 @@ def default_deploy(cx: Context, box_env: str) -> None:
     """Today's ``bay deploy <env> --tags deploy_stack``, without the prompts and the banner."""
     from bay_cli.commands import ops
     from bay_cli.commands.validate import run_validation
-    from bay_cli.healthcheck import purge_reconcile_reports
+    from bay_cli.healthcheck import new_report_dir, report_dir_vars
     from bay_cli.receipts import deploy_extra_vars
 
     result = run_validation(cx.fleet_root, box_env, bay_dir=cx.framework_root, show_banner=False)
     if result.total_issues:
         raise BayError(f"validation failed with {result.total_issues} problem(s)")
-    extra = ["-e", "_rig_mode=true", "-e", "_rig_write=false", *deploy_extra_vars(cx)]
-    purge_reconcile_reports(cx.framework_root)
-    ops._run_playbook(cx, "deploy", box_env, "deploy_stack", extra)
-    ops._invalidate_rig_cache(cx.cache_dir)
-    ops._run_post_deploy_healthcheck(box_env, cx.fleet_root, cx.framework_root)
+    # The per-box reconciler reports go to a temp dir outside every working
+    # tree, never into the framework checkout, and are removed afterwards.
+    report_dir = new_report_dir()
+    try:
+        extra = [
+            "-e",
+            "_rig_mode=true",
+            "-e",
+            "_rig_write=false",
+            *deploy_extra_vars(cx),
+            *report_dir_vars(report_dir),
+        ]
+        ops._run_playbook(cx, "deploy", box_env, "deploy_stack", extra)
+        ops._invalidate_rig_cache(cx.cache_dir)
+        ops._run_post_deploy_healthcheck(
+            box_env, cx.fleet_root, cx.framework_root, report_dir=report_dir
+        )
+    finally:
+        shutil.rmtree(report_dir, ignore_errors=True)
 
 
 def _write_services(cx: Context, text: str) -> Path:

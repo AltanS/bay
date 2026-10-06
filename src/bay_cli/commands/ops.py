@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -540,49 +541,55 @@ def deploy(
             raise BayError(f"Unknown region '{region}' for env '{env}'")
         extra_args = ["-l", host] + extra_args
 
-    # Drop last run's .reconcile-report/ files BEFORE the playbook, never after.
-    # A report found afterwards can then only be this run's — a tags-filtered
-    # or aborted deploy leaves the directory empty rather than handing the
-    # summary a stale touched list to attribute against.
-    from bay_cli.healthcheck import purge_reconcile_reports
+    # Each host hands its reconciler report to a fresh temporary directory
+    # outside every working tree (never `<framework>/.reconcile-report/`,
+    # which landed in the checkout). A fresh directory holds only this run's
+    # reports, so a tags-filtered or aborted deploy finds none rather than a
+    # stale touched list. Removed when the deploy is done.
+    from bay_cli.healthcheck import new_report_dir, report_dir_vars
 
-    purge_reconcile_reports(bay_dir)
+    report_dir = new_report_dir()
+    extra_args = [*extra_args, *report_dir_vars(report_dir)]
+    try:
+        _run_playbook(cx, "deploy", env, tags, extra_args, profile=profile)
+        _show_headscale_onboarding(cx)
 
-    _run_playbook(cx, "deploy", env, tags, extra_args, profile=profile)
-    _show_headscale_onboarding(cx)
+        # ── Post-deploy reachability audit ────────────────────────────────
+        # Skip under dry-run (--check / -C) so we don't probe real URLs for
+        # a playbook that never mutated state. Also skip if tags filter
+        # excluded deploy_stack — there's nothing meaningful to probe.
+        is_dry_run = any(a in ("--check", "-C", "--diff") for a in (ctx.args or []))
+        tags_exclude_deploy = tags is not None and "deploy_stack" not in (tags or "")
 
-    # ── Post-deploy reachability audit ────────────────────────────────
-    # Skip under dry-run (--check / -C) so we don't probe real URLs for
-    # a playbook that never mutated state. Also skip if tags filter
-    # excluded deploy_stack — there's nothing meaningful to probe.
-    is_dry_run = any(a in ("--check", "-C", "--diff") for a in (ctx.args or []))
-    tags_exclude_deploy = tags is not None and "deploy_stack" not in (tags or "")
+        # ── Refresh rig-state cache (S9) ─────────────────────────────────────
+        # The deploy succeeded (a failure would have raised). After a non-dry,
+        # non-tag deploy the server's rig matches the current inputs — a rig deploy
+        # just wrote .rig-state, a rig-skip deploy already matched — so record that
+        # and the next deploy skips infra. A tag-filtered deploy is partial:
+        # invalidate so the next run re-checks from scratch.
+        if not is_dry_run:
+            if tags:
+                _invalidate_rig_cache(cache_dir_for(root))
+            else:
+                _record_rig_matched(bay_dir, root)
 
-    # ── Refresh rig-state cache (S9) ─────────────────────────────────────
-    # The deploy succeeded (a failure would have raised). After a non-dry,
-    # non-tag deploy the server's rig matches the current inputs — a rig deploy
-    # just wrote .rig-state, a rig-skip deploy already matched — so record that
-    # and the next deploy skips infra. A tag-filtered deploy is partial:
-    # invalidate so the next run re-checks from scratch.
-    if not is_dry_run:
-        if tags:
-            _invalidate_rig_cache(cache_dir_for(root))
+        if skip_healthcheck:
+            console.info("Skipping post-deploy healthcheck (--skip-healthcheck).")
+        elif is_dry_run:
+            console.info("Skipping post-deploy healthcheck (dry-run mode).")
+        elif tags_exclude_deploy:
+            console.info(
+                f"Skipping post-deploy healthcheck (--tags={tags} did not include deploy_stack)."
+            )
         else:
-            _record_rig_matched(bay_dir, root)
-
-    if skip_healthcheck:
-        console.info("Skipping post-deploy healthcheck (--skip-healthcheck).")
-    elif is_dry_run:
-        console.info("Skipping post-deploy healthcheck (dry-run mode).")
-    elif tags_exclude_deploy:
-        console.info(
-            f"Skipping post-deploy healthcheck (--tags={tags} did not include deploy_stack)."
-        )
-    else:
-        _run_post_deploy_healthcheck(env, root, bay_dir)
+            _run_post_deploy_healthcheck(env, root, bay_dir, report_dir=report_dir)
+    finally:
+        shutil.rmtree(report_dir, ignore_errors=True)
 
 
-def _run_post_deploy_healthcheck(env: str, root: Path, bay_dir: Path) -> None:
+def _run_post_deploy_healthcheck(
+    env: str, root: Path, bay_dir: Path, *, report_dir: Path | None = None
+) -> None:
     """Post-deploy reachability audit. Probes every public service's
     `domains:` with HTTPS GET in parallel and reports status. Does not
     exit the deploy non-zero — the deploy itself already succeeded, and
@@ -611,7 +618,7 @@ def _run_post_deploy_healthcheck(env: str, root: Path, bay_dir: Path) -> None:
         console.info("No public services with domains — nothing to probe.")
         return
 
-    touched = read_touched_services(bay_dir)
+    touched = read_touched_services(bay_dir, report_dir=report_dir)
     if touched is None:
         console.info(
             "No reconciler report for this run — showing every service "

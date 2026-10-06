@@ -64,6 +64,11 @@ repo, the `.bay/` clone and the `bin/bay` wrapper are gone.
   hashed the old env files and said `noop`, so a deploy could recreate more
   containers than the plan listed. A new service with env no longer fails the
   check for a missing env file.
+- The reconciler's per-box reports go to a fresh temporary directory outside
+  every working tree, for `bay up`, `bay deploy` and `bay plan --remote`, and
+  are removed afterwards. Before, a deploy wrote `.reconcile-report/` into the
+  framework checkout. `.reconcile-report/` is gitignored for a playbook run by
+  hand.
 
 ### Removed
 

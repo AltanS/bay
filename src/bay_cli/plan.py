@@ -941,12 +941,18 @@ def default_box_check(
 
     Each box writes its plan-only JSON into a temporary directory on this
     machine (``bay_reconciler_plan_report_dir``, see
-    ``roles/container_lifecycle/tasks/reconcile.yml``). The files are read
-    back here, one per box.
+    ``roles/container_lifecycle/tasks/reconcile.yml``). The directory comes
+    from ``tempfile.mkdtemp``, so it is outside every working tree, and it is
+    removed when the reports are read. The real-run hand-off goes to its own
+    temp dir too (``bay_reconciler_report_dir``), never to
+    ``<framework>/.reconcile-report/``.
     """
     from bay_cli.commands.ops import _run_playbook
+    from bay_cli.healthcheck import new_report_dir, report_dir_vars
 
-    with tempfile.TemporaryDirectory(prefix="bay-box-plan-") as tmp:
+    tmp = tempfile.mkdtemp(prefix="bay-box-plan-")
+    real_reports = new_report_dir()
+    try:
         _run_playbook(
             cx,
             "deploy",
@@ -963,10 +969,14 @@ def default_box_check(
                 "_rig_mode=true",
                 "-e",
                 "_rig_write=false",
+                *report_dir_vars(real_reports),
                 "--check",
             ],
         )
         return read_box_predictions(Path(tmp))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        shutil.rmtree(real_reports, ignore_errors=True)
 
 
 def read_box_predictions(directory: Path) -> list[dict[str, Any]]:

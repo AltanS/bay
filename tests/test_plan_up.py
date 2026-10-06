@@ -1524,3 +1524,88 @@ def test_check_mode_plan_sees_an_env_file_that_only_changed_order(
     assert (step["container"], step["action"], step["source"]) == ("webapp", "recreate", "box")
     assert "same variables, different order" in step["reason"]
     assert step["reason"].startswith("box box-1 predicts recreate: config_hash: changed")
+
+
+# ── report directories live outside every working tree ──────────────────────
+
+#: The real one: the ``box`` fixture swaps ``applymod.default_deploy`` for a fake.
+_REAL_DEFAULT_DEPLOY = applymod.default_deploy
+
+
+def _json_var(extra: list[str], key: str) -> Path:
+    return Path(next(json.loads(a)[key] for a in extra if a.startswith("{") and key in a))
+
+
+def test_box_check_reports_go_to_a_temp_dir_never_cwd(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bay_cli.commands import ops
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    seen: dict[str, Path] = {}
+
+    def fake_run(cx: Context, playbook: str, env: str, tags: Any, extra: list[str]) -> None:
+        seen["plan"] = _json_var(extra, "bay_reconciler_plan_report_dir")
+        seen["real"] = _json_var(extra, "bay_reconciler_report_dir")
+        for d in seen.values():
+            assert d.is_dir()
+        report = {"ok": True, "containers": [{"name": "webapp", "action": "noop", "reasons": []}]}
+        (seen["plan"] / "box-1.json").write_text(json.dumps(report))
+
+    monkeypatch.setattr(ops, "_run_playbook", fake_run)
+    cx = cx_of(world)
+    entries = planmod.default_box_check(cx, "production", world["fleet"] / "x.yml")
+    assert entries and entries[0]["report"]["containers"][0]["name"] == "webapp"
+    for d in seen.values():
+        assert not d.exists(), f"{d} was not cleaned up"
+        assert not d.resolve().is_relative_to(cwd.resolve())
+        assert not d.resolve().is_relative_to(cx.framework_root.resolve())
+    assert list(cwd.iterdir()) == []
+
+
+def test_up_deploy_reports_go_to_a_temp_dir_never_cwd(
+    world: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from bay_cli.commands import ops, validate
+
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    seen: dict[str, Any] = {}
+
+    def fake_run(cx: Context, playbook: str, env: str, tags: Any, extra: list[str]) -> None:
+        seen["dir"] = _json_var(extra, "bay_reconciler_report_dir")
+        (seen["dir"] / "box-1.json").write_text(json.dumps({"results": []}))
+
+    def fake_health(env: str, root: Path, bay_dir: Path, *, report_dir: Path | None) -> None:
+        seen["read"] = report_dir
+        seen["files"] = sorted(p.name for p in report_dir.iterdir()) if report_dir else None
+
+    monkeypatch.setattr(
+        validate, "run_validation", lambda *a, **k: SimpleNamespace(total_issues=0)
+    )
+    monkeypatch.setattr(ops, "_run_playbook", fake_run)
+    monkeypatch.setattr(ops, "_invalidate_rig_cache", lambda *_: None)
+    monkeypatch.setattr(ops, "_run_post_deploy_healthcheck", fake_health)
+    cx = cx_of(world)
+    _REAL_DEFAULT_DEPLOY(cx, "production")
+
+    assert seen["read"] == seen["dir"] and seen["files"] == ["box-1.json"]
+    assert not seen["dir"].exists()
+    assert not seen["dir"].resolve().is_relative_to(cwd.resolve())
+    assert not seen["dir"].resolve().is_relative_to(cx.framework_root.resolve())
+    assert list(cwd.iterdir()) == []
+
+
+def test_the_report_hand_off_honours_the_report_dir_var() -> None:
+    tasks = _named(_RECONCILE_YML)
+    for name in (
+        "Ensure the control-node report directory exists",
+        "Hand the reconciler report to the CLI",
+    ):
+        assert "bay_reconciler_report_dir | default(" in json.dumps(tasks[name]), name
+    assert ".reconcile-report/" in (ROOT / ".gitignore").read_text().splitlines()

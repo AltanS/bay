@@ -19,6 +19,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import re
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -703,6 +704,11 @@ def _render_grouped(
 # touched nothing".
 
 REPORT_DIRNAME = ".reconcile-report"
+#: Extra var that points the reconciler's report hand-off at a directory
+#: (roles/container_lifecycle/tasks/reconcile.yml). Without it the playbook
+#: falls back to ``<playbook_dir>/.reconcile-report``, inside the framework
+#: checkout, so every CLI deploy passes one.
+REPORT_DIR_VAR = "bay_reconciler_report_dir"
 
 # Every action but NoOp mutates the container.
 _UNTOUCHED_KINDS = {"NoOp"}
@@ -720,12 +726,30 @@ def purge_reconcile_reports(bay_dir: Path) -> None:
         pass
 
 
-def read_touched_services(bay_dir: Path) -> set[str] | None:
+def new_report_dir() -> Path:
+    """A fresh, empty report directory outside every working tree.
+
+    ``tempfile.mkdtemp`` (mode 0700, under the system temp dir). The caller
+    removes it when the deploy is done. Fresh means a report found in it can
+    only be this run's.
+    """
+    return Path(tempfile.mkdtemp(prefix="bay-reconcile-report-"))
+
+
+def report_dir_vars(report_dir: Path) -> list[str]:
+    """The ``-e`` arguments that send the reconciler's report to ``report_dir``."""
+    return ["-e", json.dumps({REPORT_DIR_VAR: str(report_dir)})]
+
+
+def read_touched_services(bay_dir: Path, *, report_dir: Path | None = None) -> set[str] | None:
     """Names of the services this deploy changed, merged across hosts.
+
+    ``report_dir`` is the directory the deploy was told to write to
+    (:func:`report_dir_vars`); without it, ``<bay_dir>/.reconcile-report``.
 
     None means no report was written at all. An empty set means the reconciler
     ran and every container was already correct."""
-    report_dir = bay_dir / REPORT_DIRNAME
+    report_dir = report_dir if report_dir is not None else bay_dir / REPORT_DIRNAME
     try:
         files = sorted(report_dir.glob("*.json"))
     except OSError:

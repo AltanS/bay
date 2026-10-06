@@ -1352,9 +1352,10 @@ break something it never touched, such as an accessory recreated under an
 unchanged app, and those are the failures most worth catching.
 
 The grouping comes from the reconciler, which writes what it changed to
-`.reconcile-report/<host>.json` in the framework checkout on your machine, one file per host. The
-CLI empties that directory before every deploy, so a report found afterwards
-can only be the current run's. When there is no report the summary says so in
+`<host>.json` in a temporary directory on your machine, one file per host.
+The CLI makes a fresh directory for every deploy, outside every working tree,
+and removes it afterwards, so a report found there can only be the current
+run's. When there is no report the summary says so in
 one line and prints ungrouped, exactly as it did before. That is the normal
 case for `--check`, for a `--tags` deploy, and for a server still on an older
 framework.
