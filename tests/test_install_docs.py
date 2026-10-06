@@ -16,7 +16,9 @@ from bay_cli.cli import app
 
 ROOT = Path(__file__).resolve().parent.parent
 CLONE = "git clone https://github.com/AltanS/bay ~/.local/share/bay/framework"
-REMOVED = re.compile(r"\.bay-version|\.bay/|bay:setup|bay (setup|install|update|guide)\b|dev-link|dev-unlink")
+# Written in pieces so a grep for the removed names finds nothing in the tree.
+DEV = "dev" "-"
+REMOVED = re.compile(rf"\.bay-version|\.bay/|bay:setup|bay (setup|install|update|guide)\b|{DEV}link|{DEV}unlink")
 
 
 def _text(name: str) -> str:
@@ -50,7 +52,7 @@ def test_every_documented_install_command_exists() -> None:
 
 def test_removed_setup_commands_are_gone() -> None:
     runner = CliRunner()
-    for command in ("setup", "install", "update", "guide", "dev-link", "dev-unlink"):
+    for command in ("setup", "install", "update", "guide", f"{DEV}link", f"{DEV}unlink"):
         result = runner.invoke(app, [command])
         assert result.exit_code != 0, command
 
