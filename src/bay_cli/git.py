@@ -79,3 +79,62 @@ def clone(url: str, dest: Path) -> None:
         ["git", "clone", url, str(dest)],
         message="Cloning bay framework...",
     )
+
+
+# ── Quiet reads ──────────────────────────────────────────────────────────
+# `runner.run` prints a failed command's output to the console, which is
+# right for an operator watching a human command and wrong for `--json`,
+# where stdout must hold one JSON document. These reads print nothing and
+# return None when `path` is not a git checkout or git is missing.
+
+
+def _quiet(path: Path, *args: str) -> str | None:
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(path), *args],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def head_commit(path: Path) -> str | None:
+    """Full SHA of HEAD, or None when ``path`` is not in a git checkout."""
+    return _quiet(path, "rev-parse", "HEAD") or None
+
+
+def is_dirty(path: Path) -> bool | None:
+    """True when ``path`` (and below) has uncommitted changes, None when not git.
+
+    Scoped to ``path`` with ``-- .``: a fleet that lives in a subdirectory of
+    a bigger repo is dirty only when its own files are.
+    """
+    if head_commit(path) is None:
+        return None
+    out = _quiet(path, "status", "--porcelain", "--", ".")
+    if out is None:
+        return None
+    return bool(out)
+
+
+def ref_name(path: Path) -> str | None:
+    """Exact tag at HEAD, else the short SHA, else None. Never prints."""
+    return _quiet(path, "describe", "--tags", "--exact-match") or (
+        _quiet(path, "rev-parse", "--short", "HEAD") or None
+    )
+
+
+def newest_tag(path: Path) -> str | None:
+    """Highest tag by version sort, or None. Never prints."""
+    out = _quiet(path, "tag", "--sort=-v:refname")
+    if not out:
+        return None
+    return out.splitlines()[0].strip() or None

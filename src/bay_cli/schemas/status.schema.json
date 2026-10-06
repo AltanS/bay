@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AltanS/bay/schemas/status.schema.json",
+  "title": "bay status --json",
+  "description": "Output of `bay status --json`, status_version 1. Documented in docs/deploy-receipt.md. A new field may be added without a version bump; a removed or retyped field bumps status_version.",
+  "type": "object",
+  "required": ["status_version", "framework", "fleet", "boxes"],
+  "additionalProperties": false,
+  "properties": {
+    "status_version": {"const": 1},
+    "framework": {
+      "type": "object",
+      "required": ["pinned", "checkout", "latest"],
+      "additionalProperties": false,
+      "properties": {
+        "pinned": {"type": ["string", "null"], "description": "Version pinned in the fleet's .bay-version."},
+        "checkout": {"type": ["string", "null"], "description": "Exact tag at the framework checkout's HEAD, else its short SHA."},
+        "latest": {"type": ["string", "null"], "description": "Highest tag known to the framework checkout."}
+      }
+    },
+    "fleet": {
+      "type": "object",
+      "required": ["root", "commit", "dirty"],
+      "additionalProperties": false,
+      "properties": {
+        "root": {"type": "string"},
+        "commit": {"type": ["string", "null"], "description": "Full SHA of the fleet repo HEAD; null outside git."},
+        "dirty": {"type": ["boolean", "null"], "description": "Uncommitted changes under the fleet root; null outside git."}
+      }
+    },
+    "boxes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["env", "box", "receipt", "error"],
+        "additionalProperties": false,
+        "properties": {
+          "env": {"type": "string"},
+          "box": {"type": ["string", "null"], "description": "inventory_hostname; null when no box could be listed."},
+          "receipt": {
+            "description": "The box's receipt, or null when there is none or it could not be read.",
+            "oneOf": [{"$ref": "#/$defs/receipt"}, {"type": "null"}]
+          },
+          "error": {"type": ["string", "null"]}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "receipt": {
+      "title": "Deploy receipt, receipt_version 1",
+      "description": "/var/lib/bay/receipts/<env>.json on the box. Written by bay_reconcile.receipt.",
+      "type": "object",
+      "required": [
+        "receipt_version", "env", "box", "deployed_at", "framework_version",
+        "framework_commit", "fleet_commit", "fleet_dirty", "result",
+        "containers", "projects"
+      ],
+      "additionalProperties": true,
+      "properties": {
+        "receipt_version": {"const": 1},
+        "env": {"type": "string"},
+        "box": {"type": "string"},
+        "deployed_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"},
+        "framework_version": {"type": ["string", "null"]},
+        "framework_commit": {"type": ["string", "null"]},
+        "fleet_commit": {"type": ["string", "null"]},
+        "fleet_dirty": {"type": ["boolean", "null"]},
+        "result": {"enum": ["ok", "failed"]},
+        "containers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "image", "config_hash", "action", "healthy"],
+            "additionalProperties": true,
+            "properties": {
+              "name": {"type": "string"},
+              "image": {"type": ["string", "null"]},
+              "config_hash": {"type": ["string", "null"]},
+              "action": {"enum": ["noop", "create", "recreate", "start", "remove", null]},
+              "healthy": {"type": ["boolean", "null"]}
+            }
+          }
+        },
+        "projects": {"type": "object"}
+      }
+    }
+  }
+}

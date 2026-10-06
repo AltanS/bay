@@ -525,9 +525,14 @@ def deploy(
     rig_mode = rig or bool(tags)
     rig_write = rig and not bool(tags)
     extra_args = [a for a in (ctx.args or []) if a not in ("--", "--rig", "--skip-validate", "--skip-healthcheck", "--check-token-scope", "--profile")]
+    # The deploy receipt on each box records which fleet and framework
+    # commits this run came from (docs/deploy-receipt.md).
+    from bay_cli.receipts import deploy_extra_vars
+
     extra_args = [
         "-e", f"_rig_mode={'true' if rig_mode else 'false'}",
         "-e", f"_rig_write={'true' if rig_write else 'false'}",
+        *deploy_extra_vars(cx),
     ] + extra_args
 
     if region:

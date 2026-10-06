@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import typer
 from rich.panel import Panel
@@ -1075,14 +1076,49 @@ def dev_unlink() -> None:
 
 
 @app.command()
-def status(ctx: typer.Context) -> None:
+def status(
+    ctx: typer.Context,
+    as_json: bool = typer.Option(
+        False,
+        "--json",
+        help=(
+            "Print one JSON document: framework, fleet, and the deploy receipt "
+            "of every box (read over SSH). Schema: docs/deploy-receipt.md."
+        ),
+    ),
+    env: Optional[str] = typer.Option(
+        None, "--env", "-e", help="With --json: read the receipts of this environment only."
+    ),
+    no_remote: bool = typer.Option(
+        False, "--no-remote", help="With --json: do not contact any box (boxes is empty)."
+    ),
+) -> None:
     """Show the pinned framework version, update status, and feature flags.
+
+    With --json, print a stable JSON document instead (status_version 1):
+    the framework version, the fleet commit, and what each box last
+    deployed, from the receipt the box wrote. Never prompts: SSH runs in
+    batch mode, and a box that cannot be read gets an error string.
 
     Examples:
 
         bin/bay status
+        bin/bay status --json
+        bin/bay status --json --env production
+        bin/bay status --json --no-remote
     """
     cx = context_from(ctx)
+
+    if as_json or console.is_json_mode():
+        from bay_cli.receipts import status_document
+
+        doc = status_document(cx, env=env, remote=not no_remote)
+        if as_json:
+            print(json.dumps(doc, indent=2))
+        else:
+            console.emit_result(doc, command="status")
+        return
+
     bay_dir, root = cx.framework_root, cx.fleet_root
 
     pinned = paths.read_pinned_version(root)
