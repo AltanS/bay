@@ -67,6 +67,9 @@ SINGLE_INVALID: dict[str, set[str]] = {
     "deploy-required-invalid": {"deploy"},
 }
 
+#: Valid fixtures that document a behavior and have no invalid twin.
+SINGLE_VALID = {"shared-volume-valid"}
+
 
 def _paths(violations: list[bay_toml.Violation]) -> set[str]:
     return {v.path for v in violations}
@@ -104,6 +107,11 @@ def test_invalid_fixture_fails_at_expected_paths(rule):
     assert _paths(violations) == PAIRS[rule], [str(v) for v in violations]
 
 
+@pytest.mark.parametrize("stem", sorted(SINGLE_VALID))
+def test_single_valid_fixture(stem):
+    assert bay_toml.validate_file(FIXTURES / f"{stem}.toml") == []
+
+
 @pytest.mark.parametrize("stem", sorted(SINGLE_INVALID))
 def test_single_invalid_fixture(stem):
     violations = bay_toml.validate_file(FIXTURES / f"{stem}.toml")
@@ -111,7 +119,7 @@ def test_single_invalid_fixture(stem):
 
 
 def test_every_fixture_is_accounted_for():
-    known = {"corrected-example", "draft-v2-example", *SINGLE_INVALID}
+    known = {"corrected-example", "draft-v2-example", *SINGLE_INVALID, *SINGLE_VALID}
     for rule in PAIRS:
         known |= {f"{rule}-valid", f"{rule}-invalid"}
     on_disk = {p.stem for p in FIXTURES.glob("*.toml")}

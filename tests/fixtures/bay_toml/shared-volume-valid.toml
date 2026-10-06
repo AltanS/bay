@@ -1,0 +1,22 @@
+# A volume name is shared by the whole project. Two services that mount the
+# same volume name share one volume: the worker reads what the main container writes.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[[mounts]]
+path = "/app/data"
+volume = "data"
+
+[services.worker]
+command = "node dist/worker.js"
+
+[[services.worker.mounts]]
+path = "/srv/data"
+volume = "data"
+
+[deploy.production]
+domain = "app.example.com"

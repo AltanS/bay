@@ -83,6 +83,8 @@ Data names and volumes:
 - bay.toml never names an adopted database, user or volume.
 - Volume names are `<name>-<volume>` in the primary environment and
   `<name>-<env>-<volume>` in the others.
+- A volume name is shared by the whole project. Two services that mount the same volume
+  name share one volume.
 
 Jobs and release:
 
@@ -395,7 +397,8 @@ Each mount sets `path` and exactly one of `volume` or `from`.
 | `backup` | bool | `true` | Volume mounts only. |
 | `mode` | octal string | `"0600"` | `from` mounts only. |
 
-Two mounts in one container may not use the same `path`.
+Two mounts in one container may not use the same `path`. A volume name is shared by the
+whole project. Two services that mount the same volume name share one volume.
 
 ### `[backup]`
 
