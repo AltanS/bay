@@ -338,8 +338,11 @@ def test_status_json_schema(tmp_path: Path, monkeypatch) -> None:
     doc = json.loads(result.stdout)
     jsonschema.validate(doc, _SCHEMA)
 
-    assert doc["status_version"] == 1
+    assert doc["status_version"] == 2
     assert doc["fleet"]["root"] == str(cx.fleet_root)
+    assert doc["fleet"]["source"] == "--fleet"
+    assert set(doc["framework"]) == {"version", "path"}
+    assert doc["framework"]["version"]  # bay_version from version.yml
     boxes = {(b["env"], b["box"]): b for b in doc["boxes"]}
     assert boxes[("production", "app-1")]["receipt"]["result"] == "ok"
     assert boxes[("production", "app-2")]["error"].startswith("unreachable")

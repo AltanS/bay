@@ -2,28 +2,32 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/AltanS/bay/schemas/status.schema.json",
   "title": "bay status --json",
-  "description": "Output of `bay status --json`, status_version 1. Documented in docs/deploy-receipt.md. A new field may be added without a version bump; a removed or retyped field bumps status_version.",
+  "description": "Output of `bay status --json`, status_version 2. Documented in docs/deploy-receipt.md. A new field may be added without a version bump; a removed or retyped field bumps status_version.",
   "type": "object",
   "required": ["status_version", "framework", "fleet", "boxes"],
   "additionalProperties": false,
   "properties": {
-    "status_version": {"const": 1},
+    "status_version": {"const": 2},
     "framework": {
       "type": "object",
-      "required": ["pinned", "checkout", "latest"],
+      "required": ["version", "path"],
       "additionalProperties": false,
       "properties": {
-        "pinned": {"type": ["string", "null"], "description": "Version pinned in the fleet's .bay-version."},
-        "checkout": {"type": ["string", "null"], "description": "Exact tag at the framework checkout's HEAD, else its short SHA."},
-        "latest": {"type": ["string", "null"], "description": "Highest tag known to the framework checkout."}
+        "version": {"type": ["string", "null"], "description": "bay_version from version.yml in the install; null when the file is missing."},
+        "path": {"type": "string", "description": "The checkout the bay command runs from."}
       }
     },
     "fleet": {
       "type": "object",
-      "required": ["root", "commit", "dirty"],
+      "required": ["root", "source", "commit", "dirty"],
       "additionalProperties": false,
       "properties": {
         "root": {"type": "string"},
+        "source": {
+          "type": "string",
+          "enum": ["--fleet", "BAY_FLEET", "bay.toml", "~/.config/bay/fleets", "cwd"],
+          "description": "How Bay found the fleet: the --fleet option, the BAY_FLEET variable, the fleet named in bay.toml, BAY_FLEET_NAME (a fleet under ~/.config/bay/fleets), or the working directory."
+        },
         "commit": {"type": ["string", "null"], "description": "Full SHA of the fleet repo HEAD; null outside git."},
         "dirty": {"type": ["boolean", "null"], "description": "Uncommitted changes under the fleet root; null outside git."}
       }

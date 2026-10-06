@@ -28,7 +28,7 @@ from bay_cli import ansible, git, paths
 from bay_cli.context import Context
 from bay_reconcile.receipt import RECEIPTS_DIR, receipt_path
 
-STATUS_VERSION = 1
+STATUS_VERSION = 2
 
 #: ``(argv, extra_env, cwd) -> CompletedProcess``. Tests swap in a fake.
 Runner = Callable[[list[str], dict[str, str], Path], "subprocess.CompletedProcess[str]"]
@@ -44,9 +44,13 @@ _CONNECT_TIMEOUT = "10"
 
 
 def fleet_state(cx: Context) -> dict[str, Any]:
-    """``{"root", "commit", "dirty"}`` for the fleet. Commit and dirty are None outside git."""
+    """``{"root", "source", "commit", "dirty"}`` for the fleet.
+
+    ``source`` is how Bay found the fleet. Commit and dirty are None outside git.
+    """
     return {
         "root": str(cx.fleet_root),
+        "source": cx.source,
         "commit": git.head_commit(cx.fleet_root),
         "dirty": git.is_dirty(cx.fleet_root),
     }
@@ -181,10 +185,10 @@ def fetch_receipts(cx: Context, env: str, *, run: Runner | None = None) -> list[
 
 
 def framework_state(cx: Context) -> dict[str, Any]:
+    """``{"version", "path"}``: ``bay_version`` from version.yml, and the install."""
     return {
-        "pinned": paths.read_pinned_version(cx.fleet_root),
-        "checkout": git.ref_name(cx.framework_root),
-        "latest": git.newest_tag(cx.framework_root),
+        "version": paths.read_installed_version(cx.framework_root),
+        "path": str(cx.framework_root),
     }
 
 

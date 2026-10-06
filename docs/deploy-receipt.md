@@ -11,7 +11,7 @@ Bay keeps three truths apart:
 This page documents two formats. Both are stable. A reader can rely on them.
 
 - The **receipt** that each box writes after each deploy (`receipt_version` 1).
-- The **status document** that `bay status --json` prints (`status_version` 1).
+- The **status document** that `bay status --json` prints (`status_version` 2).
 
 The JSON Schema for both is `src/bay_cli/schemas/status.schema.json`. The
 receipt is its `$defs/receipt`.
@@ -21,6 +21,9 @@ receipt is its `$defs/receipt`.
 - A new field can appear without a version bump. Readers must ignore fields
   they do not know.
 - A removed field, a renamed field or a changed type bumps the version.
+- `status_version` 2 (Bay 2.0.0) removed `framework.pinned`, `framework.checkout` and
+  `framework.latest`, because a machine has one Bay install and no per-fleet pin. It added
+  `framework.version`, `framework.path` and `fleet.source`. The receipt format did not change.
 - `projects` is an empty object in version 1. A later release fills it from
   the fleet lockfiles, with no version bump.
 
@@ -153,20 +156,21 @@ uv run --project <framework> ansible <env> -m ansible.builtin.command \
   -a "cat /var/lib/bay/receipts/<env>.json" -T 10 --ssh-extra-args="-o BatchMode=yes"
 ```
 
-- It runs from the fleet root, so the fleet's `ansible.cfg`, `hosts/<env>`
-  and SSH settings apply.
+- It runs with the fleet as its working directory. Bay passes the fleet's
+  `hosts/` inventory, its `.vault_pass` and the SSH settings to Ansible, so no
+  `ansible.cfg` in the fleet is needed.
 - Each box runs one `cat`. No `sudo` is used. The file is world-readable.
 - The `ansible.posix.json` output callback gives one parsed result per box.
 - SSH runs in batch mode and stdin is closed, so the command never prompts.
   A missing key or an unknown host key is an error string, not a question.
 
-### Format, version 1
+### Format, version 2
 
 ```json
 {
-  "status_version": 1,
-  "framework": {"pinned": "v2.0.0", "checkout": "v2.0.0", "latest": "v2.0.1"},
-  "fleet": {"root": "/home/me/.config/bay/fleets/acme", "commit": "9fadd62...", "dirty": false},
+  "status_version": 2,
+  "framework": {"version": "2.0.0", "path": "/home/me/.local/share/bay/framework"},
+  "fleet": {"root": "/home/me/.config/bay/fleets/acme", "source": "~/.config/bay/fleets", "commit": "9fadd62...", "dirty": false},
   "boxes": [
     {"env": "production", "box": "app-1", "receipt": {"receipt_version": 1, "...": "..."}, "error": null},
     {"env": "production", "box": "app-2", "receipt": null, "error": null},
@@ -177,10 +181,10 @@ uv run --project <framework> ansible <env> -m ansible.builtin.command \
 
 | Field | Meaning |
 |-------|---------|
-| `framework.pinned` | The version in the fleet's `.bay-version`, or null. |
-| `framework.checkout` | The exact tag at the framework checkout's HEAD, else its short SHA, or null. |
-| `framework.latest` | The highest tag the framework checkout knows, or null. |
+| `framework.version` | `bay_version` from `version.yml` in the install, or null when the file is missing. |
+| `framework.path` | The checkout that the `bay` command runs from. |
 | `fleet.root` | The fleet directory. |
+| `fleet.source` | How Bay found the fleet: `--fleet`, `BAY_FLEET`, `bay.toml` (the fleet named in the app repo), `~/.config/bay/fleets` (`BAY_FLEET_NAME`) or `cwd`. |
 | `fleet.commit` | Full SHA of the fleet repo HEAD, or null outside git. |
 | `fleet.dirty` | True when the fleet directory has uncommitted changes, or null outside git. |
 | `boxes[].env` | The environment. |
