@@ -45,6 +45,17 @@ SOURCE_FLEETS_DIR = "~/.config/bay/fleets"
 SOURCE_CWD = "cwd"
 
 
+#: Per-fleet cache directory, inside the fleet repo and git-ignored. It holds
+#: what Bay learns about this fleet's boxes (rig state, validate probes), so a
+#: second fleet on the same machine never reads it.
+CACHE_DIRNAME = ".bay-cache"
+
+
+def cache_dir_for(fleet_root: Path) -> Path:
+    """The cache directory of the fleet at ``fleet_root``."""
+    return fleet_root / CACHE_DIRNAME
+
+
 def package_root() -> Path:
     """The repo root of the running ``bay_cli`` package (``src/bay_cli/../..``)."""
     return Path(__file__).resolve().parents[2]
@@ -66,6 +77,11 @@ class Context:
     @property
     def hosts_dir(self) -> Path:
         return self.fleet_root / "hosts"
+
+    @property
+    def cache_dir(self) -> Path:
+        """``<fleet>/.bay-cache``: caches of fleet state. Never shared between fleets."""
+        return cache_dir_for(self.fleet_root)
 
     @property
     def vault_pass(self) -> Path:

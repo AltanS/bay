@@ -35,6 +35,12 @@ env = "production"
 """
 
 
+_GITIGNORE = """\
+# Caches of fleet state that Bay keeps per fleet. Never commit them.
+.bay-cache/
+"""
+
+
 def _check_name(name: str) -> None:
     if not _NAME_RE.match(name):
         raise BayError(
@@ -87,6 +93,7 @@ def init(
     else:
         dest.mkdir()
         (dest / FLEET_FILE).write_text(_FLEET_TEMPLATE.format(file=FLEET_FILE, name=name))
+        (dest / ".gitignore").write_text(_GITIGNORE)
         try:
             runner.run(["git", "init", "--quiet", str(dest)])
         except (BayError, OSError, subprocess.SubprocessError):

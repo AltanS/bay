@@ -65,6 +65,15 @@ With none of these, the command stops and lists the ways to pick one.
 `--fleet <path>` is also how you try a fleet that is not under `~/.config/bay/fleets`.
 It works from any directory.
 
+## Caches
+
+Bay keeps what it learns about a fleet in `<fleet>/.bay-cache/`. This holds the
+rig-state cache (`.rig-state-cache`) and the probe cache of `bay validate`
+(`.validate-probe-cache`). Each file expires after one hour. Two fleets on one machine
+never share a cache. `bay fleet init` adds `.bay-cache/` to the `.gitignore` of a new
+fleet. If you cloned a fleet with `--from`, add that line yourself. Delete the
+directory at any time. Bay builds it again.
+
 ## Uninstall
 
 ```bash

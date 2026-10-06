@@ -45,6 +45,8 @@ def test_fleet_init_writes_a_valid_minimal_fleet_file(home: Path) -> None:
     assert "BAY_FLEET_NAME=prod" in result.output
     assert "BAY_FLEET=" in result.output
     assert "--fleet" in result.output
+    # The per-fleet cache directory is never committed.
+    assert ".bay-cache/" in (path / ".gitignore").read_text().splitlines()
 
 
 def test_fleet_init_refuses_an_existing_fleet_and_a_bad_name(home: Path) -> None:

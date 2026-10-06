@@ -61,7 +61,7 @@ def default_deploy(cx: Context, box_env: str) -> None:
     extra = ["-e", "_rig_mode=true", "-e", "_rig_write=false", *deploy_extra_vars(cx)]
     purge_reconcile_reports(cx.framework_root)
     ops._run_playbook(cx, "deploy", box_env, "deploy_stack", extra)
-    ops._invalidate_rig_cache(cx.framework_root)
+    ops._invalidate_rig_cache(cx.cache_dir)
     ops._run_post_deploy_healthcheck(box_env, cx.fleet_root, cx.framework_root)
 
 

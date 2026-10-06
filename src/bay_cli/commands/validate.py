@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 from bay_cli import console
-from bay_cli.context import Context, context_from
+from bay_cli.context import Context, cache_dir_for, context_from
 from bay_cli.errors import BayError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -1522,7 +1522,7 @@ def _validate_build_tokens(
 # ops.py pulls in the deploy machinery, and validate must stay cheap.
 _PROBE_CACHE_MAX_AGE = 3600  # 1 hour — mirrors _RIG_CACHE_MAX_AGE in ops.py
 
-#: Sibling dotfile of ``.rig-state-cache``, in the framework directory.
+#: Sibling dotfile of ``.rig-state-cache``, in the fleet's ``.bay-cache`` directory.
 _PROBE_CACHE_FILENAME = ".validate-probe-cache"
 
 #: Overrides the directory the probe cache is written to. Set it to a scratch
@@ -1552,9 +1552,9 @@ class ProbeCache:
     error — same posture as ``_read_rig_cache``.
     """
 
-    def __init__(self, bay_dir: Path | None, *, enabled: bool = True) -> None:
+    def __init__(self, cache_dir: Path | None, *, enabled: bool = True) -> None:
         override = os.environ.get(PROBE_CACHE_DIR_ENV, "").strip()
-        directory = Path(override) if override else bay_dir
+        directory = Path(override) if override else cache_dir
         self._path = (directory / _PROBE_CACHE_FILENAME) if directory is not None else None
         #: When False every probe runs; results are still recorded, so
         #: ``--no-probe-cache`` refreshes the cache rather than bypassing it.
@@ -2849,9 +2849,9 @@ def run_validation(
     ``bay deploy`` (pre-deploy gate).
 
     Args:
-        root: Consumer project root directory.
+        root: Fleet root directory.
         env: Target environment (e.g., ``"production"``).
-        bay_dir: Path to the ``.argo/`` framework directory.  When  # kept-argo: .argo/.argo-version convention, rename lands in S03
+        bay_dir: Path to the framework checkout.  When
             ``None`` the version drift check is skipped silently (for
             unit tests that don't set up a framework directory).
         show_banner: Whether to print the Bay banner header.
@@ -2861,7 +2861,7 @@ def run_validation(
         check_webhook_health: When True, probe GitHub webhook health for
             all build services. Never runs automatically — caller must opt in.
         use_probe_cache: When True (default) a successful git/image probe
-            recorded in ``<bay_dir>/.validate-probe-cache`` less than an hour
+            recorded in ``<fleet>/.bay-cache/.validate-probe-cache`` less than an hour
             ago is reused instead of re-run. Failures are never cached.
             ``bay validate --no-probe-cache`` sets this False, which re-runs
             every probe and refreshes the cache. Set ``BAY_PROBE_CACHE_DIR``
@@ -2915,7 +2915,7 @@ def run_validation(
 
     # 6. Connectivity and reference checks (only if schema passed)
     if services_data is not None:
-        probe_cache = ProbeCache(bay_dir, enabled=use_probe_cache)
+        probe_cache = ProbeCache(cache_dir_for(root), enabled=use_probe_cache)
         _validate_connectivity(root, services_data, parsed, result, probe_cache)
 
     # 6b. Every secret name the services need exists in this env's vault

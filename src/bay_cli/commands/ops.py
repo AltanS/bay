@@ -14,7 +14,7 @@ import yaml
 from rich.panel import Panel
 
 from bay_cli import ansible, console, guards, paths, runner
-from bay_cli.context import Context, context_from
+from bay_cli.context import Context, cache_dir_for, context_from
 from bay_cli.errors import BayError
 
 # Re-export for clarity in the scrub helpers below — imported as
@@ -265,7 +265,7 @@ def _consumer_ref(root: Path) -> str:
     return "unknown"
 
 
-def _read_rig_cache(bay_dir: Path, *, version: str, consumer_ref: str) -> bool | None:
+def _read_rig_cache(cache_dir: Path, *, version: str, consumer_ref: str) -> bool | None:
     """Cached rig decision, or None if stale/missing/computed-for-other-inputs.
 
     The cache is trusted only when it was computed for the SAME framework
@@ -273,7 +273,7 @@ def _read_rig_cache(bay_dir: Path, *, version: str, consumer_ref: str) -> bool |
     miss (forcing a fresh check), never a stale skip of a needed rig."""
     from datetime import datetime, timezone
 
-    cache_file = bay_dir / ".rig-state-cache"
+    cache_file = cache_dir / ".rig-state-cache"
     if not cache_file.exists():
         return None
     try:
@@ -289,12 +289,13 @@ def _read_rig_cache(bay_dir: Path, *, version: str, consumer_ref: str) -> bool |
         return None
 
 
-def _write_rig_cache(bay_dir: Path, rig_needed: bool, *, version: str, consumer_ref: str) -> None:
+def _write_rig_cache(cache_dir: Path, rig_needed: bool, *, version: str, consumer_ref: str) -> None:
     """Write rig state to cache, stamped with the inputs it was computed for."""
     from datetime import datetime, timezone
 
-    cache_file = bay_dir / ".rig-state-cache"
+    cache_file = cache_dir / ".rig-state-cache"
     try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
         cache_file.write_text(json.dumps({
             "rig_needed": rig_needed,
             "version": version,
@@ -305,10 +306,10 @@ def _write_rig_cache(bay_dir: Path, rig_needed: bool, *, version: str, consumer_
         pass  # non-fatal
 
 
-def _invalidate_rig_cache(bay_dir: Path) -> None:
+def _invalidate_rig_cache(cache_dir: Path) -> None:
     """Drop the cache so the next deploy re-checks (after a partial/tag deploy)."""
     try:
-        (bay_dir / ".rig-state-cache").unlink(missing_ok=True)
+        (cache_dir / ".rig-state-cache").unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -317,7 +318,7 @@ def _record_rig_matched(bay_dir: Path, root: Path) -> None:
     """After a successful full/skip deploy the server matches the current inputs,
     so cache rig_needed=False — the next deploy correctly skips infra."""
     version = paths.read_installed_version(bay_dir) or "unknown"
-    _write_rig_cache(bay_dir, False, version=version, consumer_ref=_consumer_ref(root))
+    _write_rig_cache(cache_dir_for(root), False, version=version, consumer_ref=_consumer_ref(root))
 
 
 def _check_rig_state(env: str, bay_dir: Path, root: Path) -> bool:
@@ -325,13 +326,13 @@ def _check_rig_state(env: str, bay_dir: Path, root: Path) -> bool:
     version = paths.read_installed_version(bay_dir) or "unknown"
     consumer_ref = _consumer_ref(root)
 
-    cached = _read_rig_cache(bay_dir, version=version, consumer_ref=consumer_ref)
+    cached = _read_rig_cache(cache_dir_for(root), version=version, consumer_ref=consumer_ref)
     if cached is not None:
         console.info("Using cached rig state (< 1 hour old)")
         return cached
 
     result = _fetch_rig_state(env, bay_dir, root, current_version=version, current_ref=consumer_ref)
-    _write_rig_cache(bay_dir, result, version=version, consumer_ref=consumer_ref)
+    _write_rig_cache(cache_dir_for(root), result, version=version, consumer_ref=consumer_ref)
     return result
 
 
@@ -565,7 +566,7 @@ def deploy(
     # invalidate so the next run re-checks from scratch.
     if not is_dry_run:
         if tags:
-            _invalidate_rig_cache(bay_dir)
+            _invalidate_rig_cache(cache_dir_for(root))
         else:
             _record_rig_matched(bay_dir, root)
 

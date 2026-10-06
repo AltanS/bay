@@ -141,7 +141,7 @@ validate reaches the network twice: `git ls-remote` for each build-from-source
 service, and `skopeo inspect` for each image service. On a fleet with a handful
 of services that is 2-5 seconds of the same answers, every single run.
 
-Successful probes are cached in `<bay_dir>/.validate-probe-cache`, a JSON dotfile
+Successful probes are cached in `<fleet>/.bay-cache/.validate-probe-cache`, a JSON dotfile
 next to `.rig-state-cache`, with a **1 hour TTL** — the same TTL as the rig-state
 cache. A hit skips the subprocess entirely; a miss probes and records. The file is
 written `0600` and is gitignored.
