@@ -1,0 +1,12 @@
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "tailnet"
+
+[access.identity]
+header = "X-Tailnet-Device"
+
+[deploy.production]
+domain = "app.example.com"

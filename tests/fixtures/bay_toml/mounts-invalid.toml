@@ -1,0 +1,15 @@
+# A mount takes exactly one of volume or from.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[[mounts]]
+path = "/app/data"
+volume = "data"
+from = "deploy/data"
+
+[deploy.production]
+domain = "app.example.com"

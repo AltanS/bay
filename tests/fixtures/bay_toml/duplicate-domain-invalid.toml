@@ -1,0 +1,17 @@
+# services.admin.domain applies to every environment, so production and staging collide.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[services.admin]
+port = 5000
+domain = "admin.example.com"
+
+[deploy.production]
+domain = "app.example.com"
+
+[deploy.staging]
+domain = "staging.example.com"

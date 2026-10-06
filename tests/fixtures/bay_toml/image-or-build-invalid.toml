@@ -1,0 +1,13 @@
+name = "myapp"
+fleet = "myfleet"
+image = "ghcr.io/org/app:1.4"
+port = 3000
+
+[build]
+dockerfile = "Dockerfile"
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "app.example.com"

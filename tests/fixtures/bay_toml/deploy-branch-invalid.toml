@@ -1,0 +1,10 @@
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "app.example.com"
+branch = "my branch"

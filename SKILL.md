@@ -191,6 +191,8 @@ to reproduce it. The flags that change what a command *means*:
 - `bin/bay doctor [env]` — Run pre-flight checks on your project before deploying.
 - `bin/bay secret` — Generate random secrets or hash passwords.
 - `bin/bay test` — Run the consumer's infrastructure tests (tests/test_infra.sh).
+- `bin/bay toml` — Work with bay.toml files.
+- `bin/bay toml validate [path]` — Check a bay.toml file against schema v3; print one line per violation.
 - `bin/bay validate` — Validate configuration files before deploying.
 
 <!-- END GENERATED CLI REFERENCE -->
@@ -209,6 +211,8 @@ Paths are relative to the framework root (`.bay/` in a consumer).
 
 **Configuration**
 
+- `docs/bay-toml.md` — The `bay.toml` schema v3 for Bay v2: every key, the rules, the corrected example and `bay toml validate`.
+- `docs/bay-toml-blind-readers.md` — The blind-reader test that proves the `bay.toml` example has one reading, and its results.
 - `docs/services.md` — The `services.yml` schema — services, accessories, access modes, env/secrets, ports, build, backups, update policy. The single source of truth for your app surface.
 
 **Access & networking**

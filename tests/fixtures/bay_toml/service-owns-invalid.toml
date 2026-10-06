@@ -1,0 +1,16 @@
+# One name may not come from both env and secrets in one service.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[services.sidecar]
+inherit = false
+image = "ghcr.io/org/sidecar:2"
+env = { TOKEN = "plain" }
+secrets = ["TOKEN"]
+
+[deploy.production]
+domain = "app.example.com"

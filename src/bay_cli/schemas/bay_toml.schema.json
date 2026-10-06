@@ -1,0 +1,504 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AltanS/bay/schemas/bay_toml.schema.json",
+  "title": "bay.toml",
+  "description": "Schema v3 for the per-app bay.toml file. Unknown keys fail everywhere. Rules that span several keys (one needs form per file, name vs env suffix, duplicate domains, per-env overrides) live in bay_cli/bay_toml.py. Keys named x-messages and x-at are annotations read by that module: x-messages maps a failing keyword to a plain message, x-at names the key the message points at.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "fleet", "access", "deploy"],
+  "properties": {
+    "name": { "$ref": "#/$defs/name" },
+    "fleet": { "$ref": "#/$defs/name" },
+    "publish": { "type": "boolean" },
+    "image": { "$ref": "#/$defs/image" },
+    "port": { "$ref": "#/$defs/port" },
+    "command": { "$ref": "#/$defs/command" },
+    "release": { "$ref": "#/$defs/command" },
+    "health": { "$ref": "#/$defs/health" },
+    "replicas": { "$ref": "#/$defs/replicas" },
+    "memory": { "$ref": "#/$defs/size" },
+    "update": { "$ref": "#/$defs/update" },
+    "zero_downtime": { "type": "boolean" },
+    "logs": { "$ref": "#/$defs/logs" },
+    "secrets": { "$ref": "#/$defs/secrets" },
+    "needs": { "$ref": "#/$defs/needs" },
+    "build": { "$ref": "#/$defs/build" },
+    "env": { "$ref": "#/$defs/env" },
+    "fleet_secrets": { "$ref": "#/$defs/fleet_secrets" },
+    "access": {
+      "$ref": "#/$defs/access",
+      "required": ["mode"],
+      "x-messages": { "required": "is required; choose public, tailnet or internal" }
+    },
+    "mounts": { "$ref": "#/$defs/mounts" },
+    "backup": { "$ref": "#/$defs/backup" },
+    "jobs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/job" }
+    },
+    "services": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/service_name" },
+      "additionalProperties": { "$ref": "#/$defs/service" }
+    },
+    "deploy": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/env_name" },
+      "additionalProperties": { "$ref": "#/$defs/deploy_env" },
+      "x-messages": { "minProperties": "needs at least one [deploy.<env>] table" }
+    }
+  },
+  "allOf": [
+    { "$ref": "#/$defs/image_xor_build" },
+    {
+      "if": {
+        "required": ["access"],
+        "properties": { "access": { "required": ["password"] } }
+      },
+      "then": {
+        "required": ["health"],
+        "x-messages": { "required": "is required when [access.password] is set; write a path or \"none\"" }
+      }
+    },
+    {
+      "if": {
+        "required": ["access"],
+        "properties": { "access": { "properties": { "mode": { "enum": ["public", "tailnet"] } }, "required": ["mode"] } }
+      },
+      "then": {
+        "required": ["port"],
+        "x-messages": { "required": "is required when access.mode is public or tailnet, because traffic needs a container port" }
+      }
+    }
+  ],
+  "$defs": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "x-messages": { "pattern": "must use only lowercase letters, digits and hyphens, and start with a letter or digit" }
+    },
+    "service_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "not": { "const": "web" },
+      "x-messages": {
+        "pattern": "service names use only lowercase letters, digits and hyphens",
+        "not": "the name web is taken by the main container"
+      }
+    },
+    "env_name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*$",
+      "x-messages": { "pattern": "environment names use only lowercase letters and digits, and start with a letter" }
+    },
+    "var_name": {
+      "type": "string",
+      "pattern": "^[A-Z_][A-Z0-9_]*$",
+      "x-messages": { "pattern": "variable names use only uppercase letters, digits and underscores" }
+    },
+    "image": {
+      "type": "string",
+      "pattern": "^[^\\s]+$",
+      "x-messages": { "pattern": "must be an image reference without spaces" }
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1
+    },
+    "health": {
+      "type": "string",
+      "pattern": "^(none|/.*)$",
+      "x-messages": { "pattern": "must be a path that starts with / or the word none" }
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "size": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*[kmg]$",
+      "x-messages": { "pattern": "must be a size such as 512m or 2g (units k, m, g)" }
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*[hdw]$",
+      "x-messages": { "pattern": "must be a duration such as 12h, 7d or 4w (units h, d, w)" }
+    },
+    "logs": {
+      "type": "string",
+      "pattern": "^(off|[1-9][0-9]*[hdw])$",
+      "x-messages": { "pattern": "must be off or a duration such as 7d (units h, d, w)" }
+    },
+    "update": {
+      "type": "string",
+      "enum": ["notify", "auto", "off"]
+    },
+    "url_path": {
+      "type": "string",
+      "pattern": "^/",
+      "x-messages": { "pattern": "must start with /" }
+    },
+    "path_list": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/url_path" }
+    },
+    "domain": {
+      "type": "string",
+      "pattern": "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$",
+      "x-messages": { "pattern": "must be a lowercase domain such as app.example.com" }
+    },
+    "secrets": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/var_name" }
+    },
+    "env": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/var_name" },
+      "additionalProperties": {
+        "type": "string",
+        "x-messages": { "type": "must be a string; put quotes around the value" }
+      }
+    },
+    "fleet_secrets": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/var_name" },
+      "additionalProperties": { "$ref": "#/$defs/var_name" }
+    },
+    "needs": {
+      "type": ["array", "object"],
+      "x-messages": { "type": "must be a list of names or [needs.<name>] tables" },
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/name" },
+      "propertyNames": { "$ref": "#/$defs/name" },
+      "properties": {
+        "postgres": { "$ref": "#/$defs/need_postgres" }
+      },
+      "additionalProperties": { "$ref": "#/$defs/need" }
+    },
+    "need": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "env": { "$ref": "#/$defs/var_name" }
+      }
+    },
+    "need_postgres": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "env": { "$ref": "#/$defs/var_name" },
+        "extensions": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9_]+$",
+            "x-messages": { "pattern": "extension names use only lowercase letters, digits and underscores" }
+          }
+        },
+        "database": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]*$",
+          "x-messages": { "pattern": "database names use only lowercase letters, digits and underscores" }
+        },
+        "role": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_]*$",
+          "x-messages": { "pattern": "database user names use only lowercase letters, digits and underscores" }
+        }
+      }
+    },
+    "build_args": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/var_name" },
+      "additionalProperties": {
+        "type": "string",
+        "x-messages": { "type": "must be a string; put quotes around the value" }
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dockerfile": { "type": "string", "minLength": 1 },
+        "context": { "type": "string", "minLength": 1 },
+        "strategy": { "type": "string", "enum": ["local", "remote", "registry"] },
+        "memory": { "$ref": "#/$defs/size" },
+        "watch": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "ignore": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "args": { "$ref": "#/$defs/build_args" },
+        "secrets": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$",
+            "x-messages": { "pattern": "build secret ids use only letters, digits, dots, hyphens and underscores" }
+          },
+          "additionalProperties": { "$ref": "#/$defs/var_name" }
+        }
+      }
+    },
+    "image_xor_build": {
+      "not": { "required": ["image", "build"] },
+      "x-messages": { "not": "set image or [build], not both" },
+      "x-at": "image"
+    },
+    "access": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["public", "tailnet", "internal"] },
+        "open": { "$ref": "#/$defs/path_list" },
+        "locked": { "$ref": "#/$defs/path_list" },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rate": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*/[sm]$",
+              "x-messages": { "pattern": "must be a rate such as 100/s or 600/m" }
+            },
+            "burst": { "type": "integer", "minimum": 1 },
+            "concurrent": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "password": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["users"],
+          "properties": {
+            "users": {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]*$",
+                "x-messages": { "pattern": "user names use only lowercase letters, digits and underscores, because each maps to a secret PASSWORD_<USER>" }
+              }
+            },
+            "realm": { "type": "string", "minLength": 1 }
+          }
+        },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["header"],
+          "properties": {
+            "header": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9-]+$",
+              "x-messages": { "pattern": "must be an HTTP header name such as X-Tailnet-Device" }
+            }
+          }
+        }
+      }
+    },
+    "mount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "x-messages": { "pattern": "must be an absolute path inside the container" }
+        },
+        "volume": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_.-]*$",
+          "x-messages": { "pattern": "volume names use only lowercase letters, digits, dots, hyphens and underscores" }
+        },
+        "from": {
+          "type": "string",
+          "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$",
+          "x-messages": { "pattern": "must be a path inside this repo, without a leading / and without .." }
+        },
+        "owner": {
+          "type": "string",
+          "pattern": "^[0-9]+(:[0-9]+)?$",
+          "x-messages": { "pattern": "must be a numeric uid or uid:gid such as 472:472" }
+        },
+        "backup": { "type": "boolean" },
+        "mode": {
+          "type": "string",
+          "pattern": "^0[0-7]{3}$",
+          "x-messages": { "pattern": "must be an octal file mode such as 0644" }
+        }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            { "required": ["volume"] },
+            { "required": ["from"] }
+          ],
+          "x-messages": { "oneOf": "needs exactly one of volume or from" }
+        },
+        {
+          "not": { "required": ["from", "owner"] },
+          "x-messages": { "not": "applies only to a volume mount" },
+          "x-at": "owner"
+        },
+        {
+          "not": { "required": ["from", "backup"] },
+          "x-messages": { "not": "applies only to a volume mount; files from the repo are not backed up" },
+          "x-at": "backup"
+        },
+        {
+          "not": { "required": ["volume", "mode"] },
+          "x-messages": { "not": "applies only to a mount with from" },
+          "x-at": "mode"
+        }
+      ]
+    },
+    "mounts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/mount" }
+    },
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keep": { "$ref": "#/$defs/duration" },
+        "hour": { "type": "integer", "minimum": 0, "maximum": 23 }
+      }
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "schedule", "command"],
+      "properties": {
+        "name": { "$ref": "#/$defs/name" },
+        "schedule": {
+          "type": "string",
+          "pattern": "^\\S+( \\S+){4}$",
+          "x-messages": { "pattern": "must be a five-field cron line in UTC such as \"0 2 * * *\"" }
+        },
+        "command": { "$ref": "#/$defs/command" }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inherit": { "type": "boolean" },
+        "image": { "$ref": "#/$defs/image" },
+        "build": { "$ref": "#/$defs/build" },
+        "command": { "$ref": "#/$defs/command" },
+        "port": { "$ref": "#/$defs/port" },
+        "health": { "$ref": "#/$defs/health" },
+        "memory": { "$ref": "#/$defs/size" },
+        "path": { "$ref": "#/$defs/url_path" },
+        "domain": { "$ref": "#/$defs/domain" },
+        "expose": { "type": "string", "enum": ["loopback", "tailnet"] },
+        "access": { "$ref": "#/$defs/access" },
+        "mounts": { "$ref": "#/$defs/mounts" },
+        "env": { "$ref": "#/$defs/env" },
+        "secrets": { "$ref": "#/$defs/secrets" },
+        "fleet_secrets": { "$ref": "#/$defs/fleet_secrets" },
+        "needs": { "$ref": "#/$defs/needs" }
+      },
+      "allOf": [
+        { "$ref": "#/$defs/image_xor_build" },
+        {
+          "not": { "required": ["path", "domain"] },
+          "x-messages": { "not": "set path (a prefix on the main domain) or domain (its own domain), not both" },
+          "x-at": "path"
+        },
+        {
+          "if": { "anyOf": [{ "required": ["path"] }, { "required": ["domain"] }, { "required": ["expose"] }] },
+          "then": {
+            "required": ["port"],
+            "x-messages": { "required": "is required for a service with path, domain or expose" }
+          }
+        },
+        {
+          "if": {
+            "required": ["access"],
+            "properties": { "access": { "required": ["password"] } }
+          },
+          "then": {
+            "required": ["health"],
+            "x-messages": { "required": "is required when the service sets access.password; write a path or \"none\"" }
+          }
+        }
+      ]
+    },
+    "deploy_env": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "box": { "$ref": "#/$defs/name" },
+        "domain": { "$ref": "#/$defs/domain" },
+        "aliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/domain" }
+        },
+        "redirect": { "type": "boolean" },
+        "branch": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._][A-Za-z0-9._/-]*$",
+          "x-messages": { "pattern": "must be a git branch name" }
+        },
+        "image": { "$ref": "#/$defs/image" },
+        "port": { "$ref": "#/$defs/port" },
+        "command": { "$ref": "#/$defs/command" },
+        "release": { "$ref": "#/$defs/command" },
+        "health": { "$ref": "#/$defs/health" },
+        "replicas": { "$ref": "#/$defs/replicas" },
+        "memory": { "$ref": "#/$defs/size" },
+        "update": { "$ref": "#/$defs/update" },
+        "zero_downtime": { "type": "boolean" },
+        "logs": { "$ref": "#/$defs/logs" },
+        "secrets": { "$ref": "#/$defs/secrets" },
+        "env": { "$ref": "#/$defs/env" },
+        "access": { "$ref": "#/$defs/access" },
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "x-messages": { "additionalProperties": "only build.args may be overridden per environment" },
+          "properties": {
+            "args": { "$ref": "#/$defs/build_args" }
+          }
+        },
+        "services": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/service_name" },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "x-messages": { "additionalProperties": "only domain may be overridden per environment for a service" },
+            "properties": {
+              "domain": { "$ref": "#/$defs/domain" }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "not": { "required": ["image", "build"] },
+          "x-messages": { "not": "an image override and build.args in one environment conflict, because a pulled image is not built" },
+          "x-at": "build"
+        }
+      ]
+    }
+  }
+}

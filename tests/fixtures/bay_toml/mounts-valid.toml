@@ -1,0 +1,19 @@
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[[mounts]]
+path = "/app/data"
+volume = "data"
+owner = "472:472"
+
+[[mounts]]
+path = "/etc/app/config.yaml"
+from = "deploy/config.yaml"
+mode = "0644"
+
+[deploy.production]
+domain = "app.example.com"

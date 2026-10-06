@@ -1,0 +1,10 @@
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+memmory = "512m"
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "app.example.com"

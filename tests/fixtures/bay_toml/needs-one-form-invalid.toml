@@ -1,0 +1,16 @@
+# List form at the top, table form in a service: one file, two forms.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+needs = ["postgres"]
+
+[access]
+mode = "public"
+
+[services.worker]
+command = "node worker.js"
+
+[services.worker.needs.redis]
+
+[deploy.production]
+domain = "app.example.com"

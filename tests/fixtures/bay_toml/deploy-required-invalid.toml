@@ -1,0 +1,9 @@
+# No [deploy.<env>] table: nothing says where the app runs.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[deploy]

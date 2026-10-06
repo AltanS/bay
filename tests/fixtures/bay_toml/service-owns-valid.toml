@@ -1,0 +1,22 @@
+# A service may own env, secrets and needs. `inherit = false` starts it empty.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+needs = ["postgres"]
+secrets = ["SESSION_SECRET"]
+
+[env]
+LOG_LEVEL = "info"
+
+[access]
+mode = "public"
+
+[services.sidecar]
+inherit = false
+image = "ghcr.io/org/sidecar:2"
+env = { MODE = "sidecar" }
+secrets = ["SIDECAR_TOKEN"]
+needs = ["redis"]
+
+[deploy.production]
+domain = "app.example.com"

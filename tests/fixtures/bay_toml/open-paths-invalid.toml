@@ -1,0 +1,10 @@
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "tailnet"
+open = ["webhooks"]
+
+[deploy.production]
+domain = "app.example.com"

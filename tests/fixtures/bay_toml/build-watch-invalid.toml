@@ -1,0 +1,13 @@
+# watch is a list, even with one entry.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[build]
+watch = "src/**"
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "app.example.com"

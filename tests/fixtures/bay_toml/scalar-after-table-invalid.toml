@@ -1,0 +1,10 @@
+# `port` sits below [access], so TOML reads it as access.port.
+name = "myapp"
+fleet = "myfleet"
+
+[access]
+mode = "public"
+port = 3000
+
+[deploy.production]
+domain = "app.example.com"

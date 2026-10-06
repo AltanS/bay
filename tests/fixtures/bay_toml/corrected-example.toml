@@ -1,0 +1,128 @@
+# ── Identity ───────────────────────────────────────────────
+name = "myapp"                 # [a-z0-9-]; prefixes containers, databases, volumes, secret names
+fleet = "myfleet"              # which fleet repo
+publish = false                # true = other projects may `needs = ["myapp"]` (fleet injects MYAPP_URL)
+
+# ── Image (this example builds; `image = "ghcr.io/org/app:1.4"` is the other form) ──
+# ── Runtime ────────────────────────────────────────────────
+port = 3000                    # container port that receives traffic
+command = "node server.js"     # default: image CMD
+release = "npx prisma migrate deploy"  # once per deploy before traffic moves; failure aborts, old container stays
+health = "/api/health"         # default "/"; "none" disables. Required explicit when [access.password] is set.
+replicas = 1
+memory = "512m"                # default none; swap never allowed
+update = "notify"              # notify | auto | off  (default notify)
+zero_downtime = false          # true = old and new overlap; refused if a mount is single-writer
+logs = "7d"                    # "off" | duration; log archive on the box (rotation always on, fleet cap)
+secrets = ["SESSION_SECRET"]   # names only; fleet holds values per environment
+
+# ── Needs (table form here; `needs = ["postgres", "redis"]` when no need has options) ──
+[needs.postgres]
+env = "GF_DATABASE_URL"        # alias injected beside DATABASE_URL. Own database and user per environment.
+extensions = ["vector"]
+database = "myapp_prod"        # adopt an existing db name (importer writes this; default <name>_<env>)
+role = "myapp"                 # adopt an existing database user name
+[needs.redis]                  # REDIS_URL, own key namespace per environment
+[needs.pigeon]                 # a published project; injects PIGEON_URL; fleet decides network path and ACL
+# Removing a need never deletes data; the plan marks that step destructive and separate.
+
+[build]
+dockerfile = "Dockerfile"      # default
+context = "."                  # default, relative to repo root
+strategy = "local"             # local | remote | registry; default = fleet setting
+memory = "2g"                  # build memory cap; default = fleet setting
+watch = ["src/**", "package.json"]   # include list; a push touching nothing here does not rebuild
+ignore = ["*.md", "docs/**"]   # exclude list; applied after watch
+[build.args]
+NODE_ENV = "production"
+[build.secrets]
+npmrc = "NPMRC"                # BuildKit secret id = secret NAME from the fleet
+
+[env]                          # plain config, committed
+LOG_LEVEL = "info"
+
+[fleet_secrets]                # container var name = fleet secret name (shared values, one rotation)
+TURNSTILE_SECRET_KEY = "TURNSTILE_SECRET_KEY"
+BW_CLIENTID = "SHARED_BW_CLIENT_ID"
+
+# ── Access ─────────────────────────────────────────────────
+[access]
+mode = "public"                # public | tailnet | internal
+                               # public   = internet, HTTPS via Let's Encrypt
+                               # tailnet  = only devices on the fleet VPN (compiles to the fleet allowlist)
+                               # internal = no route; reachable only by containers that need it
+open   = ["/webhooks"]         # paths opened to public; bypass mode AND password
+locked = ["/admin"]            # paths locked to the tailnet
+# The health path bypasses the password by exact match. Identity header is stripped on non-tailnet requests.
+[access.limits]                # per source IP; default = fleet setting
+rate = "100/s"
+burst = 50
+concurrent = 100
+[access.password]              # HTTP basic auth on everything not in `open`; passwords are secrets PASSWORD_<USER>
+users = ["admin"]
+realm = "Staff only"
+[access.identity]              # tailnet only; app receives caller's device name in this header
+header = "X-Tailnet-Device"
+
+# ── Data ───────────────────────────────────────────────────
+[[mounts]]                     # exactly one of volume / from
+path = "/app/data"             # inside the container
+volume = "data"                # bay-managed named volume; backed up; survives recreation
+owner = "472:472"              # default root
+[[mounts]]
+path = "/app/cache"
+volume = "cache"
+backup = false
+[[mounts]]
+path = "/etc/app/config.yaml"
+from = "deploy/config.yaml"    # file or directory from this repo, read-only; a change recreates the container
+mode = "0644"                  # default 0600
+
+[backup]                       # managed mounts with backup = true (databases follow the fleet policy)
+keep = "30d"                   # default fleet setting
+hour = 3                       # UTC; default fleet setting
+
+# ── Scheduled jobs (same image, env, secrets, needs) ───────
+[[jobs]]
+name = "cleanup"
+schedule = "0 2 * * *"         # UTC cron
+command = "node dist/cleanup.js"
+
+# ── Extra services ─────────────────────────────────────────
+# Inherit by default: image/[build], env, secrets, fleet_secrets, needs. `inherit = false` starts empty.
+# Own: command, port, health, memory, access, mounts, env, secrets, needs, image/[build].
+# No `domain` and no `path` = internal. Routed services default to the project mode.
+# Password and limits are never inherited.
+# Siblings reach each other at http://<service>:<port>; Bay injects <SERVICE>_URL.
+[services.worker]
+command = "node dist/worker.js"
+memory = "256m"
+[services.api]
+build = { dockerfile = "apps/api/Dockerfile", context = "apps/api" }
+port = 4000
+path = "/api"                  # routed on the main domain by prefix
+[services.api.access.limits]
+rate = "2/s"
+[services.admin]
+port = 5000
+domain = "admin.example.com"   # a second hostname is a service, not a route; override per env below
+[services.browser]
+inherit = false                # sidecar: none of the project's secrets or needs
+image = "ghcr.io/steel-dev/steel-browser:latest"
+port = 3000
+expose = "loopback"            # loopback | tailnet; publish the port on the box for Traefik or probes
+
+# ── Deploy targets (one table per environment; each env = own data + secret values) ──
+[deploy.production]
+box = "eu-1"                   # default: fleet default box
+domain = "app.example.com"     # default: <name>.<fleet default domain>
+aliases = ["example.com"]      # redirect to domain; redirect = false serves both
+branch = "main"                # webhook builds follow this branch; default main
+[deploy.staging]
+box = "eu-1"
+domain = "staging.example.com"
+branch = "develop"
+access.mode = "tailnet"        # any runtime / access / build.args / env key may be overridden per environment
+services.admin.domain = "admin-staging.example.com"   # the plan refuses a duplicate domain on one box
+[deploy.staging.env]
+LOG_LEVEL = "debug"

@@ -1,0 +1,14 @@
+# A published project need takes only `env`; database options belong to postgres.
+name = "myapp"
+fleet = "myfleet"
+publish = true
+port = 3000
+
+[needs.pigeon]
+extensions = ["vector"]
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "app.example.com"

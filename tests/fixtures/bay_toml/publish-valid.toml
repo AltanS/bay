@@ -1,0 +1,12 @@
+# This project is published, and it needs another published project.
+name = "myapp"
+fleet = "myfleet"
+publish = true
+port = 3000
+needs = ["postgres", "pigeon"]
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "app.example.com"

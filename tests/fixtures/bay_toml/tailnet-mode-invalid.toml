@@ -1,0 +1,10 @@
+# The old word vpn is gone; the mode is tailnet.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "vpn"
+
+[deploy.production]
+domain = "app.example.com"

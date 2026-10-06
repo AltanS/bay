@@ -1,0 +1,26 @@
+# Builds by default; production pulls a pinned image; staging gets its own env value.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[build]
+dockerfile = "Dockerfile"
+
+[env]
+LOG_LEVEL = "info"
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "app.example.com"
+image = "ghcr.io/org/app:1.4"
+
+[deploy.staging]
+domain = "staging.example.com"
+
+[deploy.staging.env]
+LOG_LEVEL = "debug"
+
+[deploy.staging.build.args]
+NODE_ENV = "staging"

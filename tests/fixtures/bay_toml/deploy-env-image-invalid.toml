@@ -1,0 +1,14 @@
+# An image override and build.args in one environment conflict.
+name = "myapp"
+fleet = "myfleet"
+port = 3000
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "app.example.com"
+image = "ghcr.io/org/app:1.4"
+
+[deploy.production.build.args]
+NODE_ENV = "production"
