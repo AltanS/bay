@@ -20,6 +20,11 @@ environment of ``<name>``. ``<name>-<suffix>`` with the same repo (or the same
 image) becomes ``[services.<suffix>]`` when that is exact. Every decision, and
 every value the importer cannot carry over exactly (a FLAG), lands in the
 report. Secret values are never read and never printed.
+
+Environment names: the main environment is named after the group of the box
+it runs on (``boxes.<b>.env``), so ``[deploy.<env>]`` matches the group a
+deploy targets. With one group in the fleet, that group is also
+``primary_env`` in bay.fleet.toml (see :meth:`_Importer._env_names`).
 """
 
 from __future__ import annotations
@@ -376,6 +381,8 @@ class _Importer:
         self.copies: dict[str, Path] = {}
         self.boxes = self._boxes()
         self.default_box = self._default_box()
+        #: the box groups a deploy targets (``boxes.<b>.env`` in bay.fleet.toml)
+        self.groups = sorted({b.env for b in self.boxes.values()})
         self.res_ports: dict[str, int] = {}
 
     # ── boxes ───────────────────────────────────────────────────────────
@@ -779,6 +786,7 @@ class _Importer:
             for m in extras
             if _port(m.svc) is not None
         }
+        names = self._env_names(plan.name, mains)
         per_env: dict[str, dict[str, Any]] = {}
         for m in mains:
             per_env[m.env] = self._level(plan, m, m.key, is_web=True, injected=injected)
@@ -843,7 +851,7 @@ class _Importer:
                             f"{lvl['key']}: {k} differs from {primary.key}; "
                             f"environments share it, so {primary.key}'s value is used"
                         )
-            deploy[env] = d
+            deploy[names[env]] = d
         # [env]: what every environment shares; the rest per environment.
         if len(per_env) > 1:
             common = {
@@ -854,18 +862,18 @@ class _Importer:
             for env, lvl in per_env.items():
                 rest = {k: v for k, v in lvl["doc"].get("env", {}).items() if common.get(k) != v}
                 if rest:
-                    deploy[env]["env"] = rest
+                    deploy[names[env]]["env"] = rest
             doc["env"] = common
         if not doc["env"]:
             del doc["env"]
         for env, lvl in per_env.items():
-            lock["envs"][env] = {"box": lvl["box"], "adopted": lvl["adopted"]}
+            lock["envs"][names[env]] = {"box": lvl["box"], "adopted": lvl["adopted"]}
 
         services: dict[str, Any] = {}
         for m in extras:
             lvl = self._level(plan, m, m.key, is_web=False, main_key=primary.key)
             services[m.service] = lvl["doc"]
-            adopted = lock["envs"][PRIMARY_ENV]["adopted"]
+            adopted = lock["envs"][names[primary.env]]["adopted"]
             for k, v in lvl["adopted"].items():
                 if isinstance(v, dict):
                     adopted.setdefault(k, {}).update(v)
@@ -887,6 +895,30 @@ class _Importer:
                 k: v for k, v in sorted(env["adopted"].items()) if v not in ({}, None)
             }
         return doc, lock
+
+    def _env_names(self, project: str, mains: list[_Member]) -> dict[str, str]:
+        """``{logical env: [deploy.<name>]}`` for a project's main containers.
+
+        The primary environment (``-prod`` or no suffix) is named after the
+        group of the box it runs on (``boxes.<b>.env``), so a box in group
+        ``testing`` gives ``[deploy.testing]``. ``-staging`` and ``-dev`` keep
+        their names. When a name would then repeat, the project keeps the
+        plain names and a FLAG says so.
+        """
+        names: dict[str, str] = {}
+        for m in mains:
+            if m.env == PRIMARY_ENV:
+                boxes = self._boxes_of(m.svc, m.key)
+                names[m.env] = self.boxes[boxes[0] if boxes else self.default_box].env
+            else:
+                names[m.env] = m.env
+        if len(set(names.values())) < len(names):
+            self.flags.append(
+                f"{project}: the box group {names[PRIMARY_ENV]} is also the name of another "
+                f"environment; kept the names {', '.join(sorted(names))}"
+            )
+            return {env: env for env in names}
+        return names
 
     def _level(
         self,
@@ -1326,6 +1358,8 @@ class _Importer:
             )
             domain = self._resolve(first, self.default_box, "domains").split(".", 1)[-1]
         doc["default_domain"] = domain
+        if len(self.groups) == 1:
+            doc["primary_env"] = self.groups[0]
         boxes: dict[str, Any] = {}
         for name, box in sorted(self.boxes.items()):
             entry: dict[str, Any] = {"env": box.env}

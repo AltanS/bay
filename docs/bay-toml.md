@@ -43,6 +43,10 @@ bay import --fleet ./fleet --check --diff      # also prints the diff of each co
   `-dev` become an environment of `<name>`. `<name>-<suffix>` with the same repo or
   image becomes `[services.<suffix>]` when the result is exact. The report lists every
   decision.
+- The main environment of a project is named after the group of its box (`env` of the
+  box in `bay.fleet.toml`). A box in group `testing` gives `[deploy.testing]`.
+  `-staging` and `-dev` keep their names. When every box is in one group, that group
+  is also `primary_env` in `bay.fleet.toml`, so container names stay as they are.
 - A value `http://<container>:<port>` that reaches another project becomes a need with
   `env` set to today's variable name, and the other project gets `publish = true`.
 - The report lists each secret to add (for example a password that is plain text

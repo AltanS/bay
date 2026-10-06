@@ -356,3 +356,109 @@ def test_import_check_prints_the_diff_summary(legacy: Path) -> None:
     assert "DIFF mailer on box eu: memswap_limit" in result.output
     assert "DIFF blog-prod on box eu: log_retention" in result.output
     assert _state(legacy) == before, "--check writes nothing into the fleet"
+
+
+# ── environment names follow the box group ──────────────────────────────────
+
+
+def test_one_group_fleet_sets_primary_env(imported: tuple[importer.ImportResult, Path]) -> None:
+    _, out = imported
+    # every fixture box is in group production
+    assert toml(out, "bay.fleet.toml")["primary_env"] == "production"
+
+
+def _small_fleet(root: Path, hosts: str, services: dict[str, Any], groups: list[str]) -> Path:
+    (root / "group_vars" / "all").mkdir(parents=True)
+    (root / "group_vars" / "all" / "main.yml").write_text("---\nstack_name: small\n")
+    (root / "group_vars" / "all" / "services.yml").write_text(
+        yaml.safe_dump({"services": services}, sort_keys=False)
+    )
+    for g in groups:
+        (root / "group_vars" / g).mkdir(parents=True, exist_ok=True)
+        (root / "group_vars" / g / "main.yml").write_text("---\n{}\n")
+    (root / "group_vars" / groups[0] / "secrets.yml").write_text("---\nsecrets: {}\n")
+    (root / "hosts").mkdir()
+    (root / "hosts" / "boxes").write_text(hosts)
+    return root
+
+
+def _svc(port: int, domain: str | None = None, **kw: Any) -> dict[str, Any]:
+    return {
+        "image": "registry.example.com/small/app:1",
+        "domains": [domain or f"app{port}.example.com"],
+        "ports": {"internal": port},
+        "healthcheck_path": "/health",
+        **kw,
+    }
+
+
+def test_single_box_in_group_testing_gives_deploy_testing(tmp_path: Path) -> None:
+    legacy = _small_fleet(
+        tmp_path / "legacy",
+        "[testing]\n192.0.2.20\n\n[other]\n192.0.2.21\n",
+        {"app": _svc(3000), "app-staging": _svc(3000, "s.example.com"), "tool": _svc(3002)},
+        ["testing"],
+    )
+    result = importer.import_fleet(legacy, "small")
+    out = tmp_path / "fleet"
+    result.write(out)
+    fleet = toml(out, "bay.fleet.toml")
+    assert fleet["primary_env"] == "testing"
+    assert fleet["boxes"] == {"testing": {"env": "testing"}}
+    assert sorted(toml(out, "projects/app/bay.toml")["deploy"]) == ["staging", "testing"]
+    assert list(toml(out, "projects/tool/bay.toml")["deploy"]) == ["testing"]
+    assert sorted(lock(out, "app")["envs"]) == ["staging", "testing"]
+    assert lock(out, "app")["envs"]["testing"]["adopted"]["containers"] == {"web": "app"}
+    compiled = compiler.compile_fleet(load_inputs(out))
+    assert sorted(compiled.services) == ["app", "app-staging", "tool"]
+    gate = roundtrip.run_gate(legacy, name="small", workdir=tmp_path / "gate")
+    assert gate.ok, "\n".join(gate.summary_lines())
+
+
+def test_multi_group_fleet_names_each_env_after_its_box(tmp_path: Path) -> None:
+    hosts = (
+        "[eu]\n192.0.2.11\n\n[na]\n192.0.2.12\n\n"
+        "[production:children]\neu\n\n[canary:children]\nna\n"
+    )
+    legacy = _small_fleet(
+        tmp_path / "legacy",
+        hosts,
+        {
+            "app": _svc(3000, regions=["eu"]),
+            "app-staging": _svc(3000, "s.example.com", regions=["eu"]),
+            "tool": _svc(3002, regions=["na"]),
+            "edge": _svc(3003, regions=["na"]),
+            "edge-staging": _svc(3003, "es.example.com", regions=["na"]),
+        },
+        ["production", "canary", "eu", "na"],
+    )
+    result = importer.import_fleet(legacy, "small")
+    out = tmp_path / "fleet"
+    result.write(out)
+    fleet = toml(out, "bay.fleet.toml")
+    assert "primary_env" not in fleet  # two groups: the default stays
+    assert {b: d["env"] for b, d in fleet["boxes"].items()} == {"eu": "production", "na": "canary"}
+    assert sorted(toml(out, "projects/app/bay.toml")["deploy"]) == ["production", "staging"]
+    assert list(toml(out, "projects/tool/bay.toml")["deploy"]) == ["canary"]
+    assert sorted(toml(out, "projects/edge/bay.toml")["deploy"]) == ["canary", "staging"]
+    assert lock(out, "tool")["envs"]["canary"]["adopted"]["containers"] == {"web": "tool"}
+    compiled = compiler.compile_fleet(load_inputs(out))
+    assert sorted(compiled.services) == ["app", "app-staging", "edge", "edge-staging", "tool"]
+    gate = roundtrip.run_gate(legacy, name="small", workdir=tmp_path / "gate")
+    assert gate.ok, "\n".join(gate.summary_lines())
+
+
+def test_env_name_collision_keeps_the_plain_names(tmp_path: Path) -> None:
+    legacy = _small_fleet(
+        tmp_path / "legacy",
+        "[staging]\n192.0.2.30\n",
+        {"app": _svc(3000), "app-staging": _svc(3000, "s.example.com")},
+        ["staging"],
+    )
+    result = importer.import_fleet(legacy, "small")
+    out = tmp_path / "fleet"
+    result.write(out)
+    assert sorted(toml(out, "projects/app/bay.toml")["deploy"]) == ["production", "staging"]
+    assert any("is also the name of another environment" in f for f in result.flags)
+    gate = roundtrip.run_gate(legacy, name="small", workdir=tmp_path / "gate")
+    assert gate.ok, "\n".join(gate.summary_lines())
