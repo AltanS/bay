@@ -121,10 +121,13 @@ def routed_output(as_json: bool, log: Path | None) -> Iterator[Callable[[str], N
     """Keep stdout for the one result document.
 
     With ``--log``, progress lines and everything the deploy prints (Ansible
-    included) are appended to that file. Otherwise, with ``--json``, they go
-    to stderr. Otherwise nothing is redirected. Both the Python ``sys.stdout``
-    and, when it is a real file, descriptor 1 are redirected, so a child
-    process that inherits stdout follows too.
+    included, stdout AND stderr) are appended to that file. Otherwise, with
+    ``--json``, they go to stderr. Otherwise nothing is redirected.
+
+    A child process gets ``sys.stdout`` and ``sys.stderr`` as its handles
+    (``runner.run`` passes them), so both Python streams point at the target.
+    Descriptors 1 (and 2 with ``--log``) are redirected too when the target
+    is a real file, so a child that only inherits them follows as well.
 
     Yields the function that prints one progress line.
     """
@@ -132,26 +135,35 @@ def routed_output(as_json: bool, log: Path | None) -> Iterator[Callable[[str], N
         yield lambda m: console.info(m)
         return
     handle: IO[str] = open(log, "a", encoding="utf-8") if log is not None else sys.stderr
-    saved_fd: int | None = None
+    fds = (1, 2) if log is not None else (1,)
+    saved: dict[int, int] = {}
     try:
         target_fd = handle.fileno()
         sys.stdout.flush()
-        saved_fd = os.dup(1)
-        os.dup2(target_fd, 1)
+        sys.stderr.flush()
+        for fd in fds:
+            saved[fd] = os.dup(fd)
+            os.dup2(target_fd, fd)
     except (OSError, ValueError, AttributeError):  # io.UnsupportedOperation is both
-        saved_fd = None
+        for fd, copy in saved.items():
+            os.dup2(copy, fd)
+            os.close(copy)
+        saved = {}
 
     def say(message: str) -> None:
         print(message, file=handle, flush=True)
 
     try:
-        with contextlib.redirect_stdout(handle):
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(contextlib.redirect_stdout(handle))
+            if log is not None:
+                stack.enter_context(contextlib.redirect_stderr(handle))
             yield say
     finally:
         handle.flush()
-        if saved_fd is not None:
-            os.dup2(saved_fd, 1)
-            os.close(saved_fd)
+        for fd, copy in saved.items():
+            os.dup2(copy, fd)
+            os.close(copy)
         if log is not None:
             handle.close()
 

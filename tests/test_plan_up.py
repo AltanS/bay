@@ -1219,3 +1219,50 @@ def test_fleet_inside_a_larger_repo_is_committed_not_pushed(
     assert "inside a larger repo" in result.stderr
     assert git(outer, "rev-parse", "HEAD") == doc["receipt_commit"]  # committed
     assert git(remote, "rev-parse", "main") == before  # not pushed
+
+
+# ── --log takes the deploy child's stderr too ───────────────────────────────
+
+_CHILD = (
+    "import sys; sys.stderr.write('CHILD-STDERR-LINE\\n'); "
+    "sys.stdout.write('CHILD-STDOUT-LINE\\n')"
+)
+
+
+def test_log_file_takes_the_child_stderr(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bay_cli import runner as runmod
+
+    def deploy(cx: Context, box_env: str) -> None:
+        # The real path: ansible.run_playbook -> runner.run(capture=False),
+        # which hands sys.stdout and sys.stderr to the child.
+        runmod.run([sys.executable, "-c", _CHILD], capture=False)
+        box.deploy(cx, box_env)
+
+    monkeypatch.setattr(applymod, "default_deploy", deploy)
+    log = tmp_path / "up.log"
+    for args in (("up", "--log", str(log)), ("up", "--json", "--log", str(log))):
+        result = cli(world, *args)
+        assert result.exit_code == 0, result.output
+        assert "CHILD" not in result.stdout and "CHILD" not in result.stderr, args
+    text = log.read_text()
+    assert text.count("CHILD-STDERR-LINE") == 2 and text.count("CHILD-STDOUT-LINE") == 2
+
+
+def test_log_file_takes_an_inheriting_child(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    from bay_cli.commands.project_cmd import routed_output
+
+    log = tmp_path / "x.log"
+    with routed_output(False, log) as say:
+        say("progress")
+        subprocess.run([sys.executable, "-c", _CHILD], check=True)  # inherits fd 1 and 2
+    print("after-stdout")
+    print("after-stderr", file=sys.stderr)
+    out, err = capfd.readouterr()
+    text = log.read_text()
+    assert "progress" in text and "CHILD-STDERR-LINE" in text and "CHILD-STDOUT-LINE" in text
+    assert "CHILD" not in out + err
+    assert "after-stdout" in out and "after-stderr" in err  # both descriptors restored
