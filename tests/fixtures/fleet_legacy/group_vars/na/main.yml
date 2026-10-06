@@ -1,0 +1,3 @@
+---
+domain_base: na.fleet-a.example.com
+headscale_server_tailnet_ip: "100.64.0.2"

@@ -1,0 +1,10 @@
+# Two boxes in two groups. Documentation addresses only.
+[eu]
+192.0.2.11
+
+[na]
+192.0.2.12
+
+[production:children]
+eu
+na

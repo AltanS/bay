@@ -1,0 +1,302 @@
+---
+# A small fleet in today's layout. It exercises every grouping rule and the
+# main mapping rows of the importer (see tests/test_import.py).
+
+_anchors:
+  shop_env: &shop_env
+    NODE_ENV: production
+
+services:
+  # G1: shop + shop-staging are two environments of one project.
+  shop:
+    access: public
+    zero_downtime: true
+    vpn_routes:
+      - /admin
+    healthcheck_path: /healthz
+    image: registry.example.com/fleeta/shop:latest
+    build:
+      repo: git@github.com:acme/shop.git
+      token: '{{ secrets.ACME_GIT_TOKEN }}'
+      branch: main
+      dockerfile: Dockerfile
+      context: .
+      strategy: remote
+      args:
+        APP_FLAVOR: full
+      secrets:
+        npmrc: '{{ secrets.ACME_NPMRC }}'
+      paths:
+        include:
+          - 'src/**'
+        exclude:
+          - '*.md'
+    domains:
+      - shop.example.com
+      - www.shop.example.com
+    ports:
+      internal: 3000
+    regions:
+      - eu
+    mem_limit: 512m
+    depends_on:
+      - postgres
+      - cache
+    database:
+      accessory: postgres
+      name: shop_prod
+      user: shop_app
+    volumes:
+      - shop_data:/app/data
+    env:
+      clear:
+        <<: *shop_env
+        LOG_LEVEL: info
+        APP_URL: https://shop.example.com
+        MAIL_BASE_URL: 'http://mailer:3601'
+        REPORT_URL: 'http://mailer:3601/api/report'
+        CACHE_HOST_URL: 'http://cache:6379'
+      secret:
+        - SESSION_SECRET
+
+  shop-staging:
+    access: vpn
+    zero_downtime: true
+    healthcheck_path: /healthz
+    image: registry.example.com/fleeta/shop-staging:latest
+    build:
+      repo: git@github.com:acme/shop.git
+      token: '{{ secrets.ACME_GIT_TOKEN }}'
+      branch: develop
+      dockerfile: Dockerfile
+      context: .
+      strategy: remote
+      args:
+        APP_FLAVOR: full
+      secrets:
+        npmrc: '{{ secrets.ACME_NPMRC }}'
+      paths:
+        include:
+          - 'src/**'
+        exclude:
+          - '*.md'
+    domains:
+      - staging.shop.example.com
+    ports:
+      internal: 3000
+    regions:
+      - eu
+    mem_limit: 512m
+    depends_on:
+      - postgres
+      - cache
+    database:
+      accessory: postgres
+      name: shop_staging
+      user: shop_staging
+    volumes:
+      - shop_staging_data:/app/data
+    env:
+      clear:
+        <<: *shop_env
+        LOG_LEVEL: debug
+        APP_URL: https://staging.shop.example.com
+        MAIL_BASE_URL: 'http://mailer:3601'
+        REPORT_URL: 'http://mailer:3601/api/report'
+        CACHE_HOST_URL: 'http://cache:6379'
+      secret:
+        - SESSION_SECRET
+
+  # G1 with no stem key: blog-prod is the production environment of blog.
+  blog-prod:
+    access: public
+    image: ghcr.io/acme/blog:2.0
+    domains:
+      - blog.example.com
+    ports:
+      internal: 2368
+    regions:
+      - eu
+    log_rotation:
+      max_size: 10m
+      max_file: 2
+    log_retention:
+      days: 3
+      compress: true
+    volumes:
+      - blog_prod_content:/var/lib/ghost/content
+
+  # G2 accepted: app-api is [services.api] of app (same image, app reads API_URL).
+  app:
+    access: public
+    update: auto
+    image: ghcr.io/acme/app:1.0
+    domains:
+      - app.example.com
+    ports:
+      internal: 8080
+    regions:
+      - eu
+    env:
+      clear:
+        API_URL: 'http://app-api:4000'
+      secret:
+        APP_KEY: APP_APP_KEY
+  app-api:
+    access: vpn
+    image: ghcr.io/acme/app:1.1
+    domains:
+      - api.app.example.com
+    ports:
+      internal: 4000
+    regions:
+      - eu
+    command: serve-api
+    env:
+      clear:
+        MODE: api
+      secret:
+        - API_TOKEN
+
+  # G2 refused: app does not read DOCS_URL today.
+  app-docs:
+    access: public
+    image: ghcr.io/acme/app:1.0
+    domains:
+      - docs.app.example.com
+    ports:
+      internal: 8081
+    regions:
+      - eu
+
+  # Published: shop reaches it on the same box, news across boxes.
+  mailer:
+    access: vpn
+    healthcheck_path: /healthz
+    image: ghcr.io/acme/mailer:3
+    domains:
+      - mail.example.com
+    ports:
+      internal: 3601
+      expose: tailnet
+    public_routes:
+      - /v1/webhooks
+    regions:
+      - eu
+    memswap_limit: 256m
+    mem_limit: 256m
+    env:
+      secret:
+        - ADMIN_SECRET
+
+  news:
+    access: public
+    image: ghcr.io/acme/news:1
+    domains:
+      - news.example.com
+    ports:
+      internal: 3000
+    regions:
+      - na
+    depends_on:
+      - postgres
+    database:
+      accessory: postgres
+    env:
+      clear:
+        MAIL_BASE_URL: 'http://100.64.0.1:3601'
+      secret:
+        SESSION_SECRET: NEWS_SESSION_SECRET
+        TELEGRAM_BOT_TOKEN: TELEGRAM_BOT_TOKEN
+
+  # Templated domains, a plain-text password and a config file mount.
+  status:
+    access: vpn
+    update: auto
+    image: ghcr.io/acme/status:latest
+    domains:
+      - 'status.{{ domain_base }}'
+    ports:
+      internal: 8080
+    regions:
+      - na
+    middleware:
+      basic_auth:
+        credentials:
+          - username: ops
+            password: example-password
+      rate_limit:
+        average: 20
+        burst: 40
+        period: 1s
+    config_files:
+      - status/config.yaml
+    volumes:
+      - '{{ stack_dir }}/config/status/config.yaml:/config/config.yaml:ro'
+      - status_data:/data
+    env:
+      clear:
+        CONFIG: /config/config.yaml
+
+  # A config directory whose name is not the project name: adopted.
+  site:
+    access: public
+    image: ghcr.io/acme/site:5
+    domains:
+      - site.example.com
+    ports:
+      internal: 80
+    regions:
+      - eu
+    config_files_mode: public
+    config_files:
+      - legal-site/beta/de/imprint.md
+      - legal-site/beta/terms.md
+    volumes:
+      - '{{ stack_dir }}/config/legal-site/beta:/content/legal:ro'
+
+accessories:
+  postgres:
+    image: postgres:16
+    port: '5432:5432'
+    regions:
+      - eu
+      - na
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    env:
+      clear:
+        POSTGRES_DB: app
+        POSTGRES_USER: app
+      secret:
+        POSTGRES_PASSWORD: POSTGRES_PASSWORD
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'app']
+      interval: 5s
+      retries: 5
+    backup:
+      method: pg_dump
+      schedule: '0 3 * * *'
+      retain: 7
+
+  cache:
+    image: redis:7
+    update: false
+    mem_limit: 256m
+    regions:
+      - eu
+
+  shop-backup:
+    image: registry.example.com/pause:3.9
+    regions:
+      - eu
+    volumes:
+      - shop_data:/data:ro
+    backup:
+      method: file
+      schedule: '0 4 * * *'
+      retain: 30
+
+webhook:
+  domain: 'deploy.{{ domain_base }}'
+  secret: '{{ secrets.WEBHOOK_SECRET }}'

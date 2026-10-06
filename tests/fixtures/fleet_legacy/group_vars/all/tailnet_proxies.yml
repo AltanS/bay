@@ -1,0 +1,6 @@
+---
+tailnet_proxies:
+  notes:
+    domains:
+      - notes.ts.example.com
+    upstream: "http://laptop.fleet-a.tailnet.internal:8080"
