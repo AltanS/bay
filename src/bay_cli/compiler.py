@@ -570,7 +570,7 @@ class _Compiler:
         # The local build tag build_specs.yml:72 and git_deploy_image_prefix
         # derive. The prefix is the live tag on the boxes and stays until a
         # separate image migration.
-        local = "argo-{{ stack_name }}-" + web + ":latest"  # legacy-argo: live tag on boxes
+        local = "argo-{{ stack_name }}-" + web + ":latest"  # kept-argo: live tag on boxes
         return local, None
 
     def _build(
@@ -912,10 +912,36 @@ class _Compiler:
         hook = self.fleet.get("webhook")
         if hook is None:
             return None
-        first = self.domains.get(hook["domain"])
-        if first is not None:
-            self._err(f"domain {hook['domain']} is used by both {first} and the webhook")
-        return {"domain": hook["domain"], "secret": _secret_ref(hook["secret"])}
+        by_group: dict[str, str] = {}
+        for box, entry in sorted(self.boxes.items()):
+            override = entry.get("webhook_domain")
+            if override is None:
+                continue
+            group = entry.get("group")
+            if group is None:
+                self._err(
+                    f"boxes.{box}.webhook_domain: box {box} has no group; "
+                    "set group so the receiver on this box can pick its domain"
+                )
+            elif by_group.setdefault(group, override) != override:
+                self._err(
+                    f"boxes.{box}.webhook_domain: group {group} already has webhook domain "
+                    f"{by_group[group]}; boxes of one group share one domain"
+                )
+        for domain in [hook["domain"], *by_group.values()]:
+            first = self.domains.get(domain)
+            if first is not None:
+                self._err(f"domain {domain} is used by both {first} and the webhook")
+        secret = _secret_ref(hook["secret"])
+        if not by_group:
+            return {"domain": hook["domain"], "secret": secret}
+        # One shared file, one domain per box: the group of the box picks it.
+        table = ", ".join(f"'{g}': '{d}'" for g, d in sorted(by_group.items()))
+        pick = (
+            f"{{{{ {{{table}}} | dict2items | selectattr('key', 'in', group_names) "
+            f"| map(attribute='value') | first | default('{hook['domain']}') }}}}"
+        )
+        return {"domain": pick, "secret": secret}
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────

@@ -497,6 +497,36 @@ def test_webhook_and_regions(data: dict[str, Any]) -> None:
     assert data["services"]["shop"]["regions"] == ["eu"]
 
 
+def _webhook_domain_for(domain_expr: str, group_names: list[str]) -> str:
+    """Evaluate the compiled domain the way a box does (dict2items is an Ansible filter)."""
+    import jinja2
+
+    env = jinja2.Environment()
+    env.filters["dict2items"] = lambda d: [{"key": k, "value": v} for k, v in d.items()]
+    return env.from_string(domain_expr).render(group_names=group_names)
+
+
+def test_webhook_domain_per_box(fleet: Path) -> None:
+    edit(fleet, FLEET, 'group = "na"\n', 'group = "na"\nwebhook_domain = "deploy.na.example.com"\n')
+    domain = compiled(fleet).data()["webhook"]["domain"]
+    assert _webhook_domain_for(domain, ["production", "na"]) == "deploy.na.example.com"
+    assert _webhook_domain_for(domain, ["production", "eu"]) == "deploy.example.com"
+
+
+def test_webhook_domain_without_overrides_stays_literal(fleet: Path) -> None:
+    assert compiled(fleet).data()["webhook"]["domain"] == "deploy.example.com"
+
+
+def test_webhook_domain_needs_a_group(fleet: Path) -> None:
+    edit(fleet, FLEET, 'group = "na"\n', 'webhook_domain = "deploy.na.example.com"\n')
+    assert any("boxes.na-1.webhook_domain: box na-1 has no group" in m for m in problems(fleet))
+
+
+def test_webhook_domain_collision_with_a_box_domain(fleet: Path) -> None:
+    edit(fleet, FLEET, 'group = "na"\n', 'group = "na"\nwebhook_domain = "status.example.com"\n')
+    assert any("domain status.example.com is used by both" in m for m in problems(fleet))
+
+
 def test_adopted_container_names_win(fleet: Path) -> None:
     edit_lock(fleet, lambda d: d["envs"]["production"]["adopted"].update(
         containers={"web": "shop-prod", "api": "shop-api-v1"}))

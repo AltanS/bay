@@ -1333,6 +1333,13 @@ class _Importer:
                 entry["group"] = box.group
             if box.tailnet_ip:
                 entry["tailnet_ip"] = box.tailnet_ip
+            if self.lg.webhook:
+                own = self._resolve(self.lg.webhook.get("domain"), name, "webhook.domain")
+                default = self._resolve(
+                    self.lg.webhook.get("domain"), self.default_box, "webhook.domain"
+                )
+                if isinstance(own, str) and own != default:
+                    entry["webhook_domain"] = own
             boxes[name] = entry
         doc["boxes"] = boxes
         if resources:
@@ -1347,15 +1354,6 @@ class _Importer:
                 )
                 self.flags.append(
                     "webhook.secret: the value is plain text today; add it as secret WEBHOOK_SECRET"
-                )
-            hook_domains = {
-                self._resolve(self.lg.webhook.get("domain"), b, "webhook.domain")
-                for b in self.boxes
-            }
-            if len(hook_domains) > 1:
-                self.flags.append(
-                    f"webhook.domain: differs per box ({', '.join(sorted(hook_domains))}); "
-                    f"bay.fleet.toml holds one, the {self.default_box} value is used"
                 )
             doc["webhook"] = {
                 "domain": self._resolve(

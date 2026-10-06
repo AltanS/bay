@@ -1,6 +1,6 @@
 ---
 name: bay
-description: Operate a Bay infrastructure repo — deploy and provision servers, manage services and secrets, run the Headscale tailnet gateway, and find the right deep doc. Use when the repo has a .bay/ framework clone or a bin/bay wrapper (or a services.yml beside group_vars/), when developing the Bay framework itself, or when the user mentions Bay, bin/bay, or a bay deploy.
+description: Operate Bay infrastructure — deploy and provision servers, manage services and secrets, run the Headscale tailnet gateway, and find the right deep doc. Use when the repo has a bay.toml or bay.fleet.toml, or a fleet at ~/.config/bay/fleets, when developing Bay itself, or when the user mentions Bay or a bay deploy.
 ---
 
 # Bay
@@ -9,63 +9,67 @@ Bay is an Ansible + Python framework for running Docker services on hardened
 servers: Traefik reverse proxy, CrowdSec/nftables at the firewall, a self-hosted
 Headscale tailnet, declarative services, restic backups, and a build pipeline.
 
-**Framework + consumer.** Bay is a standalone repo that a *consumer* clones into
-`.bay/` inside its own repo. The consumer owns `services.yml`, `group_vars/`,
-`hosts/` and `bin/bay`; the framework owns roles, playbooks and the CLI. In
-production only the consumer repo exists — it pulls the framework at the version
-pinned in `.bay-version`.
+**Framework + fleet.** Bay is a command you install once per machine, from a
+checkout at `~/.local/share/bay/framework` (see `docs/install.md`). A *fleet* is
+the repo that holds your boxes and the apps on them. It keeps `group_vars/`,
+`hosts/` and `bay.fleet.toml`, at `~/.config/bay/fleets/<name>`. An app repo
+holds a `bay.toml` that names its fleet. The framework owns roles, playbooks and
+the CLI. Pick the fleet with `bay --fleet <path>`, `BAY_FLEET=<path>`,
+`BAY_FLEET_NAME=<name>`, or by running inside an app repo whose `bay.toml` names
+`fleet = "<name>"`.
 
 ```
-consumer/
-├── .bay/          # framework clone (gitignored, pinned by .bay-version)
-├── bin/bay        # wrapper → uv run --project .bay bay
-├── services.yml   # the app surface — single source of truth
-├── group_vars/    # config + vault-encrypted secrets
-└── hosts/         # inventory
+~/.local/share/bay/framework/   # the framework checkout (bay self update)
+~/.config/bay/fleets/prod/      # a fleet
+├── bay.fleet.toml              # fleet settings
+├── group_vars/                 # config + vault-encrypted secrets
+└── hosts/                      # inventory
+my-app/bay.toml                 # an app repo, names its fleet
 ```
 
-This file is generated in part. `bin/bay --skill` prints it; `make docs-skill`
+This file is generated in part. `bay --skill` prints it; `make docs-skill`
 in the framework repo rebuilds the generated sections.
 
-## Rules — operating a consumer
+## Rules — operating a fleet
 
-- **Always go through `bin/bay`.** Never call `ansible-playbook` directly — the
+- **Always go through `bay`.** Never call `ansible-playbook` directly — the
   CLI runs pre-deploy validation, version checks and other guards.
-- **`bin/bay validate` before any deploy that touches config.** An invalid
+- **`bay validate` before any deploy that touches config.** An invalid
   Headscale ACL crash-loops the control server; an invalid `services.yml`
   reaches the host.
-- **`git pull` the consumer before deploying.** A stale local clone silently
+- **`git pull` the fleet before deploying.** A stale local clone silently
   reverts remote-only config to framework defaults.
 - **A deploy ships app code, not just config.** `git_deploy` pulls each
-  service's repo, so `bin/bay deploy` can change what is running even when no
+  service's repo, so `bay deploy` can change what is running even when no
   framework or config file changed. Weigh blast radius accordingly.
 - **Not every role runs on deploy.** Some (e.g. `outbound_monitor`) live in
   `provision.yml`, so a deploy will never apply them no matter which tags you
   pass — a role can sit broken for months this way. Check the CHANGELOG's
-  *Upgrade notes* for `bin/bay provision --tags <role>` instructions.
+  *Upgrade notes* for `bay provision --tags <role>` instructions.
 - **Enrolling a tailnet node does not grant it access.** Under a default-deny
   ACL an unlisted node is dead on arrival; rules are **directional** (a node
   that is reachable still cannot initiate); failures are silent, because
   tailscale ACLs are accept-only and an ungranted peer is simply absent from
   `tailscale status`. sshd `AllowUsers`/`ListenAddress` is a second, independent
   gate. **Read `docs/tailnet-naming.md` before `gateway enroll` or any ACL
-  edit**, and verify with `bin/bay gateway acl audit` — which only checks the
+  edit**, and verify with `bay gateway acl audit` — which only checks the
   inbound side.
 - **Secrets live in `group_vars/<env>/secrets.yml`** under `ansible-vault`.
   Key casing is load-bearing: UPPERCASE = container env var, lowercase =
   Ansible role variable.
 - **Rig infrastructure is not in `services.yml`.** Traefik, CrowdSec,
   Watchtower, Headscale, Zot and the webhook receiver are framework-managed
-  roles; `services.yml` is the consumer's app surface only.
+  roles; `services.yml` is the app surface only.
 
 ## Rules — developing the framework
 
-- **Framework changes are invisible to consumers until tagged.** Commit in
+- **Framework changes are invisible to users until tagged.** Commit in
   `bay/`, add a `CHANGELOG.md` entry, then `make release VERSION=X.Y.Z` (never
   `git tag`/`git push` by hand — `version.yml` would drift from the tags). Then
-  `bin/bay update` in the consumer.
-- **For local iteration use `bin/bay dev-link`** to symlink `.bay/` at a sibling
-  framework checkout, and `bin/bay dev-unlink` to restore the pinned version.
+  `bay self update` on each machine.
+- **For local iteration use `bay --fleet <path>`** to try a framework or fleet
+  change without a release, and `bay self update --to <tag>` to move the
+  installed copy to a given tag.
 - **Alerts fan out from `roles/alert_channel`.** Call `bay_notify <literal.id>`
   with an ID registered in `alerts/registry.yml` — never add a private curl to
   the notification API of the day.
@@ -74,15 +78,15 @@ in the framework repo rebuilds the generated sections.
 
 | Goal | Command |
 |---|---|
-| First-time setup | `git clone https://github.com/AltanS/bay.git .bay`, then `.bay/bootstrap.sh`, then `bin/bay setup` |
-| Deploy services | `bin/bay deploy production` |
-| Deploy including infra roles | `bin/bay deploy --rig production` |
-| Recreate containers | `bin/bay deploy production --tags deploy_stack` |
-| Dry run | `bin/bay deploy production -- --check --diff` |
-| Provision a fresh server | `bin/bay provision production` |
-| Edit secrets | `bin/bay vault edit production` |
-| Check config before deploying | `bin/bay validate` |
-| Add a machine to the tailnet | `bin/bay gateway enroll <name>`, then the ACL |
+| First-time setup | Install Bay (`docs/install.md`), then `bay fleet init <name>`, then `bay init` in an app repo |
+| Deploy services | `bay deploy production` |
+| Deploy including infra roles | `bay deploy --rig production` |
+| Recreate containers | `bay deploy production --tags deploy_stack` |
+| Dry run | `bay deploy production -- --check --diff` |
+| Provision a fresh server | `bay provision production` |
+| Edit secrets | `bay vault edit production` |
+| Check config before deploying | `bay validate` |
+| Add a machine to the tailnet | `bay gateway enroll <name>`, then the ACL |
 
 ## CLI reference
 
@@ -211,16 +215,16 @@ to reproduce it. The flags that change what a command *means*:
 
 ## Documentation map
 
-Paths are relative to the framework root (`.bay/` in a consumer).
+Paths are relative to the framework root (`~/.local/share/bay/framework`).
 
 <!-- BEGIN GENERATED DOC MAP -->
 
 **Start here**
 
-- `CHANGELOG.md` — What changed in each release, with upgrade notes. Read this before `bay update`.
+- `CHANGELOG.md` — What changed in each release, with upgrade notes. Read this before `bay self update`.
 - `docs/install.md` — Install the `bay` command once per machine, update it with `bay self update`, and make or clone a fleet.
 - `docs/features.md` — What Bay is, the full feature set, and how it compares to alternatives.
-- `docs/onboarding.md` — The `bay setup` wizard, the files it generates, and your first deploy.
+- `docs/onboarding.md` — Your first project: make a fleet, run `bay init`, the files a fleet keeps, and your first deploy.
 
 **Configuration**
 
@@ -249,7 +253,7 @@ Paths are relative to the framework root (`.bay/` in a consumer).
 **Operations**
 
 - `docs/backups.md` — restic backups — S3 config, per-accessory repos, retention, restore, and monitoring.
-- `docs/multi-region.md` — Deploying one stack to multiple regional servers from a single consumer repo.
+- `docs/multi-region.md` — Deploying one stack to multiple regional servers from a single fleet.
 - `docs/alerting.md` — Where alerts go — Telegram plus an optional generic webhook sink (Campfire/Slack/raw), and the fail-open guarantees.
 - `docs/debug-agent.md` — The `debugbot` limited-permission SSH user for AI-assisted read-only debugging.
 - `docs/performance.md` — How fast a deploy is and why — Mitogen, SSH pipelining, and the `--profile` flag.

@@ -262,6 +262,11 @@ def test_secrets_and_aliases(imported: tuple[importer.ImportResult, Path]) -> No
         "domain": "deploy.eu.fleet-a.example.com",
         "secret": "WEBHOOK_SECRET",
     }
+    # The webhook domain differs per box: the default box has none of its own,
+    # the other box carries its domain.
+    boxes = fleet["boxes"]
+    assert "webhook_domain" not in boxes["eu"]
+    assert boxes["na"]["webhook_domain"] == "deploy.na.fleet-a.example.com"
 
 
 def test_report_never_prints_a_plain_value(imported: tuple[importer.ImportResult, Path]) -> None:
@@ -285,7 +290,7 @@ def test_flags(imported: tuple[importer.ImportResult, Path]) -> None:
     assert "services.mailer.memswap_limit" in flags
     assert "services.shop.env.clear.REPORT_URL" in flags
     assert "services.blog-prod.log_retention: compress" in flags
-    assert "webhook.domain: differs per box" in flags
+    assert "webhook.domain: differs per box" not in flags
     assert "API_URL" not in flags
 
 

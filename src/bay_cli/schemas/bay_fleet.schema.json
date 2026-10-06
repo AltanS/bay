@@ -143,6 +143,10 @@
           "type": "string",
           "pattern": "^[0-9]{1,3}(\\.[0-9]{1,3}){3}$",
           "x-messages": { "pattern": "must be an IPv4 address such as 100.64.0.3" }
+        },
+        "webhook_domain": {
+          "$ref": "#/$defs/domain",
+          "description": "The deploy webhook domain of this box. It replaces [webhook] domain. The box needs a group."
         }
       }
     },
