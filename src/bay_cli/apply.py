@@ -1364,13 +1364,17 @@ def env_status(
     wanted_commit: str | None,
     running: Mapping[str, Any] | None,
     commits: Mapping[str, str | None] | None = None,
+    *,
+    in_fleet: bool = False,
 ) -> tuple[str, str]:
     """``(status word, reason)`` for one env. Order: HALF, unknown, drift, ahead, behind, ok.
 
     ``commits`` is ``{build container: running commit12 or None}`` of the
     project in RUNNING. ``ahead``: WANTED is not the pin, and every build
     container runs WANTED (a push deployed it). ``behind``: WANTED is not the
-    pin, and the box does not run WANTED yet.
+    pin, and the box does not run WANTED yet. For a project that lives in the
+    fleet, WANTED is a fleet commit and no container runs it: ``ahead`` never
+    applies, and ``behind`` says only that the fleet moved past the pin.
     """
     if record.get("result") in ("failed", "pending"):
         return "HALF", (
@@ -1394,6 +1398,11 @@ def env_status(
         return "drift", "the box receipt differs from the one bay up recorded"
     if wanted_commit and lock_commit and wanted_commit != lock_commit:
         wanted12 = wanted_commit[:12]
+        if in_fleet:
+            return (
+                "behind",
+                f"the project is at {wanted12}, the fleet pins {lock_commit[:12]}",
+            )
         if commits and all(c == wanted12 for c in commits.values()):
             return (
                 "ahead",
@@ -1462,7 +1471,9 @@ def show(
                 for n, c in planmod.running_commits(cache[box_env], built).items()
                 if n in built
             }
-        status, why = env_status(record, lock_commit, wanted.commit, running, code)
+        status, why = env_status(
+            record, lock_commit, wanted.commit, running, code, in_fleet=proj.in_fleet
+        )
         rows.append(
             {
                 "env": env,

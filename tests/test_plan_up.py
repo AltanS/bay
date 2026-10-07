@@ -4555,6 +4555,22 @@ def test_show_ahead_when_box_runs_wanted(
     assert json.loads(cli(world, "show", "--json").stdout)["envs"][0]["status"] == "ok"
 
 
+def test_show_in_fleet_behind_reason(world: dict[str, Path], box: FakeBox) -> None:
+    """An in-fleet project: WANTED is a fleet commit, so `behind` keeps the plain reason."""
+    path = _in_fleet(world)
+    up = cli(world, "up", "--project", "status", "--json", cwd=world["fleet"])
+    assert up.exit_code == 0, up.output
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "status"))
+    assert raw is not None
+    pin = raw["commit"]
+    path.write_text(path.read_text().replace('MODE = "one"', 'MODE = "two"'))
+    wanted = commit_all(world["fleet"], "status two")
+    row = json.loads(cli(world, "show", "status", "--json", cwd=world["fleet"]).stdout)["envs"][0]
+    assert row["status"] == "behind"
+    assert row["reason"] == f"the project is at {wanted[:12]}, the fleet pins {pin[:12]}"
+    assert "does not run it yet" not in row["reason"]
+
+
 def _failing_deploy(
     box: FakeBox, failed: set[str], seen: list[Any] | None = None
 ) -> Any:
