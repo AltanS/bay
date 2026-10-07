@@ -24,6 +24,26 @@ from bay_cli.errors import BayError
 app = typer.Typer(help="Show or change the Bay version installed on this machine.", no_args_is_help=True)
 
 
+def _update_help() -> str:
+    """The help of `bay self update`. Its example names the version in version.yml.
+
+    It reads the file without a YAML parser: this runs at import (see ``paths.peek_installed_version``).
+    """
+    from bay_cli import paths
+
+    declared = paths.peek_installed_version(package_root())
+    tag = f"v{declared}" if declared else "<tag>"
+    return (
+        "Move this machine to the newest Bay release, or to the tag given by --to.\n\n"
+        "Fetches the tags, checks out the target tag, syncs the Python and Ansible\n"
+        "dependencies, installs the CLI again (`uv tool install --editable`), and\n"
+        "prints the old and the new version. Refuses when the checkout has edits.\n\n"
+        "Examples:\n\n"
+        "    bay self update\n\n"
+        f"    bay self update --to {tag}"
+    )
+
+
 def framework_version(root: Path) -> str:
     """The tag (or ``tag-N-gSHA``) the checkout is on; ``unknown`` outside git."""
     described = git._quiet(root, "describe", "--tags")
@@ -60,24 +80,14 @@ def version() -> None:
     typer.echo(f"checkout: {root}")
 
 
-@app.command("update")
+@app.command("update", help=_update_help())
 def update(
     to: Annotated[
         str | None,
         typer.Option("--to", help="Move to this tag. Default: the newest tag."),
     ] = None,
 ) -> None:
-    """Move this machine to the newest Bay release, or to the tag given by --to.
-
-    Fetches the tags, checks out the target tag, syncs the Python and Ansible
-    dependencies, installs the CLI again (`uv tool install --editable`), and
-    prints the old and the new version. Refuses when the checkout has edits.
-
-    Examples:
-
-        bay self update
-        bay self update --to v2.0.0
-    """
+    """Move to the newest tag, or to --to. The help text comes from ``_update_help``."""
     root = package_root()
     _require_checkout(root)
 

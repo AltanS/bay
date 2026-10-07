@@ -33,3 +33,21 @@ def read_installed_version(bay_dir: Path) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def peek_installed_version(bay_dir: Path) -> str | None:
+    """The ``bay_version`` of ``bay_dir/version.yml``, read without a YAML parser.
+
+    :func:`read_installed_version` imports ruamel.yaml, which costs about 12 ms.
+    Help text is built when ``bay_cli.cli`` is imported, on the path of every
+    command, so it reads the one ``bay_version: "x.y.z"`` line instead. Returns
+    ``None`` when the file or the line is missing.
+    """
+    import re
+
+    try:
+        text = (bay_dir / "version.yml").read_text()
+    except OSError:
+        return None
+    match = re.search(r"^bay_version:\s*[\"']?([^\"'#\s]+)", text, re.MULTILINE)
+    return match.group(1) if match else None
