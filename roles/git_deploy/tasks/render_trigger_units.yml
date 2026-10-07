@@ -15,7 +15,7 @@
 # Check mode (`bay plan --remote`): the listing runs for real (read only), and
 # every task that reads a registered result guards it with `is not skipped`.
 
-- name: Trigger units — resolve the build facts when run on its own
+- name: "Trigger units: resolve the build facts when run on its own"
   ansible.builtin.include_tasks: render_image_map.yml
   when: >-
     _is_build_server is not defined

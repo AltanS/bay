@@ -22,7 +22,7 @@
 # handler runs at the end of the play, after deploy_stack, and tolerates a
 # box that has no receiver yet.
 
-- name: Render receiver — resolve the build facts when run on its own
+- name: "Render receiver: resolve the build facts when run on its own"
   ansible.builtin.include_tasks: render_image_map.yml
   when: >-
     _is_build_server is not defined
