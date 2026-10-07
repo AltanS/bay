@@ -3651,7 +3651,8 @@ def test_adopt_prints_plan_hint(world: dict[str, Path], tmp_path: Path, box: Fak
     shop = _shop(world, tmp_path)
     result = _adopt(world, shop)
     assert result.exit_code == 0, _said(result)
-    said = _said(result)
+    # rich wraps the hint across lines at narrow widths; collapse whitespace.
+    said = " ".join(_said(result).split())
     assert "now run `bay plan production`" in said
     assert "push it after bay up" in said and "Then: `git push`" in said
     assert said.index("`bay up production`") < said.index("`git push`")
