@@ -409,6 +409,11 @@
           "$ref": "#/$defs/build_paths_block",
           "description": "Path filtering for webhook-triggered rebuilds."
         },
+        "shared_from": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+          "description": "The main container whose build this one shares (bay.toml: a service with neither image nor build). The main container builds; this one re-tags its image."
+        },
         "track": {
           "type": "string",
           "enum": ["pin"],

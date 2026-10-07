@@ -1143,8 +1143,14 @@ def bay_build_dedup_map(services, service_names):
     """Map each service to its build dedup role (primary or alias).
 
     Groups services by build identity — (repo, branch, dockerfile, context, args).
-    The first service in each group is the "primary"; others are "aliases" that
+    The primary of a group is its first member whose build has no
+    ``shared_from`` (else its first member); the others are "aliases" that
     can re-tag from the primary's image instead of rebuilding.
+
+    ``shared_from`` marks a service that shares the build of its project's
+    main container (bay.toml: a service with neither ``image`` nor ``build``).
+    So the main container builds, whatever order the names come in, and the
+    sharing service re-tags its image through the alias fan-out.
 
     Returns a dict: {svc_name: {primary: bool, primary_svc: str, group_size: int}}
     """
@@ -1159,7 +1165,10 @@ def bay_build_dedup_map(services, service_names):
 
     result = {}
     for group in identity_groups.values():
-        primary = group[0]
+        owners = [
+            n for n in group if not (services[n].get("build") or {}).get("shared_from")
+        ]
+        primary = (owners or group)[0]
         for svc_name in group:
             result[svc_name] = {
                 "primary": svc_name == primary,

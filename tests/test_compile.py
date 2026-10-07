@@ -912,7 +912,7 @@ UNSUPPORTED = [
     pytest.param(SHOP, 'command = "warm --every 5m"', 'command = "warm --every 5m"\npath = "/warm"', "routing a service by path on the main domain", id="service-path"),
     pytest.param(SHOP, 'locked = ["/admin"]', 'locked = ["/admin"]\nopen = ["/hooks"]', "open paths that skip the password", id="open-with-password"),
     pytest.param(SHOP, 'memory = "2g"\nwatch', 'memory = "4g"\nwatch', "a build memory cap per project", id="build-memory"),
-    pytest.param(SHOP, 'build = { dockerfile = "apps/api/Dockerfile", context = "apps/api", strategy = "local" }\n', "", "a service that shares the project build", id="shared-build"),
+    pytest.param(SHOP, 'inherit = false\nimage = "ghcr.io/acme/warmer:1"\n', "", "an internal service that shares the project build", id="internal-shared-build"),
 ]
 
 
@@ -988,6 +988,40 @@ def test_job_name_collides_with_a_container(fleet: Path) -> None:
     _second_project(fleet, "shop-job-nightly", '[access]\nmode = "public"\n[deploy.production]\ndomain = "j.example.com"\n')
     edit(fleet, SHOP, "[deploy.production]", '[[jobs]]\nname = "nightly"\nschedule = "0 2 * * *"\ncommand = "x"\n\n[deploy.production]')
     assert any("container name shop-job-nightly is used by both" in m for m in problems(fleet))
+
+
+def test_compile_service_shares_project_image(fleet: Path) -> None:
+    """A routed service with neither image nor build copies the main build, with shared_from.
+
+    The main container is the primary of the build group, in either name
+    order, so it builds and the service re-tags its image.
+    """
+    sys.path.insert(0, str(ROOT / "filter_plugins"))
+    from bay_filters import bay_build_dedup_map
+
+    edit(fleet, SHOP, 'build = { dockerfile = "apps/api/Dockerfile", context = "apps/api", strategy = "local" }\n', "")
+    result = compiled(fleet)
+    assert not any("shares the project build" in u.feature for u in result.unsupported)
+    s = yaml.safe_load(result.body())["services"]
+    main, api = s["shop"], s["shop-api"]
+    assert api["build"] == {**main["build"], "shared_from": "shop"}
+    assert "shared_from" not in main["build"]
+    # A registry build: the service runs the main image, so a push's pull reaches it.
+    assert api["image"] == main["image"]
+    for order in (["shop", "shop-api"], ["shop-api", "shop"]):
+        dedup = bay_build_dedup_map(s, order)
+        assert dedup["shop"] == {"primary": True, "primary_svc": "shop", "group_size": 2}
+        assert dedup["shop-api"] == {"primary": False, "primary_svc": "shop", "group_size": 2}
+    staging = s["shop-staging-api"]
+    assert staging["build"]["shared_from"] == "shop-staging"
+    assert staging["build"]["branch"] == "develop"
+
+    # A local build: no image, each container keeps its own local tag.
+    edit(fleet, SHOP, 'strategy = "remote"', 'strategy = "local"')
+    edit_lock(fleet, lambda d: d["envs"]["production"]["adopted"].pop("images"))
+    s = yaml.safe_load(compiled(fleet).body())["services"]
+    assert s["shop-api"]["build"] == {**s["shop"]["build"], "shared_from": "shop"}
+    assert "image" not in s["shop-api"] and "image" not in s["shop"]
 
 
 @pytest.mark.parametrize(("line", "want"), [

@@ -644,12 +644,32 @@ class _Compiler:
         if "image" in unit.eff:
             return unit.eff["image"], None
         # The service shares the main container's build. The main container is
-        # emitted first, so its image (registry or adopted) is known here.
-        self._todo(unit, base, "a service that shares the project build")
+        # emitted first, so its compiled build block is known here. The
+        # service gets a copy of it plus `shared_from`: bay_build_dedup_map
+        # then makes the main container the primary of the build group, and
+        # this service re-tags the primary's image (the alias fan-out of
+        # rebuild.sh) instead of building again.
         web = unit.containers["web"]
-        main_image = (self.services.get(web) or self.accessories.get(web) or {}).get("image")
-        if main_image is not None:
-            return main_image, None
+        main = self.services.get(web) or self.accessories.get(web) or {}
+        main_build = main.get("build")
+        routed = "domain" in level or "path" in level
+        if main_build is not None and routed:
+            build = copy.deepcopy(main_build)
+            build["shared_from"] = web
+            # A registry build is pulled by image: the service consumes the
+            # main container's image, so the pull fan-out of a push reaches it.
+            image = unit.lock.images.get(service)
+            if image is None and build.get("strategy") in ("remote", "registry"):
+                image = main.get("image")
+            return image, build
+        # An internal service cannot build: the webhook build runs only for
+        # routed containers. It runs the main container's image instead, and
+        # stays a TODO, as a push does not recreate it. Also the fallback
+        # when the main container was not emitted (an error or a TODO says
+        # why).
+        self._todo(unit, base, "an internal service that shares the project build")
+        if main.get("image") is not None:
+            return main["image"], None
         # The local build tag build_specs.yml:72 and git_deploy_image_prefix
         # derive. The prefix is the live tag on the boxes and stays until a
         # separate image migration.
