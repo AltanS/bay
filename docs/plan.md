@@ -69,6 +69,7 @@ bay approve <plan-id> --reason "<why>"
 bay up [env] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--data keep] [--json] [--log PATH] [--no-push]
 bay show [name] [--json] [--no-remote]
 bay rollback [env] [--force --reason "<why>"] [--data keep] [--json] [--log PATH] [--no-push]
+bay adopt <name> [--toml-path P] [--check] [--json]   # move an in-fleet bay.toml into its app repo
 ```
 
 `env` is the `[deploy.<env>]` name. The default is the fleet's primary
@@ -483,6 +484,91 @@ that the box has. For a project whose `bay.toml` lives in the app repo, the pin
 moves to `<commit>` too. A project in the fleet keeps its pin (its pin is a
 fleet commit), and only its code moves.
 
+Straight after `bay adopt`, `bay rollback` is refused with "the previous pin
+is a fleet commit; use `bay up --at <commit>`". The adopt clears `previous`,
+because an app repo pin cannot go back to a fleet commit. The refusal holds
+until a `bay up` to a newer app commit records a `previous` again.
+`bay rollback --to <commit>` (code only) still works.
+
+### bay adopt
+
+`bay adopt <name>` moves a project's `bay.toml` out of the fleet and into its
+app repo. Run it inside a checkout of the app repo. The `bay.toml` is not
+there yet, so it cannot name the fleet: pick the fleet with `--fleet`,
+`BAY_FLEET` or `BAY_FLEET_NAME`.
+
+```bash
+cd ~/code/shop
+bay --fleet ~/fleets/prod adopt shop --check   # the files and the lock change; changes nothing
+bay --fleet ~/fleets/prod adopt shop
+git push                                       # config only: the box does nothing
+bay plan production                            # must show 0 steps
+bay up production
+```
+
+Push the adopt commit; the box does nothing; then `bay up`. The adopt commit
+changes only the `bay.toml` and the files it mounts, so it is a config-only
+push: the webhook build neither builds nor deploys it (see
+[build-pipeline.md](build-pipeline.md), "Config-only push"). `bay up` is what
+deploys config.
+
+Bay refuses, before it changes anything, when:
+
+- the fleet has no `projects/<name>/bay.toml` (the project is not in the
+  fleet, or it already lives in its repo);
+- the working directory is not a git repo, or the repo has no `origin` remote
+  or no commit;
+- a file exists at `--toml-path` (default `bay.toml` at the repo root);
+- the app repo has uncommitted changes, so the adopt commit holds only the
+  move;
+- `projects/<name>/`, or a `files/` copy that a mount reads, has uncommitted
+  changes in the fleet;
+- `name` in the `bay.toml` is not `<name>`, or the `bay.toml` is not valid;
+- the lock names another `repo` than the checkout's `origin`;
+- the fleet changed `projects/<name>/` after `bay up` pinned it (WANTED is not
+  PINNED). Run `bay up` first, so the adopt moves exactly what runs;
+- an environment is frozen by `bay rollback`;
+- two copies of one file would land at the same place in the app repo, or a
+  different file is already there.
+
+What it does:
+
+1. **Copy.** `projects/<name>/bay.toml` goes to `--toml-path`. Every other
+   file of the folder goes beside it, at the same relative path, so
+   `from = "deploy/x.yaml"` still reads `deploy/x.yaml` beside the toml. A
+   mount that the compiler reads from `files/` (the old place
+   `files/<name>/<from>`, or an adopted path) moves beside the toml too. A
+   `fleet:` mount stays in the fleet. A `files/` copy that another fleet entry
+   also reads stays as well (`kept` in the output).
+2. **App commit.** One commit with exactly those files:
+   `chore: add bay.toml (adopted from fleet <fleet>)`. It stays local; you push
+   it. `bay up` refuses a commit that is not on the remote.
+3. **Lock.** `projects/<name>/bay.lock` takes the repo form: `repo` (the
+   lock's own `repo` when it already named this repo, else the `origin` URL),
+   `toml_path`, and `commit` (the app commit). Every environment with a pin
+   moves its `commit` to the app commit, gets
+   `adopted.from_fleet_commit` (the fleet HEAD before the adopt) and loses
+   `previous`. Every other adopted name stays, so no container, volume,
+   database or config path is renamed.
+4. **Fleet commit.** `git rm` of the folder contents (the lock stays) and the
+   moved `files/` copies, plus the new lock, in one commit:
+   `bay: adopt <name> into <repo>`. Bay never pushes.
+5. **Next steps.** Bay prints them: `git push`, then `bay plan <env>` (it
+   must show 0 steps), then `bay up <env>`.
+
+The compiled output does not change. On the box a mounted file stays at
+`config/<name>/<from>` (or `config/<adopted path>`), wherever the file lives.
+A project that builds from source gains `build.bay_toml_hash`,
+`build.bay_toml_path` and `build.bay_toml_files` (the hold guard and the
+config-only rule, see [Code and config](#code-and-config)). The container hash
+leaves the `build` table out, so the plan shows no step for that: the first
+`bay up` after the adopt writes them to the box.
+
+`--toml-path services/shop/bay.toml` is for a repo with several apps: the
+files then land in `services/shop/`. `--check` prints the file list and the
+lock diff and writes nothing. `--json` prints one document with `files`,
+`removed`, `kept`, `lock_diff`, `app_commit`, `fleet_commit` and `next`.
+
 ### Code and config
 
 The pin is config: the `bay.toml` that `bay up` compiled. The code is the
@@ -725,6 +811,9 @@ and the next write stores version 2.
   `bay up production` runs.
 - `result` is `pending` while a deploy runs, then `ok` or `failed`.
 - `previous` is one level of history: enough for `bay rollback`.
+- `adopted.from_fleet_commit` is written by `bay adopt`: the fleet commit the
+  project was read from before its `bay.toml` moved into the app repo. While
+  an environment has it and no `previous`, `bay rollback` is refused.
 - `frozen` and `frozen_commit` are written by `bay rollback` and removed by
   the next `bay up` to a newer commit. While `frozen` is true, the compile
   writes `build.frozen: true`, and a push builds without deploying.

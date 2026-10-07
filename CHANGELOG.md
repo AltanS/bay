@@ -43,6 +43,37 @@ needing manual action is called out under **Upgrade notes**. Entries for
 
 ### Added
 
+- **`bay adopt <name>`.** Run it in a checkout of the app repo, with the fleet
+  named by `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME`. It moves an in-fleet
+  project's `bay.toml` and its files (including a mount still read from the old
+  place `files/<name>/<from>`) into the repo, at `--toml-path` (default
+  `bay.toml`). It makes one local app commit,
+  `chore: add bay.toml (adopted from fleet <fleet>)`, which you push. The lock
+  takes the repo form (`repo`, `toml_path`, `commit`) with
+  `adopted.from_fleet_commit` per environment. Every other adopted name stays.
+  The fleet loses the folder contents except the lock, in one commit,
+  `bay: adopt <name> into <repo>`. Nothing is pushed. The compiled output stays
+  the same, so the next `bay plan` shows 0 steps. `--check` prints the files and
+  the lock diff and changes nothing. Bay refuses a dirty app repo or project
+  folder, an existing `bay.toml`, a name mismatch, a lock that names another
+  repo, and a project whose fleet folder changed after its last `bay up`. See
+  `docs/plan.md`, "bay adopt".
+- `bay rollback` straight after `bay adopt` is refused: "the previous pin is a
+  fleet commit; use `bay up --at <commit>`".
+- **Config-only push.** A push that changes only the `bay.toml` and the files
+  its mounts read builds nothing and deploys nothing. `rebuild.sh` logs
+  `config-only push <commit12>: run bay up` and ends the run: no image build, no
+  `:latest` move, no alert, no circuit-breaker change. The previous commit's
+  image gets the new commit tag. `bay compile` writes `build.bay_toml_files`
+  (the mounted paths, relative to the repo root) next to `build.bay_toml_hash`.
+  The same rule runs on the build server for remote builds. So the adopt commit
+  is a no-op on the box, and "edit bay.toml, push, bay up" is the clean flow.
+  See `docs/build-pipeline.md`, "Config-only push".
+- `bay plan` shows no step when a container entry differs only in
+  `build.bay_toml_hash`, `build.bay_toml_path` or `build.bay_toml_files`. The
+  container hash leaves the `build` table out, so nothing is recreated; `bay up`
+  still writes the keys to the box. A build project gains these keys when
+  `bay adopt` moves its `bay.toml` into the app repo.
 - **Box move step.** When `deploy.<env>.box` in `bay.toml` (or the fleet default)
   differs from the box in the lock, the plan has a step `move`. Its risk is
   `destructive` when the project has a named volume or a database, `shared`
@@ -181,6 +212,10 @@ needing manual action is called out under **Upgrade notes**. Entries for
   with `python3 -c 'import tomllib'`.
 - Images built before this release have no commit tag. `bay rollback --to`
   works only for commits built after the upgrade.
+- The config-only rule lives in `rebuild.sh`. Deploy the boxes and the build
+  servers as above (`bay up`, plus `bay deploy <env> --tags git_deploy` on build
+  servers) before you push an adopt commit. A box with the old script builds and
+  deploys that push as a normal one.
 
 ## [2.0.2] - 2026-10-07
 

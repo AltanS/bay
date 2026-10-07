@@ -455,6 +455,17 @@ Where `from` is read:
   lock adopts one. Moving a file beside the toml does not change that path, so no
   container is recreated.
 
+**Moving an app from the fleet into its repo.** A project whose `bay.toml` lives in
+the fleet (`projects/<name>/bay.toml`) moves into its app repo with `bay adopt <name>`,
+run in a checkout of that repo. The `bay.toml` and the files it mounts move together,
+so every `from` keeps its meaning beside the toml, and a `fleet:` mount stays in the
+fleet. The lock keeps the adopted names, so the next plan shows 0 steps. See
+[plan.md, bay adopt](plan.md#bay-adopt).
+
+**Config-only push.** In an app repo, a push that changes only the `bay.toml` and the
+files its mounts read (not `fleet:` ones) builds nothing and deploys nothing. Run
+`bay up` to deploy it. See [build-pipeline.md](build-pipeline.md), "Config-only push".
+
 ### `[backup]`
 
 | Key | Type | Default | Meaning |
