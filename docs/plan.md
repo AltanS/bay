@@ -114,8 +114,10 @@ leave it out.
 ### bay plan
 
 1. **WANTED**: Bay reads `bay.toml` at HEAD of the checkout you stand in, or
-   at the head of the remote's default branch in the repo cache (`--at` picks
-   another commit). Uncommitted edits are not part of the plan. The plan
+   in the repo cache at the head of the branch that `[deploy.<env>].branch`
+   names (the branch the webhook builds; read from the pinned `bay.toml`,
+   else the cache's HEAD). With no `branch` declared, the cache's HEAD: the
+   remote's default branch. `--at` picks another commit. Uncommitted edits are not part of the plan. The plan
    records them as `wanted.dirty`. When the WANTED commit is on no branch of
    the remote, the plan says so in a note: `bay up` will refuse it.
 2. Bay copies the fleet inputs to a temporary directory. Every project is
@@ -344,7 +346,8 @@ bay --fleet ~/fleets/prod plan production --json
 
 - Every project with `[deploy.<env>]` is read at its WANTED commit: a project
   in the fleet at the last fleet commit of its folder, a repo project at the
-  head of its repo (the repo cache). The fleet is compiled once.
+  head of its deploy branch in the repo cache (or HEAD of the checkout you
+  stand in). The fleet is compiled once.
 - Every step carries the project it belongs to. Risk, verdict and exit code
   work as for one project.
 - The plan record has `project: null` and a list `projects`: per project its

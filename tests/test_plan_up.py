@@ -2106,6 +2106,35 @@ def test_repo_source_falls_back_to_bare_cache(
     assert plan["blockers"] == []
 
 
+def test_cache_wanted_follows_the_deploy_branch(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    """S7: a mirror cache's HEAD is the remote default branch; WANTED is the deploy branch."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    # No branch declared: WANTED is the mirror's HEAD (main).
+    main_head = git(world["remote"], "rev-parse", "main")
+    plan = planmod.make_plan(project(world, cwd=elsewhere), planmod.PlanOptions())
+    assert plan["wanted"]["commit"] == main_head
+
+    declared = edit_app(
+        world, "[deploy.production]\n", '[deploy.production]\nbranch = "develop"\n'
+    )
+    git(world["app"], "checkout", "-q", "-b", "develop")
+    develop = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "warn"', push=False)
+    git(world["app"], "push", "-q", "origin", "develop")
+    git(world["app"], "checkout", "-q", "main")
+    assert git(world["remote"], "rev-parse", "main") == declared
+
+    proj = project(world, cwd=elsewhere)
+    assert proj.source == "cache"
+    plan = planmod.make_plan(proj, planmod.PlanOptions())
+    assert plan["wanted"]["commit"] == develop, "refs/heads/develop, not the mirror HEAD"
+    assert planmod.read_wanted(proj, None).commit == develop, "one branch for every env"
+    # The checkout you stand in keeps its own HEAD.
+    assert make(world)["wanted"]["commit"] == declared
+
+
 def test_two_projects_one_repo_share_one_cache(
     world: dict[str, Path], tmp_path: Path, box: FakeBox
 ) -> None:

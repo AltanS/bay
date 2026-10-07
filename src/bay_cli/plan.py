@@ -320,7 +320,42 @@ class Wanted:
         return hashlib.sha256(self.toml).hexdigest() if self.toml is not None else None
 
 
-def read_wanted(proj: ProjectRef, at: str | None) -> Wanted:
+def deploy_branch(proj: ProjectRef, env: str | None) -> str | None:
+    """The branch ``[deploy.<env>].branch`` declares for a mirror-cache project, or None.
+
+    Read from the pinned ``bay.toml`` (the branch the box's webhook follows),
+    else from the mirror's HEAD. With no ``env`` the branch counts only when
+    every environment declares the same one.
+    """
+    docs = [doc_at(proj, proj.lock.get("commit")), doc_at(proj, "HEAD")]
+    for doc in docs:
+        if not isinstance(doc, Mapping):
+            continue
+        deploy = doc.get("deploy") or {}
+        if not isinstance(deploy, Mapping):
+            continue
+        if env is not None:
+            table = deploy.get(env)
+            branch = table.get("branch") if isinstance(table, Mapping) else None
+            if branch:
+                return str(branch)
+            continue
+        branches = {
+            str(v.get("branch")) for v in deploy.values() if isinstance(v, Mapping)
+        }
+        if len(branches) == 1 and "None" not in branches:
+            return branches.pop()
+    return None
+
+
+def read_wanted(proj: ProjectRef, at: str | None, env: str | None = None) -> Wanted:
+    """WANTED for ``proj``: the commit at ``at``, else HEAD of its checkout.
+
+    A mirror cache (``source == "cache"``) has no work tree, and its HEAD is
+    the remote's default branch. So there WANTED is ``refs/heads/<branch>``
+    of ``[deploy.<env>].branch`` (:func:`deploy_branch`); HEAD only when the
+    project declares no branch.
+    """
     checkout = proj.checkout
     if not gitrepo.is_repo(checkout):
         return Wanted(None, None, None, None, [f"the checkout {checkout} is not a git repo"])
@@ -331,9 +366,13 @@ def read_wanted(proj: ProjectRef, at: str | None) -> Wanted:
     else:
         dirty = gitrepo.dirty(checkout)
     ref = at or "HEAD"
+    if at is None and proj.source == "cache" and not proj.in_fleet:
+        branch = deploy_branch(proj, env)
+        if branch:
+            ref = f"refs/heads/{branch}"
     commit = gitrepo.resolve_commit(checkout, ref)
     if commit is None:
-        what = f"commit {at}" if at else "HEAD"
+        what = f"commit {at}" if at else ("HEAD" if ref == "HEAD" else f"branch {ref[11:]}")
         return Wanted(None, None, None, dirty, [f"{what} is not reachable in {checkout}"])
     if proj.in_fleet:
         # WANTED is the fleet's committed file; its commit is the last one that
@@ -2163,7 +2202,7 @@ def make_plan(
     notes: list[str] = list(proj.notes)
 
     # WANTED
-    wanted = read_wanted(proj, opts.at)
+    wanted = read_wanted(proj, opts.at, env)
     blockers.extend(wanted.problems)
     if wanted.commit and not wanted.problems and commit_on_remote(proj, wanted.commit) is not True:
         notes.append(
@@ -2421,7 +2460,7 @@ def make_env_plan(
             blockers.append(f"{name}: {exc}")
             continue
         notes.extend(f"{name}: {n}" for n in proj.notes if not n.startswith("fleet layout"))
-        wanted = read_wanted(proj, (ats or {}).get(name))
+        wanted = read_wanted(proj, (ats or {}).get(name), env)
         if wanted.doc is None:
             blockers.extend(f"{name}: {p}" for p in wanted.problems)
             continue

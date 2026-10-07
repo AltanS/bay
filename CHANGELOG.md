@@ -21,6 +21,10 @@ needing manual action is called out under **Upgrade notes**. Entries for
   its `origin` is the lock's `repo`. Otherwise it reads a mirror clone in
   `<fleet>/.bay-cache/repos/<slug>`, which it clones on first use and fetches before
   each plan. Two projects in one repo share one cache.
+- In the repo cache, WANTED is the head of the branch `[deploy.<env>].branch`
+  names, not the mirror's HEAD (the remote default branch). With no branch
+  declared it stays HEAD. `bay show` uses the branch when every environment
+  names the same one.
 - **A missing commit is an error.** A pinned commit that is in neither the checkout
   nor the cache stops the plan and names the project. Before, a lock with a repo and
   no local path could drop out of the compile without a word.
