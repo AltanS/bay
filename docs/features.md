@@ -5,7 +5,7 @@ Bay is an Ansible framework for provisioning hardened Docker servers with VPN-aw
 
 ## Declarative Service Management
 
-A single `services.yml` file is the source of truth for the entire stack. From this one file, Bay generates:
+Two kinds of file are the source of truth for the stack: a `bay.toml` per app and one `bay.fleet.toml` for the fleet (boxes, domains, shared resources). `bay compile` writes `group_vars/all/services.yml` from them. Nobody hand-edits that file, and the next compile refuses a hand edit. From the compiled file, Bay generates:
 
 - Docker Compose definitions (images, volumes, networks, healthchecks)
 - Traefik routing rules and SSL certificates
@@ -20,7 +20,7 @@ Services and accessories are distinct concepts:
 - **Services** are application containers that receive Traefik routing, automatic SSL, and access control.
 - **Accessories** are infrastructure containers (PostgreSQL, Redis, MariaDB) deployed alongside services without external routing.
 
-See [services.md](services.md) for the full schema reference.
+See [bay-toml.md](bay-toml.md) for the files you write, and [services.md](services.md) for the schema of the compiled `services.yml`.
 
 ## VPN-Aware Access Control
 
@@ -50,7 +50,7 @@ When Headscale is the access gateway, VPN service domains automatically resolve 
 - Non-VPN clients hitting the same domain get a 403
 - No `/etc/hosts` hacks, no tailnet IP bookmarks, no separate internal domains
 
-DNS records are generated from `services.yml` into `extra-records.json` and hot-reloaded by Headscale -- zero manual DNS configuration for VPN services.
+DNS records are generated from the compiled `services.yml` into `extra-records.json` and hot-reloaded by Headscale -- zero manual DNS configuration for VPN services.
 
 ## Self-Hosted Headscale
 
@@ -85,7 +85,7 @@ Deploy the same stack to multiple regional servers from a single fleet:
 - Cross-region service connectivity via the tailnet (Headscale coordinates all regions)
 - Per-region domain configuration (e.g., `eu.example.com`, `na.example.com`)
 - Shared Headscale coordination server on the control region
-- Target individual regions or all at once: `bay deploy eu`, `bay deploy production`
+- Target one region or all of them: `bay deploy production -- --limit eu`, `bay deploy production`. Keep the box env (`production`) and add `--limit`. A deploy with the group name as the env (`bay deploy eu`) writes the receipt as `eu.json`, which `bay status` and `bay plan` do not read
 
 See [multi-region.md](multi-region.md) for the full setup guide.
 
@@ -117,7 +117,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 ## Infrastructure as Code
 
 - **Pure Ansible** -- no custom runtime, no daemon, no agent on target servers; standard SSH + Python
-- **Fleet model** -- Bay is installed once per machine; the fleet repo provides only configuration (`group_vars/`, `hosts/`, `services.yml`)
+- **Fleet model** -- Bay is installed once per machine; the fleet repo provides only configuration (`bay.fleet.toml`, `projects/<name>/bay.toml`, `group_vars/`, `hosts/`, and the compiled `services.yml`)
 - **Idempotent deploys** -- run `deploy` repeatedly; only changed resources are updated
 - **Restic backups** -- deduplicated, encrypted backups to S3-compatible storage with per-accessory repositories, systemd timers, configurable retention, and one-command restore
 - **Watchtower** -- container image update monitoring with Telegram notifications; opt-in auto-update per service

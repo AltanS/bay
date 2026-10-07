@@ -551,7 +551,7 @@ steps 3 and 4 runs on the fleet, and none of them reads the fleet directory you 
    `eu-2`. Expect it to fail, as step 2 of scenario 2 does: `shop-staging` has no image yet.
 8. Build the first image. On this new box a push alone builds nothing yet: the webhook receiver
    image and the build trigger of `shop-staging` come only from a `bay deploy <env>` with no `--tags`
-   on a box that runs a
+   or with `--tags git_deploy`, on a box that runs a
    build app, and step 4 ran before `eu-2` had one. Run `bay --fleet $F deploy staging` (no `--tags`)
    once: it installs both, makes the SSH deploy key `/opt/<stack>/builds/shop-staging/.deploy_key.pub`
    on `eu-2` (when the repo has no token), and clones and builds the first image (see
@@ -1008,7 +1008,7 @@ Which verb puts what on the new box:
 - `bay up` runs only the `deploy_stack` tag. That tag also refreshes Traefik, Watchtower and the
   access gateway, but not the cron jobs, the monitor, backups or the allowlist.
 - The webhook receiver image and the build trigger of a container come only from a
-  `bay deploy <env>` with no `--tags` on a box that runs a build app. A box with no build app yet gets neither from
+  `bay deploy <env>` with no `--tags`, or with `--tags git_deploy`, on a box that runs a build app. A box with no build app yet gets neither from
   `--rig` (see scenario 4, step 8).
 
 `bay provision production` would run on every host of the box env, `eu-1` included. The code has no

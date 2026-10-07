@@ -8,6 +8,15 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.1.9] - 2026-10-07
+
+Docs only. Reader round 9: four places where two docs stated different facts.
+
+- features.md says `bay.toml` and `bay.fleet.toml` are the source of truth. `bay compile` writes `services.yml`, and a hand edit makes the next compile refuse. The fleet repo lists `bay.fleet.toml` and `projects/<name>/bay.toml`.
+- features.md targets one region with `bay deploy production -- --limit eu`. A deploy with the group name as the env writes `eu.json`, which `bay status` and `bay plan` do not read.
+- tailnet-ingress.md: a tailnet-only port is `expose = "tailnet"` in `bay.toml` and compiles to `expose: tailnet`. `gateway` is an older spelling that the deploy still accepts and `bay import` rewrites.
+- The webhook receiver image and the build triggers come from a `bay deploy <env>` with no `--tags`, or with `--tags git_deploy` (plan.md, layout-scenarios.md, build-pipeline.md agree). The reconcile step needs the env file from a `deploy_stack` run, so run `bay up` on a new box first.
+
 ## [2.1.8] - 2026-10-07
 
 Docs only. Reader round 8: ten places where two docs stated different facts.

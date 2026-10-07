@@ -546,9 +546,10 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    not clone or build anything, and it pulls nothing through Ansible (see
    [The first image](#the-first-image)). The rig roles that carry the same tag run too: Traefik,
    the access gateway, Watchtower, and Zot and the identity sidecar where they are on. The rest of
-   the rig (for example the cron jobs, the container monitor, backups, the CrowdSec allowlist, the
-   webhook receiver image, its list of build containers and the build triggers) comes only from a
-   `bay deploy <env>` with no `--tags`, so a new box needs one (see
+   the rig (for example the cron jobs, the container monitor, backups and the CrowdSec allowlist)
+   comes only from a `bay deploy <env>` with no `--tags`. The webhook receiver image, its list of
+   build containers and the build triggers come from a `bay deploy <env>` with no `--tags`, or with
+   `--tags git_deploy` (the `git_deploy` role carries that tag). So a new box needs one of them (see
    [layout-scenarios.md](layout-scenarios.md#11-adding-a-box)). When the plan has a `route` step, Bay
    runs `--tags deploy_stack,headscale,traefik`: Headscale renders the
    split-DNS records and Traefik the route file. The `headscale` tag runs every task of the

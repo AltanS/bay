@@ -486,7 +486,11 @@ the receiver's in-memory `IMAGE_MAP` table on process start
   the same spec and reconciler as `deploy_stack`. The reconciler recreates the
   container when its image ID differs from `bay-webhook:latest`, so
   `--tags git_deploy` alone is enough after a release that changed the
-  receiver.
+  receiver. The role is included with `tags: [build, git_deploy]`, so that tag runs every task
+  of the role, the webhook receiver and the build triggers included. This is the same work as a
+  `bay deploy <env>` with no `--tags` does for the receiver, and either one also installs it on a
+  new box. The reconcile step waits for the receiver env file that `deploy_stack` renders, so run
+  `bay up` on a new box first.
 
 - **Local-strategy producers sharing an image with siblings** —
   Cross-host fan-out for this topology is a separate latent gap (the

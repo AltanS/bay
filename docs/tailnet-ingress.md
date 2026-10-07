@@ -386,8 +386,9 @@ Because that is a real choice and not a typo, it must be recorded.
 
 This section shows the compiled form, `services.yml` (the keys `accessories:` and `ports`). In
 2.1 that file is generated. `bay.toml` and `bay.fleet.toml` accept `expose = "loopback"` or
-`expose = "tailnet"` only (a tailnet-only port compiles to `ports.expose: tailnet`), so the compile
-never writes `expose: host`. The check below guards a hand-written file from before 2.1. It is also
+`expose = "tailnet"` only. The compile writes that as `expose: tailnet` (`ports.expose: tailnet` on a
+service) and never writes `expose: host`. `gateway` is an older spelling of the same binding: the
+deploy still accepts it, and `bay import` rewrites it to `tailnet`. The check below guards a hand-written file from before 2.1. It is also
 a different thing from `[access.identity]`, a `bay.toml` access setting that 2.1 cannot deploy yet
 (plan.md, unsupported list), and not the route's `identity = true`.
 
@@ -408,8 +409,8 @@ services:
 
 `bay validate` **fails** on any `expose: host` without `expose_host_ack: true`, on
 both the accessory and the service `ports` form. The flag changes nothing about the
-rendered binding. Prefer `expose: gateway` (tailnet-only; `expose = "tailnet"` in `bay.toml`) or
-letting Traefik front the service; reach for `host` only when the port genuinely must be public.
+rendered binding. Prefer `expose: tailnet` (`expose = "tailnet"` in `bay.toml`; a hand-written file may also say `gateway`,
+which binds the same way) or letting Traefik front the service; reach for `host` only when the port genuinely must be public.
 
 ### Host-routing backends (e.g. `tailscale serve`)
 
