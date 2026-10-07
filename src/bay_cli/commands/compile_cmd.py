@@ -76,11 +76,12 @@ def compile_fleet(
     cx = Context.resolve(fleet) if fleet is not None else context_from(ctx)
     target = (out / GENERATED_SERVICES) if out is not None else (cx.fleet_root / GENERATED_SERVICES)
 
-    if working_tree:
-        from bay_cli import layout
+    from bay_cli import layout
 
-        for line in layout.ensure(cx.fleet_root):
-            typer.echo(f"note: fleet layout: {line}", err=True)
+    # A writer: move flat locks into project folders, after the behind check.
+    for line in layout.ensure_for_write(cx.fleet_root):
+        typer.echo(f"note: fleet layout: {line}", err=True)
+    if working_tree:
         try:
             inputs = load_inputs(
                 cx.fleet_root, output=target, checkouts=_working_checkouts(cx.fleet_root)

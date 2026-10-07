@@ -277,7 +277,7 @@ def load_inputs(
     for flat in sorted(projects_dir.glob(f"*{LOCK_SUFFIX}")):
         errors.append(
             f"{_rel(flat, fleet_root)}: a lock in the old place; it belongs in "
-            f"{PROJECTS_DIR}/{flat.stem}/{LOCK_FILE} (any bay plan or bay compile moves it)"
+            f"{PROJECTS_DIR}/{flat.stem}/{LOCK_FILE} (bay up or bay compile moves it)"
         )
     locks: dict[str, Lock] = {}
     for path in sorted(projects_dir.glob(f"*/{LOCK_FILE}")):

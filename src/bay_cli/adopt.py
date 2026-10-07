@@ -102,10 +102,11 @@ def adopt(
             raise BayError(
                 "the fleet still keeps its locks in the old place",
                 code=ErrorCode.CONFLICT,
-                hint="Run `bay plan` once (it moves them), then `bay adopt --check` again.",
+                hint="Run `bay compile` or `bay up` once (it moves them), then "
+                "`bay adopt --check` again.",
             )
     else:
-        layout.ensure(cx.fleet_root)
+        layout.ensure_for_write(cx.fleet_root)
     plan = _prepare(cx, cwd, name, toml_path)
     if check:
         return _result(plan, check=True)

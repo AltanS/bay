@@ -137,7 +137,7 @@ def init_project(
             "and push it, then run bay init again.",
         )
 
-    layout.ensure(cx.fleet_root)
+    layout.ensure_for_write(cx.fleet_root)
     fleet_doc = load_fleet_doc(cx)
     project = name or default_name(toml_file.parent if toml_path else root)
     if not _NAME_RE.match(project):

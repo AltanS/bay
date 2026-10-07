@@ -4,9 +4,13 @@ Format 1 kept a project's lock beside its folder, ``projects/<name>.lock``.
 Format 2 keeps it inside, ``projects/<name>/bay.lock``, so a project is one
 folder: its ``bay.toml``, the files that toml mounts, and its lock.
 
-:func:`migrate` does the move once per fleet. Every command that reads the
-locks calls :func:`ensure` first (``bay plan``, ``bay up``, ``bay show``,
-``bay compile``, ``bay init``), so the first run of a 2.1 CLI moves them:
+:func:`migrate` does the move once per fleet. Only a verb that writes the
+fleet moves the locks, through :func:`ensure_for_write`: ``bay up``,
+``bay rollback``, ``bay compile``, ``bay adopt`` and ``bay init``. It checks
+first that the fleet is not behind its remote, so the move never lands on a
+stale clone. A reader (``bay show``, ``bay plan``) never moves anything: it
+reads either lock form and prints :data:`PENDING_NOTE` once
+(:func:`note_pending`). The first writing run of a 2.1 CLI moves them:
 
 * each ``projects/<name>.lock`` moves to ``projects/<name>/bay.lock``
   (``git mv``, so history follows the file);
@@ -24,6 +28,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -163,6 +168,58 @@ def migrate(fleet_root: Path, *, dry_run: bool = False) -> Migration:
 
 
 def ensure(fleet_root: Path) -> list[str]:
-    """Migrate when needed. Returns one line per change, empty when there was none."""
+    """Migrate when needed. Returns one line per change, empty when there was none.
+
+    No remote check: use :func:`ensure_for_write` in a verb.
+    """
     done = migrate(fleet_root)
     return done.lines() if done.changed else []
+
+
+#: The stderr line of a reader verb on a fleet that still has flat locks.
+PENDING_NOTE = "layout: migration to project folders pending (bay up or bay compile does it)"
+
+_noted: set[Path] = set()
+
+
+def note_pending(fleet_root: Path) -> bool:
+    """For a reader verb: print :data:`PENDING_NOTE` once per fleet when a move is pending.
+
+    Changes nothing. Raises BayError when a project has both lock forms (the
+    reader cannot tell which one is the pin). Returns True when a move is
+    pending.
+    """
+    if not pending(fleet_root).changed:
+        return False
+    key = fleet_root.resolve()
+    if key not in _noted:
+        _noted.add(key)
+        print(PENDING_NOTE, file=sys.stderr)
+    return True
+
+
+def ensure_for_write(fleet_root: Path) -> list[str]:
+    """For a verb that writes the fleet: migrate, but only on a fleet that is not behind.
+
+    The move is a fleet commit. On a clone that is behind its remote it would
+    fork the history (and ``bay up`` pushes the fleet), so this refuses then,
+    and when the remote cannot be read. Returns the lines of :func:`ensure`.
+    """
+    if not pending(fleet_root).changed:
+        return []
+    if gitrepo.is_repo(fleet_root) and gitrepo.head(fleet_root) is not None:
+        behind, problem = gitrepo.behind_remote(fleet_root)
+        if problem:
+            raise BayError(
+                f"cannot move the locks into project folders: {problem}",
+                hint="Fix the fleet remote, then run the command again.",
+            )
+        if behind:
+            raise BayError(
+                "the fleet repo is behind its remote; pull it first",
+                code=ErrorCode.CONFLICT,
+                hint="Bay moves the locks into project folders in a fleet commit. "
+                "Run git pull in the fleet, then run the command again.",
+            )
+    _noted.discard(fleet_root.resolve())
+    return ensure(fleet_root)

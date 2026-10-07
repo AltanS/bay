@@ -223,11 +223,14 @@ needing manual action is called out under **Upgrade notes**. Entries for
 - `bay validate` may warn about the ACL of each route's upstream port. A warning does
   not stop a deploy.
 
-- **The first 2.1 run moves the locks.** The first `bay plan`, `bay up`, `bay show`,
-  `bay compile` or `bay init` on a fleet moves each `projects/<name>.lock` to
-  `projects/<name>/bay.lock` with `git mv`, adds `format = 2` after the `name` line
-  of `bay.fleet.toml`, and makes one fleet commit:
-  `bay: move locks into project folders`. Pull the fleet first. Commit any edit to
+- **The first 2.1 writing run moves the locks.** The first `bay up`, `bay rollback`,
+  `bay compile`, `bay adopt` or `bay init` on a fleet moves each
+  `projects/<name>.lock` to `projects/<name>/bay.lock` with `git mv`, adds
+  `format = 2` after the `name` line of `bay.fleet.toml`, and makes one fleet commit:
+  `bay: move locks into project folders`. It refuses on a fleet that is behind its
+  remote: pull the fleet first. `bay show` and `bay plan` never move them: they read
+  either form and print `layout: migration to project folders pending (bay up or bay
+  compile does it)`. Commit any edit to
   `bay.fleet.toml` first: Bay refuses to run while it has uncommitted changes. Bay
   also refuses when one project has a lock in both places.
 - A 2.0 CLI refuses a format 2 fleet (`format: unknown key`), so update every

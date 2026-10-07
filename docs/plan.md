@@ -786,13 +786,20 @@ variable and copies from the fleet's `files/` as before.
 the toml is read from its old place, `files/<name>/<from>`, with a note that
 names it. Move it beside the toml with `git mv` when you are ready.
 
-**The move to format 2.** The first `bay plan`, `bay up`, `bay show`,
-`bay compile` or `bay init` of a 2.1 CLI moves each `projects/<name>.lock` to
+**The move to format 2.** Only a verb that writes the fleet moves the locks:
+the first `bay up`, `bay rollback`, `bay compile`, `bay adopt` or `bay init`
+of a 2.1 CLI. It moves each `projects/<name>.lock` to
 `projects/<name>/bay.lock` (`git mv`), adds `format = 2` after the `name`
 line of `bay.fleet.toml`, and commits once:
-`bay: move locks into project folders`. It refuses when one project has both
-lock forms, and when `bay.fleet.toml` has uncommitted changes. A CLI refuses
-a fleet whose `format` is newer than it knows.
+`bay: move locks into project folders`. It first checks that the fleet is
+not behind its remote, and refuses when it is ("pull it first") or when the
+remote cannot be read: the move on a stale clone would fork the fleet
+history. It refuses when one project has both lock forms, and when
+`bay.fleet.toml` has uncommitted changes. A reader (`bay show`, `bay plan`)
+never moves anything: it reads either lock form and prints one stderr line,
+`layout: migration to project folders pending (bay up or bay compile does it)`.
+`bay route` does not read or write locks, so it does not move them. A CLI
+refuses a fleet whose `format` is newer than it knows.
 
 ## The plan JSON
 

@@ -52,7 +52,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from bay_cli import gitrepo, lockfile
+from bay_cli import gitrepo, layout, lockfile
 from bay_cli import plan as planmod
 from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
@@ -218,6 +218,9 @@ def up(
     cx = proj.cx
     if force and not (reason and reason.strip()):
         raise BayError("--force needs --reason", hint='Pass --reason "<why>".')
+    moved = _migrate_layout(cx, say)
+    if moved:
+        proj = planmod.load_project(cx, proj.name, cwd=proj.cwd)
 
     if plan_id:
         saved = planmod.load_saved(cx, plan_id)
@@ -229,7 +232,7 @@ def up(
     planmod.save(cx, plan)
     forced = _gate(plan, force, reason, say)
     commit = str(plan["wanted"]["commit"])
-    return _apply_plan(
+    return _with_layout_notes(moved, _apply_plan(
         cx,
         plan,
         [(proj, commit)],
@@ -242,7 +245,27 @@ def up(
         say=say,
         push=push,
         code=code,
-    )
+    ))
+
+
+def _migrate_layout(cx: Context, say: Echo) -> list[str]:
+    """Move a format 1 fleet's flat locks into project folders before a write.
+
+    Only a writing verb does it, and only on a fleet that is not behind its
+    remote (:func:`bay_cli.layout.ensure_for_write`). Returns the lines.
+    """
+    moved = layout.ensure_for_write(cx.fleet_root)
+    for line in moved:
+        say(f"fleet layout: {line}")
+    return moved
+
+
+def _with_layout_notes(moved: list[str], result: dict[str, Any]) -> dict[str, Any]:
+    if moved:
+        result["notes"] = [f"fleet layout: {line}" for line in moved] + list(
+            result.get("notes") or []
+        )
+    return result
 
 
 def up_env(
@@ -267,6 +290,7 @@ def up_env(
     say = echo or (lambda _msg: None)
     if force and not (reason and reason.strip()):
         raise BayError("--force needs --reason", hint='Pass --reason "<why>".')
+    moved = _migrate_layout(cx, say)
     if plan_id:
         saved = planmod.load_saved(cx, plan_id)
         plan = planmod.recheck_env(
@@ -285,7 +309,7 @@ def up_env(
         (planmod.load_project(cx, p["name"], cwd=cwd, fetch=False), str(p["wanted"]["commit"]))
         for p in plan["projects"]
     ]
-    return _apply_plan(
+    return _with_layout_notes(moved, _apply_plan(
         cx,
         plan,
         members,
@@ -297,7 +321,7 @@ def up_env(
         deploy=deploy,
         say=say,
         push=push,
-    )
+    ))
 
 
 def _apply_plan(
@@ -614,8 +638,7 @@ def _lock_plan_ids(cx: Context) -> set[str]:
     lose their protection, so nothing may be pruned.
     """
     out: set[str] = set()
-    for name in planmod.fleet_projects(cx):
-        path = lockfile.lock_path(cx.fleet_root, name)
+    for _, path in planmod.lock_files(cx.fleet_root):
         try:
             raw = lockfile.read(path)
         except (OSError, ValueError) as exc:

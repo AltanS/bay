@@ -212,6 +212,10 @@ def world(tmp_path: Path, box: FakeBox) -> dict[str, Path]:
     (fleet / "projects" / ".gitkeep").write_text("")
     git(fleet, "init", "-q")
     commit_all(fleet, "fleet")
+    # A 2.1 fleet: format = 2 (a writer verb sets it; readers never do).
+    from bay_cli import layout
+
+    layout.ensure(fleet)
     # The fleet was compiled before (as after `bay import`): the shared postgres runs.
     with planmod.compiled_fleet(Context.for_fleet_root(fleet)) as comp:
         assert comp.result is not None, comp.errors
@@ -2567,24 +2571,104 @@ def _flat_fleet(world: dict[str, Path]) -> Path:
 def test_lock_moves_into_project_folder(world: dict[str, Path], box: FakeBox) -> None:
     fleet = _flat_fleet(world)
     before = git(fleet, "rev-parse", "HEAD")
-    plan = make(world)  # the first command that reads the locks moves them
-    assert any(n.startswith("fleet layout: moved projects/webapp.lock") for n in plan["notes"])
+    # A reader reads the flat lock and moves nothing.
+    assert make(world)["blockers"] == []
+    assert git(fleet, "rev-parse", "HEAD") == before
+    up = do_up(world)  # the first writing command moves them
+    assert up["result"] == "ok"
+    assert up["notes"][0].startswith("fleet layout: moved projects/webapp.lock")
     assert not (fleet / "projects" / "webapp.lock").exists()
     assert (fleet / "projects" / "webapp" / "bay.lock").is_file()
     assert "format = 2" in (fleet / "bay.fleet.toml").read_text()
-    assert git(fleet, "log", "-1", "--format=%s") == "bay: move locks into project folders"
-    assert git(fleet, "rev-parse", "HEAD~1") == before  # one commit
-    changed = git(fleet, "show", "--name-status", "--format=", "HEAD").splitlines()
+    migration = git(fleet, "rev-list", "--reverse", f"{before}..HEAD").split()[0]
+    assert git(fleet, "log", "-1", "--format=%s", migration) == (
+        "bay: move locks into project folders"
+    )
+    changed = git(fleet, "show", "--name-status", "--format=", migration).splitlines()
     assert sorted(changed) == sorted(
         ["M\tbay.fleet.toml", "R100\tprojects/webapp.lock\tprojects/webapp/bay.lock"]
     )
     assert git(fleet, "status", "--porcelain") == ""
-    # The content is untouched; the next write stores version 2.
-    assert json.loads((fleet / "projects/webapp/bay.lock").read_text())["lock_version"] == 1
-    do_up(world)
+    # The move kept the content; the up's own write stored version 2.
+    moved = json.loads(git(fleet, "show", f"{migration}:projects/webapp/bay.lock"))
+    assert moved["lock_version"] == 1
     assert lock_of(world)["lock_version"] == 2
     # A second run has nothing to move.
-    assert not any(n.startswith("fleet layout:") for n in make(world)["notes"])
+    assert not any(n.startswith("fleet layout:") for n in do_up(world)["notes"])
+
+
+def test_show_and_plan_do_not_migrate(world: dict[str, Path], box: FakeBox) -> None:
+    """S3: readers read the flat lock, move nothing and say once that a move is pending."""
+    from bay_cli import layout
+
+    do_up(world)
+    fleet = _flat_fleet(world)
+    head = git(fleet, "rev-parse", "HEAD")
+    layout._noted.clear()
+    shown = cli(world, "show", "--no-remote")
+    assert shown.exit_code == 0, shown.output
+    assert layout.PENDING_NOTE in shown.stderr
+    layout._noted.clear()
+    planned = cli(world, "plan", "--json", "--no-remote")
+    assert planned.exit_code == 0, planned.output
+    assert planned.stderr.count(layout.PENDING_NOTE) == 1
+    plan = json.loads(planned.stdout)
+    assert plan["steps"] == [] and plan["pinned"]["commit"] == lock_of_flat(fleet)["commit"]
+    assert not any(n.startswith("fleet layout:") for n in plan["notes"])
+    # The whole-environment plan reads it too.
+    env_plan = planmod.make_env_plan(cx_of(world), planmod.PlanOptions(read_running=False))
+    assert [p["name"] for p in env_plan["projects"]] == ["webapp"]
+    assert git(fleet, "rev-parse", "HEAD") == head
+    assert (fleet / "projects" / "webapp.lock").is_file()
+    assert not (fleet / "projects" / "webapp" / "bay.lock").exists()
+    assert git(fleet, "status", "--porcelain", "--", ".", ":!plans") == ""
+
+
+def lock_of_flat(fleet: Path) -> dict[str, Any]:
+    return json.loads((fleet / "projects" / "webapp.lock").read_text())
+
+
+def test_up_migrates_after_behind_check(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    """S3: a writer moves the locks only on a fleet that is not behind its remote."""
+    from bay_cli.errors import BayError
+
+    fleet = _flat_fleet(world)
+    remote = tmp_path / "fleet-remote.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    git(fleet, "remote", "add", "origin", str(remote))
+    git(fleet, "push", "-q", "-u", "origin", "main")
+    other = tmp_path / "other"
+    git(tmp_path, "clone", "-q", str(remote), str(other))
+    (other / "note.txt").write_text("x\n")
+    commit_all(other, "elsewhere")
+    git(other, "push", "-q", "origin", "main")
+
+    head = git(fleet, "rev-parse", "HEAD")
+    with pytest.raises(BayError, match="behind its remote; pull it first"):
+        do_up(world)
+    compiled = cli(world, "compile", cwd=fleet)
+    assert compiled.exit_code != 0 and "behind its remote" in str(compiled.exception)
+    assert git(fleet, "rev-parse", "HEAD") == head
+    assert (fleet / "projects" / "webapp.lock").is_file()
+
+    git(fleet, "pull", "-q", "--ff-only")
+    up = do_up(world)
+    assert up["result"] == "ok"
+    assert up["notes"][0].startswith("fleet layout: moved projects/webapp.lock")
+    assert (fleet / "projects" / "webapp" / "bay.lock").is_file()
+    log = git(fleet, "log", "--format=%s").splitlines()
+    assert "bay: move locks into project folders" in log
+    assert git(remote, "rev-parse", "main") == git(fleet, "rev-parse", "HEAD")
+
+
+def test_compile_migrates_the_layout(world: dict[str, Path], box: FakeBox) -> None:
+    fleet = _flat_fleet(world)
+    result = cli(world, "compile", cwd=fleet)
+    assert result.exit_code == 0, result.output
+    assert "fleet layout: moved projects/webapp.lock" in result.stderr
+    assert (fleet / "projects" / "webapp" / "bay.lock").is_file()
 
 
 def test_layout_migration_dry_run_changes_nothing(world: dict[str, Path], box: FakeBox) -> None:

@@ -178,10 +178,11 @@ def load_project(
     A project with ``projects/<name>/bay.toml`` lives in the fleet. Any other
     project is read from its ``repo``: the checkout at ``cwd`` when its
     origin is that repo, else the fleet's repo cache (cloned when missing,
-    fetched first with ``fetch``). The flat locks of a format 1 fleet are
-    moved into project folders first (:func:`bay_cli.layout.ensure`).
+    fetched first with ``fetch``). A flat lock of a format 1 fleet
+    (``projects/<name>.lock``) is read where it is: only a writing verb moves
+    it (:func:`bay_cli.layout.ensure_for_write`), before it loads the project.
     """
-    moved = layout.ensure(cx.fleet_root)
+    layout.note_pending(cx.fleet_root)
     fleet_doc = load_fleet_doc(cx)
     if expect_fleet is not None and fleet_doc.get("name") != expect_fleet:
         raise BayError(
@@ -191,6 +192,9 @@ def load_project(
         )
     lock_file = lockfile.lock_path(cx.fleet_root, name)
     lock_rel = f"{PROJECTS_DIR}/{name}/{LOCK_FILE}"
+    flat = cx.fleet_root / PROJECTS_DIR / f"{name}{LOCK_SUFFIX}"
+    if not lock_file.exists() and flat.is_file():
+        lock_file, lock_rel = flat, f"{PROJECTS_DIR}/{flat.name}"
     try:
         raw = lockfile.read(lock_file)
     except ValueError as exc:
@@ -211,7 +215,7 @@ def load_project(
         "lock_file": lock_file,
         "lock": raw,
         "cwd": cwd,
-        "notes": [f"fleet layout: {line}" for line in moved],
+        "notes": [],
     }
     if in_dir.is_file():
         return ProjectRef(
@@ -586,14 +590,14 @@ def _materialize(
         shutil.copy2(path, all_dst / path.name)
 
     locks: dict[str, dict[str, Any]] = {}
-    for lock in sorted(projects_src.glob(f"*/{LOCK_FILE}")) if projects_src.is_dir() else []:
+    for stem, lock in lock_files(src):
         try:
             raw = lockfile.read(lock)
         except (OSError, ValueError) as exc:
-            out.problems.append(f"{PROJECTS_DIR}/{lock.parent.name}/{LOCK_FILE}: {exc}")
+            out.problems.append(f"{lock.relative_to(src)}: {exc}")
             continue
         if raw is not None:
-            locks[lock.parent.name] = raw
+            locks[stem] = raw
 
     fleet_head = gitrepo.head(src)
     _copy_files_tree(src, fleet_head, out)
@@ -608,6 +612,19 @@ def _materialize(
             continue
         _copy_repo_project(cx, tmp, stem, raw, pins, out, cwd=cwd)
     return out
+
+
+def lock_files(fleet_root: Path) -> list[tuple[str, Path]]:
+    """``(project, lock path)`` for every lock: ``projects/<name>/bay.lock``, or the
+    flat ``projects/<name>.lock`` of a fleet a writing verb has not moved yet."""
+    projects = fleet_root / PROJECTS_DIR
+    if not projects.is_dir():
+        return []
+    found = {p.parent.name: p for p in projects.glob(f"*/{LOCK_FILE}")}
+    for flat in projects.glob(f"*{LOCK_SUFFIX}"):
+        if flat.is_file():
+            found.setdefault(flat.name[: -len(LOCK_SUFFIX)], flat)
+    return sorted(found.items())
 
 
 def _write_lock(out: _Copy, name: str, raw: Mapping[str, Any]) -> None:
@@ -730,6 +747,8 @@ def _copy_in_fleet(
     if fleet_head is None:
         out.notes.append(f"{name}: the fleet is not a git repo, so its files are read as they are")
         shutil.copytree(src / scope, out.root / scope, symlinks=True)
+        if lock is not None:
+            _write_lock(out, name, lock)  # a flat lock of a format 1 fleet too
         _map_in_fleet(name, lock, out)
         return
     commit = pins.get(name) or (lock or {}).get("commit")
@@ -873,7 +892,7 @@ def compiled_fleet(
     from bay_cli import compiler
     from bay_cli.fleet import FleetError, load_inputs
 
-    moved = layout.ensure(cx.fleet_root)
+    layout.note_pending(cx.fleet_root)
     with tempfile.TemporaryDirectory(prefix="bay-plan-") as tmp:
         work = Path(tmp)
         made = _materialize(cx, work, pins or {}, cwd=cwd)
@@ -882,7 +901,7 @@ def compiled_fleet(
         if drop:
             _drop_projects(made, drop)
         errors = list(made.problems)
-        notes = [f"fleet layout: {line}" for line in moved] + list(made.notes)
+        notes = list(made.notes)
         result = None
         owners: dict[str, str] = {}
         if not errors:
@@ -2417,15 +2436,13 @@ def _read_running(
 
 
 def fleet_projects(cx: Context) -> list[str]:
-    """Every project folder of the fleet: ``projects/<name>/`` with a lock or a bay.toml."""
+    """Every project of the fleet: a lock (either form) or ``projects/<name>/bay.toml``."""
     root = cx.fleet_root / PROJECTS_DIR
     if not root.is_dir():
         return []
-    return sorted(
-        p.name
-        for p in root.iterdir()
-        if p.is_dir() and ((p / LOCK_FILE).is_file() or (p / "bay.toml").is_file())
-    )
+    names = {stem for stem, _ in lock_files(cx.fleet_root)}
+    names |= {p.name for p in root.iterdir() if p.is_dir() and (p / "bay.toml").is_file()}
+    return sorted(names)
 
 
 def make_env_plan(
@@ -2445,12 +2462,12 @@ def make_env_plan(
     ``projects``. Verdict and exit code as for one project.
     """
     check_data_mode(opts.data)
-    moved = layout.ensure(cx.fleet_root)
+    layout.note_pending(cx.fleet_root)
     fleet_doc = load_fleet_doc(cx)
     env = opts.env or str(fleet_doc.get("primary_env", "production"))
     state = _fleet_state(cx)
     blockers: list[str] = list(state.blockers)
-    notes: list[str] = [f"fleet layout: {line}" for line in moved]
+    notes: list[str] = []
 
     members: list[tuple[ProjectRef, Wanted]] = []
     for name in fleet_projects(cx):
