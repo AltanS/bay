@@ -238,6 +238,11 @@ Check mode changes nothing live. It writes only to temporary places:
   run, also when the run fails.
 - On each box, the plan bundle and the reconciler package go to a second
   temporary directory, which is also removed.
+- When the fleet has a `[webhook]` table, two read-only commands run for real:
+  `systemctl list-units --all 'bay-build@*.path'` on each box, and
+  `docker image inspect bay-webhook:latest` on each box with a build app. They
+  change nothing. The receiver image build and the trigger unit changes are
+  only predicted.
 - On this machine, each box writes its report into a temporary directory
   outside every working tree. Bay reads it and removes it.
 

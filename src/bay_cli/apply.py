@@ -78,8 +78,9 @@ class Refused(Exception):
 
 #: The tags ``bay up`` runs. They are the tags ``bay plan``'s box check runs, so
 #: the plan and the apply do the same work. The ``git_deploy`` role tags its
-#: render tasks (rebuild.sh, image-map.json) with ``deploy_stack``, so a ``bay up``
-#: re-renders the webhook rebuild script without cloning, building or pulling.
+#: render tasks (rebuild.sh, image-map.json, the receiver config and image, the
+#: build trigger units) with ``deploy_stack``, so a ``bay up`` keeps the webhook
+#: side current without cloning, building an app image or pulling.
 UP_DEPLOY_TAGS = "deploy_stack"
 
 
