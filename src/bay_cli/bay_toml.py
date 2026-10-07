@@ -524,6 +524,7 @@ def _access_rules(doc: dict[str, Any], services: dict[str, Any]) -> Iterator[Vio
     env_modes = {top_mode} | {
         _dict(d.get("access")).get("mode", top_mode) for d in _envs(doc).values()
     }
+    yield from _internal_main_access(doc, top_mode)
     for n, s in services.items():
         if not isinstance(s, dict):
             continue
@@ -550,6 +551,38 @@ def _access_rules(doc: dict[str, Any], services: dict[str, Any]) -> Iterator[Vio
                 "routes on the main domain, but access.mode internal gives the main "
                 "container no route in at least one environment",
             )
+
+
+def _internal_main_access(doc: dict[str, Any], top_mode: Any) -> Iterator[Violation]:
+    """``access`` keys other than ``mode`` on the main container where it is internal.
+
+    ``access.mode = "internal"`` (at the top or in ``[deploy.<env>.access]``)
+    gives the main container no route, so the compiler has nowhere to put
+    ``password``, ``open``, ``limits`` and the rest: they would vanish. A key
+    at the top is reported once, naming the first env that makes it internal.
+    """
+    top = _dict(doc.get("access"))
+    seen: set[str] = set()
+    for env, d in _envs(doc).items():
+        env_access = _dict(d.get("access"))
+        if env_access.get("mode", top_mode) != "internal":
+            continue
+        where = (
+            "access.mode is internal"
+            if "mode" not in env_access
+            else f"deploy.{env}.access.mode is internal"
+        )
+        for base, keys in (("access", top), (f"deploy.{env}.access", env_access)):
+            for key in sorted(k for k in keys if k != "mode"):
+                path = f"{base}.{key}"
+                if path in seen:
+                    continue
+                seen.add(path)
+                yield Violation(
+                    path,
+                    f"has no effect in deploy.{env}: {where}, so the main container is "
+                    "internal and has no route; remove the key or choose public or tailnet",
+                )
 
 
 def _str_list(value: Any) -> list[str]:

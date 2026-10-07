@@ -577,3 +577,31 @@ def test_cli_json(fixture, ok):
         assert payload["violations"] == [
             {"path": "memmory", "message": "unknown key; did you mean memory?"}
         ]
+
+
+def test_validate_rejects_access_on_internal():
+    """``access`` keys other than ``mode`` on an internal main container are errors (M118/04)."""
+    password = {"users": ["admin"]}
+    # The top-level mode is internal: every other top-level key is named.
+    doc = _doc(access={"mode": "internal", "password": password, "open": ["/hook"]})
+    doc.pop("port")
+    found = {v.path: v.message for v in bay_toml.validate(doc)}
+    assert set(found) >= {"access.password", "access.open"}
+    assert "internal" in found["access.password"] and "deploy.production" in found["access.password"]
+    # Internal in one env only: the top-level key and the env key are named once each.
+    doc = _doc(
+        access={"mode": "public", "limits": {"rate": "10/s"}},
+        deploy={"staging": {"domain": "s.example.com",
+                            "access": {"mode": "internal", "locked": ["/admin"]}}},
+    )
+    paths = _paths(bay_toml.validate(doc))
+    assert {"access.limits", "deploy.staging.access.locked"} <= paths
+    msg = {v.path: v.message for v in bay_toml.validate(doc)}["access.limits"]
+    assert "deploy.staging.access.mode is internal" in msg
+    # Only mode, or a routed main container: nothing to report.
+    doc = _doc(access={"mode": "internal"})
+    doc.pop("port")
+    assert not any(p.startswith(("access.", "deploy.production.access"))
+                   for p in _paths(bay_toml.validate(doc)))
+    assert bay_toml.validate(_doc(access={"mode": "public", "password": password},
+                                  health="/hz")) == []
