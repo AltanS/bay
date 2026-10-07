@@ -8,7 +8,7 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
-## [Unreleased]
+## [2.1.1] - 2026-10-07
 
 ### Changed
 
@@ -68,6 +68,12 @@ needing manual action is called out under **Upgrade notes**. Entries for
   plan keeps its box check when it is checked again.
 - **The remove step reason has the right verb.** It read `volume <name> stay`. It now reads
   `volume <name> stays`, `volumes <a>, <b> stay`, and the same for databases.
+
+### Upgrade notes
+
+- The lock migration no longer makes a saved plan stale; a plan saved before the first 2.1 writing run can be applied with `bay up --plan-id`.
+- `bay remove` takes `--remote` like `bay plan`.
+- After moving a mounted file beside its `bay.toml`, no other project's plan is blocked any more; the moved file is read from the fleet HEAD.
 
 ## [2.1.0] - 2026-10-07
 
