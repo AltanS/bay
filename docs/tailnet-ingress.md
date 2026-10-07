@@ -278,7 +278,12 @@ One list. Do every step in this order. Run the `bay` commands with `--fleet <pat
    the grant is live the route answers 502. A plain `bay up` with no route step runs `deploy_stack`
    only, which does not refresh the ACL.
 6. **Add the route.** `bay route add ...` (add `--ingress-box` and `--cert-domain` the first time).
-   It edits and commits `bay.fleet.toml`. It does not compile or deploy.
+   It edits and commits `bay.fleet.toml`. It does not compile or deploy. Then run `bay validate`
+   again. Step 3 ran before the route existed, so it checked the edited group_vars files but no
+   route. `bay validate` reads the routes from `bay.fleet.toml`, so only now does it warn when
+   `headscale_acl_policy` has no rule with the ingress box as its only `src` for the route's
+   upstream port. `route add` itself already
+   refused a domain or an upstream that the compile would refuse.
 7. **Plan.** `bay plan <deploy env>`. `bay plan` and `bay up` take a deploy env, not a box env. A
    route belongs to no project, but a plan is made for a project: give the deploy env name of a
    project that deploys on a box of the ingress box's box env (its `[deploy.<env>]` names that box).

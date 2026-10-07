@@ -322,14 +322,21 @@ See [Framework development](#framework-development) for details on each test sui
 
 ## Backups
 
-Bay uses [restic](https://restic.net/) for deduplicated, encrypted backups to S3-compatible storage. Add `backup: true` to any accessory in `services.yml` and the backup method is auto-detected from the image name (PostgreSQL, MySQL/MariaDB, Redis). Each accessory gets its own restic repository, systemd timer, and retention policy.
+Bay uses [restic](https://restic.net/) for deduplicated, encrypted backups to S3-compatible storage. Each backed-up shared resource gets its own restic repository, systemd timer, and retention policy.
 
-```yaml
-accessories:
-  postgres:
-    image: postgres:17
-    backup: true          # auto-detects pg_dump
+Write the backup in `bay.fleet.toml`, on the shared resource. `method` is required (`pg_dump`, `mysql`, `redis` or `file`):
+
+```toml
+[resources.postgres]
+kind = "postgres"
+image = "postgres:17"
+[resources.postgres.backup]
+method = "pg_dump"
+schedule = "0 3 * * *"    # optional, five-field cron
+retain = 7                # optional
 ```
+
+`bay compile` writes it into `services.yml` as the accessory's `backup:` block (compiled form, do not edit). Volume backups of an app (`backup` on a `[[mounts]]` volume, and the `[backup]` table of `bay.toml`) are validated, not deployed yet: see [docs/bay-toml.md](docs/bay-toml.md#mounts).
 
 See **[docs/backups.md](docs/backups.md)** for full setup instructions, S3 provider reference, retention options, restore procedures, and monitoring.
 
@@ -351,7 +358,7 @@ See **[docs/alerting.md](docs/alerting.md)** for the format adapters, the full l
 
 ## Container auto-updates
 
-Bay uses [Watchtower](https://github.com/nicholas-fedor/watchtower) (nickfedor fork, Docker 29+ compatible) to monitor container images for updates. By default, Watchtower runs in **monitor-only mode** — it checks for new images daily at 4 AM UTC and sends Telegram notifications, but does not pull or restart anything. Services opt in to automatic updates via `update: auto` in `services.yml`.
+Bay uses [Watchtower](https://github.com/nicholas-fedor/watchtower) (nickfedor fork, Docker 29+ compatible) to monitor container images for updates. By default, Watchtower runs in **monitor-only mode**: it checks for new images daily at 4 AM UTC and sends Telegram notifications, but does not pull or restart anything. Apps opt in to automatic updates with `update = "auto"` in `bay.toml` (a shared resource takes the same key in `bay.fleet.toml`). The compiled `services.yml` carries it as `update: auto` (compiled form, do not edit).
 
 See **[docs/services.md](docs/services.md#container-auto-updates)** for the `update` key reference. Override watchtower defaults in `group_vars`:
 
@@ -376,9 +383,27 @@ See **[docs/multi-region.md](docs/multi-region.md)** for the full setup guide �
 
 ## Build from source (GitHub deploy)
 
-Services can be built from a Git repository instead of pulling from a registry. Replace `image:` with a `build:` block in `services.yml`, and the framework clones the repo, builds the Docker image locally, and tags it with the commit SHA. A webhook receiver listens for GitHub push events and triggers automatic rebuilds — without exposing the Docker socket.
+Services can be built from a Git repository instead of pulling from a registry. A `bay.toml` with no `image` builds from source (`[build]` sets the Dockerfile and the rest), and the framework clones the repo, builds the Docker image locally, and tags it with the commit SHA. A webhook receiver listens for GitHub push events and triggers automatic rebuilds, without exposing the Docker socket.
+
+You write two things. The app's `bay.toml` says what to build and which branch each env follows. The fleet's `bay.fleet.toml` names the webhook:
+
+```toml
+# bay.toml in the app repo
+[build]
+dockerfile = "Dockerfile"
+[deploy.production]
+branch = "main"
+
+# bay.fleet.toml
+[webhook]
+domain = "deploy.example.com"
+secret = "WEBHOOK_SECRET"   # a secret name; the value is in the encrypted secrets file
+```
+
+The repo URL comes from the project's lock (`bay init` writes it from `git remote get-url origin`). `bay compile` turns all of this into the `build:` and `webhook:` blocks below. That is the compiled form: do not edit it, write `bay.toml` or `bay.fleet.toml` instead.
 
 ```yaml
+# compiled form (group_vars/all/services.yml), do not edit
 services:
   myapp:
     access: public
@@ -392,7 +417,7 @@ services:
 
 webhook:
   domain: deploy.example.com
-  secret: "{{ vault_webhook_secret }}"
+  secret: "{{ secrets.WEBHOOK_SECRET }}"
 ```
 
 ```bash

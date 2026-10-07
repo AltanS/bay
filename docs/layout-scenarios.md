@@ -128,6 +128,9 @@ bare container names. Its default is `production`.
 Inside the fleet directory, every other verb (`deploy`, `provision`, `vault`, `secret`, `validate`,
 `status`, `route`, `compile`, `adopt`, `init`) stops with "no fleet selected" unless you name the fleet
 with `--fleet <path>` or `BAY_FLEET`. The commands below that start with `bay --fleet $F` do that.
+One exception: the verbs that edit the fleet by hand, `bay service add|edit|remove|prune-webhooks`
+and `bay server add|remove`, take the working directory as the fleet when nothing else names one
+(rule 5 of [install.md](install.md#pick-a-fleet)).
 
 **Secret values are per box env.** They live in `group_vars/<box env>/secrets.yml`, one
 encrypted file for the whole box env. Two deploy envs on one box env share that file: one key
@@ -349,14 +352,17 @@ git push                                  #    the webhook builds the first imag
 bay plan production                       # 4. then see plan.md "The first image" for the last steps
 ```
 
-Expect step 2 to fail. `bay up` builds no image, and `shop` has none yet, so the box cannot create
-the container. The command exits 1 with `deploy failed: Command failed with exit code N`, the lock
-records `result: failed`, and Bay still commits that record and pushes the fleet. `bay show` says
-`HALF`. This is the current behaviour, not a sign that something broke: the pin and the webhook
-script are in place, which is what step 2 is for. Nothing in the exit code or the JSON tells it from
-another failed deploy (`result: failed` and the `error` text are the same), so read the Ansible log
-(`--log`) or the receipt on the box: the failed action is the container that has no image. The way out
-is steps 3 and 4: push code, wait for the build, run `bay up` again.
+Expect step 2 to fail. The first `bay up` of an app that builds from source fails on purpose:
+`bay up` builds no image, and `shop` has none yet, so the box cannot create the container
+([plan.md, The first image](plan.md#the-first-image)). Bay has no special code or message for this
+case. It looks like any failed deploy: the command exits 1 with
+`deploy failed: Command failed with exit code N`, the JSON has `"result": "failed"` and an `error`
+text, the lock records `result: failed`, and Bay still commits that record and pushes the fleet.
+`bay show` says `HALF` (the last `bay up` failed; all status words are in the
+[bay show table](plan.md#bay-show)). The pin and the webhook script are in place, which is what
+step 2 is for. To be sure that this is the expected failure and not another one, read the Ansible
+log (`--log`) or the receipt on the box: the failed action is the container that has no image. The
+way out is steps 3 and 4: push code, wait for the build, run `bay up` again.
 
 The push of step 1 builds nothing, because the box has no webhook script for `shop` yet. The
 first image comes from a push made after `bay up` (step 3), or from a full `bay deploy production`
@@ -474,8 +480,16 @@ LOG_LEVEL = "debug"
 `bay up staging` deploys every project that has a `[deploy.staging]` on `eu-2`. It does not
 deploy to the production box. But the project has one pin, so `bay up staging` moves it: the
 compiled production entries move to the same commit, and `bay show shop` says `drift` for
-production until `bay up production` runs (plan.md, [The lockfile](plan.md#the-lockfile)).
+production until `bay up production` runs (plan.md, [The lockfile](plan.md#the-lockfile); `drift`
+means the box runs something else than the pin, see the [bay show table](plan.md#bay-show)).
 Read the plan before you approve it.
+
+**Which branch holds the `bay.toml`.** The pin is one commit, and the compiler emits only the
+`[deploy.<env>]` tables of the `bay.toml` at that commit. So keep both tables on both branches:
+merge the `[deploy.staging]` commit of step 5 below into `main` before the next `bay up production`.
+If `main` has no `[deploy.staging]`, a `bay up production` from `main` pins a commit without it: the
+plan shows a destructive `remove` step for each staging container, and the next deploy of the
+staging box env removes them.
 
 Container names. The primary env (`production`) has no suffix. Other envs add `-<env>`.
 
@@ -511,7 +525,10 @@ steps 3 and 4 runs on the fleet, and none of them reads the fleet directory you 
    run `bay --fleet $F vault encrypt staging`, and later change it with `bay --fleet $F vault edit staging`.
    Add every name that `bay --fleet $F secret missing staging` lists. Staging has its own values: nothing is shared with
    production unless the project uses `fleet_secrets`.
-4. Commit and push the fleet. Provision the box: `bay --fleet $F provision staging` (scenario 11).
+4. Commit and push the fleet. Provision the box: `bay --fleet $F provision staging` (add
+   `-- -u root` the first time when the fleet's admin user is not on the box yet). Then install the
+   rig on it: `bay --fleet $F deploy --rig staging` (Traefik, the cron jobs, the monitor and the rest;
+   scenario 11 says which verb installs what).
 5. In the app repo add the `[deploy.staging]` table above and commit it on the `develop` branch.
    Push `develop`. `bay up` refuses a commit that the remote lacks, so this push comes first. It
    builds nothing yet.
@@ -522,12 +539,17 @@ steps 3 and 4 runs on the fleet, and none of them reads the fleet directory you 
    `[deploy.staging]` yet, so Bay reads the remote's default branch and blocks. Pass
    `--project shop --at <commit of develop>` there instead (`--at` needs `--project` in the fleet directory). After the first `bay up staging` the pin names the
    table, and the fleet directory finds `develop` ([plan.md](plan.md#bay-plan), step 1).
-7. `bay plan staging`, then `bay up staging`. This puts the webhook script on `eu-2`.
-8. Push to `develop` again with a code change. The webhook builds the first image (see
-   [plan.md](plan.md#the-first-image)). The push reaches `eu-2` through the webhook receiver of that
-   box: `eu-2` uses `[webhook] domain`, or its own `webhook_domain` (scenario 5 sets one on `infra`).
-   Register the GitHub hook for `shop-staging` at `https://<that domain>/webhook/shop-staging`.
-   Staging owns its data: it starts with an empty database.
+7. `bay plan staging`, then `bay up staging`. This pins the commit and puts the webhook script on
+   `eu-2`. Expect it to fail, as step 2 of scenario 2 does: `shop-staging` has no image yet.
+8. Build the first image. On this new box a push alone builds nothing yet: the webhook receiver
+   image and the build trigger of `shop-staging` come only from a full deploy of a box that runs a
+   build app, and step 4 ran before `eu-2` had one. Run `bay --fleet $F deploy staging` (no `--tags`)
+   once: it installs both, and it clones and builds the first image (see
+   [plan.md](plan.md#the-first-image)). Then run `bay up staging` again. From then on, a push to
+   `develop` builds: it reaches `eu-2` through the webhook receiver of that box. `eu-2` uses
+   `[webhook] domain`, or its own `webhook_domain` (scenario 5 sets one on `infra`). Register the
+   GitHub hook for `shop-staging` at `https://<that domain>/webhook/shop-staging`. Staging owns its
+   data: it starts with an empty database.
 
 Scenario 11 shows the box and hosts files in more detail.
 
@@ -681,6 +703,8 @@ container and sends no alert. It does one thing: it tags the image that already 
 previous commit) with the adopt commit, `<image>:<commit12>`, so that a later `bay up` to this commit
 finds its image, also in `track = "pin"`. Run `bay up` in the app
 checkout, because the fleet's repo cache does not have the adopt commit yet.
+For a later config-only push (no alert), `bay show <name>` saying `behind` is the sign that a
+`bay up` is owed (scenario 10).
 
 Only the file location moves. The container, database, volumes and files stay as they are
 because the lock keeps the adopted names. The pin changes from a fleet commit to an app
@@ -820,6 +844,12 @@ rule, then the hold guard. The order is stated once, in
 [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push). A push that
 the filter drops (it touches only files outside `watch`, a push of `bay.toml` alone included)
 reaches none of the other checks: it is not built, not held and not logged as config-only.
+So when you set `watch`, put `bay.toml` and the files its mounts read in it
+([bay-toml.md](bay-toml.md#build)).
+
+After a config-only push, nothing alerts you. The signal is `bay show shop`: it says `behind`
+(HEAD is ahead of the pin), and you run `bay up`. On the box, `journalctl -u bay-build@shop` has
+the line `config-only push <commit12>: run bay up`.
 
 A config-only push needs `build.bay_build_hash` to match. `bay_build_hash` is the hash of
 the `[build]` keys. So a `[build]` edit is never a config-only push: it always builds.
@@ -875,6 +905,9 @@ bay rollback production --project shop --to 0123456789ab
 for an app whose `bay.toml` is in its repo it moves the pin to that commit too: config and code.
 It works when the image of that commit still exists on the box. Otherwise it refuses before
 anything moves and lists the commit tags the box has. A second plain rollback undoes the first.
+How far back that reaches: nothing counts commit tags, but the `docker system prune -af` cron job
+of the box (weekly by default) removes every image that no container uses, tags and all
+([plan.md](plan.md#bay-rollback), "How far back `--to` reaches").
 
 **A bad push in branch mode.** A push deploys by itself, and it never changes `previous` (only
 `bay up` does). Say the last `bay up` was good, then a push put bad code on the box. Plain
@@ -887,15 +920,29 @@ bay up production --project shop                       # after you pushed the fi
 ```
 
 The env is frozen after the rollback: pushes build but do not deploy. The `bay up` to a newer
-commit clears the freeze. `git revert` and a push is the other way, while the env is not frozen.
-A push that fails its health check is rolled back on the box by itself.
+commit clears the freeze. A push that fails its health check is rolled back on the box by itself.
 
-**Rollback in pin mode.** A push already holds, so the freeze adds nothing you can see. Plain
+`--to` rolls the config back too. For an app whose `bay.toml` is in its repo, the pin moves to
+`<last good commit>`, so a `bay.toml` change pinned after it is undone as well. To keep the newer
+config, use the other way: commit a `git revert` of the bad code and push it. While the env is not
+frozen, that push deploys the reverted code under the pinned config, and the later `bay.toml`
+changes stay ([plan.md](plan.md#undo-a-bad-push-in-branch-mode)).
+
+**Rollback in pin mode.** The happy path:
+
+```
+bay rollback production --project shop                     # straight after a bad bay up
+bay rollback production --project shop --to <commit>       # older, or after a later deploy; the image must be on the box
+bay up production --project shop                           # forward again, once the fix is pushed and its build is held
+```
+
+A push already holds, so the freeze adds nothing you can see. Plain
 `bay rollback` moves the pin back and skips the code move (`code_kept`) when the previous image
 is not on the box. The env is then half rolled back: old config, newer code, frozen. Nothing moves by
 itself, but the code does not say that this mix is safe, so do not leave it if it is not.
 `bay plan` compares the running commit with the HEAD you stand on, not with the pin, and prints no
-check of the image. `bay show` says `behind` while HEAD is ahead of the pin. `bay rollback --to`
+check of the image. `bay show` says `behind` while HEAD is ahead of the pin (the status words are
+in the [bay show table](plan.md#bay-show)). `bay rollback --to`
 refuses when the image is missing:
 `<image>:<commit12> is not on the box ... Commit tags on the box: ...`. To go forward: push the fix,
 wait for its build, then `bay up` to that commit. In pin mode the image must be on the box, or
@@ -936,8 +983,22 @@ to that box:
 
 ```
 bay --fleet ~/.config/bay/fleets/acme provision eu2        # the group of the new box only
+bay --fleet ~/.config/bay/fleets/acme deploy --rig production -- --limit eu-2   # the rig, new box only
 bay --fleet ~/.config/bay/fleets/acme doctor production    # does the box answer?
 ```
+
+Which verb puts what on the new box:
+
+- `bay provision` hardens SSH and installs Docker, the firewall and CrowdSec. When the box has only
+  `root` and the fleet's `ansible_user` does not exist on it yet, the first run needs
+  `-- -u root` (`bay provision eu2 -- -u root`), as in the [README](../README.md).
+- `bay deploy --rig` runs every rig role once: Traefik, Watchtower, the access gateway, the cron jobs
+  (the image prune among them), the container monitor, backups and the CrowdSec allowlist.
+- `bay up` runs only the `deploy_stack` tag. That tag also refreshes Traefik, Watchtower and the
+  access gateway, but not the cron jobs, the monitor, backups or the allowlist.
+- The webhook receiver image and the build trigger of a container come only from a full
+  `bay deploy` of a box that runs a build app. A box with no build app yet gets neither from
+  `--rig` (see scenario 4, step 8).
 
 `bay provision production` would run on every host of the box env, `eu-1` included. The code has no
 guard against that, and no doc states that each provision role is safe to repeat on a live box (the
@@ -1108,9 +1169,12 @@ identity = true                           # inject the X-Tailnet-Device header
 ```
 
 **The procedure.** The ordered list is in one place: [tailnet-ingress.md, Add a route, in
-order](tailnet-ingress.md#add-a-route-in-order). In short: pull the fleet, edit the group_vars by hand
-(the ingress box prerequisites, and with `headscale_acl_policy` the two ACL edits), validate, commit
-and push those edits, deploy the ACL (`bay deploy production --tags headscale`), then `bay route add`,
+order](tailnet-ingress.md#add-a-route-in-order). In short: pull the fleet, then edit the group_vars
+by hand. Two kinds of edit go there. The ingress box prerequisites (DNS-01, the token, the identity
+sidecar) are done once per fleet, before the first route. The two ACL edits are done for each
+route, and only when the fleet has `headscale_acl_policy`. Then validate, commit and push those
+edits, deploy the ACL (`bay deploy production --tags headscale`, only with the policy), then
+`bay route add`, `bay validate` again (now it sees the route and checks the ACL for its port),
 `bay plan`, `bay approve`, `bay up`. `bay route add` edits and commits `bay.fleet.toml` only. It never
 touches the ACL or any group_vars file, `bay plan` shows no step for them, and `bay up` deploys them
 from the working tree without committing them, so commit and push them yourself (the receipt records

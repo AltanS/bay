@@ -1,12 +1,16 @@
 # bay.toml reference (schema v3)
 
-`bay.toml` lives in the app repo. It says WHAT the app is and WHERE it deploys. The fleet
-repo holds everything else: boxes, secret values, shared resources and the per-project
-lockfile. Only the `bay` CLI writes the fleet repo.
+`bay.toml` lives in the app repo. An app with no repo of its own (an off-the-shelf image)
+keeps it in the fleet instead, as `projects/<name>/bay.toml`. It says WHAT the app is and
+WHERE it deploys. The fleet repo holds everything else: boxes, secret values, shared
+resources and the per-project lockfile. Only the `bay` CLI writes the lockfile.
 
 Status: the schema and the validator ship today, and so do the commands that act on the
 file (`bay init`, `bay plan`, `bay up`, `bay show`, `bay rollback`, see [plan.md](plan.md)).
 This page is the contract they follow. `bay up` deploys the whole box environment, not one project.
+The other docs call this file at the project's current commit **WANTED** (what you ask for),
+the commit in the fleet lockfile **PINNED**, and what the box reports **RUNNING**. The three
+are defined in [plan.md](plan.md).
 
 **Validated is not deployed.** The validator accepts a few keys that the compiler cannot deploy
 yet. In the Keys tables below, each of them carries the tag `(validated, not deployed yet)`.
@@ -416,7 +420,7 @@ lockfile (see Behavior).
 | `context` | string | `.` | Build context, relative to the repo root. |
 | `strategy` | `local`, `remote`, `registry` | fleet setting | Where the image is built. |
 | `memory` | size | fleet setting | Build memory cap. (validated, not deployed yet) when it differs from the fleet's build memory. |
-| `watch` | list of globs | everything | A push that touches none of these files does not rebuild. This filter runs first, before the config-only and hold checks, and it filters a push of `bay.toml` too (see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push)). |
+| `watch` | list of globs | everything | A push that touches none of these files does not rebuild. This filter runs first, before the config-only and hold checks, and it filters a push of `bay.toml` too (see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push)). Bay adds nothing to the list: include `bay.toml` and the files its mounts read, or a config-only push is dropped and its commit gets no image tag (see "Config-only push" under `[[mounts]]` below). |
 | `ignore` | list of globs | none | Files that never trigger a rebuild. Applied after `watch`. |
 | `[build.args]` | table of strings | none | Build arguments. |
 | `[build.secrets]` | table | none | BuildKit secret id = fleet secret name. |
@@ -452,6 +456,12 @@ A service with no `domain` and no `path` is internal whatever the project mode i
 ### `[[mounts]]`
 
 Each mount sets `path` and exactly one of `volume` or `from`.
+
+**Write `backup = false` on every volume mount today.** `backup` defaults to `true`, and volume
+backups are (validated, not deployed yet). So `bay toml validate` accepts a volume mount without
+the key, but `bay plan` lists it in `unsupported` (`mounts[<n>].backup`, "volume backups") and
+blocks. With `--allow-unsupported` the volume is mounted and not backed up. A `from` mount has no
+backup and is not affected.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
@@ -502,8 +512,20 @@ commit and moves no code, so the push is config only on the box. See
 
 **Config-only push.** In an app repo, a push that changes only the `bay.toml` and the
 files its mounts read (not `fleet:` ones) builds nothing and deploys nothing: no image, no `:latest`
-move, no recreate. The box tags the image of the previous commit with the pushed commit, so that
-`bay up` to that commit finds its image. Run `bay up` to deploy the change. See [build-pipeline.md](build-pipeline.md), "Config-only push".
+move, no recreate, no alert. It does one thing: the box tags the image of the previous commit with
+the pushed commit, `<image>:<commit12>` (the first 12 characters of the commit), so that `bay up`
+to that commit finds its image, also with `track = "pin"`. Run `bay up` to deploy the change. See
+[build-pipeline.md](build-pipeline.md), "Config-only push".
+
+- **How you know a `bay up` is owed.** `bay show <name>` says `behind` for the environment: the
+  project's HEAD is ahead of the pin. On the box, the build log of the container
+  (`journalctl -u bay-build@<container>`) has the line `config-only push <commit12>: run bay up`, and
+  `docker image ls <image>` lists the new tag (a `remote` build tags it in the registry instead).
+- **With `watch` set, list the config files in it.** The `watch` filter runs first (see `[build]`
+  above). A push of only `bay.toml` that matches no `watch` pattern is dropped before the
+  config-only rule: no tag, and the box logs only the receiver's `Skipping <container>` line. A
+  later `bay up` to that commit in `pin` mode then finds no image. So when you set `watch`, add the
+  `bay.toml` and every file its mounts read, as paths from the repo root.
 
 ### `[backup]`
 

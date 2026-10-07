@@ -188,6 +188,17 @@ leave it out.
    with the compiled file given as extra variables. Without `--remote`, the
    steps come from the compiled files alone and `box_checked` is `false`.
 
+`--remote` and `--no-remote` are not opposites. Each one switches its own thing, so a plan
+reads the box in one of three ways:
+
+| You pass | Receipt read (RUNNING) | Check-mode deploy on the box |
+|---|---|---|
+| `--no-remote` | no: Bay asks no box | no |
+| nothing (the default) | yes, over SSH | no |
+| `--remote` | yes, over SSH | yes: `box_checked: true`, `box_prediction` filled |
+
+(Both flags together run the box check and skip the receipt.)
+
 **What a plain `bay plan` cannot see.** It compiles and compares files, and it reads a secret by
 name only (never a value). So it sees a change of `bay.toml` at the commit, and it sees that a secret
 name is missing. It does not see a changed secret value in the vault, nor any change of an env
@@ -527,7 +538,12 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    renders the webhook rebuild script under that tag, so a later webhook build
    uses the deployed config, not the config from before this `up`. The tag does
    not clone or build anything, and it pulls nothing through Ansible (see
-   [The first image](#the-first-image)). When the plan has a `route` step, Bay
+   [The first image](#the-first-image)). The rig roles that carry the same tag run too: Traefik,
+   the access gateway, Watchtower, and Zot and the identity sidecar where they are on. The rest of
+   the rig (for example the cron jobs, the container monitor, backups, the CrowdSec allowlist, the
+   webhook receiver image, its list of build containers and the build triggers) comes only from a
+   full `bay deploy`, so a new box needs one (see
+   [layout-scenarios.md](layout-scenarios.md#11-adding-a-box)). When the plan has a `route` step, Bay
    runs `--tags deploy_stack,headscale,traefik`: Headscale renders the
    split-DNS records and Traefik the route file. The `headscale` tag runs every task of the
    Headscale role, the ACL render included (when `headscale_acl_policy` is defined). So this
@@ -564,7 +580,8 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
   script on the box. A full `bay deploy <env>` with no `--tags` also clones and builds it
   (`git_deploy`). There is no `bay build` verb that builds: `bay build` has `status` and
   `reset` only. Until an image exists, the container cannot be created: the receipt has a
-  failed action and `bay show` says `HALF`. `bay plan` does not check for it.
+  failed action and `bay show` says `HALF` (the last `bay up` failed, see the status table of
+  [bay show](#bay-show)). `bay plan` does not check for it.
   **So the first `bay up` of such an app fails, and that is the documented path.** It exits 1 with
   `deploy failed: Command failed with exit code N. the fleet pins <commit12>; bay show says HALF until
   a deploy succeeds.` The JSON result has `"result": "failed"` and an `error` text. The lock keeps the
@@ -708,6 +725,15 @@ depends on where the `bay.toml` lives:
 - A project in the fleet: it keeps its pin (a fleet commit, not a repo commit). Only the
   code moves.
 
+**How far back `--to` reaches.** Only to a commit whose tag is still on the box. Bay keeps no count
+of commit tags on a box. What removes them is the cron job `docker system prune -af --volumes`
+that the `cronjobs` role installs (with a full `bay deploy`): it deletes every image that no
+container uses, with all of its tags. It runs weekly by default (`docker_prune_schedule`, Sunday
+03:00 on the box clock) and daily on the build server (`docker_prune_build_server_schedule`). Set
+those, or `docker_prune_enabled: false`, in the fleet's group_vars. So after a prune, the box holds
+the commit tags of the images its containers use and the tags made since. A config-only push tags
+the running image, so its tag stays as long as that image runs.
+
 #### Undo a bad push in branch mode
 
 In `branch` mode a push to the deploy branch can put bad code on the box after your last
@@ -722,11 +748,28 @@ bay rollback production --project shop --to <last good commit>
 
 The image `<image>:<last good commit>` must be on the box. The environment is then frozen:
 later pushes build but do not deploy. Push the fix, then run `bay up` to that commit, which
-clears the freeze. The other way is `git revert` and a push, which deploys by itself while the
-environment is not frozen. A push whose health check fails on the box is rolled back on the
+clears the freeze.
+
+`--to` moves more than the code. For a project whose `bay.toml` lives in the app repo it also
+moves the pin to `<last good commit>`, so the config goes back to the `bay.toml` of that commit.
+A `bay.toml` change that you pinned after that commit is undone too. The rollback plan lists those
+changes as steps, so read them. To keep the newer config, do not use `--to`: commit a
+`git revert` of the bad code change and push it. In `branch` mode, while the environment is not
+frozen, that push deploys the reverted code by itself under the pinned config, and every later
+`bay.toml` change stays. A push whose health check fails on the box is rolled back on the
 box by itself (see [build-pipeline.md](build-pipeline.md)).
 
 #### Rollback in pin mode
+
+The happy path names one verb:
+
+1. Straight after a bad `bay up`: `bay rollback <env> --project <p>`. It goes back to the previous
+   pin and to the image of the previous receipt.
+2. For an older commit, or after any later deploy of the box env: `bay rollback <env> --project <p>
+   --to <commit>`. The image `<image>:<commit12>` must be on the box (see "How far back `--to`
+   reaches" above).
+3. To go forward: push the fix, wait until its build has tagged the image (in `pin` mode the
+   build ends with the alert `build.held`), then `bay up`.
 
 With `track = "pin"` every push already holds, so the freeze adds nothing you can see.
 Plain `bay rollback` moves the pin back and points the code at the image of the previous
@@ -1237,7 +1280,14 @@ and the next write stores version 2.
 - The top-level `commit` is the project pin that the fleet compiles. One
   `bay.toml` serves all environments of a project, so `bay up staging` also
   moves the compiled production entries. Production then shows `drift` until
-  `bay up production` runs.
+  `bay up production` runs. `envs.<env>.commit` only records what that env got
+  at its last `bay up`; the compile reads only the top-level `commit`.
+- So every branch you run `bay up` from must hold every `[deploy.<env>]` table.
+  The compiler emits only the envs of the `bay.toml` at the pin. When `bay up
+  production` pins a commit of `main` that has no `[deploy.staging]`, the
+  compiled file loses the staging containers: the plan shows a `remove` step for
+  each (destructive, so `approve`), and the next deploy of the staging box env
+  removes them. Merge the `[deploy.<env>]` tables into every deploy branch.
 - `result` is `pending` while a deploy runs, then `ok` or `failed`.
 - `previous` is one level of history: enough for `bay rollback`.
 - `adopted.from_fleet_commit` is written by `bay adopt`: the fleet commit the
