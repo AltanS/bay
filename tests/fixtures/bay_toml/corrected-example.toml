@@ -75,7 +75,7 @@ volume = "cache"
 backup = false
 [[mounts]]
 path = "/etc/app/config.yaml"
-from = "deploy/config.yaml"    # file or directory from this repo, read-only; a change recreates the container
+from = "deploy/config.yaml"    # file or directory beside this bay.toml, read-only; a change recreates the container
 mode = "0644"                  # default 0600
 
 [backup]                       # managed mounts with backup = true (databases follow the fleet policy)
