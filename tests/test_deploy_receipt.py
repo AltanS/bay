@@ -255,6 +255,101 @@ def test_receipt_main_reads_the_report_from_stdin(tmp_path: Path, monkeypatch) -
     assert stored["fleet_commit"] == "a" * 40 and stored["result"] == "ok"
 
 
+_ROUTE_FILE = """\
+---
+http:
+  routers:
+    notes-tailnet:
+      rule: "Host(`notes.ts.example.com`) || Host(`memo.ts.example.com`)"
+      entryPoints:
+        - websecure_tailnet
+      service: notes-tailnet
+      middlewares:
+        - tailnet-identity@file
+  services:
+    notes-tailnet:
+      loadBalancer:
+        passHostHeader: false
+        servers:
+          - url: "http://laptop.acme.tailnet.internal:8080"
+"""
+
+
+def test_receipt_records_routes(tmp_path: Path, monkeypatch) -> None:
+    """M118/05: the receipt lists the routes of the rendered route file."""
+    from bay_reconcile import routes as box_routes
+
+    stack = tmp_path / "stack"
+    (stack / "dynamic").mkdir(parents=True)
+    (stack / box_routes.ROUTE_FILE).write_text(_ROUTE_FILE)
+    want = box_routes.rendered_routes(stack)
+    assert [r["name"] for r in want] == ["notes"]
+    assert want[0]["domains"] == ["notes.ts.example.com", "memo.ts.example.com"]
+
+    meta = {**_META, "stack_dir": str(stack)}
+    written = box_receipt.build_receipt(meta=meta, bundle=_BUNDLE, report=_REPORT)
+    assert written["routes"] == want
+    jsonschema.validate(written, _RECEIPT_SCHEMA)
+    # A box with no route file lists no routes; a meta with no stack_dir
+    # (an older role) writes no routes key at all.
+    bare = {**_META, "stack_dir": str(tmp_path / "other")}
+    assert box_receipt.build_receipt(meta=bare, bundle=_BUNDLE, report=_REPORT)["routes"] == []
+    assert "routes" not in box_receipt.build_receipt(meta=_META, bundle=_BUNDLE, report=_REPORT)
+
+    # A webhook stamp keeps the routes.
+    stamped = box_receipt.stamp_receipt(written, name="web", commit="ab" * 20, image="x:1")
+    assert stamped is not None and stamped["routes"] == want
+
+    # main() writes them too, from the meta the role passes.
+    bundle = tmp_path / "bundle.json"
+    bundle.write_text(json.dumps(_BUNDLE))
+    monkeypatch.setattr("sys.stdin", io.StringIO(json.dumps(_REPORT)))
+    out = tmp_path / "r"
+    argv = ["--meta", json.dumps(meta), "--bundle", str(bundle), "--dir", str(out)]
+    assert box_receipt.main(argv) == 0
+    assert json.loads((out / "production.json").read_text())["routes"] == want
+
+    # The role passes stack_dir in the meta.
+    write = _task("Write the deploy receipt")["block"][1]["ansible.builtin.command"]["argv"]
+    meta_expr = write[write.index("--meta") + 1]
+    assert "'stack_dir': stack_dir" in meta_expr
+
+
+def test_status_human_prints_the_route_count(tmp_path: Path, monkeypatch) -> None:
+    """M118/05: bay status --env prints one line per box, with the route count."""
+    from bay_cli.commands.framework import receipt_line
+
+    cx = _fleet(tmp_path)
+    box_dir = tmp_path / "box"
+    receipt = box_receipt.build_receipt(meta=_META, bundle=_BUNDLE, report=_REPORT)
+    receipt["routes"] = [{"name": "a"}, {"name": "b"}]
+    box_receipt.write_receipt(receipt, box_receipt.receipt_path("production", box_dir))
+    calls: list = []
+    monkeypatch.setattr(receipts, "_default_runner", _fake_ssh(box_dir, calls=calls))
+
+    plain = CliRunner().invoke(app, ["--fleet", str(cx.fleet_root), "status"])
+    assert plain.exit_code == 0, plain.output
+    assert calls == [], "plain bay status reads no box"
+    one = CliRunner().invoke(app, ["--fleet", str(cx.fleet_root), "status", "--env", "production"])
+    assert one.exit_code == 0, one.output
+    assert len(calls) == 1
+    assert "app-1: ok," in one.output and "3 containers, 2 routes" in one.output
+    off = CliRunner().invoke(
+        app, ["--fleet", str(cx.fleet_root), "status", "--env", "production", "--no-remote"]
+    )
+    assert off.exit_code == 0 and len(calls) == 1
+
+    # No routes key, or an empty list: no route count.
+    del receipt["routes"]
+    line = receipt_line({"box": "app-1", "receipt": receipt, "error": None})
+    assert "route" not in line
+    receipt["routes"] = []
+    assert "route" not in receipt_line({"box": "app-1", "receipt": receipt, "error": None})
+    assert receipt_line({"box": "app-2", "receipt": None, "error": "unreachable: x"}) == (
+        "app-2: unreachable: x"
+    )
+
+
 def test_reconciler_report_carries_post_pass_state() -> None:
     class Fake:
         def __init__(self) -> None:

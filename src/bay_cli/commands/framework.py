@@ -23,10 +23,16 @@ def status(
         ),
     ),
     env: Optional[str] = typer.Option(
-        None, "--env", "-e", help="With --json: read the receipts of this environment only."
+        None,
+        "--env",
+        "-e",
+        help=(
+            "With --json: read the receipts of this environment only. Without "
+            "--json: also print the receipt of each box of this environment."
+        ),
     ),
     no_remote: bool = typer.Option(
-        False, "--no-remote", help="With --json: do not contact any box (boxes is empty)."
+        False, "--no-remote", help="Do not contact any box (with --json, boxes is empty)."
     ),
 ) -> None:
     """Show the installed Bay version, the fleet it works on, and the feature flags.
@@ -43,6 +49,7 @@ def status(
         bay status --json
         bay status --json --env production
         bay status --json --no-remote
+        bay status --env production
     """
     cx = context_from(ctx)
 
@@ -71,7 +78,42 @@ def status(
     # Feature summary
     _show_feature_summary(cx.fleet_root)
 
+    if env and not no_remote:
+        from bay_cli.receipts import fetch_receipts
+
+        _show_receipts(env, fetch_receipts(cx, env))
+
     console.console.print()
+
+
+def receipt_line(entry: dict) -> str:
+    """One plain line for a box of ``bay status --env``: what its receipt says.
+
+    The route count shows only for a receipt that lists routes (the ingress
+    box). A receipt written before 2.3 has no ``routes`` key.
+    """
+    box = entry.get("box") or "?"
+    if entry.get("error"):
+        return f"{box}: {entry['error']}"
+    receipt = entry.get("receipt")
+    if not isinstance(receipt, dict):
+        return f"{box}: no receipt"
+    containers = receipt.get("containers") or []
+    parts = [
+        str(receipt.get("result") or "unknown"),
+        str(receipt.get("deployed_at") or "?"),
+        f"{len(containers)} container{'' if len(containers) == 1 else 's'}",
+    ]
+    routes = receipt.get("routes")
+    if isinstance(routes, list) and routes:
+        parts.append(f"{len(routes)} route{'' if len(routes) == 1 else 's'}")
+    return f"{box}: " + ", ".join(parts)
+
+
+def _show_receipts(env: str, entries: list[dict]) -> None:
+    console.header(f"Receipts ({env})")
+    for entry in entries:
+        console.console.print(f"  {receipt_line(entry)}", markup=False, highlight=False)
 
 
 # ── Feature summary for status command ────────────────────────────────

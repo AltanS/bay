@@ -12,7 +12,10 @@ Inputs:
   reconciler's exit code. No secret is in it. ``code_moves`` (optional): the
   moves ``bay_reconcile.codepin`` reported before the pass; each becomes a row
   of the receipt's ``code_moves`` (``name``, ``status``, ``detail``), so the
-  CLI can say which code move was skipped and why.
+  CLI can say which code move was skipped and why. ``stack_dir`` (optional):
+  the stack directory of the box. When set, the receipt's ``routes`` lists
+  the tailnet routes the box serves, read from the route file the traefik
+  role rendered there (:func:`bay_reconcile.routes.rendered_routes`).
 * ``--bundle``: the reconcile bundle. It holds resolved env (secrets), so only
   ``name``, ``image`` and ``config_hash`` are ever read out of it.
 * stdin: the reconciler's JSON report, or nothing when it crashed. Its
@@ -39,6 +42,7 @@ from pathlib import Path
 from typing import Any
 
 from .images import is_commit, short
+from .routes import rendered_routes
 
 RECEIPT_VERSION = 1
 RECEIPTS_DIR = Path("/var/lib/bay/receipts")
@@ -101,7 +105,11 @@ def build_receipt(
     report: Mapping[str, Any] | None,
     deployed_at: str | None = None,
 ) -> dict[str, Any]:
-    """Assemble a version-1 receipt. Pure: no I/O, no clock unless defaulted.
+    """Assemble a version-1 receipt. No I/O but one read, no clock unless defaulted.
+
+    The one read: with ``stack_dir`` in ``meta``, ``routes`` lists the routes
+    in ``<stack_dir>/dynamic/tailnet-proxies.yml`` (``[]`` when the box has no
+    route file). Without ``stack_dir`` the receipt has no ``routes`` key.
 
     ``result`` is ``ok`` only when the reconciler exited 0 AND its report says
     ``ok``. A crash (no report) or a failed action is ``failed``.
@@ -185,6 +193,9 @@ def build_receipt(
     moves = _code_moves(meta.get("code_moves"))
     if moves is not None:
         out["code_moves"] = moves
+    stack_dir = meta.get("stack_dir")
+    if isinstance(stack_dir, str) and stack_dir:
+        out["routes"] = rendered_routes(Path(stack_dir))
     return out
 
 

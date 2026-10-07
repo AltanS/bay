@@ -115,6 +115,23 @@
               "detail": {"type": "string"}
             }
           }
+        },
+        "routes": {
+          "description": "The tailnet routes the box serves, read from its rendered route file (dynamic/tailnet-proxies.yml in the stack directory). Empty on a box with no route file. Absent in receipts written before 2.3.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "domains", "upstream", "pass_host_header", "identity_inject", "entrypoint"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string"},
+              "domains": {"type": "array", "items": {"type": "string"}},
+              "upstream": {"type": ["string", "null"]},
+              "pass_host_header": {"type": "boolean"},
+              "identity_inject": {"type": "boolean"},
+              "entrypoint": {"type": ["string", "null"]}
+            }
+          }
         }
       }
     }

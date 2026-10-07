@@ -5,11 +5,8 @@ The traefik role renders ``<stack_dir>/dynamic/tailnet-proxies.yml`` from
 :func:`rendered_routes` reads that file back so the deploy receipt can list the
 routes the box really serves (RUNNING), next to the fleet table (WANTED) and
 the compiled ``tailnet_proxies`` (PINNED). ``bay show --routes`` compares the
-three.
-
-Not wired yet: :mod:`bay_reconcile.receipt` will add
-``"routes": rendered_routes(<file>)`` to the receipt. Until then the receipt
-has no ``routes`` key and ``bay show --routes`` reports RUNNING as unknown.
+three. :mod:`bay_reconcile.receipt` writes the list as the receipt's
+``routes`` when the receipt meta has ``stack_dir``.
 
 Stdlib only, like the rest of the package: it runs on the box, which has no
 YAML library. The parser reads only the fixed shape the template writes; a
