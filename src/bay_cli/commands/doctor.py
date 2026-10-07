@@ -48,6 +48,14 @@ def doctor(
         console.error("Vault password     .vault_pass missing — create it with: echo 'your-password' > .vault_pass")
         issues += 1
 
+    # ── v1 leftovers ─────────────────────────────────────────────────
+    leftovers = v1_leftovers(root)
+    if leftovers:
+        console.warning(
+            f"v1 leftovers       {', '.join(leftovers)} in the fleet; Bay 2 does not use them. "
+            "Remove them, and drop a shell alias bay='bin/bay'"
+        )
+
     # ── Inventory ────────────────────────────────────────────────────
     inventory_file = cx.inventory(env)
     hosts = _parse_inventory(inventory_file)
@@ -175,6 +183,15 @@ def doctor(
 #: Fallback when group_vars/all/main.yml does not set admin_user. Matches the
 #: value the wizard scaffolds (wizard/templates/main.yml.j2).
 DEFAULT_ADMIN_USER = "bay-admin"
+
+
+#: What a Bay 1 fleet held to run its own copy of Bay. Bay 2 installs the CLI once per machine.
+V1_LEFTOVERS = ("bin", ".bay", ".bay-version")
+
+
+def v1_leftovers(root: Path) -> list[str]:
+    """The Bay 1 leftovers present in the fleet at ``root``."""
+    return [name for name in V1_LEFTOVERS if (root / name).exists()]
 
 
 def _inventory_ansible_user(inventory_file: Path | None, host: str) -> str | None:
