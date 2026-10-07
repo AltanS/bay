@@ -101,7 +101,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 - **CrowdSec bouncer binding** -- systemd drop-in auto-restarts the nftables bouncer when the CrowdSec agent restarts, preventing stale/empty blocklist sets after OOM recovery
 - **Container memory limits** -- optional `mem_limit` per service/accessory prevents runaway containers from OOM-killing the host. Optional `memswap_limit` set equal to `mem_limit` gives one container no swap, so its memory pages never reach disk
 - **Deploy lock** -- file-based mutex prevents concurrent deploys; stale locks (>1 hour) are automatically ignored
-- **Deploy privilege separation** -- root bootstrap creates directories, then all deployment runs as unprivileged `app` user with Docker group membership
+- **Deploy privilege separation** -- root bootstrap creates directories, then all deployment runs as the unprivileged app account (`app_user`, `bay` in the example fleet) with Docker group membership
 
 ## Developer Experience
 

@@ -108,13 +108,15 @@ Manual VPN with static peer configuration. You manage peer keys and IPs yourself
 - `group_vars/all/access_gateway.yml` — `access_gateway: wireguard`
 - `group_vars/all/vpn_access.yml` — your peer IPs in `vpn_allowed_ips`
 
-### None (No Gateway, the default)
+### None (No Gateway)
 
 All services are publicly accessible. No VPN.
 
-**When to choose**: All your services are public, or you'll add VPN later. This is the default because it is the shortest path to a working first deploy.
+**When to choose**: All your services are public, or you'll add VPN later. It is the shortest path to a working first deploy. Set `access_gateway: none` in `group_vars/all/access_gateway.yml` to choose it.
 
-**Note**: Services with `access: vpn` in `services.yml` will still be tagged for VPN access, but without a gateway they'll be unreachable. Use `access: public` for all services, or add a gateway later by setting `access_gateway` in `group_vars/all/access_gateway.yml`.
+**The default is not `none`.** A fleet that does not set `access_gateway` gets `wireguard`, the default in `roles/access_gateway/defaults/main.yml`.
+
+**Note**: With `none`, the deploy stops with an error if a service sets `access: vpn`. Use `access: public` for all services, or add a gateway later by setting `access_gateway` in `group_vars/all/access_gateway.yml`.
 
 ## Service Catalog
 
@@ -180,6 +182,9 @@ docker_users:
   - "{{ app_user }}"
 ```
 
+`app_user` is the app account. The deploy runs as this account and it owns the stack directory.
+No role sets a default, so the fleet must set it. The example fleet uses `bay`.
+
 ### `group_vars/all/services.yml`
 
 Do not write this file. `bay compile` writes it from `bay.fleet.toml` and the `bay.toml` of each
@@ -197,6 +202,10 @@ access_gateway: headscale
 # Required for headscale:
 headscale_domain: hs.example.com  # CHANGE: your headscale domain
 ```
+
+Ansible reads every file in `group_vars/all/`, so the deploy would also find these keys in
+`main.yml`. Keep them in `access_gateway.yml` anyway. `bay gateway`, `bay region` and `bay doctor`
+read the gateway settings from this file by name.
 
 ### `group_vars/production/domains.yml`
 

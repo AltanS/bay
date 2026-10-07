@@ -1,5 +1,20 @@
 # Multi-Region Deployments
 
+Status: historical (Bay v1 consumer model; see docs/bay-toml.md and docs/layout-scenarios.md for the current model)
+
+This page began as a v1 guide. The parts below about the inventory, `group_vars`, secrets,
+WireGuard peers, backups and Headscale still hold. The app parts changed in v2:
+
+- `bay compile` writes `group_vars/all/services.yml`. Do not edit it, and do not use
+  `bay service add` or `bay service edit` on it. The next `bay compile` refuses a file
+  edited by hand.
+- An app picks its box and its domain per deploy env, in `[deploy.<env>]` of its `bay.toml`
+  (`box`, `domain`). `bay.toml` takes no templating, so `{{ domain_base }}` does not work
+  there. See [bay-toml.md](bay-toml.md).
+- A box and its group live in `bay.fleet.toml` (`[boxes.<name>]` with `env` and `group`).
+  Scenario 4 of [layout-scenarios.md](layout-scenarios.md#4-two-environments-two-boxes) puts
+  an app on two boxes. Scenario 11 adds a box.
+
 Bay supports deploying the same stack to multiple regional servers from a single fleet -- with zero framework changes. The CLI passes the `env` argument to Ansible as a host pattern (`-e target_host=<env>`), Ansible resolves groups and merges `group_vars/` by specificity, and Jinja2 lazy evaluation handles per-region configuration. Everything described here is standard Ansible behavior; Bay simply stays out of the way.
 
 ## Single-Server Setup
@@ -11,7 +26,7 @@ rm hosts/production-multi-region
 rm -r group_vars/eu group_vars/na
 ```
 
-Use `hosts/production` with a single host entry and hardcode domains directly in `services.yml`. You can add multi-region support later by following this guide — no framework changes are needed.
+Use `hosts/production` with a single host entry, and set each app's domain in `[deploy.<env>] domain` of its `bay.toml`. You can add a region later by following this guide. No framework changes are needed.
 
 ## Inventory Structure
 
@@ -35,8 +50,8 @@ The CLI argument is just an Ansible host pattern passed as `target_host`:
 
 | Command | What it targets |
 |---------|-----------------|
-| `bay deploy eu` | Only `eu-server` |
-| `bay deploy na` | Only `na-server` |
+| `bay deploy production -- --limit eu` | Only `eu-server` |
+| `bay deploy production -- --limit na` | Only `na-server` |
 | `bay deploy production` | Both `eu-server` and `na-server` |
 
 This works because the framework playbooks use `hosts: "{{ target_host }}"` -- whatever you pass as the environment argument becomes the Ansible host pattern. There is nothing region-specific in the framework.
@@ -59,7 +74,7 @@ The most specific value wins. This means you put shared configuration in `all/` 
 group_vars/
 ├── all/
 │   ├── main.yml          # Shared config (stack_name, app_user, docker_users, etc.)
-│   ├── services.yml      # Service definitions (with parameterized domains)
+│   ├── services.yml      # Written by `bay compile`. Do not edit.
 │   └── security.yml      # Firewall rules, CrowdSec config
 ├── production/
 │   ├── main.yml          # Production-wide overrides
@@ -90,43 +105,22 @@ domain_base: na.example.com
 letsencrypt_email: admin@na.example.com
 ```
 
-Everything else -- `stack_name`, `app_user`, `docker_users`, service definitions, security settings -- is inherited from `all/` and `production/` without repetition.
+Everything else -- `stack_name`, `app_user`, `docker_users`, security settings -- is inherited from `all/` and `production/` without repetition. App definitions do not come from `group_vars`: they come from `bay.toml` through `bay compile`.
 
-## Domain Parameterization
+## Per-Region Domains
 
-In a single-region setup, domains in `services.yml` are typically hardcoded:
+Each app sets its domain per deploy env, in its `bay.toml`:
 
-```yaml
-# Before: hardcoded domains (single-region)
-services:
-  gatus:
-    access: vpn
-    image: twinproduction/gatus:latest
-    domains:
-      - gatus.example.com
-    ports:
-      internal: 8080
+```toml
+[deploy.production]
+box = "eu-1"
+domain = "shop.eu.example.com"
 ```
 
-For multi-region, replace hardcoded domains with a Jinja2 variable:
-
-```yaml
-# After: parameterized domains (multi-region)
-services:
-  gatus:
-    access: vpn
-    image: twinproduction/gatus:latest
-    domains:
-      - "gatus.{{ domain_base }}"
-    ports:
-      internal: 8080
-```
-
-With `domain_base` set to `eu.example.com` in the EU region and `na.example.com` in the NA region, the same `services.yml` produces different Traefik routing rules per server.
-
-**Why this works without framework changes:** Ansible lazily evaluates Jinja2 expressions in `group_vars` values. The `{{ domain_base }}` template is not resolved when the YAML file is parsed -- it is resolved later, after all group_vars have been merged, at the point where the variable is actually used. By that time, `domain_base` has been set by the region-specific `group_vars/<region>/main.yml`.
-
-See [services.md](services.md) for the full service schema reference.
+A deploy env runs on one box. The same app on a second box takes a second deploy env, as
+scenario 4 of [layout-scenarios.md](layout-scenarios.md#4-two-environments-two-boxes) shows.
+`bay compile` writes the result into `services.yml`. `domain_base` in `group_vars/<region>/`
+does not reach the compiled app domains.
 
 ## Per-Region Secrets
 
@@ -155,7 +149,7 @@ bay vault edit na
 bay vault edit production
 ```
 
-Ansible merges secrets the same way it merges any other group_vars -- region-specific values override production-wide values. A secret defined in both `production/secrets.yml` and `eu/secrets.yml` will use the EU value when deploying to the EU server.
+Ansible merges secrets the same way it merges any other group_vars, but it does not merge two `secrets:` mappings key by key. The most specific `secrets:` mapping replaces the whole mapping (Ansible's default `hash_behaviour`). So when `eu/secrets.yml` has a `secrets:` mapping, the EU server sees only that mapping. Repeat in it every secret the EU server needs. `bay secret missing production` reads only `group_vars/production/secrets.yml`.
 
 ## VPN Access Per Region
 
@@ -241,7 +235,7 @@ This is the safest approach for production changes. There is no special canary f
 ### Provision a new region
 
 ```bash
-bay provision eu
+bay provision production -- --limit eu
 ```
 
 Provisions and hardens only the EU server. Add a new region by adding its host to the inventory, creating the region `group_vars/`, and running provision + deploy.
@@ -343,7 +337,7 @@ Multi-region + headscale requires deploying regions in a specific order:
 
 ```bash
 # 1. Deploy control region first (starts Headscale server)
-bay deploy eu
+bay deploy production -- --limit eu
 
 # 2. Generate API key on control server
 bay gateway apikey
@@ -353,7 +347,7 @@ bay vault edit production
 # Add headscale_api_key inside the secrets dict
 
 # 4. Deploy remote region (registers via API)
-bay deploy na
+bay deploy production -- --limit na
 ```
 
 After both regions are deployed, verify connectivity:
@@ -411,17 +405,16 @@ Containers reach the tailnet via the host's network stack — no special Docker 
 
 ### Adding a cross-region link
 
-```bash
-# Add n8n in NA, linked to postgres in EU
-bay service add n8n --region na --link postgres:eu
-
-# Or add links to an existing service
-bay service edit n8n --link postgres:eu --link redis:eu
-```
+`links:` is a key of the compiled `services.yml` only. Neither `bay.toml` nor
+`bay.fleet.toml` has a key for it, so `bay compile` never writes one. In a fleet that
+`bay compile` writes, a cross-region link cannot be declared today. The rest of this
+section describes the compiled form, for fleets that still keep a hand-written
+`services.yml`. Do not use `bay service add` or `bay service edit` in a compiled fleet.
 
 The link target must declare host exposure on its own stanza, otherwise it will not be reachable from the tailnet:
 
 ```yaml
+# services.yml (compiled form)
 # Accessory link target — top-level expose:
 accessories:
   postgres:
@@ -462,15 +455,8 @@ Configure your application to use these variables for cross-region connections.
 
 ### Removing links
 
-```bash
-# Remove a specific link
-bay service edit n8n --unlink postgres
-
-# Deploy to apply changes
-bay deploy production
-```
-
-After removing a link, redeploy. If the link target served only that one consumer, you should also remove `expose: tailnet` from the target so the host bind goes away.
+Delete the `links:` entry from the consumer in the hand-written `services.yml`, then run
+`bay deploy production`. After removing a link, redeploy. If the link target served only that one consumer, you should also remove `expose: tailnet` from the target so the host bind goes away.
 
 > **Migration note (framework v0.86.0+):** Previously the framework auto-rewrote a link target's port binding from `127.0.0.1:` to `0.0.0.0:`. A later change severed that rewrite to make exposure declarative; this fix closed the resulting gap by adding `ports.expose:` for services and fixing cross-region port resolution. If you have an accessory or service that's a cross-region link target, declare `expose: tailnet` (or `ports.expose: tailnet` for services) explicitly. Without an explicit `expose:`, the target has no host-port binding on its
 > region's host, so the link resolves a port that nothing is listening on.
@@ -482,13 +468,13 @@ See [services.md](services.md#cross-region-links) for the full `links:` schema r
 | Scenario | Approach |
 |----------|----------|
 | Same stack in EU and NA | Multi-region (single fleet) |
-| Same stack with minor per-region config differences | Multi-region with group_vars overrides |
+| Same stack with minor per-region config differences | Multi-region: per-env `[deploy.<env>]` tables in `bay.toml`, `group_vars` overrides for the rest |
 | Completely different projects that happen to use Bay | Separate fleets |
 | Different stacks with different services | Separate fleets |
 | Staging and production of the same project | Multi-region (staging as a "region" group) |
 
-**Use multi-region** when the service definitions are fundamentally the same and only configuration (domains, secrets, VPN peers) differs per location. The `services.yml` is shared, and per-region `group_vars/` handle the differences.
+**Use multi-region** when the apps are fundamentally the same and only configuration (domains, secrets, VPN peers) differs per location. Each app's `bay.toml` sets the box and domain per deploy env, and per-region `group_vars/` handle the rest.
 
 **Use separate fleets** when the projects have different services, different infrastructure requirements, or are managed by different teams. Each fleet gets its own inventory and its own `group_vars/` -- they are completely independent.
 
-The dividing line: if two deployments share the same `services.yml` (possibly with parameterized values), they belong in the same fleet as a multi-region setup. If they need fundamentally different `services.yml` definitions, they should be separate fleets.
+The dividing line: if two deployments run the same apps from one `bay.fleet.toml`, they belong in the same fleet as a multi-region setup. If they need fundamentally different apps, they should be separate fleets.

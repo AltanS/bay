@@ -211,8 +211,8 @@ The rig state file contains:
 
 The deploy playbook runs in three phases to minimize root usage:
 
-1. **Root bootstrap** — creates the stack directory under `/opt` (requires root), sets ownership to `app:docker`, and creates the ACME cert file (`root:root 0600`, required by Traefik)
-2. **App deploy** — everything else runs as the `app` user via `become_user`. The `app` user has `docker` group membership, so it can manage containers and images without root.
+1. **Root bootstrap** — creates the stack directory under `/opt` (requires root), sets ownership to `<app_user>:docker`, and creates the ACME cert file (`root:root 0600`, required by Traefik)
+2. **App deploy** — everything else runs as the app account via `become_user`. The fleet names that account in `app_user` (`bay` in `example/group_vars/all/main.yml`; no role sets a default). The app account has `docker` group membership, so it can manage containers and images without root.
 3. **System services** — monitoring and cron jobs (requires root for systemd/logrotate)
 
 This reduces blast radius if a container is compromised — the deploy pipeline never runs as root except for directory creation and system service setup.
@@ -376,7 +376,7 @@ watchtower_cleanup: true              # Remove old images after update (default:
 
 ## Multi-region deployments
 
-Bay supports deploying the same stack to multiple regional servers from a single fleet with zero framework changes. Define regions as Ansible inventory groups, override per-region configuration (domains, secrets, VPN peers) via `group_vars/<region>/`, and target individual regions or all at once with the standard CLI commands.
+Bay supports deploying the same stack to multiple regional servers from a single fleet with zero framework changes. Define regions as Ansible inventory groups, override per-region configuration (secrets, VPN peers) via `group_vars/<region>/`, set each app's box and domain per deploy env in its `bay.toml` (`[deploy.<env>]`), and target individual regions or all at once with the standard CLI commands.
 
 ```bash
 bay deploy production -- --limit eu   # Deploy to the EU region only
@@ -386,7 +386,7 @@ bay deploy production                 # Deploy to all regions
 
 `bay deploy eu` (the group name as the env) also runs, but the box then writes its receipt as `eu.json`, not `production.json`, and `bay status`, `bay plan` and `bay rollback` read only `production.json`. Keep the box env and add `-- --limit <group>`.
 
-See **[docs/multi-region.md](docs/multi-region.md)** for the full setup guide — inventory structure, group_vars layering, domain parameterization, per-region secrets, and operational workflows.
+See **[docs/multi-region.md](docs/multi-region.md)** for the full setup guide — inventory structure, group_vars layering, per-region domains, per-region secrets, and operational workflows.
 
 ## Build from source (GitHub deploy)
 
@@ -443,7 +443,7 @@ Auto-builds include a circuit breaker (stops after 5 consecutive failures by def
 
 ### Access gateways
 
-Bay supports two VPN gateway backends for services with `access: vpn`: **WireGuard** (manual peer configuration, static IPs) and **Headscale** (self-hosted Tailscale coordination server with automatic tunnel management and OIDC self-service enrollment). Set `access_gateway: wireguard` (default) or `access_gateway: headscale` in `group_vars` to select a backend. Both gateways feed into the same downstream pipeline (nftables, CrowdSec, Traefik IPAllowList), so service definitions work identically with either option.
+Bay supports two VPN gateway backends for services with `access: vpn`: **WireGuard** (manual peer configuration, static IPs) and **Headscale** (self-hosted Tailscale coordination server with automatic tunnel management and OIDC self-service enrollment). Set `access_gateway` in `group_vars/all/access_gateway.yml` to select a backend: `wireguard`, `headscale` or `none` (no gateway, every service public). If the fleet does not set it, the deploy uses `wireguard`, the default in `roles/access_gateway/defaults/main.yml`. Both gateways feed into the same downstream pipeline (nftables, CrowdSec, Traefik IPAllowList), so service definitions work identically with either option.
 
 VPN services are seamlessly accessible via their public domain when the client is on the tailnet. Headscale's MagicDNS split-DNS automatically resolves VPN service domains to the server's tailnet IP for enrolled clients, so requests travel through the tunnel and pass the IPAllowList — no `/etc/hosts` hacks or tailnet IP bookmarks needed. Non-tailnet clients still get blocked with 403.
 
@@ -451,7 +451,7 @@ See **[docs/access-gateways.md](docs/access-gateways.md)** for traffic flow diag
 
 ### Headscale quick start
 
-1. **Configure** — set `access_gateway: headscale` and `headscale_domain` in `group_vars/all/main.yml`
+1. **Configure** — set `access_gateway: headscale` and `headscale_domain` in `group_vars/all/access_gateway.yml`
 2. **DNS** — point `hs.example.com` (A record) to your server IP
 3. **Provision + deploy** — `bay provision production && bay deploy production`
 4. **Create user + pre-auth key** — `bay gateway add-user alice && bay gateway key alice`

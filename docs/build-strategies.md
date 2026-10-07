@@ -103,7 +103,7 @@ GitHub Push
 |                            |         |
 |                  git fetch + buildx   |
 |                            |         |
-|                  push :sha + :latest  |
+|     push :sha (+ :latest unless held) |
 |                            |         |     +------------+
 |                  push to registry ---------> Zot (OCI)  |
 |                            |         |     +------------+
@@ -143,8 +143,10 @@ GitHub Push
 +-------------+   +-------------+
 ```
 
-- `docker buildx build --push` exports both `:sha` and `:latest` to the
-  registry in one pass. The image is **not** loaded into the build server's
+- `docker buildx build --push` exports `:sha` and, unless the push is held,
+  the moving tag of `image` (usually `:latest`) to the registry in one pass.
+  A held push exports `:sha` only and sends no pull signal (see
+  [build-pipeline.md](build-pipeline.md), "Track, hold and freeze"). The image is **not** loaded into the build server's
   local Docker daemon, so do not expect `docker images` there to show it.
 - Image built once on build server, shared across regions
 - One pull signal per unique image per region (not per service)
@@ -276,7 +278,7 @@ External CI/CD (GitHub Actions, etc.)
 
 - No build infrastructure deployed on servers
 - No webhook auto-deploy (server has nothing to trigger)
-- For auto-updates without redeploying, set `update: auto` in `services.yml` to enable Watchtower polling
+- For auto-updates without redeploying, set `update = "auto"` in the app's `bay.toml` to enable Watchtower polling
 - The `build:` block is required (with `strategy: registry`) so the framework knows this service has a build pipeline, even though it's external
 
 ---
@@ -474,11 +476,15 @@ the same information.
 
 In addition to the build strategies above, Bay supports **Watchtower** for image update detection:
 
-- `update: auto` -- Watchtower pulls new images and restarts containers automatically (polling-based)
-- `update: monitor` (default) -- Watchtower detects new images and sends Telegram alerts, but does not auto-update
-- `update: false` -- Watchtower ignores the container
+Set `update` in the app's `bay.toml` (see [bay-toml.md](bay-toml.md)):
 
-Watchtower is complementary to webhook auto-deploy. For `registry` strategy services without webhook infrastructure, `update: auto` provides automated updates with a polling delay.
+- `update = "notify"` (default): Watchtower detects new images and sends Telegram alerts, but does not auto-update. Compiled form: no `update` key, which the deploy reads as `monitor`.
+- `update = "auto"`: Watchtower pulls new images and restarts containers automatically (polling-based). Compiled form: `update: auto`.
+- `update = "off"`: Watchtower ignores the container. Compiled form: `update: false`.
+
+`bay compile` writes the compiled form into `services.yml`. Do not write it by hand.
+
+Watchtower is complementary to webhook auto-deploy. For `registry` strategy services without webhook infrastructure, `update = "auto"` provides automated updates with a polling delay.
 
 ---
 
@@ -500,7 +506,7 @@ Both paths derive container specs from the same `services.yml` source, producing
 
 | Path | Purpose |
 |------|---------|
-| `/opt/<stack>/triggers/<svc>.trigger` | Trigger file (empty = build, "pull" = pull-only) |
+| `/opt/<stack>/triggers/<svc>.trigger` | Trigger file, format v2: line 1 correlation id, line 2 `pull` or empty (empty = build). See [build-pipeline.md](build-pipeline.md#trigger-file-format) |
 | `/opt/<stack>/bin/rebuild.sh` | Rendered build script (0700, owner-only) |
 | `/opt/<stack>/state/<svc>.json` | Circuit breaker state |
 | `/opt/<stack>/builds/shared/<slug>/repo/` | Cloned repos (local strategy) |
@@ -521,11 +527,14 @@ journalctl -u bay-build@<service>.service -n 50
 # Circuit breaker status (from your machine: bay --fleet <path> build status)
 cat /opt/<stack>/state/<service>.json
 
-# Manual build trigger
-touch /opt/<stack>/triggers/<service>.trigger
+# Manual build trigger (format v2: line 1 correlation id, line 2 empty)
+printf '%s\n' "operator-$(date +%s)" > /opt/<stack>/triggers/<service>.trigger
 
-# Manual pull trigger (pull-only services)
-echo pull > /opt/<stack>/triggers/<service>.trigger
+# Manual pull trigger (format v2: line 2 is "pull")
+printf '%s\n' "operator-$(date +%s)" pull > /opt/<stack>/triggers/<service>.trigger
+
+# The legacy one-line form (v1) still works: an empty file (touch) builds,
+# and a file with only "pull" (echo pull > ...) pulls. Logs then show [unknown].
 
 # Image map (which services use which images)
 cat /opt/<stack>/webhook/image-map.json
@@ -547,7 +556,7 @@ On failure, automatic rollback to `:previous` image tag. Three Telegram alert ty
 - Rollback image also unhealthy → both images failed
 - Rollback succeeded → service running on previous image
 
-**Configuration:** `git_deploy_health_check_timeout: 30` (seconds, override in the fleet's group_vars)
+**Configuration:** `git_deploy_health_check_timeout` sets the wait in seconds. The default is `90` (`roles/git_deploy/defaults/main.yml`). Override it in the fleet's group_vars.
 
 ### Build timeout (v0.75.0+)
 

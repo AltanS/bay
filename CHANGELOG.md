@@ -8,6 +8,17 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.1.8] - 2026-10-07
+
+Docs only. Reader round 8: ten places where two docs stated different facts.
+
+- Access gateway: when the fleet does not set `access_gateway`, the deploy uses `wireguard` (the role default), not `none`. `access_gateway` and `headscale_domain` go in `group_vars/all/access_gateway.yml`, the file `bay gateway`, `bay region` and `bay doctor` read.
+- App account: the docs name it by `app_user` (`bay` in the example fleet). No role sets a default, so the fleet must set it.
+- `git_deploy_health_check_timeout` defaults to 90 seconds in every doc. `bay.toml` has no per-service key for it.
+- build-strategies.md speaks in `bay.toml` values for `update` (`notify`, `auto`, `off`) and marks `monitor` and `false` as the compiled form.
+- Remote build: `:<commit12>` is always pushed, the moving tag (usually `:latest`) only when the push is not held. Trigger files: build-strategies.md describes format v2 and calls the one-line `pull` or empty file the legacy v1 form, which `rebuild.sh` still accepts.
+- multi-region.md is marked historical. It uses `bay deploy production -- --limit <group>` throughout, sets domains in `[deploy.<env>]` of `bay.toml`, drops `bay service add|edit`, and says a region `secrets:` mapping replaces the production one.
+
 ## [2.1.7] - 2026-10-07
 
 Docs only. Reader round 7: fourteen places where two docs stated different facts.

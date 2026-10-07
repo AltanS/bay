@@ -1,7 +1,9 @@
 # Multi-region inventory example
-# bay deploy eu       → targets EU server only
-# bay deploy na       → targets NA server only
-# bay deploy production → targets all regions
+# bay deploy production -- --limit eu → targets EU server only
+# bay deploy production -- --limit na → targets NA server only
+# bay deploy production               → targets all regions
+# (`bay deploy eu` also runs, but writes the receipt as eu.json, which
+#  bay status, bay plan and bay rollback do not read.)
 # See docs/multi-region.md for the full pattern.
 
 [eu]

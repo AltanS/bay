@@ -13,17 +13,26 @@ Trigger files live at `/opt/<stack>/triggers/<service>.trigger`. Their format
 defines the correlation contract between webhook, fan-out, and rebuild.sh
 (v0.82.6+):
 
-- **Webhook-written triggers (primary path):**
+- **Webhook-written triggers (primary path, format v2):**
   ```
-  <corr_id>      # line 1 — first 8 hex chars of the UUID for this push
-  <pull_signal>  # line 2 — "pull" or equivalent signal from the webhook
+  <corr_id>      # line 1: the UUID4 the receiver made for this push
+  <pull_signal>  # line 2: "pull", or empty for a build
+  <revision>     # line 3, optional, pull signals only: the commit the build server pushed
+  <built_at>     # line 4, optional, pull signals only: epoch second the build finished
   ```
-  Written atomically: `printf '%s\n' "$CORR_ID" "$SIGNAL" > tmpfile && mv -f tmpfile trigger`.
+  A GitHub push writes line 1 only, and `rebuild.sh` builds. An image-level
+  pull signal writes `pull` on line 2, and `rebuild.sh` pulls and restarts.
+  The receiver writes the file in one `write_text` call
+  (`roles/git_deploy/files/webhook/app.py`).
 
 - **Alias fan-out triggers (dedup path):** line 1 only (CORR_ID, no pull
   signal). Alias rebuilds retag from the primary's local image rather than
-  pulling from registry, so no pull signal is needed. Also written atomically
-  via temp+mv.
+  pulling from registry, so no pull signal is needed. `rebuild.sh` writes them
+  atomically through a temp file and `mv -f`.
+
+- **Legacy one-line form (v1):** a file whose only line is `pull` is still a
+  pull trigger, and an empty file is still a build trigger. `rebuild.sh`
+  accepts both and logs the correlation id as `unknown`.
 
 - **`[unknown]` in logs** — zero-byte trigger file (bare `touch`). Fixed in
   v0.82.6: all trigger writers now use `printf`+atomic-mv. If you see
@@ -311,7 +320,8 @@ ssh debugbot@203.0.113.12 "systemctl status bay-build@<svc>.path"
 `bay build` runs on your machine and reaches the box over SSH. Name the fleet with
 `--fleet <path>` or `BAY_FLEET`: `build` does not take it from the directory you stand
 in. The `ssh` lines below run one command on the box. `bay-admin` is the `admin_user`
-of the example fleet (`example/group_vars/all/main.yml`), and `debugbot` is the default
+of the example fleet (`example/group_vars/all/main.yml`), `bay` (in `sudo -u bay`) is its
+`app_user`, and `debugbot` is the default
 `debug_agent_user` (`roles/debug_agent`). Use the accounts of your own fleet.
 
 ```bash
@@ -327,12 +337,15 @@ ssh debugbot@<host> "touch /opt/<stack>/triggers/<svc>.trigger"
 
 **Health check failure causing rollback loop (per-service timeout override):**
 ```yaml
-# services.yml — increase rebuild.sh's wait window for slow-starting services
-# (default git_deploy_health_check_timeout: 90s)
+# services.yml (compiled form): increase rebuild.sh's wait window for slow-starting services
+# (default git_deploy_health_check_timeout: 90 seconds, roles/git_deploy/defaults/main.yml)
 services:
   myapp:
     health_check_timeout: 180  # seconds — use for JVM/DB-warmup heavy services
 ```
+`bay.toml` has no key for the per-service value, and `bay compile` writes
+`services.yml`. In such a fleet, raise `git_deploy_health_check_timeout` in the
+fleet's group_vars. That value applies to every service.
 The Docker container `healthcheck.start_period` and `rebuild.sh`'s
 `HEALTH_CHECK_TIMEOUT` are independent: Docker uses `start_period` to
 suppress early failures from its restart policy; rebuild.sh uses
@@ -397,7 +410,8 @@ rollback poll down can never make the probe stricter than baseline. See
   in `svc.regions`. Deployment servers receive the pull signal, skip the
   build, and pull+restart the container. Full pipeline: GitHub push →
   build server webhook → `docker buildx build --push` straight to the Zot
-  registry (both `:sha` and `:latest` in one call) →
+  registry (`:sha` always, plus the moving tag of `image`, usually `:latest`,
+  in the same call unless the push is held; a held push stops here) →
   `X-Bay-Pull-Signal` HTTP call to each region's webhook → deployment
   server writes `pull` trigger → `bay-build@.path` fires `rebuild.sh` →
   `docker pull` + `docker compose up -d` + health check. See "Webhook
