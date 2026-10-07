@@ -374,10 +374,12 @@ def _apply_plan(
         services = _write_services(cx, comp.result.text())
         compiled_commits = dict(comp.commits)
         left_out = list(comp.unpinned)
+        # Only a one-project plan carries code.keep (branch mode, newer code runs).
+        keep = set((plan.get("code") or {}).get("keep") or [])
         code_targets: dict[str, dict[str, Any]] = {}
         for proj, commit in members:
             built = _build_containers(comp.result.data(), proj, locks[proj.name], env, commit)
-            code_targets.update(_code_targets(proj, env, commit, built, code))
+            code_targets.update(_code_targets(proj, env, commit, built, code, keep=keep))
 
         # 4. commit
         paths = [p.lock_file for p, _ in members]
@@ -462,6 +464,12 @@ def _apply_plan(
     notes = [
         f"{name} has no pinned commit, so this deploy left it out and its lock is unchanged"
         for name in left_out
+    ]
+    notes += [
+        f"{name} runs code newer than {members[0][1][:12]}; bay up kept that code and "
+        "applied the config only"
+        for name in sorted(keep)
+        if name not in code_targets
     ]
     applied, stale_boxes = applied_from(entries, fleet_commit)
     notes += [
@@ -784,6 +792,8 @@ def _code_targets(
     commit: str,
     built: list[str],
     code: Mapping[str, Any] | None,
+    *,
+    keep: set[str] | frozenset[str] = frozenset(),
 ) -> dict[str, dict[str, Any]]:
     """``{container: {"commit"|"source", "strict"}}``: where ``:latest`` must point.
 
@@ -793,6 +803,8 @@ def _code_targets(
       image must be on the box, built by a push). Not strict in ``branch``
       mode: a missing image leaves ``:latest`` where the last push put it.
       This is how ``bay up`` releases a held build.
+    * ``keep`` (branch mode, from the plan's ``code.keep``): containers that
+      run code newer than the pin. They get no target: code moves only forward.
     * An in-fleet project: nothing. Its pin is a fleet commit, not a code
       commit, so ``:latest`` stays where the last push put it.
     """
@@ -806,7 +818,11 @@ def _code_targets(
         return {}
     doc = planmod.doc_at(proj, commit) or {}
     strict = bay_toml.track(doc, env) == "pin"
-    return {name: {"commit": commit, "strict": strict} for name in built}
+    return {
+        name: {"commit": commit, "strict": strict}
+        for name in built
+        if strict or name not in keep
+    }
 
 
 def rollback(
@@ -850,6 +866,8 @@ def rollback(
         box_check=opts.box_check,
         allow_unsupported=opts.allow_unsupported,
         cwd_repo=opts.cwd_repo,
+        # A rollback moves code backwards on purpose: no forward-only check.
+        code_order=False,
     )
     return up(proj, restored, action="rollback", code=code, **kwargs)
 

@@ -145,6 +145,15 @@
       }
     },
     "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+    "code": {
+      "description": "Branch mode only, and only when bay up keeps code: the build containers whose running commit is newer than the pin. bay up applies the config and leaves their :latest where it is. Absent otherwise.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["keep"],
+      "properties": {
+        "keep": { "type": "array", "items": { "type": "string" } }
+      }
+    },
     "unsupported": { "type": "array", "items": { "type": "string" } },
     "missing_secrets": {
       "type": "array",

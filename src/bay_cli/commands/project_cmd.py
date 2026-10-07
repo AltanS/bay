@@ -72,6 +72,16 @@ _AllowUnsupportedOpt = Annotated[
         help="Plan and apply even when bay.toml uses a feature Bay cannot deploy yet.",
     ),
 ]
+_ForceCodeOpt = Annotated[
+    bool,
+    typer.Option(
+        "--force-code",
+        help=(
+            'track = "branch": move the code to the pin even when Bay cannot tell '
+            "whether it is older than what runs (a destructive step)."
+        ),
+    ),
+]
 
 
 # ── resolution ──────────────────────────────────────────────────────────────
@@ -321,6 +331,7 @@ def plan(
     ] = False,
     no_remote: _NoRemoteOpt = False,
     allow_unsupported: _AllowUnsupportedOpt = False,
+    force_code: _ForceCodeOpt = False,
     data: _DataOpt = None,
     log: _LogOpt = None,
 ) -> None:
@@ -373,6 +384,7 @@ def plan(
                     allow_unsupported=allow_unsupported,
                     cwd_repo=cwd_repo,
                     data=data,
+                    force_code=force_code,
                 )
                 if plan_id:
                     result = planmod.recheck(proj, planmod.load_saved(proj.cx, plan_id), opts)
@@ -427,6 +439,7 @@ def _apply(
     push: bool,
     log: Path | None,
     data: str | None = None,
+    force_code: bool = False,
 ) -> None:
     from bay_cli import apply as applymod
     from bay_cli import plan as planmod
@@ -455,6 +468,7 @@ def _apply(
                     allow_unsupported=allow_unsupported,
                     cwd_repo=cwd_repo,
                     data=data,
+                    force_code=force_code,
                 )
                 if which == "rollback":
                     # For a rollback, `at` is --to: the code commit to roll back to.
@@ -530,6 +544,7 @@ def up(
     ] = False,
     reason: Annotated[str | None, typer.Option("--reason", help="Why --force.")] = None,
     allow_unsupported: _AllowUnsupportedOpt = False,
+    force_code: _ForceCodeOpt = False,
     data: _DataOpt = None,
     as_json: _JsonOpt = False,
     no_push: _NoPushOpt = False,
@@ -568,6 +583,7 @@ def up(
         not no_push,
         log,
         data,
+        force_code=force_code,
     )
 
 

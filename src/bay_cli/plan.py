@@ -56,7 +56,7 @@ import json
 import shutil
 import tempfile
 import tomllib
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import partial
 from dataclasses import dataclass, field
@@ -1258,6 +1258,73 @@ def running_commits(entries: list[dict[str, Any]], names: set[str]) -> dict[str,
     return out
 
 
+#: ``(pin, running) -> "same" | "newer" | "older" | "unknown"``: where the
+#: running commit stands against the pin. See :func:`code_order`.
+CodeOrder = Callable[[str, str], str]
+
+
+def code_order(repos: Sequence[Path], pin: str, running: str) -> str:
+    """Where ``running`` stands against ``pin``, read in ``repos`` in order.
+
+    ``repos`` is the checkout, then the fleet's repo cache (fetched before the
+    plan, so it knows what a push deployed after the checkout was pulled).
+
+    ``newer``: ``running`` descends from ``pin`` (a push deployed it after the
+    pin). ``older``: ``pin`` descends from ``running`` (a held build, or the
+    first deploy of new code). ``unknown``: no repo holds both commits, or the
+    two are on different branches.
+    """
+    if pin.lower().startswith(running.lower()) or running.lower().startswith(pin.lower()):
+        return "same"
+    for repo in repos:
+        forward = gitrepo.is_ancestor(repo, pin, running)
+        if forward:
+            return "newer"
+        back = gitrepo.is_ancestor(repo, running, pin)
+        if back:
+            return "older"
+        if forward is False and back is False:
+            return "unknown"  # both known, on different branches
+    return "unknown"
+
+
+def _code_orderer(proj: ProjectRef) -> CodeOrder:
+    """:func:`code_order` for ``proj``: the checkout first, then the repo cache.
+
+    A checkout may be stale: a push deployed a commit it never fetched. So
+    when the checkout cannot order the two, the fleet's repo cache is fetched
+    (once per plan) and asked.
+    """
+    cache: list[Path] | None = None
+
+    def order(pin: str, running: str) -> str:
+        nonlocal cache
+        where = code_order([proj.checkout], pin, running)
+        if where != "unknown" or proj.in_fleet or not proj.repo:
+            return where
+        if cache is None:
+            path, _ = reposource.ensure_cache(
+                proj.cx.fleet_root, proj.repo, fetch=proj.source != "cache"
+            )
+            same = path is not None and path.resolve() == proj.checkout.resolve()
+            cache = [path] if path is not None and not same else []
+        return code_order(cache, pin, running) if cache else where
+
+    return order
+
+
+@dataclass
+class CodeStatus:
+    """What :func:`code_status` found: plan steps, notes, blockers and kept containers."""
+
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    info: list[str] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    #: Branch mode: build containers whose running code is newer than the pin.
+    #: ``bay up`` applies the config and leaves their ``:latest`` alone.
+    keep: list[str] = field(default_factory=list)
+
+
 def code_status(
     commits: Mapping[str, str | None],
     *,
@@ -1267,20 +1334,29 @@ def code_status(
     pinned_commit: str | None,
     wanted_commit: str | None,
     frozen: Mapping[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Code against config: ``(steps, info lines)``.
+    order: CodeOrder | None = None,
+    force_code: bool = False,
+) -> CodeStatus:
+    """Code against config.
 
     * ``track = "branch"``: a push deploys new code under the pinned config,
       so a receipt commit that differs from the pin is expected, not drift.
       One info line: ``code at <commit>, config pinned at <commit>``.
+      ``bay up`` moves code only forward (``order`` given, app-repo project):
+
+      - running newer than the commit ``bay up`` pins: keep it (``keep``);
+        ``bay up`` applies the config only;
+      - running older or the same: ``bay up`` moves ``:latest`` to the pin;
+      - order unknown: a blocker, ``cannot order <pin> and <running>``, or
+        with ``force_code`` a step ``image`` of risk destructive.
     * ``track = "pin"`` (bay.toml in the app repo): the code must be the
-      commit ``bay up`` pins. A container that runs another commit is a step
-      ``image``, risk safe: ``bay up`` points ``:latest`` at the pinned image.
+      commit ``bay up`` pins, backwards included. A container that runs
+      another commit is a step ``image``, risk safe.
     * ``frozen`` (the env record, when ``bay rollback`` froze it): one info
       line that says pushes do not deploy.
     """
-    steps: list[dict[str, Any]] = []
-    info: list[str] = []
+    out = CodeStatus()
+    steps, info = out.steps, out.info
     if frozen and frozen.get("frozen"):
         at = str(frozen.get("frozen_commit") or "")[:12] or "unknown"
         info.append(
@@ -1304,12 +1380,40 @@ def code_status(
                         source="box",
                     )
                 )
-        return steps, info
+        return out
+    if order is not None and not in_fleet and wanted_commit:
+        target = wanted_commit[:12]
+        for name in sorted(known):
+            where = order(wanted_commit, known[name])
+            if where == "newer":
+                out.keep.append(name)
+            elif where == "unknown":
+                problem = f"cannot order {target} and {known[name]}"
+                if not force_code:
+                    out.blockers.append(f"{problem}; fetch the repo or pass --force-code")
+                    continue
+                steps.append(
+                    _step(
+                        "image",
+                        "update",
+                        "destructive",
+                        f"{problem}; --force-code moves the code to {target}, which may be "
+                        "older than what runs",
+                        container=name,
+                        project=project,
+                        source="box",
+                    )
+                )
+    if out.keep:
+        # bay up keeps this code and pins the config at WANTED.
+        kept = sorted({known[name] for name in out.keep})
+        info.append(f"code at {', '.join(kept)}, config pinned at {str(wanted_commit)[:12]}")
+        return out
     pinned = (pinned_commit or "")[:12]
     running = sorted(set(known.values()))
     if pinned and running and running != [pinned]:
         info.append(f"code at {', '.join(running)}, config pinned at {pinned}")
-    return steps, info
+    return out
 
 
 def running_detail(entries: list[dict[str, Any]], names: set[str]) -> list[dict[str, Any]]:
@@ -1662,6 +1766,12 @@ class PlanOptions:
     #: ``--data``: ``keep`` lets a box move with data start empty on the new
     #: box and leave the data on the old one (:func:`move_blocker`).
     data: str | None = None
+    #: Branch mode: allow ``bay up`` to move code it cannot order against the
+    #: pin (a destructive ``image`` step). See :func:`code_status`.
+    force_code: bool = False
+    #: Branch mode: order running code against the pin. ``bay rollback`` turns
+    #: it off: it moves code backwards on purpose.
+    code_order: bool = True
 
 
 # ``notes`` is text for the reader (a missing --remote hint, the directory the
@@ -1993,21 +2103,41 @@ def make_plan(
             notes=notes,
             check_box=check_box,
         )
+    built = {
+        n
+        for n in env_names
+        if "build" in ((diff.wanted_data.get("services") or {}).get(n) or {})
+        or "build" in ((diff.wanted_data.get("accessories") or {}).get(n) or {})
+    }
+    keep: list[str] = []
     if wanted.doc is not None and receipt_entries:
         from bay_cli import bay_toml
 
-        code_steps, code_info = code_status(
-            running_commits(receipt_entries, env_names),
+        # Only build containers carry this project's code; a pulled image's
+        # revision label names someone else's repo.
+        commits = {
+            name: c
+            for name, c in running_commits(receipt_entries, env_names).items()
+            if name in built
+        }
+        code = code_status(
+            commits,
             project=proj.name,
             track=bay_toml.track(wanted.doc, env),
             in_fleet=proj.in_fleet,
             pinned_commit=pinned_commit,
             wanted_commit=wanted.commit,
             frozen=(proj.lock.get("envs") or {}).get(env),
+            order=_code_orderer(proj) if opts.code_order else None,
+            force_code=opts.force_code,
         )
         explained = {str(s["container"]) for s in diff.steps if s["container"]}
-        diff.steps.extend(s for s in code_steps if s["container"] not in explained)
-        notes.extend(code_info)
+        diff.steps.extend(
+            s for s in code.steps if s["risk"] == "destructive" or s["container"] not in explained
+        )
+        notes.extend(code.info)
+        blockers.extend(code.blockers)
+        keep = code.keep
     moves: list[dict[str, Any]] = []
     if place.move:
         move = move_record(
@@ -2063,6 +2193,9 @@ def make_plan(
     # key keeps its id.
     if moves:
         plan["moves"] = moves
+    if keep:
+        # Hashed: it changes what bay up does with the code.
+        plan["code"] = {"keep": keep}
     return _finish(cx, plan, state, proj.fleet, diff.box_checked, place.box_env)
 
 
@@ -2476,6 +2609,14 @@ def recheck(
         allow_unsupported=opts.allow_unsupported,
         cwd_repo=opts.cwd_repo,
         data=opts.data or saved_data_mode(saved),
+        # A plan made with --force-code carries its destructive image step;
+        # re-plan with the flag so the two bodies match.
+        force_code=opts.force_code
+        or any(
+            s.get("kind") == "image" and s.get("risk") == "destructive"
+            for s in saved.get("steps") or []
+        ),
+        code_order=opts.code_order,
     )
     fresh = make_plan(proj, again, read_receipts=read_receipts, check_box=check_box)
     fresh["stale"] = stale_reasons(saved, fresh)

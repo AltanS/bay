@@ -2853,6 +2853,15 @@ def _code_deploys(monkeypatch: pytest.MonkeyPatch, box: FakeBox) -> list[Any]:
     return seen
 
 
+def _push_code(world: dict[str, Path], text: str, *, push: bool = True) -> str:
+    """A code-only commit in the app (bay.toml unchanged). Returns its commit."""
+    (world["app"] / "app.txt").write_text(text + "\n")
+    sha = commit_all(world["app"], f"code {text}")
+    if push:
+        git(world["app"], "push", "-q", "origin", "main")
+    return sha
+
+
 def _stamp(box: FakeBox, name: str, commit: str) -> None:
     """What a webhook build does on the box: the receipt names the code it runs."""
     row = box.container(name)
@@ -2949,17 +2958,18 @@ def test_plan_prints_code_and_config_commits(
     do_up(world)
 
     # Branch mode: a push deployed new code under the pinned config. Information, not a step.
-    _stamp(box, "webapp", "abcdef0123456789")
-    plan = make(world)
+    code = _push_code(world, "v2")
+    _stamp(box, "webapp", code)
+    plan = make(world, at=config)
     assert plan["steps"] == [] and plan["verdict"] == "auto"
-    line = f"code at abcdef012345, config pinned at {config[:12]}"
+    line = f"code at {code[:12]}, config pinned at {config[:12]}"
     assert line in plan["notes"]
     assert f"note: {line}" in planmod.render(plan)
+    assert plan["code"] == {"keep": ["webapp"]}
     jsonschema.validate(plan, PLAN_SCHEMA)
-    # The info line is not part of the plan body: the id ignores it.
     _stamp(box, "webapp", config)
-    again = make(world)
-    assert again["plan_id"] == plan["plan_id"]
+    again = make(world, at=config)
+    assert "code" not in again
     assert not any(n.startswith("code at") for n in again["notes"])
 
     # Pin mode: code that is not the pin is a step, kind image, risk safe.
@@ -2981,3 +2991,110 @@ def test_plan_prints_code_and_config_commits(
     assert plan["verdict"] == "auto"
     assert not any(n.startswith("code at") for n in plan["notes"])
     jsonschema.validate(plan, PLAN_SCHEMA)
+
+
+# ── branch mode: bay up moves code only forward ────────────────────────────
+
+
+def test_branch_mode_up_never_moves_code_backwards(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bay_reconcile import tomlhash
+
+    seen = _code_deploys(monkeypatch, box)
+    _build_app(world)
+    assert do_up(world)["result"] == "ok"
+
+    # A config commit, then a stale checkout made at it.
+    config = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    stale = world["app"].parent / "stale"
+    git(world["app"].parent, "clone", "-q", str(world["remote"]), str(stale))
+    # A newer code commit that a push built and deployed. The stale checkout
+    # has never seen it; the fleet's repo cache has.
+    code = _push_code(world, "v2")
+    _stamp(box, "webapp", code)
+
+    proj = planmod.load_project(cx_of(world), "webapp", cwd=stale)
+    up = applymod.up(proj, planmod.PlanOptions())
+    assert up["result"] == "ok" and up["commit"] == config
+    # CONFIG at the pin.
+    assert lock_of(world)["envs"]["production"]["commit"] == config
+    text = (world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1]
+    built = yaml.safe_load(text)["services"]["webapp"]["build"]
+    assert built["bay_toml_hash"] == tomlhash.canonical_hash(
+        git(stale, "show", f"{config}:bay.toml").encode()
+    )
+    # CODE stays: no target for webapp, so :latest is not touched.
+    assert not seen[-1] and up["code_targets"] == {}
+    plan = planmod.load_saved(cx_of(world), up["plan_id"])
+    assert f"code at {code[:12]}, config pinned at {config[:12]}" in plan["notes"]
+    assert plan["code"] == {"keep": ["webapp"]}
+    assert any(n.startswith("webapp runs code newer than") for n in up["notes"])
+
+    # Pin mode is not affected: code follows the pin, backwards included.
+    edit_app(world, "[deploy.production]\n", '[deploy.production]\ntrack = "pin"\n')
+    pin = git(world["app"], "rev-parse", "HEAD")
+    later = _push_code(world, "v3")
+    _stamp(box, "webapp", later)
+    assert do_up(world, at=pin)["result"] == "ok"
+    assert seen[-1] == {"webapp": {"commit": pin, "strict": True}}
+
+
+def test_branch_mode_up_releases_held_build_forward(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _code_deploys(monkeypatch, box)
+    first = _build_app(world)
+    # The first deploy: no commit on the box yet, so code moves to the pin.
+    assert do_up(world)["result"] == "ok"
+    assert seen[-1] == {"webapp": {"commit": first, "strict": False}}
+
+    # A push changed config and was held: the box still runs the older commit.
+    _stamp(box, "webapp", first)
+    held = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    plan = make(world)
+    assert "code" not in plan and not plan["blockers"]
+    assert do_up(world)["result"] == "ok"
+    assert seen[-1] == {"webapp": {"commit": held, "strict": False}}
+
+    # The same commit runs: bay up still points :latest at the pin.
+    _stamp(box, "webapp", held)
+    assert do_up(world)["result"] == "ok"
+    assert seen[-1] == {"webapp": {"commit": held, "strict": False}}
+
+
+def test_branch_mode_up_refuses_when_order_unknown_unless_force_code(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _code_deploys(monkeypatch, box)
+    _build_app(world)
+    assert do_up(world)["result"] == "ok"
+    config = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    # The box runs a commit that neither the checkout nor the cache knows.
+    _stamp(box, "webapp", "fedcba9876543210")
+    deploys = len(seen)
+
+    refused = cli(world, "up", "--json")
+    assert refused.exit_code == 20, refused.output
+    plan = json.loads(refused.stdout)
+    message = f"cannot order {config[:12]} and fedcba987654; fetch the repo or pass --force-code"
+    assert message in plan["blockers"]
+    assert len(seen) == deploys
+
+    # --force-code: a destructive image step, so it needs approval or --force.
+    forced = cli(world, "plan", "--force-code", "--json")
+    plan = json.loads(forced.stdout)
+    assert forced.exit_code == 10 and plan["verdict"] == "approve"
+    (step,) = [s for s in plan["steps"] if s["kind"] == "image"]
+    assert (step["action"], step["risk"], step["container"]) == (
+        "update",
+        "destructive",
+        "webapp",
+    )
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    assert cli(world, "up", "--force-code", "--json").exit_code == 10
+    assert len(seen) == deploys
+
+    done = cli(world, "up", "--force-code", "--force", "--reason", "rebuilt box", "--json")
+    assert done.exit_code == 0, done.output
+    assert seen[-1] == {"webapp": {"commit": config, "strict": False}}
