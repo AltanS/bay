@@ -26,8 +26,8 @@ moves ``:latest`` (unless ``:latest`` already is that image: then nothing
 moves anyway).
 
 ``python -m bay_reconcile.codepin --targets <json> [--prev <path>]
-[--failed-dir <dir>]``. Prints one JSON report. Pure planning in :func:`plan_moves`; the docker calls are in
-:class:`SdkImages`.
+[--failed-dir <dir>]``. Prints one JSON report. Pure planning in
+:func:`plan_moves`; the docker calls are in :class:`SdkImages`.
 """
 
 from __future__ import annotations

@@ -162,7 +162,7 @@ def build_receipt(
         )
 
     fleet_dirty = meta.get("fleet_dirty")
-    out = {
+    out: dict[str, Any] = {
         "receipt_version": RECEIPT_VERSION,
         "env": str(meta["env"]),
         "box": str(meta["box"]),
