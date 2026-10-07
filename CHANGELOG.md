@@ -8,6 +8,67 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [Unreleased]
+
+### Changed
+
+- **Lock version 2, one folder per project.** A project's lock moves from
+  `projects/<name>.lock` to `projects/<name>/bay.lock`. The lock holds `repo`,
+  `toml_path`, `commit` and `envs`. It no longer holds `local_path`: a lock never
+  names a path on a machine. A version 1 lock is read as version 2, and the next
+  write stores version 2.
+- **Bay finds an app repo by its URL.** It reads the git checkout you stand in when
+  its `origin` is the lock's `repo`. Otherwise it reads a mirror clone in
+  `<fleet>/.bay-cache/repos/<slug>`, which it clones on first use and fetches before
+  each plan. Two projects in one repo share one cache.
+- **A missing commit is an error.** A pinned commit that is in neither the checkout
+  nor the cache stops the plan and names the project. Before, a lock with a repo and
+  no local path could drop out of the compile without a word.
+- **`from =` is relative to the directory of the `bay.toml`**, in an app repo and in
+  the fleet. A project that lives in the fleet keeps its mounted files beside its
+  toml: `projects/<name>/config.yaml`. The box path stays `config/<name>/<from>`, so
+  no container is recreated.
+- An in-fleet project's WANTED commit no longer counts `projects/<name>/bay.lock`.
+  So the lock commit that `bay up` makes does not make the project look changed.
+- `bay import` writes the new layout: `format = 2`, the lock in the project folder,
+  and the files a project owns beside its `bay.toml`.
+
+### Added
+
+- `from = "fleet:<path>"` mounts the shared fleet file `files/<path>`.
+- `bay init --toml-path services/api/bay.toml` for a repo with several apps. The
+  lock records it as `toml_path`.
+- `format = 2` in `bay.fleet.toml`. A CLI refuses a fleet whose format is newer
+  than it knows.
+- `bay up` refuses a repo project's commit that is on no branch of the remote:
+  "push first". `bay plan` says so in a note.
+- `bay plan` is blocked when a compiled config file is missing from the fleet's
+  `files/` or differs from it there. The deploy still copies config files from the
+  fleet's working tree, so the plan would otherwise show one file and the deploy
+  ship another.
+- `bay doctor` warns when the fleet still has the Bay 1 leftovers `bin/`, `.bay/`
+  or `.bay-version`.
+
+### Upgrade notes
+
+- **The first 2.1 run moves the locks.** The first `bay plan`, `bay up`, `bay show`,
+  `bay compile` or `bay init` on a fleet moves each `projects/<name>.lock` to
+  `projects/<name>/bay.lock` with `git mv`, adds `format = 2` after the `name` line
+  of `bay.fleet.toml`, and makes one fleet commit:
+  `bay: move locks into project folders`. Pull the fleet first. Commit any edit to
+  `bay.fleet.toml` first: Bay refuses to run while it has uncommitted changes. Bay
+  also refuses when one project has a lock in both places.
+- A 2.0 CLI refuses a format 2 fleet (`format: unknown key`), so update every
+  machine that works on the fleet with `bay self update`.
+- `files/<name>/<from>` is still read for this release, with a note that names
+  each file. Do not move those files out of `files/` yet: the deploy still copies
+  config files from the fleet's `files/`, and the plan blocks when a compiled file
+  is missing or different there. A file beside the toml needs the same bytes at
+  `files/<name>/<from>` until the deploy reads the mapped copy.
+- `bay init` now refuses a repo with no `origin` remote.
+- Remove the Bay 1 leftovers `bin/`, `.bay/` and `.bay-version` from each fleet
+  and drop the shell alias `bay='bin/bay'`. `bay doctor` lists what is left.
+
 ## [2.0.2] - 2026-10-07
 
 ### Fixed
