@@ -46,6 +46,63 @@ defines the correlation contract between webhook, fan-out, and rebuild.sh
   write content back to the trigger file; any build state belongs in
   `/opt/<stack>/state/<service>.json`.
 
+## Track, hold and freeze
+
+Since 2.1 every build is tagged by its commit, and `:latest` moves only when
+the push may deploy. The rules for each webhook build:
+
+1. **Tag by commit.** `rebuild.sh` builds `<image>:<commit12>` (the first 12
+   characters of the commit, `git rev-parse --short=12`). The image carries the
+   labels `com.bay.commit=<commit12>` and
+   `org.opencontainers.image.revision=<commit12>`. The deploy-time builds
+   (`git_deploy/tasks/build.yml`, `remote_build.yml`) tag and label the same
+   way. A remote build pushes `:<commit12>` always, and `:latest` only when the
+   push may deploy. When `:<commit12>` is already in the registry, the build is
+   skipped and the registry moves `:latest` with
+   `docker buildx imagetools create` (a failure is `build.failed`, "Registry
+   retag").
+2. **Hold guard.** `_hold_reason` decides. The push is held when:
+   - the compiled `build.track` is `pin` (`[deploy.<env>] track = "pin"`);
+   - the compiled `build.frozen` is true (`bay rollback` froze the env);
+   - the `bay.toml` at the pushed commit has another canonical hash than the
+     pinned one (`build.bay_toml_hash`, path `build.bay_toml_path`). The hash
+     is the SHA-256 of the parsed TOML as sorted, compact JSON
+     (`python -m bay_reconcile.tomlhash <file>`), so a comment or a key order
+     change does not count. A file that is gone, is not valid TOML, or that the
+     box cannot hash (no `tomllib`, Python older than 3.11, and no `tomli`)
+     holds too: Bay never deploys a config it could not check.
+   `bay_toml_hash` is compiled only for a project whose `bay.toml` lives in the
+   app repo. A project in the fleet has nothing to compare.
+3. **A held build is not a failure.** `_hold_build` logs
+   `HOLD <svc> at <commit>: <reason>`, sends one `build.held` alert (warn) with
+   the commit, the image and what to do ("config changed, run bay up"), and
+   exits 0. The image keeps only its commit tag. `:latest` and the running
+   container are not touched, the trigger was already consumed, and the
+   circuit breaker is neither counted nor reset. A remote build that is held
+   sends no pull signal.
+4. **Deploy.** When the push may deploy, `_promote_latest` tags the old
+   `:latest` as `:previous` and moves `:latest` to `:<commit12>`. The container
+   is recreated with the `com.bay.config-hash` label of the container it
+   replaces, so the next `bay up` plans a noop for it (M116/03). Then
+   `rebuild.sh` stamps the container's `commit` and `image` into the receipt
+   (`python -m bay_reconcile.receipt stamp`, see
+   [deploy-receipt.md](deploy-receipt.md)).
+5. **Pull path.** An app box that gets a pull signal checks `track` and
+   `frozen` from its own compiled config (the build server may be behind). A
+   held pull fetches `<image>:<commit12>` only, so `bay up` and
+   `bay rollback --to` find it, and sends `build.held`. A pull that may deploy
+   also tags the pulled image as `<image>:<commit12>`.
+
+`bay up` releases a hold: it pins the commit, compiles its config and asks the
+box to point `:latest` at that commit's image before the container pass
+(`bay_reconcile.codepin`). `bay rollback` points `:latest` back at the previous
+receipt's image and freezes the env. Both are in [plan.md](plan.md), "Code and
+config".
+
+Troubleshooting a hold: `journalctl -u bay-build@<svc>` shows the `HOLD` line
+and its reason. `docker image ls <image>` on the box lists the commit tags
+that `bay rollback --to` can use.
+
 ## Circuit Breaker State (rebuild.sh)
 
 `rebuild.sh` maintains a per-service state file at

@@ -96,9 +96,9 @@ checks that the two match.
   "fleet_dirty": false,
   "result": "ok",
   "containers": [
-    {"name": "web", "image": "ghcr.io/acme/web:1.4", "config_hash": "a1b2...", "action": "recreate", "healthy": true},
-    {"name": "postgres", "image": "postgres:16", "config_hash": "c3d4...", "action": "noop", "healthy": true},
-    {"name": "old-worker", "image": null, "config_hash": null, "action": "remove", "healthy": null}
+    {"name": "web", "image": "registry.example.com/acme/web:1a2b3c4d5e6f", "image_ref": "registry.example.com/acme/web:latest", "commit": "1a2b3c4d5e6f", "config_hash": "a1b2...", "action": "recreate", "healthy": true},
+    {"name": "postgres", "image": "postgres:16", "image_ref": "postgres:16", "commit": null, "config_hash": "c3d4...", "action": "noop", "healthy": true},
+    {"name": "old-worker", "image": null, "image_ref": null, "commit": null, "config_hash": null, "action": "remove", "healthy": null}
   ],
   "projects": {}
 }
@@ -123,10 +123,27 @@ Each container entry:
 | Field | Type | Meaning |
 |-------|------|---------|
 | `name` | string | Container name. |
-| `image` | string or null | Image reference. Null for a removed container. |
+| `image` | string or null | The image the container runs. `<repo>:<commit12>` when that commit tag resolves on the box to the running image, else the reference the deploy asked for. Null for a removed container. |
+| `image_ref` | string or null | The image reference the deploy asked for (the spec, often `:latest`). Absent in receipts written before 2.1. |
+| `commit` | string or null | The 12-character commit the running image was built from: the image label `com.bay.commit`, or `org.opencontainers.image.revision` for older builds. Null when the image has neither (a pulled third-party image). Absent before 2.1. |
 | `config_hash` | string or null | The config hash the deploy compared. Null for a removed container. |
 | `action` | string or null | `noop`, `create`, `recreate`, `start` or `remove`. A zero-downtime swap is `recreate`. Null when the pass crashed before it reported. `start` is reserved; version 1 does not write it. |
 | `healthy` | boolean or null | Read once, right after the pass. `true`: running and healthy. `false`: not running, or unhealthy. `null`: running with no health check, still starting, removed, or unknown. |
+
+A webhook build changes the code without a deploy. After it recreates a
+container, `rebuild.sh` stamps that container's `commit` and `image` into
+`<env>.json` (`python -m bay_reconcile.receipt stamp --env <env> --name <c>
+--commit <c12> --image <ref>`). The stamp rewrites the file atomically and
+moves nothing else: `image_ref`, `config_hash`, `action`, `deployed_at` and
+`<env>.prev.json` stay as the last deploy wrote them. `rebuild.sh` runs as the
+app user, so the receipts directory is group `docker`, mode `0775`. A failed
+stamp is a log line, never a failed build. `bay plan` hashes `image_ref`, so a
+stamp is not drift; it reads `commit` for "code at X, config pinned at Y" (see
+[plan.md](plan.md), "Code and config").
+
+The two new fields are additive, so the receipt stays `receipt_version` 1 and
+`bay status --json` stays `status_version` 2. A reader of an older receipt
+must treat a missing `commit` or `image_ref` as null.
 
 `bay up` reads `action` back: every container that is not `noop` goes into
 the `applied` list of its JSON result, when the receipt's `fleet_commit` is

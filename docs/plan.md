@@ -460,6 +460,55 @@ Bay takes the environment's `previous` commit and runs `bay up` with it. The
 two pins swap, so a second rollback undoes the first. Bay refuses when there
 is no `previous`. The output names the old and the new commit and the steps.
 
+A rollback restores config **and** code:
+
+- Config: the pin moves back, and Bay compiles that commit's `bay.toml`.
+- Code: the box points `:latest` of every build container of the project at
+  the image that the previous receipt (`<env>.prev.json`) names, then the
+  deploy runs. The result lists this in `code_targets`.
+- Freeze: Bay sets `frozen = true` (and `frozen_commit`) on the environment in
+  the lock. While the environment is frozen, a push builds and tags its image,
+  but does not deploy it, whatever `track` says. The alert `build.held` says
+  so. The next `bay up` to a newer commit (a descendant of `frozen_commit`)
+  clears the freeze. A `bay up` to the same or an older commit keeps it.
+
+`bay rollback --to <commit>` rolls the code back to that commit's image. Bay
+asks the box first (`docker image ls`). When `<image>:<commit12>` is not on the
+box, Bay refuses before anything moves, and the message lists the commit tags
+that the box has. For a project whose `bay.toml` lives in the app repo, the pin
+moves to `<commit>` too. A project in the fleet keeps its pin (its pin is a
+fleet commit), and only its code moves.
+
+### Code and config
+
+The pin is config: the `bay.toml` that `bay up` compiled. The code is the
+image that a container runs. Every build is tagged `<image>:<commit12>`, and
+the image carries the label `com.bay.commit`. The receipt names the commit and
+the image of every container (see [deploy-receipt.md](deploy-receipt.md)).
+
+`[deploy.<env>] track` decides what a push does (see
+[bay-toml.md](bay-toml.md)):
+
+- `branch` (the default): a push deploys new code under the pinned config. The
+  code commit and the config commit can then differ, and that is expected.
+  `bay plan` prints one information line, `code at <commit>, config pinned at
+  <commit>`. It is not a step and does not change the plan id.
+- `pin`: only `bay up` deploys code. When a container runs another commit than
+  the one `bay up` would pin, `bay plan` shows a step of kind `image`, action
+  `update`, risk `safe`.
+
+`bay up` of a project whose `bay.toml` lives in the app repo asks the box to
+point `:latest` at the pinned commit's image (`bay_code_targets`, run by
+`python -m bay_reconcile.codepin` before the container pass). This is how
+`bay up` releases a held build. In `pin` mode the image must be on the box, or
+the deploy stops before any container changes, with the commit tags that the
+box has. In `branch` mode a missing image is skipped, and `:latest` stays
+where the last push put it. A project in the fleet passes no code targets.
+
+Note: in `branch` mode `bay up` deploys the commit of the checkout it reads.
+When that checkout is older than the code that a push already deployed, the
+box goes back to the older image. Pull the app checkout before `bay up`.
+
 ### bay show
 
 Bay prints WANTED (the checkout's HEAD, the `bay.toml` hash, uncommitted
@@ -596,8 +645,11 @@ know.
 - `running.receipt_sha256` hashes only the box, name, image and config hash
   of this project's containers. A deploy of another project rewrites the
   receipt file, but this hash stays the same, so the plan does not go stale.
+  The image is the reference the deploy asked for (`image_ref`), so a webhook
+  build that stamps a new commit into the receipt is not drift either.
 - `kind` is one of `container`, `volume`, `database`, `database_user`,
-  `secret`, `resource`, `tailnet`, `fleet`. `action` is one of `create`,
+  `secret`, `resource`, `tailnet`, `fleet`, `image` (`track = "pin"` only,
+  see "Code and config"). `action` is one of `create`,
   `update`, `remove`, `rename`, `move`, and for a box step also `recreate`
   and `start`.
 - `source` is `compile` for a step from the compiled diff, `box` for a step
@@ -641,5 +693,8 @@ and the next write stores version 2.
   `bay up production` runs.
 - `result` is `pending` while a deploy runs, then `ok` or `failed`.
 - `previous` is one level of history: enough for `bay rollback`.
+- `frozen` and `frozen_commit` are written by `bay rollback` and removed by
+  the next `bay up` to a newer commit. While `frozen` is true, the compile
+  writes `build.frozen: true`, and a push builds without deploying.
 - `box` is written by the first `bay up`. After that the fleet decides: a new
   `box` in `bay.toml` gives a note, not a move.

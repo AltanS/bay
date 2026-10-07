@@ -512,6 +512,33 @@ values. `bay up` deploys `production`; `bay up staging` deploys `staging`.
 | `aliases` | list of domains | `[]` | Extra domains that redirect to `domain` with HTTP 308. The path and the query are kept. Bay issues a certificate for every alias. |
 | `redirect` | bool | `true` | `false` serves the aliases instead of redirecting them. |
 | `branch` | git branch | `main` | Webhook builds follow this branch. |
+| `track` | `"branch"` or `"pin"` | `"branch"` | What a push does. `branch`: a push builds and deploys new code under the pinned config. `pin`: a push only builds; `bay up` deploys. |
+
+#### `track`: what a push deploys
+
+Every push builds an image and tags it with its commit, `<image>:<commit12>`
+(the first 12 characters of the commit). The image moves to `:latest`, and the
+container starts, only when the push may deploy. The pinned config (the
+`bay.toml` that `bay up` compiled) always decides the config.
+
+- `track = "branch"` (the default). A push builds and deploys. When the push
+  also changes `bay.toml`, the build is **held**: the image keeps only its
+  commit tag, the container keeps running, and the alert `build.held` says
+  "config changed, run bay up". Bay compares the parsed file, so a comment or a
+  key order change is not a config change. `bay up` deploys the held commit
+  with its new config.
+- `track = "pin"`. Every push is held. Only `bay up` deploys, and it deploys
+  the image of the pinned commit. The image must be on the box, so push first
+  and let the build finish. `track = "pin"` needs the `bay.toml` in the app
+  repo; a project in the fleet cannot use it.
+
+`bay rollback` freezes an environment: a push builds but does not deploy,
+whatever `track` says, until a `bay up` to a newer commit. See
+[plan.md](plan.md) ("Code and config").
+
+The hold guard compares the `bay.toml` of a project whose file lives in the app
+repo. A project in the fleet keeps its `bay.toml` in the fleet repo, so a push
+to its app repo never changes its config.
 
 Overrides. A `[deploy.<env>]` table may also set:
 

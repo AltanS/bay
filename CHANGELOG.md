@@ -81,6 +81,35 @@ needing manual action is called out under **Upgrade notes**. Entries for
   it in a note. A plain `bay deploy` still copies from the fleet's `files/`.
 - `bay doctor` warns when the fleet still has the Bay 1 leftovers `bin/`, `.bay/`
   or `.bay-version`.
+- `[deploy.<env>] track = "branch" | "pin"` in `bay.toml`. `branch` (the
+  default) lets a push deploy new code under the pinned config. `pin` makes a
+  push only build; `bay up` deploys. `pin` needs the `bay.toml` in the app repo.
+- Every build is tagged `<image>:<commit12>` and labelled `com.bay.commit`.
+  `:latest` moves only when the push may deploy.
+- Hold guard. `bay compile` writes `build.bay_toml_hash` (the SHA-256 of the
+  parsed `bay.toml` as sorted JSON) for a project whose `bay.toml` lives in the
+  app repo. When a push changes that hash, the build is held: the image keeps
+  its commit tag, the container keeps running, the circuit breaker is not
+  touched, and the new alert `build.held` (warn) says "config changed, run bay
+  up". A comment edit does not hold. `track = "pin"` and a frozen environment
+  hold every push. `bay up` releases a hold.
+- The receipt names the `commit` and the `image` of every container, plus
+  `image_ref` (the reference the deploy asked for). A webhook build stamps the
+  new commit into the receipt. Additive: `receipt_version` 1, `status_version` 2.
+- `bay plan` prints `code at <commit>, config pinned at <commit>` in branch
+  mode. In pin mode, code that is not the pin is a step of kind `image`, risk
+  safe.
+- `bay rollback` restores code as well as config: the box points `:latest` at
+  the image of the previous receipt. It also freezes the environment
+  (`frozen = true` in the lock): a push builds but does not deploy until a
+  `bay up` to a newer commit. `bay rollback --to <commit>` rolls back to a
+  commit whose image is on the box, and lists the commit tags when it is not.
+
+### Fixed
+
+- A webhook build now keeps the `com.bay.config-hash` label of the container it
+  replaces, so the next `bay up` no longer recreates it for `no config-hash
+  label` (M116/03).
 
 ### Upgrade notes
 
@@ -103,6 +132,15 @@ needing manual action is called out under **Upgrade notes**. Entries for
 - `bay init` now refuses a repo with no `origin` remote.
 - Remove the Bay 1 leftovers `bin/`, `.bay/` and `.bay-version` from each fleet
   and drop the shell alias `bay='bin/bay'`. `bay doctor` lists what is left.
+- Deploy the boxes once (`bay up`, or `bay deploy <env> --tags deploy_stack`)
+  so `rebuild.sh`, the reconciler package and the group-writable receipts
+  directory (`/var/lib/bay/receipts`, group `docker`, mode `0775`) reach them.
+  Also run `bay deploy <env> --tags git_deploy` on build servers.
+- The hold guard hashes `bay.toml` with Python's `tomllib` (3.11+) or `tomli`.
+  A box or build server with neither holds every config-checked push. Check
+  with `python3 -c 'import tomllib'`.
+- Images built before this release have no commit tag. `bay rollback --to`
+  works only for commits built after the upgrade.
 
 ## [2.0.2] - 2026-10-07
 
