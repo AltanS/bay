@@ -22,6 +22,57 @@
     or _all_build_services is not defined
     or git_deploy_rebuild_services is not defined
 
+# ── Shared build box guard ───────────────────────────────────────────────
+# `/etc/systemd/system/bay-build@.path` is one file for the whole box, and it
+# watches `<stack_dir>/triggers`. When two fleets list the same build box, a
+# deploy from the second fleet would point the template at its own stack_dir,
+# and the stale-unit cleanup below would then stop the first fleet's units.
+# So read the installed template first (read only, works in check mode) and
+# stop the run if it watches another stack. This runs before any write, on
+# the widest condition of this file (the cleanup runs on `webhook is defined`).
+- name: Guard against a build box that another fleet owns
+  when: webhook is defined
+  block:
+    - name: Check for an installed path unit template
+      ansible.builtin.stat:
+        path: "{{ git_deploy_systemd_unit_dir | default('/etc/systemd/system') }}/bay-build@.path"
+      register: _bay_owner_template
+      check_mode: false
+
+    - name: Read the installed path unit template
+      ansible.builtin.slurp:
+        src: "{{ git_deploy_systemd_unit_dir | default('/etc/systemd/system') }}/bay-build@.path"
+      register: _bay_owner_template_body
+      check_mode: false
+      when:
+        - _bay_owner_template is not skipped
+        - _bay_owner_template.stat.exists
+
+    - name: Find the trigger directory the installed template watches
+      ansible.builtin.set_fact:
+        _bay_owner_trigger_path: >-
+          {{ (_bay_owner_template_body.content | b64decode
+              | regex_findall('(?m)^PathExists=(.+)$') | first | default('')) | trim }}
+      when:
+        - _bay_owner_template_body is not skipped
+        - _bay_owner_template_body.content is defined
+
+    - name: Stop when another stack owns the build triggers on this box
+      ansible.builtin.fail:
+        msg: >-
+          The build triggers on this box belong to the stack at
+          {{ _bay_owner_trigger_path | regex_replace('/triggers/.*$', '') }}.
+          This run is for the stack at {{ stack_dir }}.
+          Another fleet owns this box's builds, so this run stops here.
+          This check wrote nothing. If the move is intended, check that the other
+          stack no longer needs this box, then remove
+          {{ git_deploy_systemd_unit_dir | default('/etc/systemd/system') }}/bay-build@.path
+          by hand and run the deploy again.
+      when:
+        - _bay_owner_trigger_path is defined
+        - _bay_owner_trigger_path | length > 0
+        - not (_bay_owner_trigger_path.startswith((stack_dir | string) ~ '/triggers/'))
+
 - name: Render the build trigger units (runs under deploy_stack too)
   when:
     - webhook is defined

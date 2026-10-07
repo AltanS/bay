@@ -160,7 +160,25 @@ bay-build@ghost.path not-found inactive dead bay-build@ghost.path
 """
 
 
-def _run_stale(tmp_path: Path, *, check: bool) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+_TEMPLATE = """# managed
+[Unit]
+Description=Watch for build trigger - %i
+
+[Path]
+PathExists={stack}/triggers/%i.trigger
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _run_stale(
+    tmp_path: Path, *, check: bool, installed_stack: str | None = None
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    unit_dir = tmp_path / "units-dir"
+    unit_dir.mkdir()
+    if installed_stack is not None:
+        (unit_dir / "bay-build@.path").write_text(_TEMPLATE.format(stack=installed_stack))
     bindir = tmp_path / "bin"
     bindir.mkdir()
     stub = bindir / "systemctl"
@@ -180,6 +198,7 @@ def _run_stale(tmp_path: Path, *, check: bool) -> tuple[subprocess.CompletedProc
         "_is_build_server": False,
         "_global_remote_build_services": [],
         "stack_dir": str(tmp_path / "stack"),
+        "git_deploy_systemd_unit_dir": str(unit_dir),
     }
     (tmp_path / "vars.json").write_text(json.dumps(extra))
     (tmp_path / "ansible.cfg").write_text("[defaults]\n")
@@ -227,6 +246,51 @@ def test_up_stops_trigger_unit_of_removed_service(tmp_path: Path) -> None:
     # systemd has not loaded is not taken.
     assert not any("keep" in c for c in acted)
     assert not any("ghost" in c for c in calls if not c.startswith("list-units"))
+
+
+def test_shared_build_box_guard_stops_when_another_stack_owns_the_triggers(tmp_path: Path) -> None:
+    other = "/srv/other-fleet/stack"
+    proc, calls = _run_stale(tmp_path, check=False, installed_stack=other)
+    assert proc.returncode != 0
+    out = proc.stdout + proc.stderr
+    assert "The build triggers on this box belong to the stack at" in out
+    assert other in out
+    assert "Another fleet owns this box's builds" in out
+    # Nothing was stopped or disabled, and the template was not rewritten.
+    assert not [c for c in calls if c.split()[0] in ("stop", "disable")]
+    assert not any(c.startswith("list-units") for c in calls)
+    installed = (tmp_path / "units-dir" / "bay-build@.path").read_text()
+    assert installed == _TEMPLATE.format(stack=other)
+
+
+def test_shared_build_box_guard_stops_in_check_mode_too(tmp_path: Path) -> None:
+    proc, calls = _run_stale(tmp_path, check=True, installed_stack="/srv/other-fleet/stack")
+    assert proc.returncode != 0
+    assert "Another fleet owns this box's builds" in proc.stdout + proc.stderr
+    assert not [c for c in calls if c.split()[0] in ("stop", "disable")]
+
+
+def test_shared_build_box_guard_passes_for_the_same_stack(tmp_path: Path) -> None:
+    proc, calls = _run_stale(tmp_path, check=False, installed_stack=str(tmp_path / "stack"))
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    acted = [c for c in calls if c.split()[0] in ("stop", "disable")]
+    assert "stop bay-build@gone.path" in acted
+
+
+def test_shared_build_box_guard_precedes_every_write() -> None:
+    tasks = _load("render_trigger_units.yml")
+    names = [str(t.get("name", "")) for t in tasks]
+    guard = names.index("Guard against a build box that another fleet owns")
+    render = names.index("Render the build trigger units (runs under deploy_stack too)")
+    cleanup = names.index("Stop the trigger units of containers that left the box")
+    assert guard < render < cleanup
+    assert "webhook is defined" in _when(tasks[guard])
+    # Only this file writes the system-wide template, so the guard covers every writer.
+    writers = [
+        p.name for p in _TASKS.glob("*.yml")
+        if _template_tasks(_load(p.name), "bay-build@.path.j2")
+    ]
+    assert writers == ["render_trigger_units.yml"]
 
 
 def test_stale_trigger_cleanup_changes_nothing_in_check_mode(tmp_path: Path) -> None:
