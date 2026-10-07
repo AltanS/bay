@@ -74,7 +74,7 @@ as good as the ACL — see [Locking the upstream](#locking-the-upstream-headscal
 - **Cert:** a second Traefik resolver `letsencrypt_dns` (ACME DNS-01, Cloudflare).
   One wildcard (`*.ts.example.com`) covers every tailnet route.
 - **Remote upstreams:** Traefik's **file provider** renders a router per
-  `tailnet_proxies` entry pointing at any tailnet URL — something Docker-label
+  route (the compiled `tailnet_proxies` entries) pointing at any tailnet URL, something Docker-label
   routing (local containers only) cannot express. The file provider itself is
   always on (it also carries `tls.options.default`, which is dynamic-only
   configuration); `traefik_dns_challenge_enabled` only adds the
@@ -92,32 +92,106 @@ public sites, so the fail-closed split has a small blast radius.
 
 ## Routes in bay.fleet.toml (2.1)
 
-Since 2.1 you declare routes in `bay.fleet.toml`. A route is rig routing to a machine
-Bay does not run, so it lives in the fleet, never in an app's `bay.toml`.
+Since 2.1 a route is a table of `bay.fleet.toml`: `[tailnet.routes.<name>]`. A route is rig
+routing to a machine Bay does not run, so it lives in the fleet, never in an app's `bay.toml`.
+You edit it with `bay route add`, `bay route ls`, `bay route rm` and `bay route import`.
+`bay up` deploys it. The hand-written `tailnet_proxies` file is the method from before 2.1:
+see [Before 2.1](#before-21-the-hand-written-tailnet_proxies-file).
 
 ```toml
 [tailnet]
 ingress_box = "infra"                 # the box whose Traefik serves the routes
 cert_domain = "*.ts.example.com"      # the wildcard every route sits under
-allowlist = ["100.64.0.0/10"]
+allowlist = ["100.64.0.0/10"]         # optional, see "The allowlist key" below
 
 [tailnet.routes.homelab-app]
 domain = "homelab-app.ts.example.com"
-upstream = "http://laptop.demo.tailnet.internal:8787"
+upstream = "http://laptop.acme.tailnet.internal:8787"
 host = "upstream"                     # upstream | client (default client)
 identity = true                       # inject X-Tailnet-Device
 aliases = []                          # more names for the same route
 # entrypoint = "websecure_tailnet"    # optional; default as in the role
 ```
 
+### Before the first route: the ingress box prerequisites
+
+Do these once per fleet, before the first `bay route add` goes live. Other docs
+(scenario 15 of [layout-scenarios.md](layout-scenarios.md#15-tailnet-route)) link here
+instead of repeating them.
+
+1. **DNS-01 and the wildcard certificate.** In the group_vars of the ingress box (the
+   box that `ingress_box` names):
+
+   ```yaml
+   traefik_dns_challenge_enabled: true
+   traefik_cloudflare_dns_api_token: "{{ secrets.CLOUDFLARE_DNS_API_TOKEN }}"  # Zone:DNS:Edit
+   tailnet_ingress_cert_domain: "*.ts.example.com"   # one wildcard for all routes
+
+   # Fail-closed listener (recommended on the ingress host; needs netplan_address):
+   traefik_split_entrypoints: true
+   vpn_entrypoints: "websecure,websecure_tailnet"     # VPN services: public(allowlisted)+tailnet
+   ```
+
+   The token goes into the vault under `CLOUDFLARE_DNS_API_TOKEN` (`bay vault edit <env>`).
+   With `traefik_dns_challenge_enabled` off, the deploy renders no route file and says nothing.
+   `tailnet_ingress_cert_domain` is the certificate Traefik asks for. `[tailnet] cert_domain`
+   in `bay.fleet.toml` is only the name check of the compile (each domain must be one label
+   under it). Neither sets the other: write the same wildcard in both.
+2. **Identity (only for `identity = true`).** In the same group_vars:
+
+   ```yaml
+   tailnet_identity_enabled: true
+   tailnet_identity_api_key: "{{ secrets.tailnet_identity_api_key }}"   # a Headscale API key, mint once
+   ```
+
+   Without `tailnet_identity_enabled`, `identity = true` does nothing: the middleware is
+   dropped. See [Per-device identity](#per-device-identity-tailnet_identity_enabled--identity_inject).
+3. **The ingress box and the certificate domain in the fleet file.** The first
+   `bay route add` needs `--ingress-box <box> --cert-domain <domain>`. They write the two
+   `[tailnet]` keys. Every later `add` reads them from the file.
+4. **The ACL**, when the fleet has `headscale_acl_policy`: two edits for each route, listed
+   once in [Adding a proxy under default-deny](#adding-a-proxy-under-default-deny).
+
+`bay validate` and `bay compile` check none of the group_vars in items 1 and 2. They check
+`ingress_box` and `cert_domain`, that each domain sits under `cert_domain`, and the upstream.
+A missing item shows as a route that answers with an error (see
+[Diagnosing a broken route](#diagnosing-a-broken-route)).
+
+### The route keys
+
 | Key | Required | Compiles to | Meaning |
 |---|---|---|---|
 | `domain` | yes | `domains[0]` | The name. It must be one label under `cert_domain`. |
-| `upstream` | yes | `upstream` | `http(s)://<name or address>:<port>`. The name is a tailnet address (100.64.0.0/10) or a MagicDNS name: one label, or a name under `.tailnet.internal` or `.ts.net`. The port is required. |
+| `upstream` | yes | `upstream` | `http(s)://<host>:<port>`, no path. The port is required. The host form is below. |
 | `host` | no | `pass_host_header: false` when `upstream` | `client` forwards the client's name. `upstream` forwards the upstream's own name, for a backend behind `tailscale serve` (see [Host-routing backends](#host-routing-backends-eg-tailscale-serve)). |
 | `identity` | no | `identity_inject: true` | Inject the caller's device name (see [Per-device identity](#per-device-identity-tailnet_identity_enabled--identity_inject)). |
 | `aliases` | no | `domains[1:]` | More names. They are served like `domain`, with no redirect. |
 | `entrypoint` | no | `entrypoint` | A Traefik entrypoint other than the default. |
+
+**The upstream host form.** The compile accepts exactly three forms, and refuses any other
+host, `localhost` and loopback:
+
+- a tailnet IP in `100.64.0.0/10`, for example `100.64.0.42`;
+- one label, for example `laptop`;
+- a name under `.tailnet.internal` or `.ts.net`.
+
+On a Headscale tailnet the full MagicDNS name of a node is `<node>.<base_domain>`. `<node>` is
+the `given_name` of the node, the NODE column of `bay gateway nodes`. `<base_domain>` is the
+variable `headscale_magic_dns_domain` of the fleet, which defaults to
+`<stack_name>.tailnet.internal`. So the name in `laptop.acme.tailnet.internal` is the node
+`laptop`, and `acme` is the stack name of the fleet: it is not a Headscale user and not the
+fleet name. The user that owns the node is not part of the name. If the fleet sets another
+`headscale_magic_dns_domain` that does not end in `.tailnet.internal`, use the IP or the one
+label. To read the exact name of a node, run `tailscale status --json` on a peer and read the
+`DNSName` of the node (drop the trailing dot), or build it from `bay gateway nodes` and the
+variable.
+
+**The allowlist key.** `[tailnet] allowlist` is an optional list of IPs or CIDRs. Today no
+compile step writes it into services.yml or into Traefik. Bay only tracks it: a change since
+the last fleet commit is a plan step of kind `tailnet`, risk `shared`. The list that Traefik's
+`vpn-only` middleware enforces for tailnet-mode services and routes comes from the variable
+`vpn_allowed_ips` in group_vars (the access gateway adds the Headscale tailnet range). So
+the key marks a fleet-wide change for the plan. It does not itself open or close access.
 
 `bay compile` writes the routes as `tailnet_proxies:` into `group_vars/all/services.yml`,
 with the keys the Traefik, Headscale and CrowdSec templates read. A key at its default is
@@ -127,7 +201,7 @@ entry did in the old hand-written file. The compile refuses:
 - a domain or alias that is not one label under `cert_domain`;
 - a domain used twice: by two routes, by a route and a project, or by a route and the
   webhook;
-- an upstream that is not a URL with a port, or not on the tailnet;
+- an upstream that is not a URL with a port, or not on the tailnet (the three forms above);
 - routes without `ingress_box` or `cert_domain`, or an `ingress_box` that is not in
   `[boxes]`;
 - routes in both places: `[tailnet.routes]` and a hand file in `group_vars/all` that still
@@ -143,34 +217,59 @@ which is legal, so there is no warning then.
 
 ```bash
 bay route add homelab-app --domain homelab-app.ts.example.com \
-  --upstream http://laptop.demo.tailnet.internal:8787 --host upstream --identity
+  --upstream http://laptop.acme.tailnet.internal:8787 --host upstream --identity
 bay route ls                     # name, domain, upstream, host, identity
 bay route rm homelab-app
+bay route import                 # the file from before 2.1, once per fleet
 bay show --routes                # WANTED (fleet file), PINNED (compiled), RUNNING (box)
 ```
 
-`route add` and `route rm` edit `bay.fleet.toml` with a small text edit, so comments and
-order stay. They refuse an edit the compile would refuse, and write nothing then. They
-commit the fleet repo (`bay: route add <name>`); `--no-commit` only edits. They refuse when
-`bay.fleet.toml` already has uncommitted changes, because the commit would take them along.
-`route add --ingress-box <box> --cert-domain <domain>` sets the two `[tailnet]` keys too.
+Options of `add`: `--domain`, `--upstream`, `--host client|upstream`, `--identity`,
+`--alias` (repeatable), `--entrypoint`, `--ingress-box`, `--cert-domain`, `--no-commit`.
 
-Then plan and apply as for any change: `bay plan <env>` for a project on the ingress box's
-env. A route change is a step of kind `route` (`route_added`, `route_changed`,
-`route_removed`) at risk `shared`, so it needs `bay approve`. When the domains change, the
-step says "Headscale restarts": the split-DNS records change. `bay up` then runs the tags
-`deploy_stack,headscale,traefik`. Like every `bay up`, it deploys the whole box environment. A plan for a project on another env is blocked while a
-route change is pending, because that deploy would never reach the ingress box.
+**`bay route add` edits `bay.fleet.toml` only. It never edits the ACL, `group_vars` or any
+other file, and it prints no ACL warning.** If the fleet has `headscale_acl_policy`, the two
+ACL edits are yours (next section). `route add` and `route rm` edit `bay.fleet.toml` with a
+small text edit, so comments and order stay. They refuse an edit the compile would refuse, and
+write nothing then. They commit the fleet repo (`bay: route add <name>`); `--no-commit` only
+edits. They refuse when `bay.fleet.toml` already has uncommitted changes, because the commit
+would take them along.
+
+### Add a route, in order
+
+1. Do the prerequisites above, once per fleet.
+2. Under `headscale_acl_policy`: make both ACL edits (grant, then carve-out) in
+   `group_vars/all/headscale_acl.yml`, and `bay validate`. Deploy them with
+   `bay deploy <env> --tags headscale`. A plain `bay up` runs `deploy_stack` only, which does not
+   refresh the ACL. `bay plan` shows no step for an ACL edit. Until the grant is live the route
+   answers 502.
+3. `bay route add ...` (add `--ingress-box` and `--cert-domain` the first time).
+4. `bay plan <env>` for a project on the ingress box's env. A route change is a step of
+   kind `route` (`route_added`, `route_changed`, `route_removed`) at risk `shared`, so it
+   needs `bay approve <plan-id> --reason "<why>"`. When the domains change, the step says
+   "Headscale restarts": the split-DNS records change.
+5. `bay up <env>`. With a route step it runs the tags `deploy_stack,headscale,traefik`. Like
+   every `bay up`, it deploys the whole box environment. A plan for a project on another
+   env is blocked while a route change is pending, because that deploy would never reach the
+   ingress box.
+6. Probe from a peer, not from the ingress host (see
+   [Diagnosing a broken route](#diagnosing-a-broken-route)).
 
 `bay show --routes` prints one status per route: `ok`, `pending` (the fleet file differs
 from the compiled file; plan and up), `drift` (the box serves something else) or `unknown`
 (no receipt lists routes yet).
 
-### Import the old file, once per fleet
+### Before 2.1: the hand-written `tailnet_proxies` file
+
+Before 2.1 a route was an entry of the `tailnet_proxies` key in
+`group_vars/all/tailnet_proxies.yml`, deployed with `bay deploy <env> --tags traefik,headscale`.
+That is no longer the way: since 2.1, `bay compile` writes `tailnet_proxies` from
+`[tailnet.routes]`, and the compile and `bay validate` refuse a fleet that has routes in
+both places. A fleet that still has the old file imports it, once:
 
 ```bash
-bay route import          # reads group_vars/all/tailnet_proxies.yml, deletes it, commits
-bay plan production       # one route_added per route
+bay route import         # reads group_vars/all/tailnet_proxies.yml, deletes it, commits
+bay plan production      # one route_added per route
 bay approve <plan-id> --reason "routes move into bay.fleet.toml"
 bay up production
 ```
@@ -187,31 +286,7 @@ The first `bay up` after the import shows one `route_added` step per route. The 
 route file and the split-DNS records keep their bytes, so Traefik serves the same routes
 and no container is recreated.
 
-## Configuration
-
-```yaml
-# group_vars/<control-region>/main.yml
-traefik_dns_challenge_enabled: true
-traefik_cloudflare_dns_api_token: "{{ secrets.CLOUDFLARE_DNS_API_TOKEN }}"  # Zone:DNS:Edit
-tailnet_ingress_cert_domain: "*.ts.example.com"   # one wildcard for all routes
-
-# Fail-closed listener (recommended on the ingress host; needs netplan_address):
-traefik_split_entrypoints: true
-vpn_entrypoints: "websecure,websecure_tailnet"     # VPN services: public(allowlisted)+tailnet
-```
-
-```yaml
-# tailnet_proxies — top-level key (sibling of services:), used only on the ingress host.
-# Since 2.1 bay compile writes it from [tailnet.routes] (see above); do not write it by hand.
-tailnet_proxies:
-  homelab-app:
-    domains: ['homelab-app.ts.example.com']   # must be under tailnet_ingress_cert_domain
-    upstream: 'http://100.64.0.42:8787'   # the remote node's tailnet IP:port
-    # entrypoint: websecure_tailnet       # optional override
-    # pass_host_header: false             # see "Host-routing backends" below
-```
-
-### Who may enrol: the OIDC allowlist
+## Who may enrol: the OIDC allowlist
 
 Headscale applies **no allowlist of its own**. If `headscale_oidc_issuer` is set and
 you configure nothing else, every account that issuer will authenticate can enrol a
@@ -242,7 +317,7 @@ does enrol reaches every node and port, including every `access: vpn` service.
 deliberate migration with real blast radius — see
 [Locking the upstream](#locking-the-upstream-headscale-acl-headscale_acl_policy).
 
-### `expose: host` and the missing DOCKER-USER chain
+## `expose: host` and the missing DOCKER-USER chain
 
 Bay **deliberately does not manage a `DOCKER-USER` chain.** A Docker-published port is
 DNAT'd in `PREROUTING` and never reaches the nftables `input` chain, which is where the
@@ -281,16 +356,15 @@ MagicDNS name and returns a bare `404 page not found` for anything else (the
 request never reaches your app). Symptom: `https://homelab-app.ts.example.com` 404s,
 but hitting the node's MagicDNS name directly works.
 
-Fix: set **`pass_host_header: false`** and point `upstream` at the **MagicDNS
-name** the backend accepts (not the IP) — Traefik resolves it via tailnet DNS and
-sends that name as the Host:
+Fix: set **`host = "upstream"`** on the route (compiled to `pass_host_header: false`) and
+point `upstream` at the **MagicDNS name** the backend accepts (not the IP). Traefik
+resolves it via tailnet DNS and sends that name as the Host:
 
-```yaml
-tailnet_proxies:
-  homelab-app:
-    domains: ['homelab-app.ts.example.com']
-    upstream: 'http://node.example.ts.net:8787'   # MagicDNS name the backend serves
-    pass_host_header: false
+```toml
+[tailnet.routes.homelab-app]
+domain = "homelab-app.ts.example.com"
+upstream = "http://node.example.ts.net:8787"   # MagicDNS name the backend serves
+host = "upstream"
 ```
 
 If the app also runs a same-origin/CSRF check, add `homelab-app.ts.example.com` to its
@@ -321,7 +395,7 @@ upstream.
 > — a denied flow times out (curl exit 28) rather than refusing.
 
 Hosts that leave these unset render **byte-identically** to before. Deploy with
-`bay deploy production --tags traefik,headscale`, then verify: from a tailnet
+`bay up` (see [Add a route, in order](#add-a-route-in-order)), then verify: from a tailnet
 device *other than the ingress host* `https://homelab-app.ts.example.com` is a
 trusted, secure context; from off the tailnet `nmap -p443 <ingress-public-ip>` shows
 the hostname unreachable.
@@ -335,14 +409,13 @@ once. After that:
   re-running the DNS-01 challenge with the stored token — so the token is an
   *ongoing* credential, not a one-shot. Drop it after first issuance and HTTPS
   breaks silently within ≤90 days.
-- **Another tailnet app = one declaration + a deploy** — *if* the tailnet is
-  allow-all. Append a `tailnet_proxies` entry and redeploy `traefik,headscale`.
-  **No new token, cert, or DNS record** — the wildcard already covers the new
-  subdomain and split-DNS regenerates.
-- **Under `headscale_acl_policy`, it is one declaration + an ACL edit + a deploy.**
-  A new upstream port is not reachable until the policy names it, and the
-  declaration alone gives you a route that 502s. If the route also sets
-  `identity_inject`, the ACL edit is *two* changes, not one — see
+- **Another tailnet app = `bay route add`, then `bay plan`, `bay approve` and `bay up`**,
+  *if* the tailnet is allow-all. **No new token, cert, or DNS record**: the wildcard already
+  covers the new subdomain and split-DNS regenerates. The steps are in
+  [Add a route, in order](#add-a-route-in-order).
+- **Under `headscale_acl_policy`, it is the route plus two ACL edits.** `bay route add`
+  never edits the ACL. A new upstream port is not reachable until the policy names it, and
+  the route alone answers 502. The ACL edit is *two* changes, not one. See
   [Adding a proxy under default-deny](#adding-a-proxy-under-default-deny).
 
 **Why the token is in the vault, not a `.env`:** the deploy loads `secrets.*` from
@@ -368,7 +441,7 @@ and exists only on the machine that made it.
 | `traefik_split_entrypoints` | `false` | Fail-closed: bind public IP + add `websecure_tailnet` |
 | `traefik_public_bind_ip` | `netplan_address` | Public IP for `web`/`websecure` in split mode |
 | `vpn_entrypoints` / `public_entrypoints` | `websecure` | Per-router entrypoints (router labels) |
-| `tailnet_proxies` | (undefined) | Map of remote tailnet routes. Since 2.1 compiled from `[tailnet.routes]` |
+| `tailnet_proxies` | (undefined) | Map of remote tailnet routes. Since 2.1 it is compiled from `[tailnet.routes]`; never write it by hand |
 | `headscale_acl_policy` | (undefined) | HuJSON ACL (file mode). Undefined = allow-all; defining it = default-deny |
 | `headscale_oidc_allowed_domains` | `[]` | Email domain suffixes allowed to enrol via OIDC |
 | `headscale_oidc_allowed_users` | `[]` | Exact email addresses allowed to enrol via OIDC |
@@ -382,14 +455,14 @@ and exists only on the machine that made it.
 | `tailnet_identity_source` | `api` | IP→device source: `api` (HTTP API, no mount — recommended) or `sqlite` (DB read, mounts state) |
 | `tailnet_identity_api_key` | `""` | Headscale API key (vault ref) — required when source is `api` |
 | `tailnet_identity_unknown_action` | `pass` | Unknown client IP: `pass` (200 + `unknown`) or `deny` (403) |
-| `<proxy>.identity_inject` | `false` | Per-route opt-in to the identity header |
+| `<route>.identity` (compiled `identity_inject`) | `false` | Per-route opt-in to the identity header |
 
 ## Notes & gotchas
 
 - **One wildcard per zone.** All proxy hostnames should share one
   `tailnet_ingress_cert_domain`; a hostname outside it triggers a separate cert.
-- **Split-DNS staleness** (as with VPN services): after changing `tailnet_proxies`,
-  redeploy the `headscale` tag so `extra-records.json` updates (hot-reloads via the
+- **Split-DNS staleness** (as with VPN services): after changing a route,
+  `bay up` runs the `headscale` tag; after a hand deploy, redeploy the `headscale` tag so `extra-records.json` updates (hot-reloads via the
   file watcher).
 - **Remote upstream is plain HTTP over WireGuard** (the tunnel encrypts it).
   Restrict the upstream port to the ingress host with a Headscale ACL so the
@@ -468,8 +541,12 @@ access-gateways.md for the walkthrough.
 
 ### Adding a proxy under default-deny
 
-Once `headscale_acl_policy` exists, a new `tailnet_proxies` entry is **not**
-self-contained. Two separate edits are needed, and only the first one fails loudly.
+Once `headscale_acl_policy` exists, a new route is **not** self-contained. `bay route add`
+edits `bay.fleet.toml` only: it never touches the ACL, so these two edits are always by
+hand, in `group_vars/all/headscale_acl.yml`. This is the one place that lists them; other
+docs link here. Two separate edits are needed, and only the first one fails loudly.
+Deploy them with `bay deploy <env> --tags headscale`, before or with the route's `bay up`
+(`bay plan` shows no step for an ACL edit).
 
 **1. Grant the ingress host the new port** — otherwise the upstream is dead on
 arrival and the route 502s:
@@ -523,16 +600,17 @@ ForwardAuth resolves the client IP → Headscale device name and injects
 ```yaml
 # group_vars/<control-region>/main.yml
 tailnet_identity_enabled: true          # runs the sidecar on the ingress host
-tailnet_identity_api_key: "{{ vault_headscale_api_key }}"   # mint once, store in vault
+tailnet_identity_api_key: "{{ secrets.tailnet_identity_api_key }}"   # mint once, store in vault
 # tailnet_identity_source: api          # default; 'sqlite' avoids the key but mounts state
+```
 
-# group_vars/all/tailnet_proxies.yml
-tailnet_proxies:
-  homelab-app:
-    domains: ["homelab-app.ts.example.com"]
-    upstream: "http://laptop.demo.tailnet.internal:8787"
-    pass_host_header: false
-    identity_inject: true               # opt this route into the header
+```toml
+# bay.fleet.toml
+[tailnet.routes.homelab-app]
+domain = "homelab-app.ts.example.com"
+upstream = "http://laptop.acme.tailnet.internal:8787"
+host = "upstream"
+identity = true                         # opt this route into the header
 ```
 
 The downstream app trusts `X-Tailnet-Device` **only in combination with the ACL
