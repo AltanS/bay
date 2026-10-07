@@ -8,7 +8,7 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
-## [Unreleased]
+## [2.1.4] - 2026-10-07
 
 ### Changed
 
@@ -28,6 +28,10 @@ needing manual action is called out under **Upgrade notes**. Entries for
 
 - `bay up --json` now carries the adopt note in `notes`. When the commit is the `bay adopt`
   commit, the sentence "no code moves, git push it after this bay up" went to the log only.
+
+### Upgrade notes
+
+- Docs only plus one note fix; no box change. `bay self update` on other machines.
 
 ## [2.1.3] - 2026-10-07
 
