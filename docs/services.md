@@ -501,7 +501,7 @@ How webhooks interact with build strategies:
 
 **Note:** `strategy: remote` webhook support requires the webhook receiver to be deployed on the build server. Until that is configured, pushes to remote-strategy services will trigger a notification but not an automatic build. Use `bay deploy` to build and deploy manually.
 
-A `bay deploy <env>` with no `--tags` deploys the receiver, clones and builds, and makes the deploy keys. `bay up` registers each build container with the receiver and enables its build trigger.
+A `bay deploy <env>` with no `--tags` deploys the receiver, clones and builds, and makes the deploy keys. `bay up` deploys the whole box environment; it also registers each build container with the receiver and enables its build trigger.
 
 ### Path Filtering
 

@@ -204,7 +204,8 @@ builds the new image, and the hold guard holds it (the whole `bay.toml` hash
 differs): `bay up` deploys it. A services file with no `bay_build_hash` is
 never config only. The webhook's
 `watch`/`ignore` filter runs before this (in the receiver, before the trigger),
-so a push that it filters out never reaches `rebuild.sh`. "Edit `bay.toml`,
+so a push that it filters out never reaches `rebuild.sh`. A push that changes
+`bay.toml` or a mounted file always passes that filter. "Edit `bay.toml`,
 push, `bay up`" is the clean flow: the push does nothing on the box, and
 `bay up` deploys the config. The adopt commit of `bay adopt` is such a push,
 once `bay up` has written the new script: run `bay up` before `git push`
@@ -217,32 +218,33 @@ A push meets these checks in this order. The first one that applies decides.
 In the webhook receiver, before any trigger file exists:
 
 1. A deleted branch, or a ref that is not the deploy branch, is ignored (HTTP 200).
-2. The `[build] watch` and `ignore` lists (compiled to the include and exclude path
-   filters, gitignore syntax) filter the pushed files. A push that fails the filter returns
-   200 "skipped" and writes no trigger: nothing is built, no commit tag exists, no alert
-   goes out. A force push, or a push of 20 or more commits, skips the filter. The filter
-   does not know that `bay.toml` is special: a push that touches only `bay.toml`, or only a
-   mounted file, is skipped when `watch` does not list it. Then no `<image>:<commit12>`
-   exists for that commit, and a later `bay up` to it in `pin` mode stops with "not on this
-   box". Keep `bay.toml` and the mounted files inside `watch`, or leave `watch` unset.
+2. A push that changes the project's `bay.toml` or a file its mounts read (`bay_toml_path`
+   and `bay_toml_files` of the receiver config, a file under a listed directory too) passes,
+   whatever `watch` and `ignore` say. The receiver logs `config file changed: <files>` and
+   writes the trigger, so the config-only check (7) and the hold guard (9) decide. A project
+   in the fleet has no such paths.
+3. The `[build] watch` and `ignore` lists (compiled to the include and exclude path
+   filters, gitignore syntax) filter the other pushed files. A push that fails the filter
+   returns 200 "skipped" and writes no trigger: nothing is built, no commit tag exists, no
+   alert goes out. A force push, or a push of 20 or more commits, skips both checks.
 
 In `rebuild.sh`, for a trigger that got through:
 
-3. The circuit breaker is open: exit 0 (one alert per hour).
-4. A pull signal for a held project (`track = "pin"` or frozen): fetch the commit tag only,
+4. The circuit breaker is open: exit 0 (one alert per hour).
+5. A pull signal for a held project (`track = "pin"` or frozen): fetch the commit tag only,
    exit 0. A pull-only service exits 0 here as well.
-5. Fetch or pull, and read the commit.
-6. Config-only check (see "Config-only push" above): only `bay.toml` and its mounted files
+6. Fetch or pull, and read the commit.
+7. Config-only check (see "Config-only push" above): only `bay.toml` and its mounted files
    changed since the previous commit (the container's label, else the checkout's HEAD before
    the pull) and the `[build]` hash is the same. Tag the previous commit's image (its commit
    tag, else a `:latest` that holds it) with the commit, exit 0.
    A project in the fleet never gets the keys for this, so every push of it builds.
-7. Build `<image>:<commit12>`, unless that image already exists.
-8. Hold guard `_hold_reason`, in this order: `track = "pin"`, frozen, `bay.toml` missing at
+8. Build `<image>:<commit12>`, unless that image already exists.
+9. Hold guard `_hold_reason`, in this order: `track = "pin"`, frozen, `bay.toml` missing at
    the commit, `bay.toml` hash unreadable, `bay.toml` hash differs from the pinned one. A hold
    keeps the commit tag, does not move `:latest`, sends `build.held` and exits 0.
-9. Otherwise move `:latest`, recreate the container, run the health check and stamp the
-   receipt. A failed health check rolls back on the box and exits 1.
+10. Otherwise move `:latest`, recreate the container, run the health check and stamp the
+    receipt. A failed health check rolls back on the box and exits 1.
 
 ## Circuit Breaker State (rebuild.sh)
 
@@ -490,17 +492,18 @@ the receiver's in-memory `IMAGE_MAP` table on process start
   handler is a no-op when the rendered content matches what's already on
   disk. Operators do **not** need to run `docker restart bay-webhook`
   manually after a normal deploy — the framework handles it.
-  The handler only restarts. A new receiver *image* is applied separately:
-  `git_deploy` (`roles/git_deploy/tasks/webhook.yml`) rebuilds
-  `bay-webhook:latest` and then reconciles the receiver alone through
-  the same spec and reconciler as `deploy_stack`. The reconciler recreates the
-  container when its image ID differs from `bay-webhook:latest`, so
-  `--tags git_deploy` alone is enough after a release that changed the
-  receiver. The role is included with `tags: [build, git_deploy]`, so that tag runs every task
-  of the role, the webhook receiver and the build triggers included. This is the same work as a
-  `bay deploy <env>` with no `--tags` does for the receiver, and either one also installs it on a
-  new box. The reconcile step waits for the receiver env file that `deploy_stack` renders, so run
-  `bay up` on a new box first.
+  The same handler fires when the receiver config (`config.json`, the list
+  of build containers) changes, because the receiver reads it once at start
+  too. The handler only restarts. A new receiver *image* is applied
+  separately: `roles/git_deploy/tasks/render_webhook.yml` builds
+  `bay-webhook:latest` when the receiver files changed or the image is
+  missing. That file runs under `deploy_stack` too, so `bay up` builds it.
+  Under `bay up`, the `deploy_stack` container pass recreates the receiver
+  when its image ID differs from `bay-webhook:latest`. A `--tags git_deploy`
+  run reconciles the receiver alone (`roles/git_deploy/tasks/webhook.yml`)
+  through the same spec and reconciler, so it is enough after a release that
+  changed the receiver. That reconcile waits for the receiver env file that
+  `deploy_stack` renders. On a new box, `bay up` creates the receiver.
 
 - **Local-strategy producers sharing an image with siblings** —
   Cross-host fan-out for this topology is a separate latent gap (the

@@ -423,7 +423,7 @@ lockfile (see Behavior).
 | `context` | string | `.` | Build context, relative to the repo root. |
 | `strategy` | `local`, `remote`, `registry` | fleet setting | Where the image is built. |
 | `memory` | size | fleet setting | Build memory cap. (validated, not deployed yet) when it differs from the fleet's build memory. |
-| `watch` | list of globs | everything | A push that touches none of these files does not rebuild. This filter runs first, before the config-only and hold checks, and it filters a push of `bay.toml` too (see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push)). Bay adds nothing to the list: include `bay.toml` and the files its mounts read, or a config-only push is dropped and its commit gets no image tag (see "Config-only push" under `[[mounts]]` below). |
+| `watch` | list of globs | everything | A push that touches none of these files does not rebuild. This filter runs first, before the config-only and hold checks (see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push)). Bay passes a push that changes `bay.toml` or a file its mounts read, whatever `watch` says, so you do not list them here (see "Config-only push" under `[[mounts]]` below). |
 | `ignore` | list of globs | none | Files that never trigger a rebuild. Applied after `watch`. |
 | `[build.args]` | table of strings | none | Build arguments. |
 | `[build.secrets]` | table | none | BuildKit secret id = fleet secret name. |
@@ -523,11 +523,11 @@ to that commit finds its image, also with `track = "pin"`. Run `bay up` to deplo
   project's HEAD is ahead of the pin. On the box, the build log of the container
   (`journalctl -u bay-build@<container>`) has the line `config-only push <commit12>: run bay up`, and
   `docker image ls <image>` lists the new tag (a `remote` build tags it in the registry instead).
-- **With `watch` set, list the config files in it.** The `watch` filter runs first (see `[build]`
-  above). A push of only `bay.toml` that matches no `watch` pattern is dropped before the
-  config-only rule: no tag, and the box logs only the receiver's `Skipping <container>` line. A
-  later `bay up` to that commit in `pin` mode then finds no image. So when you set `watch`, add the
-  `bay.toml` and every file its mounts read, as paths from the repo root.
+- **`watch` does not drop it.** The webhook receiver knows the path of the `bay.toml` and of
+  every file its mounts read (a file under a mounted directory too). It passes a push that changes
+  one of them, whatever `watch` and `ignore` say, and logs `config file changed: <files>`. So the
+  push always reaches the config-only rule and gets its tag. A project in the fleet has no such
+  paths: its `bay.toml` is not in the app repo.
 
 ### `[backup]`
 

@@ -348,7 +348,7 @@ bay init --fleet acme                     # once: drafts bay.toml, writes projec
 git add bay.toml && git commit -m "chore: add bay.toml"
 git push                                  # 1. push first: bay up refuses a commit the remote lacks
 bay plan production                       # WANTED (this commit) vs PINNED vs RUNNING
-bay up production                         # 2. pins this commit, deploys the whole env, puts the webhook script on the box
+bay up production                         # 2. pins this commit, deploys the whole env, registers shop with the webhook
 git commit -am "feat: first build"        # 3. a push that changes code, made AFTER bay up
 git push                                  #    the webhook builds the first image
 bay plan production                       # 4. then see plan.md "The first image" for the last steps
@@ -361,21 +361,23 @@ case. It looks like any failed deploy: the command exits 1 with
 `deploy failed: Command failed with exit code N`, the JSON has `"result": "failed"` and an `error`
 text, the lock records `result: failed`, and Bay still commits that record and pushes the fleet.
 `bay show` says `HALF` (the last `bay up` failed; all status words are in the
-[bay show table](plan.md#bay-show)). The pin and the webhook script are in place, which is what
-step 2 is for. To be sure that this is the expected failure and not another one, read the Ansible
+[bay show table](plan.md#bay-show)). The pin, the webhook script, the receiver entry for `shop` and
+its build trigger are in place, which is what step 2 is for. To be sure that this is the expected failure and not another one, read the Ansible
 log (`--log`) or the receipt on the box: the failed action is the container that has no image. The
 way out is steps 3 and 4: push code, wait for the build, run `bay up` again.
 
-The push of step 1 builds nothing, because the box has no webhook script for `shop` yet. The
-first image comes from a push made after `bay up` (step 3), or from a `bay deploy production`
-with no `--tags`, which clones and builds. Followed in this order, `bay show` says `HALF` until the
+The push of step 1 builds nothing, because the webhook receiver does not know `shop` until
+`bay up` registers it. The first image comes from a push made after `bay up` (step 3), or from a
+`bay deploy production` with no `--tags`, which clones and builds. The push of step 3 builds only
+when the repo checkout is on the box. `shop` is a `local` build (the default), and only the full
+deploy clones a `local` repo, so run it once before step 3 (below). Followed in this order, `bay show` says `HALF` until the
 build has finished and a `bay up` has run again ([plan.md](plan.md#the-first-image)). The push
 reaches the box through the webhook receiver: you register the GitHub hook by hand, in the repo
 settings, with the payload URL `https://<webhook domain>/webhook/<container name>` (`shop` here). The
 webhook domain is `[webhook] domain` of `bay.fleet.toml`, or `webhook_domain` of the box that runs
 the container. Bay has no verb that creates the hook; `bay validate --check-webhook-health` probes it.
 Before the first push, run `bay --fleet <path> deploy production` (no `--tags`) once for the box env:
-it installs the receiver and the build trigger, and on the box it makes the SSH deploy key
+it clones the repo and builds the first image, and on the box it makes the SSH deploy key
 `/opt/<stack>/builds/shop/.deploy_key.pub` (only when the repo has no token). Bay does not register
 that key: add it to the GitHub repo yourself, under Settings > Deploy keys (read-only). With an SSH
 repo URL, the first such deploy stops at the clone until the key is on GitHub. Add it, then run the
@@ -547,13 +549,13 @@ steps 3 and 4 runs on the fleet, and none of them reads the fleet directory you 
    `[deploy.staging]` yet, so Bay reads the remote's default branch and blocks. Pass
    `--project shop --at <commit of develop>` there instead (`--at` needs `--project` in the fleet directory). After the first `bay up staging` the pin names the
    table, and the fleet directory finds `develop` ([plan.md](plan.md#bay-plan), step 1).
-7. `bay plan staging`, then `bay up staging`. This pins the commit and puts the webhook script on
-   `eu-2`. Expect it to fail, as step 2 of scenario 2 does: `shop-staging` has no image yet.
-8. Build the first image. On this new box a push alone builds nothing yet: the webhook receiver
-   image and the build trigger of `shop-staging` come only from a `bay deploy <env>` with no `--tags`
-   or with `--tags git_deploy`, on a box that runs a
-   build app, and step 4 ran before `eu-2` had one. Run `bay --fleet $F deploy staging` (no `--tags`)
-   once: it installs both, makes the SSH deploy key `/opt/<stack>/builds/shop-staging/.deploy_key.pub`
+7. `bay plan staging`, then `bay up staging`. This pins the commit, puts the webhook script on
+   `eu-2`, builds the receiver image there, registers `shop-staging` with the receiver and enables
+   its build trigger. Expect it to fail, as step 2 of scenario 2 does: `shop-staging` has no image yet.
+8. Build the first image. On this new box a push alone builds nothing yet: `shop-staging` is a
+   `local` build, and its first clone comes only from a `bay deploy <env>` with no `--tags`. Run
+   `bay --fleet $F deploy staging` (no `--tags`)
+   once: it makes the SSH deploy key `/opt/<stack>/builds/shop-staging/.deploy_key.pub`
    on `eu-2` (when the repo has no token), and clones and builds the first image (see
    [plan.md](plan.md#the-first-image)). Bay does not register the key: add it to the GitHub repo
    yourself, under Settings > Deploy keys (read-only). Then run `bay up staging` again. From then on, a push to
@@ -854,11 +856,11 @@ track = "branch"                          # default: a push builds and deploys n
 
 The checks apply in a fixed order: the webhook's `watch` and `ignore` filter, the config-only
 rule, then the hold guard. The order is stated once, in
-[build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push). A push that
-the filter drops (it touches only files outside `watch`, a push of `bay.toml` alone included)
-reaches none of the other checks: it is not built, not held and not logged as config-only.
-So when you set `watch`, put `bay.toml` and the files its mounts read in it
-([bay-toml.md](bay-toml.md#build)).
+[build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push). Bay passes a push that
+changes `bay.toml` or a file its mounts read, whatever `watch` and `ignore` say, so it always
+reaches the config-only rule and the hold guard. A push that the filter drops (it touches only
+other files outside `watch`) reaches none of the other checks: it is not built, not held and not
+logged as config-only.
 
 After a config-only push, nothing alerts you. The signal is `bay show shop`: it says `behind`
 (HEAD is ahead of the pin), and you run `bay up`. On the box, `journalctl -u bay-build@shop` has
@@ -1008,9 +1010,11 @@ Which verb puts what on the new box:
   (the image prune among them), the container monitor, backups and the CrowdSec allowlist.
 - `bay up` runs only the `deploy_stack` tag. That tag also refreshes Traefik, Watchtower and the
   access gateway, but not the cron jobs, the monitor, backups or the allowlist.
-- The webhook receiver image and the build trigger of a container come only from a
-  `bay deploy <env>` with no `--tags`, or with `--tags git_deploy`, on a box that runs a build app. A box with no build app yet gets neither from
-  `--rig` (see scenario 4, step 8).
+- `bay up` also renders the webhook side of each build container on the box: the receiver config
+  and image, and the build trigger `bay-build@<container>.path`. It stops the trigger of a container
+  that left the box. A box with no build app gets none of it, from `bay up` or from `--rig`.
+- The first clone of a `local` build app and its SSH deploy key come only from a
+  `bay deploy <env>` with no `--tags` (see scenario 4, step 8).
 
 `bay provision production` would run on every host of the box env, `eu-1` included. The code has no
 guard against that, and no doc states that each provision role is safe to repeat on a live box (the
@@ -1310,8 +1314,9 @@ repo, the GitHub hook or the `bay.toml` in the repo: they stay as they were. Aft
 the lock is gone, so `bay plan` from that repo stops with "project shop is not in fleet acme"
 (`bay init` refuses a repo that still has a `bay.toml`, so to register the app again, move the file
 aside, run `bay init`, and restore it). The compiled file no longer lists the project, so the
-box's webhook receiver gets its service list and image map without it, so a push has no service to build. The docs
-make no promise that the old webhook script file on the box is deleted. Remove the GitHub hook
+box's webhook receiver gets its service list and image map without it, so a push has no service to build. The `bay up`
+of the removal also stops and disables the build trigger `bay-build@<container>.path` of each
+removed container. The docs make no promise that the old webhook script file on the box is deleted. Remove the GitHub hook
 yourself: `bay service prune-webhooks <owner>/<repo>` lists the hooks that no service claims and deletes
 them on request (it needs `github_admin_token` in the vault). Delete the `bay.toml` from the repo when you
 no longer want it.

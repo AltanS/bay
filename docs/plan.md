@@ -542,15 +542,28 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
 6. Bay runs today's deploy for the box's environment, limited to
    `--tags deploy_stack` (the same work as `bay deploy <env> --tags deploy_stack`,
    and the same tag the box check of `bay plan` runs). The `git_deploy` role
-   renders the webhook rebuild script under that tag, so a later webhook build
-   uses the deployed config, not the config from before this `up`. The tag does
-   not clone or build anything, and it pulls nothing through Ansible (see
-   [The first image](#the-first-image)). The rig roles that carry the same tag run too: Traefik,
-   the access gateway, Watchtower, and Zot and the identity sidecar where they are on. The rest of
-   the rig (for example the cron jobs, the container monitor, backups and the CrowdSec allowlist)
-   comes only from a `bay deploy <env>` with no `--tags`. The webhook receiver image, its list of
-   build containers and the build triggers come from a `bay deploy <env>` with no `--tags`, or with
-   `--tags git_deploy` (the `git_deploy` role carries that tag). So a new box needs one of them (see
+   runs before the containers, and under that tag it renders the webhook side
+   of every build container on the box:
+   - the rebuild script, so a later webhook build uses the deployed config, not
+     the config from before this `up`;
+   - the receiver config (its list of build containers) and its image map. A
+     change restarts the receiver at the end of the run;
+   - the receiver image. Bay builds `bay-webhook:latest` when the receiver
+     files changed or the image is missing. The container pass then creates
+     or recreates `bay-webhook`;
+   - the build trigger units. Bay enables `bay-build@<container>.path` for
+     each build container, and stops and disables the unit of a container that
+     left the box.
+
+   So a push of a new build app reaches its trigger after one `bay up`. The
+   tag does not clone an app repo, build an app image or make a deploy key, and
+   it pulls nothing through Ansible (see [The first image](#the-first-image)).
+   The rig roles that carry the same tag run too: Traefik, the access gateway,
+   Watchtower, and Zot and the identity sidecar where they are on. The rest of
+   the rig (for example the cron jobs, the container monitor, backups and the
+   CrowdSec allowlist) comes only from a `bay deploy <env>` with no `--tags`.
+   The first clone of a `local` build app and its SSH deploy key also come only
+   from that deploy (see
    [layout-scenarios.md](layout-scenarios.md#11-adding-a-box)). When the plan has a `route` step, Bay
    runs `--tags deploy_stack,headscale,traefik`: Headscale renders the
    split-DNS records and Traefik the route file. The `headscale` tag runs every task of the
@@ -584,9 +597,12 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
 - **An app with `image`** (no build): the box reconciler pulls the image when it creates or
   recreates the container and the image is not there.
 - **An app that builds from source**: the first image comes from a build that `bay up` does
-  not run. A push to the deploy branch builds it, once `bay up` has rendered the webhook
-  script on the box. A `bay deploy <env>` with no `--tags` also clones and builds it
-  (`git_deploy`). There is no `bay build` verb that builds: `bay build` has `status` and
+  not run. `bay up` registers the container with the webhook receiver and enables its build
+  trigger, so a push to the deploy branch starts a build. The build needs the repo checkout on
+  the box. A `remote` build clones it in the build script, on the build server. A `local` build
+  does not: its first clone and its SSH deploy key come from a `bay deploy <env>` with no
+  `--tags`, which also builds the first image (`git_deploy`). A `local` app whose repo another
+  app on the box already uses shares that checkout. There is no `bay build` verb that builds: `bay build` has `status` and
   `reset` only. Until an image exists, the container cannot be created: the receipt has a
   failed action and `bay show` says `HALF` (the last `bay up` failed, see the status table of
   [bay show](#bay-show)). `bay plan` does not check for it.
