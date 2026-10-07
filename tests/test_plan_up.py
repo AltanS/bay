@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -2795,6 +2796,59 @@ def test_plans_prune_keeps_last_50_and_lock_referenced(
     status = git(world["fleet"], "status", "--porcelain", "--", "plans")
     assert status == "?? plans/0000000000ff.json"
     assert applymod.prune_plans(cx_of(world)) == []
+
+
+def test_plans_prune_refuses_when_a_lock_is_unreadable(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    do_up(world)
+    _fake_records(world, 60)
+    commit_all(world["fleet"], "old plans")
+    lockfile.lock_path(world["fleet"], "webapp").write_text("{ not json")
+    before = git(world["fleet"], "ls-files", "plans")
+    with pytest.raises(applymod.PruneRefused, match="projects/webapp/bay.lock cannot be read"):
+        applymod.prune_plans(cx_of(world))
+    # Nothing pruned: that lock's plans keep their protection.
+    assert git(world["fleet"], "ls-files", "plans") == before
+
+
+TWO_BOX_ENVS = FLEET_TOML.replace(
+    '[boxes.box-1]\nenv = "production"\n',
+    '[boxes.box-1]\nenv = "production"\n\n[boxes.box-2]\nenv = "edge"\n',
+)
+
+
+def test_move_stops_before_old_box_when_new_box_deploy_fails(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    from bay_cli.errors import BayError
+
+    (world["fleet"] / "bay.fleet.toml").write_text(TWO_BOX_ENVS)
+    (world["fleet"] / "hosts" / "edge").write_text("[edge]\nbox-2\n")
+    edge = world["fleet"] / "group_vars" / "edge"
+    edge.mkdir()
+    shutil.copy2(world["fleet"] / "group_vars" / "production" / "secrets.yml", edge)
+    commit_all(world["fleet"], "two box envs")
+    edit_app(world, 'needs = ["postgres"]\n', "")
+    edit_app(world, VOLUME_MOUNT, "")
+    do_up(world)
+    edit_app(world, "[deploy.production]\n", '[deploy.production]\nbox = "box-2"\n')
+    plan = make(world)
+    assert plan["box_env"] == "edge"
+    assert plan["moves"][0]["from_box_env"] == "production"
+
+    calls: list[str] = []
+
+    def deployer(cx: Context, target: str, **_: Any) -> None:
+        calls.append(target)
+        raise BayError(f"the deploy of {target} failed")
+
+    with pytest.raises(applymod.DeployFailed) as failed:
+        applymod.up(project(world), planmod.PlanOptions(), force=True, reason="test",
+                    deploy=deployer)
+    # The new box failed: the old box was never deployed, so it keeps the containers.
+    assert calls == ["edge"]
+    assert failed.value.result["error"] == "the deploy of edge failed"
 
 
 def test_plans_prune_takes_the_approval_with_its_record(

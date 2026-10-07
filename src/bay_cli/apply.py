@@ -425,9 +425,16 @@ def _apply_plan(
                     cx, target, config_files_root=comp.files_root, **extra
                 )
             except (BayError, OSError) as exc:
-                failure = failure or str(exc) or type(exc).__name__
+                failure = str(exc) or type(exc).__name__
             except SystemExit as exc:
-                failure = failure or f"deploy exited with {exc.code}"
+                failure = f"deploy exited with {exc.code}"
+            if failure is not None:
+                # Stop at the first failure. The new box comes first: when it
+                # failed, the old box of a move must keep its containers.
+                skipped = deploy_envs[deploy_envs.index(target) + 1 :]
+                if skipped:
+                    say(f"not deployed after the failure: {', '.join(skipped)}")
+                break
 
     # 6. receipt
     reader = read_receipts or planmod.default_receipt_reader
@@ -504,7 +511,7 @@ def _apply_plan(
     pruned: list[str] = []
     try:
         pruned = prune_plans(cx)
-    except gitrepo.GitError as exc:
+    except (gitrepo.GitError, PruneRefused) as exc:
         say(f"warning: plans/ was not pruned: {exc}")
     if pruned:
         say(f"pruned {len(pruned)} old plan file(s) from {planmod.PLANS_DIR}/")
@@ -582,14 +589,24 @@ def _plan_time(path: Path) -> str:
     return str(data.get("created_at") or "") if isinstance(data, dict) else ""
 
 
+class PruneRefused(Exception):
+    """A lock cannot be read, so ``plans/`` prune cannot tell which plans it names."""
+
+
 def _lock_plan_ids(cx: Context) -> set[str]:
-    """Every plan id a lock of the fleet names: ``envs.*.plan_id`` and ``previous.plan_id``."""
+    """Every plan id a lock of the fleet names: ``envs.*.plan_id`` and ``previous.plan_id``.
+
+    Raises :class:`PruneRefused` when a lock cannot be read: its plans would
+    lose their protection, so nothing may be pruned.
+    """
     out: set[str] = set()
     for name in planmod.fleet_projects(cx):
+        path = lockfile.lock_path(cx.fleet_root, name)
         try:
-            raw = lockfile.read(lockfile.lock_path(cx.fleet_root, name))
-        except ValueError:
-            continue
+            raw = lockfile.read(path)
+        except (OSError, ValueError) as exc:
+            rel = path.relative_to(cx.fleet_root).as_posix()
+            raise PruneRefused(f"{rel} cannot be read ({exc})") from None
         for record in ((raw or {}).get("envs") or {}).values():
             if not isinstance(record, Mapping):
                 continue
@@ -608,16 +625,17 @@ def prune_plans(cx: Context, *, keep: int = PLANS_KEEP) -> list[str]:
     lock still names. A record's approval (``<id>.approved``) goes with it.
     Only files git tracks are removed, with ``git rm`` and the commit
     ``bay: prune plans``; an untracked plan (a ``bay plan`` that was never
-    applied) is never touched.
+    applied) is never touched. A lock that cannot be read refuses the whole
+    prune (:class:`PruneRefused`): nothing is removed.
     """
     rel_dir = planmod.PLANS_DIR
+    named = _lock_plan_ids(cx)
     tracked = set(gitrepo.tracked_files(cx.fleet_root, rel_dir))
     records = sorted(
         (rel for rel in tracked if rel.endswith(".json")),
         key=lambda rel: (_plan_time(cx.fleet_root / rel), rel),
         reverse=True,
     )
-    named = _lock_plan_ids(cx)
     kept = {Path(rel).stem for rel in records[:keep]} | named
     gone: list[str] = []
     for rel in tracked:
