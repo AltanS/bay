@@ -12,8 +12,11 @@ Rule of thumb: **an app that has a repo keeps its `bay.toml` in that repo.** An 
 no repo (an off-the-shelf image such as gatus) lives inside the fleet as
 `projects/<name>/bay.toml`. Both kinds have `projects/<name>/bay.lock` in the fleet.
 
-Everything here works in Bay 2.1. A feature that Bay does not have yet carries the tag
-`(planned)` on its line.
+Everything here is valid in Bay 2.1 and the files pass `bay toml validate`. A feature that
+Bay does not have yet carries the tag `(planned)` on its line. Some valid keys are also not
+deployable yet: `bay plan` blocks a file that uses one (the `unsupported` list) unless you pass
+`--allow-unsupported`. The list is in [plan.md](plan.md#features-bay-cannot-deploy-yet). Scenarios
+3 and 9 use some of those keys and say so.
 
 Names below are examples. `acme` is the fleet. `eu-1`, `eu-2`, `infra` and `na-1` are
 boxes. `shop` and `blog` are apps.
@@ -21,12 +24,19 @@ boxes. `shop` and `blog` are apps.
 ## What `bay up` does
 
 `bay up <env>` deploys the whole box environment, not one project. It runs from an app
-repo or from the fleet. It pins every project it covered. It commits the plan record under
-`plans/` and the receipt, and it pushes the fleet. Other projects' pins do not move: they
-deploy at their own pin, whoever runs `bay up`. `bay plan production` with no
-project, run in the fleet directory, previews the whole env (see
-[plan.md](plan.md#the-whole-environment)). A fleet inside a bigger repo is not pushed
-(scenario 6).
+repo or from the fleet. It commits the plan record under `plans/` and the receipt, and it
+pushes the fleet. A project is covered when it has a `[deploy.<e>]` table (any name `<e>`)
+on the same box environment as the plan. What gets pinned depends on where you run it:
+
+| You run | Pinned to a new commit | Other covered projects |
+|---|---|---|
+| In an app repo, or with `--project shop` | `shop`, at the planned commit | keep their own pin and deploy at it |
+| In the fleet directory, no `--project` | every covered project, each at its own WANTED commit | none: all of them move |
+
+`bay plan production` with no project, run in the fleet directory, previews the whole env
+(see [plan.md](plan.md#the-whole-environment)). A fleet inside a bigger repo is not pushed
+(scenario 6). The first image of an app that builds from source is not made by `bay up`
+(see [plan.md](plan.md#the-first-image)).
 
 ## Sample `bay plan` output
 
@@ -68,6 +78,26 @@ that project in `project` and keeps its own risk, so two safe changes give `auto
 | `blocked` | 20 | Fix what `blockers` says. Approval cannot help. |
 | `stale` | 30 | Something moved since the plan. Run `bay plan` again. |
 
+## Words: deploy env, box env and group
+
+Four words name four different things. The docs use each one in one sense only.
+
+| Word | Where it is set | What it is |
+|---|---|---|
+| Box | `[boxes.<name>]` in `bay.fleet.toml` | One server. The name (`eu-1`) is a label that `box = "eu-1"` in a deploy table uses. No inventory host is named after it. |
+| Box env | `env` of the box | The box environment. It names the inventory file `hosts/<env>`, the folder `group_vars/<env>/` (the secrets), and the receipt `/var/lib/bay/receipts/<env>.json`. `bay provision <box env>` and the deploy of `bay up` run against it. |
+| Group | `group` of the box | The inventory group: the `[eu]` heading inside the hosts file. It limits a container to the boxes of that group. |
+| Deploy env | `[deploy.<env>]` in a `bay.toml` | An environment of one app: own pin, data, secret values and container suffix. `bay plan <env>` and `bay up <env>` take this name. |
+
+The deploy env and the box env often have the same name (`production` on production boxes,
+`staging` on the staging box), but they are two keys. Bay finds the box env from the box that
+the deploy table names. `primary_env` in `bay.fleet.toml` is a deploy env: the one that gets
+bare container names. Its default is `production`.
+
+Give each box of one box env its own `group`, and a matching heading in the hosts file.
+Boxes that share a group would each run the containers of both. A box that is alone in
+its box env may leave `group` out.
+
 ## 0. The machine
 
 ```
@@ -79,11 +109,16 @@ that project in `project` and keeps its own risk, so two safe changes give `auto
 └── blog/                                 # app repo with bay.toml (scenario 3)
 ```
 
-Pick the fleet in this order: `--fleet <path>`, `BAY_FLEET=<path>`, the `fleet = "acme"`
-line of the `bay.toml` you stand in, `BAY_FLEET_NAME=acme`. A stray `BAY_FLEET` in your
-shell profile beats the `bay.toml` line. A command that changes something prints
-`fleet: acme (<path>)` first on stderr, so you see which fleet won. A command that only
-reads (`show`, `status`) does not print it.
+Bay picks the fleet in one fixed order of five rules: `--fleet <path>`, `BAY_FLEET=<path>`,
+the `fleet = "acme"` line of the `bay.toml` you stand in, `BAY_FLEET_NAME=acme`, and last the
+fleet directory you stand in (for `plan`, `up`, `approve`, `rollback` and `remove`). The
+rules, and which verbs use the last one, are in [install.md](install.md#pick-a-fleet). `bay init`
+and `bay adopt` have no `bay.toml` to read yet, so they do not use the third rule. A stray
+`BAY_FLEET` in your shell profile beats the `bay.toml` line. A command that changes something
+prints `fleet: acme (<path>)` first on stderr, so you see which fleet won. A command that
+only reads (`show`, `status`) does not print it. The folder `acme`, the `name` in
+`bay.fleet.toml` and the `fleet =` line must be the same word
+([install.md](install.md#the-three-names-of-a-fleet)).
 
 **Fleet layout migration.** A fleet made before 2.1 keeps its locks in
 `projects/<name>.lock`. Readers (`bay show`, `bay plan`) never move them. They read both
@@ -121,12 +156,16 @@ format = 2                                # a Bay 2.0 CLI refuses this fleet
 name = "acme"
 default_box = "eu-1"
 default_domain = "acme.example"
-primary_env = "production"
+primary_env = "production"                # optional; default "production"; the deploy env with bare container names
 
 [boxes.eu-1]
-env = "production"
-group = "eu"
+env = "production"                        # box env: hosts/production, group_vars/production/, the receipt name
+group = "eu"                              # inventory group: the [eu] heading in hosts/production
 ```
+
+`hosts/production` holds the heading `[eu]` and one line for `eu-1` (scenario 11 shows the
+file). The words box env, group and deploy env are defined in
+[Words](#words-deploy-env-box-env-and-group).
 
 `projects/gatus/bay.toml`:
 
@@ -159,6 +198,21 @@ A fleet that still keeps a mounted file at `files/gatus/config.yaml` works too. 
 prints a note. Move it with `git mv files/gatus/config.yaml projects/gatus/config.yaml`.
 The path on the box does not change, so nothing is recreated.
 
+**Create the first in-fleet app.** No verb does it, and `bay init` is only for app repos.
+
+```
+mkdir -p projects/gatus && $EDITOR projects/gatus/bay.toml projects/gatus/config.yaml
+bay toml validate projects/gatus/bay.toml
+git add projects/gatus && git commit -m "feat: add gatus"      # an uncommitted file is not read
+bay plan production --project gatus       # no lock yet: one create step per container
+bay up production --project gatus         # writes projects/gatus/bay.lock
+```
+
+You never write the lock. The first `bay up` creates it: `repo: null`, `toml_path: bay.toml`,
+`commit` = the fleet commit that last changed `projects/gatus/`, and the `production`
+record. An app that builds from source does not belong here: keep it in its own repo
+(scenario 2), because a lock with a clone URL can only come from `bay init` or `bay import`.
+
 Daily: `bay plan production --project gatus`, then `bay up production --project gatus`.
 
 ## 2. One app with its own repo
@@ -188,7 +242,10 @@ fleet = "acme"
 port = 3000
 health = "/healthz"
 secrets = ["SESSION_SECRET"]              # names only; values are in the vault
-needs = ["postgres"]
+needs = ["postgres"]                      # needs a resource of kind postgres on the same box (scenario 5)
+
+[access]
+mode = "public"                           # required: public | tailnet | internal; there is no default
 
 [[mounts]]
 path = "/etc/nginx/nginx.conf"
@@ -222,12 +279,16 @@ Flow from the app repo:
 
 ```
 cd ~/code/shop
-bay init                                  # once: drafts bay.toml, writes projects/shop/bay.lock in the fleet
+bay init --fleet acme                     # once: drafts bay.toml, writes projects/shop/bay.lock in the fleet
+                                          # (no bay.toml yet, so name the fleet; later commands read `fleet =`)
 git add bay.toml && git commit -m "chore: add bay.toml"
 git push                                  # push FIRST
 bay plan production                       # WANTED (this commit) vs PINNED vs RUNNING
 bay up production                         # pins this commit, deploys the whole env, commits and pushes the fleet
 ```
+
+The first image does not come from `bay up`. See [plan.md](plan.md#the-first-image): the first
+push to the deploy branch builds it, once `bay up` has put the webhook script on the box.
 
 Where Bay reads the app code, in this order:
 
@@ -263,6 +324,9 @@ fleet = "acme"
 port = 3000
 needs = ["postgres", "redis"]
 
+[access]
+mode = "public"
+
 [build]
 dockerfile = "apps/web/Dockerfile"
 
@@ -279,7 +343,9 @@ domain = "blog.acme.example"
 ```
 
 Containers on the box: `blog`, `blog-worker`, `blog-api`. The fleet only gains
-`projects/blog/bay.lock`.
+`projects/blog/bay.lock`. As written, this file hits two unsupported cases of 2.1: `path = "/api"`
+and the worker that shares the build of the project. `bay plan` lists them in `unsupported` and blocks
+until you pass `--allow-unsupported` ([plan.md](plan.md#features-bay-cannot-deploy-yet)).
 
 ## 4. Two environments, two boxes
 
@@ -294,8 +360,15 @@ its own pin. One compiled `services.yml` covers both envs.
 # bay.fleet.toml
 [boxes.eu-1]
 env = "production"
+group = "eu"
 [boxes.eu-2]
 env = "staging"
+group = "eu2"
+
+[resources.postgres]                      # one resource, two boxes (scenario 5 explains `kind` and `box`)
+kind = "postgres"
+box = ["eu-1", "eu-2"]
+image = "pgvector/pgvector:pg17"
 ```
 
 `shop/bay.toml` deploy tables:
@@ -326,6 +399,29 @@ Container names. The primary env (`production`) has no suffix. Other envs add `-
 | job `cleanup` | `shop-job-cleanup` | `shop-staging-job-cleanup` |
 
 Missing secrets: `bay secret missing staging` lists the names. It never prints a value.
+
+**A second env on a new box, in order.** Do the fleet first, then the app repo:
+
+1. `hosts/staging`, one heading per group:
+
+   ```ini
+   [eu2]
+   eu-2 ansible_host=192.0.2.11
+   ```
+
+2. `bay.fleet.toml`: the box `eu-2` with `env = "staging"` and `group = "eu2"`, and `"eu-2"` in
+   the `box` list of the postgres resource (above). Without it, `needs = ["postgres"]` has no
+   postgres on `eu-2` and the plan blocks (scenario 5).
+3. The secrets of the env: write `group_vars/staging/secrets.yml` as a `secrets:` mapping,
+   run `bay vault encrypt staging`, and later change it with `bay vault edit staging`. Add every name
+   that `bay secret missing staging` lists. Staging has its own values: nothing is shared with
+   production unless the project uses `fleet_secrets`.
+4. Commit and push the fleet. Provision the box: `bay provision staging` (scenario 11).
+5. In the app repo add the `[deploy.staging]` table above, commit, and push the `develop` branch.
+6. `bay plan staging`, then `bay up staging`. The first image comes from the push of step 5 (see
+   [plan.md](plan.md#the-first-image)). Staging owns its data: it starts with an empty database.
+
+Scenario 11 shows the box and hosts files in more detail.
 
 ## 5. Several boxes, shared resources, mixed apps
 
@@ -359,13 +455,26 @@ group = "infra"
 webhook_domain = "deploy.infra.acme.example"
 
 [resources.postgres]                      # shared, used by `needs = ["postgres"]`
-box = "eu-1"
+kind = "postgres"                         # postgres | redis | container (default container)
+box = "eu-1"                              # one box, or a list: ["eu-1", "eu-2"]
 image = "pgvector/pgvector:pg17"
 volumes = ["postgres_data:/var/lib/postgresql/data"]
 
 [webhook]
 secret = "WEBHOOK_SECRET"                 # a secret NAME; the value is in the vault
 ```
+
+**How a resource maps to boxes.** `needs = ["postgres"]` finds the one resource of `kind =
+"postgres"` whose `box` contains the box of the project's deploy env. That is the whole rule:
+
+- `box` is a name or a list. A list runs the same image and config on each listed box, and
+  each box has its own empty data.
+- A project on a box that no postgres resource lists does not reach a postgres on another
+  box. `bay plan` blocks with "postgres on another box than eu-2 (cross-box data access)".
+  Fix it by adding the box to the list, or by a second resource of the same kind that lists
+  only that box (`[resources.postgres-staging]`, `kind = "postgres"`, `box = "eu-2"`).
+- Two resources of one kind that both list the same box are an error ("keep one per box").
+- A `kind` left out is `container`, which no `needs = ["postgres"]` matches: write the `kind`.
 
 A project mounts a shared fleet file with an explicit prefix. There is no guessing:
 `from = "fleet:shared/robots.txt"` reads `<fleet>/files/shared/robots.txt`.
@@ -405,6 +514,11 @@ fleet projects/shop/bay.lock              fleet projects/shop/bay.lock
   adopted: {...}                            adopted: {...}         (kept, so nothing is renamed)
 ```
 
+An in-fleet lock normally has `repo: null`. It carries a URL only when the project builds from
+source (the repo that the webhook builds). The adopt sets `repo` to the `origin` URL of the
+checkout when it was `null`, and keeps the lock's own string when it already named this repo. A
+lock that names another repo stops the adopt.
+
 Steps. The order matters: adopt, `bay up`, then `git push`.
 
 ```
@@ -436,7 +550,11 @@ because the lock keeps the adopted names. The pin changes from a fleet commit to
 commit, and that is by design.
 
 `bay rollback` straight after an adopt is refused: the previous pin is a fleet commit. Use
-`bay up --at <commit>`. `bay rollback --to <commit>` (code only) still works.
+`bay up --at <commit>`. `bay rollback --to <commit>` of an app commit still works: it moves the
+pin and the code (scenario 10).
+
+`bay plan` on the adopt commit prints no "bay up will refuse it" note. It says the commit is the adopt
+commit and is not pushed yet, and that `bay up` takes it. Once you push, the note is gone.
 
 ## 8. App needs app
 
@@ -466,6 +584,9 @@ name = "web"
 fleet = "acme"
 port = 3000
 needs = ["api"]                           # the fleet injects API_URL into web
+
+[access]
+mode = "public"
 
 [deploy.production]
 domain = "app.acme.example"
@@ -526,7 +647,10 @@ domain = "shop.acme.example"
 - `bay secret missing production` lists `PASSWORD_STAFF` until it is in the vault.
 
 The job is a one-shot container, `shop-job-cleanup`. It gets the image, env, secrets,
-needs and mounts of the main container. This doc names no verb to run a job once by hand
+needs and mounts of the main container. In 2.1 the compiler cannot deploy `[[jobs]]` yet, and
+`access.open` beside a password is unsupported too: `bay plan` lists both in `unsupported`
+([plan.md](plan.md#features-bay-cannot-deploy-yet)). The service `staff` above is
+fine. This doc names no verb to run a job once by hand
 or to read its last result.
 
 ## 10. Rollback, both track modes
@@ -545,6 +669,11 @@ track = "branch"                          # default: a push builds and deploys n
 | Only `bay.toml` and the files its mounts read | nothing is built or deployed: `config-only push <commit12>: run bay up` | nothing is built |
 | Code and `bay.toml` | builds, then **holds**: the alert `build.held` names `bay up` | builds, then holds |
 | A `[build]` edit (Dockerfile path, build arg, `image`) | builds, then holds | builds, then holds |
+
+The checks apply in a fixed order, from the webhook's `watch` and `ignore` filter to the
+hold guard: see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push). A push that
+the filter drops (it touches only files outside `watch`, a push of `bay.toml` alone included)
+reaches none of the other checks: it is not built, not held and not logged as config-only.
 
 A config-only push needs `build.bay_build_hash` to match. `bay_build_hash` is the hash of
 the `[build]` keys. So a `[build]` edit is never a config-only push: it always builds.
@@ -576,14 +705,37 @@ only the config changes. A whole-environment `bay up <env>` makes the same check
 project. `--force-code` moves it anyway, as a destructive step. `pin` mode and
 `bay rollback` move code backwards on purpose.
 
-`previous` is one level deep. For anything older:
+`previous` is one level deep. For anything older, or to undo only the last bad push:
 
 ```
 bay rollback production --project shop --to 0123456789ab
 ```
 
-It works when the image of that commit still exists on the box. Otherwise it refuses and
-lists the commit tags the box has. A second plain rollback undoes the first.
+`--to` is the one form for an older state. It moves the code to the image of that commit, and
+for an app whose `bay.toml` is in its repo it moves the pin to that commit too: config and code.
+It works when the image of that commit still exists on the box. Otherwise it refuses before
+anything moves and lists the commit tags the box has. A second plain rollback undoes the first.
+
+**A bad push in branch mode.** A push deploys by itself, and it never changes `previous` (only
+`bay up` does). Say the last `bay up` was good, then a push put bad code on the box. Plain
+`bay rollback` would go to the state before that `bay up`, which can be older than the last good
+push. Roll back to the last good commit instead:
+
+```
+bay rollback production --project shop --to <last good commit>
+bay up production --project shop                       # after you pushed the fix and its build finished
+```
+
+The env is frozen after the rollback: pushes build but do not deploy. The `bay up` to a newer
+commit clears the freeze. `git revert` and a push is the other way, while the env is not frozen.
+A push that fails its health check is rolled back on the box by itself.
+
+**Rollback in pin mode.** A push already holds, so the freeze adds nothing you can see. Plain
+`bay rollback` moves the pin back and skips the code move (`code_kept`) when the previous image
+is not on the box. `bay rollback --to` refuses in that case:
+`<image>:<commit12> is not on the box ... Commit tags on the box: ...`. To go forward: push the fix,
+wait for its build, then `bay up` to that commit. In pin mode the image must be on the box, or
+the deploy stops before any container changes. Full rules: [plan.md](plan.md#bay-rollback).
 
 ## 11. Adding a box
 
@@ -594,15 +746,19 @@ reach it.
 # bay.fleet.toml
 [boxes.eu-2]
 env = "production"
-group = "eu"
+group = "eu2"                             # its own group: boxes that share one run each other's containers
 ```
 
 ```ini
 # hosts/production
 [eu]
 eu-1 ansible_host=192.0.2.10
+[eu2]
 eu-2 ansible_host=192.0.2.11
 ```
+
+(In scenario 4, `eu-2` is the staging box of a second env. Here it is a second box of the
+`production` env.)
 
 Commit and push the fleet. Then provision the new box. Do it before the first `bay up`
 to that box:
@@ -615,12 +771,15 @@ bay --fleet ~/.config/bay/fleets/acme doctor production    # does the box answer
 SSH access to the box, and its tailnet enrolment, come from you, out of band. An empty box
 runs nothing until an app names it: `box = "eu-2"` in a `[deploy.<env>]` table, or
 `default_box` in `bay.fleet.toml`. `bay up production` then deploys the whole env,
-including the new box.
+including the new box. An app on the new box that has `needs = ["postgres"]` also needs a postgres
+resource that lists `eu-2` (scenario 5, "How a resource maps to boxes"), or its plan blocks.
 
 ## 12. Box move with data
 
-`shop` moves from `eu-1` to the box `eu-2`. Add `eu-2` first (scenario 11). Commit and push
-the app after the fleet, so the box exists when the app asks for it:
+`shop` moves from `eu-1` to the box `eu-2`. Add `eu-2` first (scenario 11), and add `"eu-2"` to
+the `box` list of the postgres resource, so that `needs = ["postgres"]` finds a postgres on the
+new box (scenario 5). Commit and push the app after the fleet, so the box exists when the app asks
+for it:
 
 ```toml
 # shop/bay.toml
@@ -682,6 +841,9 @@ port = 3000
 secrets = ["SESSION_SECRET"]              # globex has its own value; project name prefixes the secret
 needs = ["postgres"]                      # globex has its own database
 
+[access]
+mode = "public"
+
 [deploy.production]
 domain = "shop.globex.example"
 track = "pin"                             # scenario 10: roll out one tenant at a time
@@ -691,11 +853,12 @@ Register each one with `bay init --toml-path tenants/globex/bay.toml`.
 
 Why not one project with three envs (`[deploy.acme]`, `[deploy.globex]` ...)?
 
-- An env is a group of boxes. A box has exactly one `env`. A `[deploy.globex]` table needs a
-  box with `env = "globex"`. Three tenants on one box cannot be three envs.
-- `bay up globex` deploys the whole env `globex`, not one tenant.
-- One project has one pin. With one project per tenant, `bay up` for `shop-globex` leaves
-  `shop-acme` at its pin. You can roll one tenant back alone.
+- One project has one pin, shared by all its envs: a `bay up globex` also moves the compiled
+  entries of the project's other envs (`acme`, `initech`) to that pin. With one project per tenant, `bay up` for
+  `shop-globex` leaves `shop-acme` at its pin. You can roll one tenant back alone.
+- A deploy env has its own suffix on the container name (`shop-globex`) but not its own box
+  env: its box env is the one of its box (see [Words](#words-deploy-env-box-env-and-group)).
+  `bay up globex` deploys the whole box environment, not one tenant.
 
 A new tenant is a new project: `bay init`, add its secrets, `bay up`.
 
@@ -705,33 +868,41 @@ A new laptop. Nothing is installed. You will deploy `shop` to the `acme` fleet.
 
 ```
 git clone https://github.com/AltanS/bay ~/.local/share/bay/framework
-uv tool install --editable ~/.local/share/bay/framework      # needs git and uv
+~/.local/share/bay/framework/bootstrap.sh          # needs git and uv
 bay fleet init acme --from git@github.com:acme/acme-fleet.git
+cp <the vault password you were given> ~/.config/bay/fleets/acme/.vault_pass
 git clone git@github.com:acme/shop.git ~/code/shop
 cd ~/code/shop
 bay doctor production                     # fleet, vault, boxes, repo, fleet clone
 bay plan production
 ```
 
-Or run `~/.local/share/bay/framework/bootstrap.sh` instead of the `uv tool install` line.
-It installs the dependencies too. If the shell cannot find `bay`, run `uv tool update-shell`.
+This is the install of [install.md](install.md#install), exactly. `bootstrap.sh` does the Python
+packages, the Ansible roles and collections, and the `bay` command. `uv tool install --editable`
+alone is not enough to deploy. If the shell cannot find `bay`, run `uv tool update-shell`.
 
 - **The vault password** comes from the operator, out of band. Bay never stores it and no
-  repo holds it. Without it `bay vault edit` and every deploy stop. `bay doctor` checks
-  that the vault opens. It prints no name and no value.
+  repo holds it. It is the one file `.vault_pass` in the root of the fleet clone, here
+  `~/.config/bay/fleets/acme/.vault_pass` ([install.md](install.md#the-vault-password)). Add the line
+  to the fleet's `.gitignore`. Without the file `bay doctor` fails its Vault check, and `bay vault edit` and
+  every deploy stop. `bay doctor` checks that the vault opens. It prints no name and no value.
 - **SSH access to the boxes** and **tailnet membership** also come out of band.
-- `--from <url>` clones into `~/.config/bay/fleets/acme`. For a clone you made yourself,
-  use `--fleet <path>` or `BAY_FLEET=<path>`.
+- **The fleet name.** `--from <url>` clones into the folder `~/.config/bay/fleets/acme`. That
+  folder name, the `name` in `bay.fleet.toml` and the `fleet = "acme"` line of every `bay.toml`
+  must be the same word ([install.md](install.md#the-three-names-of-a-fleet)). If the repo says another
+  `name`, use that name as the folder, or use `--fleet <path>` or `BAY_FLEET=<path>` for a clone you
+  made yourself.
 - `.bay-cache/` holds its own `.gitignore`, so git never shows the fleet cache. You need
-  no line in the fleet's `.gitignore`.
+  no line in the fleet's `.gitignore` for it.
 - Do not run `bay init` again. The lock is already in the fleet. The first `bay plan`
   fetches the app code into the fleet cache (scenario 2). You need read access to the app
   repo from this machine.
 - **Push first.** `bay up` refuses a commit that is on no branch of the remote.
 - **Pull the fleet first.** A stale clone can revert config. The plan blocks when the
   fleet is behind its remote, and `bay doctor` warns.
-- The command is an editable install. A framework edit on this machine takes effect at
-  once. See [install.md](install.md#development-mode-the-editable-install).
+- The command is an editable install: the code that runs is the checkout. A framework edit on
+  this machine takes effect at once. See
+  [install.md](install.md#development-mode-the-editable-install).
 
 ## 15. Tailnet route
 
@@ -745,18 +916,32 @@ ingress_box = "infra"                     # the box that serves the routes
 cert_domain = "*.ts.acme.example"         # one wildcard certificate (DNS-01)
 
 [tailnet.routes.notes]
-domain = "notes.ts.acme.example"         # under cert_domain
-upstream = "http://devbox.acme.tailnet.internal:8787"
+domain = "notes.ts.acme.example"          # under cert_domain
+upstream = "http://devbox.acme.tailnet.internal:8787"   # tailnet IP, one label, or a name under .tailnet.internal or .ts.net
 host = "upstream"                         # upstream | client (default client): the Host header the upstream sees
 identity = true                           # inject the X-Tailnet-Device header
 ```
+
+**Before the first route.** The ingress box needs the DNS-01 setup (Cloudflare token in the
+vault, `traefik_dns_challenge_enabled`, `tailnet_ingress_cert_domain`), and `identity = true` needs
+`tailnet_identity_enabled` and a Headscale API key. The list is in one place:
+[tailnet-ingress.md](tailnet-ingress.md#before-the-first-route-the-ingress-box-prerequisites). `bay route add`
+needs `--ingress-box` and `--cert-domain` the first time.
+
+**ACL, when the fleet has `headscale_acl_policy`.** `bay route add` edits `bay.fleet.toml` only and
+never the ACL. Two hand edits are needed: grant the ingress box the upstream port, and carve
+that port out of any broader range. They are listed once, with the deploy order, in
+[tailnet-ingress.md](tailnet-ingress.md#adding-a-proxy-under-default-deny). Do them, and deploy
+them (`bay deploy production --tags headscale`), before or with the route. `bay plan` shows no step
+for an ACL edit.
 
 Add, list and remove with the CLI. `add` and `rm` edit `bay.fleet.toml`, keep its comments
 and commit the fleet repo (`--no-commit` only edits):
 
 ```
 bay route add notes --domain notes.ts.acme.example \
-    --upstream http://devbox.acme.tailnet.internal:8787 --host upstream --identity
+    --upstream http://devbox.acme.tailnet.internal:8787 --host upstream --identity \
+    --ingress-box infra --cert-domain "*.ts.acme.example"      # the last two: first route only
 bay route ls
 bay route rm notes
 bay plan production                       # steps: route_added, route_changed, route_removed (risk: shared)
@@ -764,22 +949,21 @@ bay approve <plan-id> --reason "<why>"
 bay up production                         # runs the deploy_stack, headscale and traefik tags
 ```
 
-A fleet that still has `group_vars/all/tailnet_proxies.yml` runs `bay route import` once.
-It moves the routes into `bay.fleet.toml` and deletes the file. The first `bay up` shows one
-`route_added` step per route and recreates no container.
+A fleet that still has `group_vars/all/tailnet_proxies.yml` (the method from before 2.1) runs
+`bay route import` once. It moves the routes into `bay.fleet.toml` and deletes the file. The
+first `bay up` shows one `route_added` step per route and recreates no container.
 
 On the ingress box (`infra`), Traefik serves the route on the tailnet entrypoint,
 Headscale holds the split-DNS record, and CrowdSec reads the router name. A change in DNS
 records restarts Headscale, and the plan says so. A plan for an env other than the ingress
 box's is blocked while a route change is pending. `bay validate` checks that the domain is
 under `cert_domain`, the box is the ingress box, the upstream is a tailnet name or IP with a
-port, and no domain repeats. The upstream is never `localhost`.
+port, and no domain repeats. The upstream is never `localhost`. The upstream host form and how to
+read a node's name are in [tailnet-ingress.md](tailnet-ingress.md#the-route-keys).
 
-**ACL warning.** The ingress box must be allowed to reach the upstream port. If no ACL rule
-lets it, the route answers with a 502 or a timeout, and the ACL leaves no log line.
-`bay validate` warns when no rule has the ingress box as its only `src` for that port. It
-is a warning, because allow-all mode is legal. You still edit the ACL by hand in
-`group_vars/all/headscale_acl.yml`.
+`bay validate` warns when no ACL rule has the ingress box as its only `src` for that port. It
+is a warning, because allow-all mode is legal. If no rule lets the ingress box reach the port,
+the route answers with a 502 or a timeout, and the ACL leaves no log line.
 
 `bay show --routes` lists WANTED, PINNED and RUNNING per route. RUNNING reads the receipt of
 the ingress box. No receipt lists routes yet, so RUNNING is `unknown` today, and `bay status`
@@ -808,6 +992,12 @@ bay remove shop
 bay approve <plan-id> --reason "shop is retired"
 bay up production --plan-id <plan-id>
 ```
+
+`bay remove shop` takes out every env of the project. In `bay up <env> --plan-id`, `<env>` is
+only a guard: Bay refuses a name that is neither the plan's env nor one of the planned envs. It
+does not limit the removal, so `bay up staging --plan-id <id>` applies the whole plan too. The deploy
+runs once for each distinct box env of the removed envs (a project in staging and production on one
+box env is deployed once).
 
 Only a receipt that confirms the containers are gone deletes the env from the lock. With no
 env left, `projects/shop/` leaves the fleet. The volumes and the database stay. See

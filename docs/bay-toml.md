@@ -45,10 +45,12 @@ bay import --fleet ./fleet --check --diff      # also prints the diff of each co
   `-dev` become an environment of `<name>`. `<name>-<suffix>` with the same repo or
   image becomes `[services.<suffix>]` when the result is exact. The report lists every
   decision.
-- The main environment of a project is named after the group of its box (`env` of the
-  box in `bay.fleet.toml`). A box in group `testing` gives `[deploy.testing]`.
-  `-staging` and `-dev` keep their names. When every box is in one group, that group
-  is also `primary_env` in `bay.fleet.toml`, so container names stay as they are.
+- The main environment of a project is named after the box environment of its box (the
+  `env` key of the box in `bay.fleet.toml`, see
+  [layout-scenarios.md](layout-scenarios.md#words-deploy-env-box-env-and-group)). A box
+  with `env = "testing"` gives `[deploy.testing]`. `-staging` and `-dev` keep their names.
+  When every box has one `env`, that name is also `primary_env` in `bay.fleet.toml`, so
+  container names stay as they are.
 - A value `http://<container>:<port>` that reaches another project becomes a need with
   `env` set to today's variable name, and the other project gets `publish = true`.
 - The report lists each secret to add (for example a password that is plain text
@@ -64,17 +66,23 @@ bay import --fleet ./fleet --check --diff      # also prints the diff of each co
 3. Unknown keys fail, in every table.
 4. All top-level keys come before the first table. TOML puts a key written below a
    `[table]` header into that table, so a misplaced key fails as an unknown key.
-5. Each level sets `image` or `[build]`, never both. With neither, the level builds
-   `./Dockerfile`.
+5. The top level sets `image` or `[build]`, never both. With neither, it builds
+   `./Dockerfile`. A service (`[services.<name>]`) sets `image` or an inline `build`, never
+   both, and with neither it takes the image of the top level. An environment may
+   override `image` or `build.args`, never both (see `[deploy.<env>]`).
 6. `needs` is a list or `[needs.<name>]` tables. One file uses one form everywhere,
    in the top level and in every service.
 7. `name` uses `a-z`, `0-9` and `-`, and starts with a letter or digit. It must not end
    in `-<env>` for any environment in `[deploy]`. `name` never changes: a new name is a
    new project.
-8. Container names are `<name>-<service>` in the primary environment and
-   `<name>-<env>-<service>` in the others. The primary environment is `production`. A
-   file with no `production` table has no primary environment. The main container is
-   service `web`, so no extra service may be named `web`. A service name must not start
+8. The main container is named `<name>` in the primary environment and `<name>-<env>`
+   in the others. Each extra service `[services.<s>]` is `<name>-<s>` in the primary
+   environment and `<name>-<env>-<s>` in the others. The primary environment is
+   `primary_env` of `bay.fleet.toml`; its default is `production`. A file with no table
+   for the primary environment has none: every environment then carries its suffix. The
+   key `web` stands for the main container in the rules (it is the `WEB_URL` name), so
+   no extra service may be named `web`. A lock that adopts a container name keeps that
+   name. A service name must not start
    with `<env>-` for any environment, because the names would collide. It must not start
    with `job-` either, because job containers use that prefix (see Behavior). A volume
    name must not start with `<env>-` for any environment, for the same reason.
@@ -231,7 +239,7 @@ BW_CLIENTID = "SHARED_BW_CLIENT_ID"
 [access]
 mode = "public"                # public | tailnet | internal
                                # public   = internet, HTTPS via Let's Encrypt
-                               # tailnet  = only devices on the fleet VPN (compiles to the fleet allowlist)
+                               # tailnet  = only devices on the fleet VPN (compiles to `access: vpn`)
                                # internal = no route; reachable only by containers that need it
 open   = ["/webhooks"]         # paths opened to public; bypass mode AND password
 locked = ["/admin"]            # paths locked to the tailnet
@@ -392,7 +400,7 @@ lockfile (see Behavior).
 | `context` | string | `.` | Build context, relative to the repo root. |
 | `strategy` | `local`, `remote`, `registry` | fleet setting | Where the image is built. |
 | `memory` | size | fleet setting | Build memory cap. |
-| `watch` | list of globs | everything | A push that touches none of these files does not rebuild. |
+| `watch` | list of globs | everything | A push that touches none of these files does not rebuild. This filter runs first, before the config-only and hold checks, and it filters a push of `bay.toml` too (see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push)). |
 | `ignore` | list of globs | none | Files that never trigger a rebuild. Applied after `watch`. |
 | `[build.args]` | table of strings | none | Build arguments. |
 | `[build.secrets]` | table | none | BuildKit secret id = fleet secret name. |
@@ -412,9 +420,13 @@ memory. A service that inherits the image shares the one build.
 
 ### `[access]`
 
+A file with no top-level `[access]` table, or one without `mode`, fails the check with
+`access.mode: is required`. There is no default mode. `bay init` writes `mode = "public"`.
+A service with no `domain` and no `path` is internal whatever the project mode is.
+
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `mode` | `public`, `tailnet`, `internal` | required at the top level | `public`: the internet, HTTPS via Let's Encrypt. `tailnet`: only devices on the fleet VPN. `internal`: no route; only containers that need it can reach it. |
+| `mode` | `public`, `tailnet`, `internal` | none: the top-level `[access]` table and its `mode` are required | `public`: the internet, HTTPS via Let's Encrypt. `tailnet`: only devices on the fleet VPN. `internal`: no route; only containers that need it can reach it. |
 | `open` | list of paths | `[]` | Open to the public. These paths skip the mode and the password. They stay open in every environment unless that environment overrides `access.open`. |
 | `locked` | list of paths | `[]` | Only reachable from the tailnet. They also need the password when `[access.password]` is set. A path may not be both open and locked. |
 | `[access.limits]` | `rate`, `burst`, `concurrent` | fleet setting | Per source IP. |
@@ -437,6 +449,11 @@ Each mount sets `path` and exactly one of `volume` or `from`.
 Two mounts in one container may not use the same `path`. A volume name is shared by the
 whole project. Two services that mount the same volume name share one volume.
 
+**Move mounted files beside the `bay.toml` now.** 2.1 still reads the old place,
+`files/<name>/<from>` in the fleet, as a fallback and prints a note. A later release reads
+only the place beside the toml. The code and the changelog name no release for that yet,
+so do not wait for one: run `git mv` as soon as you see the note.
+
 Where `from` is read:
 
 - **Beside the toml.** `from` is relative to the directory of the `bay.toml`, in an app
@@ -453,7 +470,7 @@ Where `from` is read:
 - **The old place, for one release.** When the file is not beside the toml, Bay still
   reads `files/<name>/<from>` in the fleet, and prints a note that names the file. Move
   it beside the `bay.toml` with `git mv`. 2.1 reads both places; a later release reads
-  only the new one.
+  only the new one. A path that the lock adopts is read first, without a note.
 - On the box the file is `config/<name>/<from>`, or `config/<adopted path>` when the
   lock adopts one. Moving a file beside the toml does not change that path, so no
   container is recreated.
@@ -495,7 +512,8 @@ It gets the image, env, secrets, `fleet_secrets`, needs and mounts of the main c
 
 ### `[services.<name>]`
 
-An extra container in the same project. The main container is service `web`.
+An extra container in the same project. The main container is not a `[services.*]` table: the key `web` stands for it, so no
+service may use that name. Container names are in rule 8.
 
 - Inherited by default: `image` or `[build]`, `env`, `secrets`, `fleet_secrets`, `needs`.
   `inherit = false` starts the service empty.
@@ -600,5 +618,7 @@ aliases = []
 
 `bay compile` writes the table into `services.yml` as `tailnet_proxies:`. Edit it with
 `bay route add`, `bay route ls` and `bay route rm`, and move an old
-`group_vars/all/tailnet_proxies.yml` in with `bay route import`. The keys, the checks and
-the plan steps are in [tailnet-ingress.md](tailnet-ingress.md#routes-in-bayfleettoml-21).
+`group_vars/all/tailnet_proxies.yml` in with `bay route import`. `bay route add` edits
+`bay.fleet.toml` only, never the ACL. The keys, the form of the upstream name (`laptop.acme.tailnet.internal`
+is node `laptop` plus the fleet's MagicDNS suffix), the `allowlist` key, the checks, the ACL edits and the plan
+steps are in [tailnet-ingress.md](tailnet-ingress.md#routes-in-bayfleettoml-21).

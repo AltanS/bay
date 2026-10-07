@@ -2,7 +2,10 @@
 
 Bay keeps three truths apart:
 
-- **Wanted**: what `bay.toml` on the main branch asks for.
+- **Wanted**: what `bay.toml` asks for at the project's current commit: the HEAD of the
+  checkout you stand in, or the head of the `[deploy.<env>].branch` branch in the fleet's
+  repo cache. For a project in the fleet it is `projects/<name>/` at the fleet's HEAD. The
+  full definition is in [plan.md](plan.md#bay-plan).
 - **Pinned**: what the fleet lockfile pins.
 - **Running**: what the box reports. The deploy receipt is this record.
 

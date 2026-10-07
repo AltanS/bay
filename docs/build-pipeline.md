@@ -167,6 +167,38 @@ push, `bay up`" is the clean flow: the push does nothing on the box, and
 once `bay up` has written the new script: run `bay up` before `git push`
 (docs/plan.md, "bay adopt").
 
+### Order of the guards on a push
+
+A push meets these checks in this order. The first one that applies decides.
+
+In the webhook receiver, before any trigger file exists:
+
+1. A deleted branch, or a ref that is not the deploy branch, is ignored (HTTP 200).
+2. The `[build] watch` and `ignore` lists (compiled to the include and exclude path
+   filters, gitignore syntax) filter the pushed files. A push that fails the filter returns
+   200 "skipped" and writes no trigger: nothing is built, no commit tag exists, no alert
+   goes out. A force push, or a push of 20 or more commits, skips the filter. The filter
+   does not know that `bay.toml` is special: a push that touches only `bay.toml`, or only a
+   mounted file, is skipped when `watch` does not list it. Then no `<image>:<commit12>`
+   exists for that commit, and a later `bay up` to it in `pin` mode stops with "not on this
+   box". Keep `bay.toml` and the mounted files inside `watch`, or leave `watch` unset.
+
+In `rebuild.sh`, for a trigger that got through:
+
+3. The circuit breaker is open: exit 0 (one alert per hour).
+4. A pull signal for a held project (`track = "pin"` or frozen): fetch the commit tag only,
+   exit 0. A pull-only service exits 0 here as well.
+5. Fetch or pull, and read the commit.
+6. Config-only check (see "Config-only push" above): only `bay.toml` and its mounted files
+   changed and the `[build]` hash is the same. Retag the running image with the commit, exit 0.
+   A project in the fleet never gets the keys for this, so every push of it builds.
+7. Build `<image>:<commit12>`, unless that image already exists.
+8. Hold guard `_hold_reason`, in this order: `track = "pin"`, frozen, `bay.toml` missing at
+   the commit, `bay.toml` hash unreadable, `bay.toml` hash differs from the pinned one. A hold
+   keeps the commit tag, does not move `:latest`, sends `build.held` and exits 0.
+9. Otherwise move `:latest`, recreate the container, run the health check and stamp the
+   receipt. A failed health check rolls back on the box and exits 1.
+
 ## Circuit Breaker State (rebuild.sh)
 
 `rebuild.sh` maintains a per-service state file at

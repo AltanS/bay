@@ -49,7 +49,7 @@ BW_CLIENTID = "SHARED_BW_CLIENT_ID"
 [access]
 mode = "public"                # public | tailnet | internal
                                # public   = internet, HTTPS via Let's Encrypt
-                               # tailnet  = only devices on the fleet VPN (compiles to the fleet allowlist)
+                               # tailnet  = only devices on the fleet VPN (compiles to `access: vpn`)
                                # internal = no route; reachable only by containers that need it
 open   = ["/webhooks"]         # paths opened to public; bypass mode AND password
 locked = ["/admin"]            # paths locked to the tailnet

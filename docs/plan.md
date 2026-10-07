@@ -4,7 +4,9 @@ These are the daily verbs of Bay v2. They work on one project of one fleet.
 
 Bay keeps three truths apart:
 
-- **WANTED**: `bay.toml` at the project's current commit.
+- **WANTED**: `bay.toml` at the project's current commit: the HEAD of the checkout you stand
+  in, else the head of the `[deploy.<env>].branch` branch in the fleet's repo cache; for a
+  project in the fleet, `projects/<name>/` at the fleet's HEAD (see [bay plan](#bay-plan)).
 - **PINNED**: the fleet lockfile `projects/<name>/bay.lock`, and the services
   file that the fleet last compiled from it.
 - **RUNNING**: the receipt that the box wrote after its last deploy
@@ -18,16 +20,17 @@ No verb asks a question. No verb takes a secret on the command line.
 
 - Inside an app repo, Bay reads the `bay.toml` in the working directory or
   above it. `name` is the project. `fleet` names the fleet.
-- The fleet is `~/.config/bay/fleets/<fleet>`. `bay --fleet <path> <verb>` or
-  `BAY_FLEET=<path>` uses another directory.
-- `--project <name>` works from any directory. The fleet then comes from
-  `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME`.
+- The fleet is picked in one fixed order, defined once in
+  [install.md](install.md#pick-a-fleet): `--fleet <path>`, `BAY_FLEET`, the `fleet =`
+  line of the `bay.toml` you stand in, `BAY_FLEET_NAME`, and last the fleet directory
+  you stand in (a `bay.fleet.toml` here or above). That last rule applies to `plan`,
+  `up`, `approve`, `rollback` and `remove` only. `bay init` and `bay adopt` run in an app
+  repo that has no `bay.toml` yet, so they cannot use the `fleet =` line (see
+  [bay init](#bay-init)).
+- `--project <name>` works from any directory. The fleet then comes from the order above.
 - With no `bay.toml` here or above and no `--project`, `bay plan <env>` and
   `bay up <env>` cover the whole environment (see
-  [The whole environment](#the-whole-environment)). The fleet is the one that
-  `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME` names, or the fleet directory you
-  stand in (a `bay.fleet.toml` here or above). `bay approve` also finds the
-  fleet directory you stand in.
+  [The whole environment](#the-whole-environment)).
 - Every verb that writes to a fleet repo or acts on a box prints
   `fleet: <name> (<path>)` as its first line on stderr, before it does
   anything. With `--json` the line stays on stderr, so stdout holds one
@@ -44,16 +47,33 @@ No verb asks a question. No verb takes a secret on the command line.
 
 ### Projects with no repo
 
-Some projects have no repo of their own. Their `bay.toml` (and the files it
-mounts) live in the fleet as `projects/<name>/`. Use `--project <name>` (or
-`bay show <name>`) for them. plan, up, show and rollback work the same way,
-with these differences:
+Some projects have no repo of their own, such as an off-the-shelf image. Their `bay.toml`
+(and the files it mounts) live in the fleet as `projects/<name>/`. Use `--project <name>`
+(or `bay show <name>`) for them.
+
+**Create one.** No verb creates it. `bay init` is for an app repo: run in a fleet folder
+it would write the `bay.toml` at the fleet root. Write the project by hand:
+
+1. Write `projects/<name>/bay.toml` and the files it mounts beside it.
+2. `bay toml validate projects/<name>/bay.toml` (it needs no fleet).
+3. Commit it in the fleet repo. An uncommitted `bay.toml` is not read: `bay plan` and
+   `bay show` say "projects/<name> is not committed in the fleet; commit it first".
+4. `bay plan <env> --project <name>`, then `bay up <env> --project <name>`.
+
+You write no lock. A project with no lock plans as a new project (one `create` step per
+container). The first `bay up` writes `projects/<name>/bay.lock` with `repo: null`,
+`toml_path: bay.toml`, `commit` (the fleet commit that last changed
+`projects/<name>/`) and the environment record. A project that builds from source
+needs a lock with a `repo` (the compile stops with "names no repo"), and no verb sets
+one for a project in the fleet: keep a project that builds in its own repo (`bay init`).
+
+plan, up, show and rollback work as for any project, with these differences:
 
 - WANTED is `projects/<name>/` at the fleet's HEAD, without
   `projects/<name>/bay.lock`. Commit an edit in the fleet repo before you plan
   it. `bay up` commits the lock, and that commit does not change WANTED.
 - Its `commit` is the fleet commit that last changed `projects/<name>/`,
-  the lock not counted. Its `repo` may name the repo a webhook builds from.
+  the lock not counted. Its `repo` is `null`, or the repo a webhook builds from.
 - `bay show` reports WANTED as dirty when the working tree of
   `projects/<name>/` differs from HEAD.
 - A project in the fleet with no lock, or with no pinned commit, is read at
@@ -63,18 +83,24 @@ with these differences:
 ## The verbs
 
 ```bash
-bay init [--name N] [--fleet F] [--box B] [--domain D] [--toml-path P]   # draft bay.toml, register the project
-bay plan [env] [--json] [--log PATH] [--at SHA] [--plan-id ID] [--remote] [--no-remote] [--data keep]
+bay init [--name N] [--fleet NAME] [--box B] [--domain D] [--toml-path P] [--json]   # draft bay.toml, register the project
+bay plan [env] [--project P] [--json] [--log PATH] [--at SHA] [--plan-id ID] [--remote] [--no-remote]
+         [--data keep] [--allow-unsupported] [--force-code]
 bay approve <plan-id> --reason "<why>"
-bay up [env] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--data keep] [--json] [--log PATH] [--no-push]
-bay show [name] [--json] [--no-remote]
-bay rollback [env] [--force --reason "<why>"] [--data keep] [--json] [--log PATH] [--no-push]
+bay up [env] [--project P] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--data keep]
+       [--allow-unsupported] [--force-code] [--json] [--log PATH] [--no-push]
+bay show [name] [--json] [--no-remote] [--routes]
+bay rollback [env] [--project P] [--to COMMIT] [--force --reason "<why>"] [--data keep]
+             [--allow-unsupported] [--json] [--log PATH] [--no-push]
 bay adopt <name> [--toml-path P] [--check] [--json]   # move an in-fleet bay.toml into its app repo
-bay remove <name> [--env E] [--json] [--remote] [--no-remote]   # plan taking a project out; bay up --plan-id applies it
+bay remove <name> [--env E] [--json] [--remote] [--no-remote] [--log PATH]   # plan taking a project out; bay up --plan-id applies it
+bay status [--env E] [--json] [--no-remote]            # box receipts (see deploy-receipt.md)
 ```
 
-`env` is the `[deploy.<env>]` name. The default is the fleet's primary
-environment (`production`).
+`env` is the `[deploy.<env>]` name, not the box environment (see
+[layout-scenarios.md](layout-scenarios.md#words-deploy-env-box-env-and-group)). The
+default is the fleet's primary environment: `primary_env` of `bay.fleet.toml`, and
+`production` when the key is absent.
 
 With `--json`, stdout holds exactly one JSON document, also for an error
 (`{"error", "hint", "code"}`). Progress lines and everything the deploy
@@ -89,7 +115,15 @@ really runs.
 
 ### bay init
 
-Run it in an app repo that has no `bay.toml`.
+Run it in an app repo that has no `bay.toml`. Run it only there: for a project with no
+repo see [Projects with no repo](#projects-with-no-repo).
+
+**The fleet.** There is no `bay.toml` yet, so there is no `fleet =` line to read. `bay init`
+takes the fleet from, in this order: the global `--fleet <path>` (before the verb), `BAY_FLEET`,
+its own `--fleet <name>` (a folder name under `~/.config/bay/fleets`), `BAY_FLEET_NAME`. It
+does not use the fleet directory you stand in. The rest of the order is in
+[install.md](install.md#pick-a-fleet). The draft gets `fleet = "<name>"` from the `name` key
+of `bay.fleet.toml`.
 
 1. Bay writes a draft `bay.toml`. It reads three hints: `EXPOSE` in the
    `Dockerfile` gives the port, `package.json` gives port 3000 and a commented
@@ -120,7 +154,10 @@ leave it out.
    else the cache's HEAD). With no `branch` declared, the cache's HEAD: the
    remote's default branch. `--at` picks another commit. Uncommitted edits are not part of the plan. The plan
    records them as `wanted.dirty`. When the WANTED commit is on no branch of
-   the remote, the plan says so in a note: `bay up` will refuse it.
+   the remote, the plan says so in a note: `bay up` will refuse it. For the `bay adopt`
+   commit (`adopted.app_commit` in the lock) the note says instead that it is the adopt
+   commit and not pushed yet, that `bay up` takes it and moves no code, and that you run
+   `git push` after. Ignore the refusal wording there: there is none for that commit.
 2. Bay copies the fleet inputs to a temporary directory. Every project is
    read at its pinned commit. This project is read at the WANTED commit.
    Each file that a `bay.toml` mounts is copied from beside the toml to
@@ -128,11 +165,24 @@ leave it out.
    Bay compiles the whole fleet from that copy, the same way `bay up` will.
 3. **PINNED**: Bay compares the result with the fleet's services file, entry
    by entry. Each difference gives one or more steps.
-4. **RUNNING**: Bay reads the box receipt over SSH. `--no-remote` skips this.
-5. With `--remote`, Bay also runs today's deploy in check mode on the box
+4. **RUNNING**: Bay reads the box receipt over SSH. This is on by default.
+   `--no-remote` skips it and asks no box at all.
+5. Only with `--remote` (off by default), Bay also runs today's deploy in check mode on the box
    (`--tags deploy_stack`, `-e bay_reconciler_plan_only=true`, `--check`),
    with the compiled file given as extra variables. Without `--remote`, the
    steps come from the compiled files alone and `box_checked` is `false`.
+
+`bay up` has no `--remote` option. Plain `bay up` plans again with the receipt read and
+no box check. The fields `box_checked`, `box_prediction`, `running` and `fleet` are part of
+the plan hash, so the plan id depends on them. Two cases follow:
+
+- `bay plan` (no `--remote`), then `bay approve`, then plain `bay up`: the new plan has the
+  same id when nothing moved in between, and the approval applies. It does not apply when
+  the fleet HEAD, the box receipt or a lock moved.
+- `bay plan --remote`, then `bay approve`, then plain `bay up`: the new plan has
+  `box_checked: false`, so another id, and `bay up` stops with exit 10. Run
+  `bay up --plan-id <id>`: it plans again with the same box check that the saved plan used,
+  and the approval applies.
 
 ### What the check-mode run touches
 
@@ -227,10 +277,36 @@ A plan is **blocked** when:
   edited by hand.
 - `bay.toml` uses a feature Bay cannot deploy yet, unless
   `--allow-unsupported` is given.
-- The fleet repo has uncommitted changes and a step is destructive. Without a
-  destructive step, the plan only records `fleet.dirty`.
+- The fleet repo has uncommitted changes and a step is destructive. Every path counts,
+  untracked files too, except the `plans/` folder: plan files and approval files
+  (`plans/<id>.json`, `plans/<id>.approved`) never make the fleet dirty. `bay remove` uses the
+  same rule, and its steps are destructive. Without a destructive step, the plan only records
+  `fleet.dirty`.
 - A box move of a project with a named volume or a database, unless
   `--data keep` is given (see [Box move](#box-move)).
+
+### Features Bay cannot deploy yet
+
+The validator accepts some `bay.toml` keys that the compiler cannot deploy yet. `bay plan`
+(and `bay compile`) blocks and lists each one in `unsupported`. `--allow-unsupported` plans
+and applies anyway, and the container then runs without that feature. These are the
+unsupported cases of 2.1:
+
+- `release` (a command before traffic moves) and `[[jobs]]` (scheduled jobs).
+- A project `[backup]` schedule, and the mount options `backup` and `owner` of a volume.
+- `path` on a service (routing it by path on the main domain).
+- A service that shares the build of the project (the project builds from source and the
+  service has no `image` and no own `build`).
+- An internal container (no `domain`, no `path`) that builds from source, has a database
+  (`needs.postgres`), has a health path other than `/`, or sets `replicas` or `zero_downtime`.
+- `needs.postgres` with `extensions`, and a build `memory` cap per project.
+- `aliases` with the default redirect (the aliases are served instead of redirecting).
+- `access.open` together with `[access.password]`, and `[access.identity]`.
+- A need of a shared resource that is on another box than the project (see
+  [layout-scenarios.md](layout-scenarios.md#4-two-environments-two-boxes)).
+
+The list follows the compiler, not this page: the `unsupported` field of the plan is the
+truth for one file.
 
 ### Risk
 
@@ -249,7 +325,7 @@ Risk is set by the data that a step touches.
 | Secret removed from a container that does not run | safe |
 | Any change to a `[resources.*]` entry (shared postgres, redis and so on) | shared |
 | Shared resource removed | destructive |
-| Tailnet allowlist in `bay.fleet.toml` changed since the last fleet commit | shared |
+| Tailnet allowlist in `bay.fleet.toml` changed since the last fleet commit (see [the allowlist key](tailnet-ingress.md#the-route-keys)) | shared |
 | Tailnet route added, changed or removed (`kind: route`, see [tailnet-ingress.md](tailnet-ingress.md#routes-in-bayfleettoml-21)) | shared |
 | Deploy webhook changed | shared |
 | Container of another project changed or removed | that project's own risk, by the rows above |
@@ -275,7 +351,7 @@ owns, so a change to them can touch every project:
   it. A project's own database on that postgres is not shared: its steps
   carry the project and the risk rows above;
 - the deploy webhook (the webhook receiver);
-- the tailnet allowlist of `bay.fleet.toml`;
+- the tailnet allowlist of `bay.fleet.toml` (what it is: [tailnet-ingress.md](tailnet-ingress.md#the-route-keys));
 - a container in the services file that no project owns;
 - a box move with no data (the project leaves one box for another).
 
@@ -359,7 +435,9 @@ bay --fleet ~/fleets/prod plan production --json
 
 `bay up <env>` in the same place applies such a plan (or `--plan-id <id>`
 names a saved one). It pins every project of the plan to its WANTED commit
-and commits once: `bay: up <env> (<n> projects)`. A `--plan-id` of a
+and commits once: `bay: up <env> (<n> projects)`. This is the only form that moves
+the pin of a project other than the one you name (see
+[Every deployed project is pinned](#every-deployed-project-is-pinned)). A `--plan-id` of a
 one-project plan given from the fleet directory applies that project.
 
 In an app repo, `bay plan <env>` keeps its one-project meaning.
@@ -402,7 +480,8 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    and the same tag the box check of `bay plan` runs). The `git_deploy` role
    renders the webhook rebuild script under that tag, so a later webhook build
    uses the deployed config, not the config from before this `up`. The tag does
-   not clone, build or pull anything. When the plan has a `route` step, Bay
+   not clone or build anything, and it pulls nothing through Ansible (see
+   [The first image](#the-first-image)). When the plan has a `route` step, Bay
    runs `--tags deploy_stack,headscale,traefik`: Headscale renders the
    split-DNS records and Traefik the route file. A route change is blocked in
    a plan for a box env other than the ingress box's.
@@ -425,6 +504,22 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    committed but not pushed: the push would publish the other work in that
    repo too. Bay prints a warning, and `push_skipped` says why.
 
+#### The first image
+
+`bay up` builds no image. What it needs on the box depends on the app:
+
+- **An app with `image`** (no build): the box reconciler pulls the image when it creates or
+  recreates the container and the image is not there.
+- **An app that builds from source**: the first image comes from a build that `bay up` does
+  not run. A push to the deploy branch builds it, once `bay up` has rendered the webhook
+  script on the box. A full `bay deploy <env>` with no `--tags` also clones and builds it
+  (`git_deploy`). There is no `bay build` verb that builds: `bay build` has `status` and
+  `reset` only. Until an image exists, the container cannot be created: the receipt has a
+  failed action and `bay show` says `HALF`. `bay plan` does not check for it.
+- **Later deploys**: in `branch` mode a missing image at the code-target step is skipped and
+  `:latest` stays. In `pin` mode it stops the deploy before any container changes (see
+  [Code and config](#code-and-config)).
+
 When the deploy fails, the lock keeps the new pin and records
 `result: failed`. Bay still commits and pushes that record. `bay show` then
 says `HALF` until a deploy succeeds.
@@ -433,7 +528,16 @@ says `HALF` until a deploy succeeds.
 
 `bay up` deploys the whole box environment, not only one project. So after
 the deploy, OK or failed, Bay updates the lock of every project that has a
-`[deploy.<env>]` on the same box environment:
+`[deploy.<e>]` (any `<e>`) on the same box environment as the plan. This is what
+"covered" means in the docs. What moves depends on how you call it:
+
+- **In an app repo, or with `--project <name>`: one project.** That project is pinned
+  to the planned commit (the table below). Every other project keeps its pin.
+- **In the fleet directory with no `--project`: every project of the plan.** Each one is
+  pinned to its own WANTED commit (see [The whole environment](#the-whole-environment)).
+  `--at` is refused in this form.
+
+The table is for the one-project forms:
 
 | Project | `commit` |
 |---|---|
@@ -447,8 +551,9 @@ Each pinned environment gets `result`, `deployed_at`, `plan_id` and its own
 `previous` holds the earlier one. `bay show` then says `ok` for each of these
 projects, or `HALF` after a failed deploy.
 
-A project in the fleet that is pinned moves only with its own `bay up`. A
-deploy through another project reads it at its pin.
+A project in the fleet that is pinned moves only with its own `bay up`, or with a
+whole-environment `bay up` from the fleet directory. A deploy through another project reads
+it at its pin.
 
 The JSON result lists the pinned environments in `pinned`
 (`project`, `env`, `commit`, `result`) and the left-out projects in `notes`.
@@ -473,11 +578,11 @@ After the receipt commit, `bay up` prunes it:
 
 ### bay rollback
 
-Bay takes the environment's `previous` commit and runs `bay up` with it. The
-two pins swap, so a second rollback undoes the first. Bay refuses when there
-is no `previous`. The output names the old and the new commit and the steps.
-
-A rollback restores config **and** code:
+Rollback returns config and code to an earlier state and freezes the environment.
+Without `--to` that state is the previous `bay up`. With `--to <commit>` it is the commit
+you name. Plain rollback takes the environment's `previous` commit and runs `bay up` with
+it. The two pins swap, so a second rollback undoes the first. Bay refuses when there is no
+`previous`. The output names the old and the new commit and the steps.
 
 - Config: the pin moves back, and Bay compiles that commit's `bay.toml`.
 - Code: the box points `:latest` of every build container of the project at
@@ -485,27 +590,69 @@ A rollback restores config **and** code:
   deploy runs. The result lists this in `code_targets`. When the box cannot
   do it, the container keeps its image and the result says so: `code_kept`
   in the JSON, and `code: kept <container> (<reason>)` in the output. The
-  usual reason is a previous receipt from before 2.1, which names no commit
-  ("the previous receipt names no commit for this container"); then only the
-  config rolled back. Use `bay rollback --to <commit>` to move the code.
-- Freeze: Bay sets `frozen = true` (and `frozen_commit`) on the environment in
-  the lock. While the environment is frozen, a push builds and tags its image,
-  but does not deploy it, whatever `track` says. The alert `build.held` says
-  so. The next `bay up` to a newer commit (a descendant of `frozen_commit`)
-  clears the freeze. A `bay up` to the same or an older commit keeps it.
+  usual reasons are a previous receipt from before 2.1, which names no commit
+  ("the previous receipt names no commit for this container"), and a previous
+  image that is no longer on the box; then only the config rolled back. Use
+  `bay rollback --to <commit>` to move the code: it refuses instead of skipping.
+- Freeze: Bay sets `frozen = true` and `frozen_commit` on the environment in
+  the lock. `frozen_commit` is the commit that the rollback went **to**: the
+  commit now pinned, or the `--to` commit. While the environment is frozen, a
+  push builds and tags its image, but does not deploy it, whatever `track` says.
+  The alert `build.held` says so. The next `bay up` to a newer commit (a
+  descendant of `frozen_commit`) clears the freeze. A `bay up` to the same or an
+  older commit, or to a commit Bay cannot order against it, keeps it.
 
-`bay rollback --to <commit>` rolls the code back to that commit's image. Bay
-asks the box first (`docker image ls`). When `<image>:<commit12>` is not on the
-box, Bay refuses before anything moves, and the message lists the commit tags
-that the box has. For a project whose `bay.toml` lives in the app repo, the pin
-moves to `<commit>` too. A project in the fleet keeps its pin (its pin is a
-fleet commit), and only its code moves.
+**`bay rollback --to <commit>`** is the one form for anything older than `previous`.
+It rolls the code back to that commit's image. Bay asks the box first
+(`docker image ls`). When `<image>:<commit12>` is not on the box, Bay refuses before
+anything moves, and the message lists the commit tags that the box has. What else moves
+depends on where the `bay.toml` lives:
+
+- A project whose `bay.toml` lives in the app repo: the pin moves to `<commit>` too. Config
+  and code both go back to that commit.
+- A project in the fleet: it keeps its pin (a fleet commit, not a repo commit). Only the
+  code moves.
+
+#### Undo a bad push in branch mode
+
+In `branch` mode a push to the deploy branch can put bad code on the box after your last
+`bay up`. A push stamps the current receipt (`<env>.json`) for that container. It never
+touches `<env>.prev.json` or the lock's `previous`. Only `bay up` writes those. So plain
+`bay rollback` goes to the state before your last `bay up`. That skips the last `bay up`'s
+code too, and it can restore older code than the last good push. To undo only the bad push:
+
+```bash
+bay rollback production --project shop --to <last good commit>
+```
+
+The image `<image>:<last good commit>` must be on the box. The environment is then frozen:
+later pushes build but do not deploy. Push the fix, then run `bay up` to that commit, which
+clears the freeze. The other way is `git revert` and a push, which deploys by itself while the
+environment is not frozen. A push whose health check fails on the box is rolled back on the
+box by itself (see [build-pipeline.md](build-pipeline.md)).
+
+#### Rollback in pin mode
+
+With `track = "pin"` every push already holds, so the freeze adds nothing you can see.
+Plain `bay rollback` moves the pin back and points the code at the image of the previous
+receipt, and skips the code move (`code_kept`) when that image is not on the box.
+`bay rollback --to <commit>` refuses before anything moves when `<image>:<commit12>` is not
+on the box:
+
+```text
+<image>:<commit12> is not on the box, so bay rollback --to <commit> cannot run it.
+Commit tags on the box: ...
+```
+
+To go forward again: push the fix, wait until its build has finished (the image is tagged
+with the commit), then `bay up` to that commit. In `pin` mode the image must be on the box,
+or the deploy stops before any container changes.
 
 Straight after `bay adopt`, `bay rollback` is refused with "the previous pin
 is a fleet commit; use `bay up --at <commit>`". The adopt clears `previous`,
 because an app repo pin cannot go back to a fleet commit. The refusal holds
 until a `bay up` to a newer app commit records a `previous` again.
-`bay rollback --to <commit>` (code only) still works.
+`bay rollback --to <commit>` of an app commit still works: it moves the pin and the code.
 
 ### bay adopt
 
@@ -570,9 +717,12 @@ What it does:
 2. **App commit.** One commit with exactly those files:
    `chore: add bay.toml (adopted from fleet <fleet>)`. It stays local. You
    push it after `bay up`, which accepts this one commit unpushed.
-3. **Lock.** `projects/<name>/bay.lock` takes the repo form: `repo` (the
-   lock's own `repo` when it already named this repo, else the `origin` URL),
-   `toml_path`, and `commit` (the app commit). Every environment with a pin
+3. **Lock.** `projects/<name>/bay.lock` takes the repo form. A lock of a project in the
+   fleet has `repo: null`, or a clone URL when the project builds from source. `repo` becomes
+   the `origin` URL when the lock had `null` (or no lock), and stays the lock's own string when it
+   already named this repo (so the compiled build entry does not change). A lock that names another repo
+   is refused. The lock also gets
+   `toml_path` and `commit` (the app commit). Every environment with a pin
    moves its `commit` to the app commit. Every environment gets
    `adopted.from_fleet_commit` (the fleet HEAD before the adopt) and
    `adopted.app_commit` (the adopt commit), and loses `previous`. Every other adopted name stays, so no container, volume,
@@ -646,14 +796,20 @@ box eu-1, resource postgres: DROP DATABASE shop; DROP ROLE shop;
 Run the SQL line in the postgres resource of that box. Take a backup first if
 you may need the data again.
 
-**Apply.** `bay up <env> --plan-id <id>` applies the approved plan:
+**Apply.** `bay up <env> --plan-id <id>` applies the approved plan. For a remove plan
+`<env>` is only a guard: Bay refuses it when it is neither the plan's environment nor one
+of the planned environments, and the message names the right one. `bay remove shop` with no
+`--env` takes out every environment, and `bay up staging --plan-id <id>` still applies all of
+them: it does not limit the removal to staging.
 
 1. Plan again. A blocked or stale plan is refused, and an unapproved one too.
 2. The lock: each environment that leaves gets `result: pending`.
 3. Compile the fleet without the project, and commit:
    `bay: remove <name> (plan <id>)`.
-4. Deploy each box environment the project ran on. The reconciler removes
-   every container that is no longer in the compiled file.
+4. Deploy each distinct box environment that the removed environments ran on, one
+   after the other (a project in staging and production on one box environment is
+   deployed once). The reconciler removes every container that is no longer in the
+   compiled file. The loop stops at the first failure.
 5. Read the receipt. It must be from this deploy and must not list a container
    of the project, other than as `action: remove`.
 6. Confirmed: the environment leaves the lock. With no environment left,
@@ -884,8 +1040,10 @@ know.
 }
 ```
 
-- `box_env` is the box's `env` in `bay.fleet.toml`: the group that the
-  deploy targets and the receipt file name.
+- `box_env` is the box's `env` in `bay.fleet.toml`: the box environment that the deploy
+  targets and the receipt file name (see
+  [layout-scenarios.md](layout-scenarios.md#words-deploy-env-box-env-and-group)). It is not
+  the `env` field of the plan, which is the `[deploy.<env>]` name.
 - `pinned.commit` is the commit this environment runs per the lock.
 - `running.receipt_sha256` hashes only the box, name, image and config hash
   of this project's containers. A deploy of another project rewrites the
