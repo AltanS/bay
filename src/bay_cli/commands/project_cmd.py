@@ -108,7 +108,9 @@ def resolve(ctx: typer.Context, project: str | None) -> tuple[Any, Path | None]:
             )
         project = name
     cx = fleet_context(ctx, fleet_name)
-    proj = planmod.load_project(cx, project, expect_fleet=fleet_name if name == project else None)
+    proj = planmod.load_project(
+        cx, project, expect_fleet=fleet_name if name == project else None, cwd=Path.cwd()
+    )
     return proj, (here.parent if here and name == project else None)
 
 
@@ -191,22 +193,35 @@ def init(
     domain: Annotated[
         str | None, typer.Option("--domain", help="Domain. Default: <name>.<fleet domain>.")
     ] = None,
+    toml_path: Annotated[
+        str | None,
+        typer.Option(
+            "--toml-path",
+            help="Where bay.toml goes, relative to the repo root (a monorepo). "
+            "Default: bay.toml at the repo root.",
+        ),
+    ] = None,
     as_json: _JsonOpt = False,
 ) -> None:
     """Draft a bay.toml in this app repo and register the app in the fleet.
 
-    Writes bay.toml here and projects/<name>.lock in the fleet, then commits
-    the fleet repo ("bay: init <name>"). Refuses when the name exists.
+    Writes bay.toml here and projects/<name>/bay.lock in the fleet, then
+    commits the fleet repo ("bay: init <name>"). Refuses when the name exists.
+    The lock records the repo's origin URL and the toml path, never a path on
+    this machine.
 
     Examples:
 
         bay init --fleet myfleet
         bay init --name shop --box eu-1 --domain shop.example.com
+        bay init --name api --toml-path services/api/bay.toml
     """
     from bay_cli.project_init import init_project
 
     cx = fleet_context(ctx, fleet)
-    result = init_project(cx, Path.cwd(), name=name, box=box, domain=domain)
+    result = init_project(
+        cx, Path.cwd(), name=name, box=box, domain=domain, toml_path=toml_path
+    )
     if as_json:
         _echo_json(result)
         return

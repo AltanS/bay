@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from bay_cli import bay_toml, gitrepo, lockfile
+from bay_cli import bay_toml, gitrepo, layout, lockfile
 from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
 from bay_cli.fleet import PROJECTS_DIR
@@ -105,15 +105,22 @@ def init_project(
     name: str | None = None,
     box: str | None = None,
     domain: str | None = None,
+    toml_path: str | None = None,
 ) -> dict[str, Any]:
-    """Write ``bay.toml`` and ``projects/<name>.lock``, then commit the fleet."""
+    """Write ``bay.toml`` and ``projects/<name>/bay.lock``, then commit the fleet.
+
+    ``toml_path`` is relative to the repo root (a monorepo keeps one bay.toml
+    per app). By default it is ``bay.toml`` at the repo root. The lock
+    records ``repo`` (the origin URL) and ``toml_path``.
+    """
     from bay_cli.plan import load_fleet_doc
 
     if not gitrepo.is_repo(repo):
         raise BayError(f"{repo} is not a git repo", hint="Run bay init inside the app repo.")
     top = gitrepo._out(repo, "rev-parse", "--show-toplevel")
     root = Path(top) if top else repo
-    toml_file = root / "bay.toml"
+    rel = _toml_rel(toml_path)
+    toml_file = root / rel
     if toml_file.exists():
         raise BayError(
             f"{toml_file} already exists",
@@ -122,9 +129,17 @@ def init_project(
         )
     if not gitrepo.is_repo(cx.fleet_root) or gitrepo.head(cx.fleet_root) is None:
         raise BayError(f"the fleet {cx.fleet_root} is not a git repo with a commit")
+    repo_url = gitrepo.remote_url(root)
+    if repo_url is None:
+        raise BayError(
+            f"{root} has no origin remote",
+            hint="Bay finds the repo by its origin URL. Give the repo an origin remote "
+            "and push it, then run bay init again.",
+        )
 
+    layout.ensure(cx.fleet_root)
     fleet_doc = load_fleet_doc(cx)
-    project = name or default_name(root)
+    project = name or default_name(toml_file.parent if toml_path else root)
     if not _NAME_RE.match(project):
         raise BayError(
             f"name {project} must use only a-z, 0-9 and -, and start with a letter or digit",
@@ -146,7 +161,7 @@ def init_project(
         )
     env = str(fleet_doc.get("primary_env", "production"))
     chosen_domain = domain or f"{project}.{fleet_doc['default_domain']}"
-    hints = detect(root)
+    hints = detect(toml_file.parent)
     text = draft(
         name=project,
         fleet_name=str(fleet_doc["name"]),
@@ -160,8 +175,8 @@ def init_project(
     if problems:
         raise BayError("the draft is not valid:\n  " + "\n  ".join(str(v) for v in problems))
 
-    repo_url = gitrepo.remote_url(root)
-    raw = lockfile.new_lock(project, repo=repo_url, local_path=str(root.resolve()))
+    raw = lockfile.new_lock(project, repo=repo_url, toml_path=rel)
+    toml_file.parent.mkdir(parents=True, exist_ok=True)
     toml_file.write_text(text)
     lockfile.write(lock_file, raw)
     try:
@@ -169,11 +184,6 @@ def init_project(
     except gitrepo.GitError as exc:
         raise BayError(f"cannot commit the fleet repo: {exc}") from None
     warnings: list[str] = []
-    if repo_url is None:
-        warnings.append(
-            "the repo has no origin remote; a build from source needs one "
-            "(the lock's repo is empty)"
-        )
     if not hints.dockerfile:
         warnings.append("no Dockerfile: add one, or set image in bay.toml")
     return {
@@ -182,9 +192,23 @@ def init_project(
         "bay_toml": str(toml_file),
         "lock": str(lock_file),
         "repo": repo_url,
+        "toml_path": rel,
         "fleet_commit": fleet_commit,
         "env": env,
         "box": chosen_box,
         "domain": chosen_domain,
         "warnings": warnings,
     }
+
+
+def _toml_rel(toml_path: str | None) -> str:
+    """The bay.toml path relative to the repo root: ``toml_path``, else ``bay.toml``."""
+    if toml_path is None:
+        return "bay.toml"
+    rel = Path(toml_path)
+    if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+        raise BayError(
+            f"--toml-path {toml_path} must be a path inside the repo, relative to its root",
+            hint="For example services/api/bay.toml.",
+        )
+    return rel.as_posix()

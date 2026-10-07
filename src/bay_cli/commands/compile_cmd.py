@@ -3,8 +3,8 @@
 Each project is read at the commit its lock pins, through the same temp
 copy of the fleet that ``bay plan`` and ``bay up`` compile
 (:func:`bay_cli.plan.compiled_fleet`). A project with no pinned commit is
-left out, with a note. ``--working-tree`` reads the local checkouts as they
-are instead (dev use).
+left out, with a note. ``--working-tree`` reads the fleet and the checkout
+you stand in as they are instead (dev use); another repo project is not read.
 
 Exit codes: 0 written or already up to date (or ``--check`` found no
 difference), 1 for a ``--check`` difference, invalid input, a hand-edited
@@ -57,7 +57,8 @@ def compile_fleet(
         bool,
         typer.Option(
             "--working-tree",
-            help="Read each project's local checkout as it is, not its pinned commit (dev use).",
+            help="Read the fleet and the checkout you stand in as they are, not at the "
+            "pinned commits (dev use).",
         ),
     ] = False,
     allow_unsupported: Annotated[
@@ -76,18 +77,26 @@ def compile_fleet(
     target = (out / GENERATED_SERVICES) if out is not None else (cx.fleet_root / GENERATED_SERVICES)
 
     if working_tree:
+        from bay_cli import layout
+
+        for line in layout.ensure(cx.fleet_root):
+            typer.echo(f"note: fleet layout: {line}", err=True)
         try:
-            inputs = load_inputs(cx.fleet_root, output=target)
+            inputs = load_inputs(
+                cx.fleet_root, output=target, checkouts=_working_checkouts(cx.fleet_root)
+            )
             result = compiler.compile_fleet(inputs)
         except (FleetError, compiler.CompileError) as exc:
             for line in exc.lines:
                 typer.echo(line, err=True)
             raise BayError(f"compile failed with {len(exc.lines)} problem(s)") from None
+        for note in result.notes:
+            typer.echo(f"note: {note}", err=True)
     else:
         from bay_cli.plan import compiled_fleet
 
-        with compiled_fleet(cx) as comp:
-            for note in comp.notes:
+        with compiled_fleet(cx, cwd=Path.cwd()) as comp:
+            for note in [*comp.notes, *comp.file_gaps]:
                 typer.echo(f"note: {note}", err=True)
             if comp.result is None:
                 for line in comp.errors:
@@ -138,6 +147,28 @@ def compile_fleet(
         f"wrote {target} ({len(result.services)} service(s), "
         f"{len(result.accessories)} other container(s))"
     )
+
+
+def _working_checkouts(fleet_root: Path) -> dict[str, Path]:
+    """``--working-tree``: a repo project is read from the checkout you stand in.
+
+    Only when the checkout's origin is the project's repo. Any other repo
+    project has no files here; the compile names it.
+    """
+    from bay_cli import lockfile, reposource
+    from bay_cli.fleet import LOCK_FILE, PROJECTS_DIR
+
+    out: dict[str, Path] = {}
+    for path in sorted((fleet_root / PROJECTS_DIR).glob(f"*/{LOCK_FILE}")):
+        try:
+            raw = lockfile.read(path)
+        except (OSError, ValueError):
+            continue
+        repo = (raw or {}).get("repo")
+        checkout = reposource.checkout_for(Path.cwd(), str(repo)) if repo else None
+        if checkout is not None:
+            out[path.parent.name] = checkout
+    return out
 
 
 def _refuse_hand_edits(target: Path, current: str, adopt: bool) -> None:

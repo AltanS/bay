@@ -1,8 +1,9 @@
 """`bay compile`: fleet file + pinned bay.toml files -> services.yml.
 
 The fixture fleet is tests/fixtures/fleet_min: two boxes, shared postgres and
-redis, `shop` pinned by a lockfile with a local checkout (checkouts/shop) and
-`gatus` living in the fleet (projects/gatus). Every test compiles a copy in
+redis, `shop` a repo project (its lock in projects/shop/bay.lock, its repo files
+in checkouts/shop, handed to the loader as the checkout) and `gatus` living in
+the fleet (projects/gatus). Every test compiles a copy in
 tmp_path, so the fixture itself is never written.
 
 The gate at the bottom feeds the compiled file to today's validation (the
@@ -34,7 +35,7 @@ FIXTURE = ROOT / "tests" / "fixtures" / "fleet_min"
 SHOP = Path("checkouts") / "shop" / "bay.toml"
 GATUS = Path("projects") / "gatus" / "bay.toml"
 FLEET = Path("bay.fleet.toml")
-LOCK = Path("projects") / "shop.lock"
+LOCK = Path("projects") / "shop" / "bay.lock"
 
 BANNED = re.compile(
     r"\b(accessor(y|ies)|rigs?|regions?|placements?|group_vars|inventor(y|ies)|playbooks?"
@@ -70,7 +71,7 @@ def edit_lock(root: Path, change: Any) -> None:
 
 
 def compiled(root: Path) -> compiler.CompileResult:
-    return compiler.compile_fleet(load_inputs(root))
+    return compiler.compile_fleet(load_inputs(root, checkouts={"shop": root / "checkouts" / "shop"}))
 
 
 def problems(root: Path) -> list[str]:
@@ -84,8 +85,21 @@ def todo_features(root: Path) -> set[str]:
 
 
 def cli(root: Path, *args: str) -> Any:
-    # The fixture checkouts are plain directories, not git repos, so read them as they are.
-    return runner.invoke(app, ["compile", "--fleet", str(root), "--working-tree", *args])
+    # --working-tree reads a repo project from the checkout you stand in, found
+    # by its origin URL. Make checkouts/shop that checkout, and stand in it.
+    shop = root / "checkouts" / "shop"
+    if not (shop / ".git").exists():
+        subprocess.run(["git", "-C", str(shop), "init", "-q"], check=True)
+        subprocess.run(
+            ["git", "-C", str(shop), "remote", "add", "origin", "git@github.com:acme/shop.git"],
+            check=True,
+        )
+    old = Path.cwd()
+    os.chdir(shop)
+    try:
+        return runner.invoke(app, ["compile", "--fleet", str(root), "--working-tree", *args])
+    finally:
+        os.chdir(old)
 
 
 def said(result: Any) -> str:
@@ -610,8 +624,8 @@ def test_compile_collision_is_error(fleet: Path) -> None:
 
 def test_container_name_collision(fleet: Path) -> None:
     _second_project(fleet, "blog", '[access]\nmode = "public"\n[deploy.production]\ndomain = "blog.example.com"\n')
-    (fleet / "projects" / "blog.lock").write_text(json.dumps({
-        "lock_version": 1, "name": "blog", "repo": None, "commit": None,
+    (fleet / "projects" / "blog" / "bay.lock").write_text(json.dumps({
+        "lock_version": 2, "name": "blog", "repo": None, "commit": None,
         "envs": {"production": {"adopted": {"containers": {"web": "gatus"}}}},
     }))
     msgs = problems(fleet)
@@ -641,8 +655,8 @@ def test_database_collision(fleet: Path) -> None:
         fleet, "blog",
         'needs = ["postgres"]\n[access]\nmode = "public"\n[deploy.production]\ndomain = "b.example.com"\n',
     )
-    (fleet / "projects" / "blog.lock").write_text(json.dumps({
-        "lock_version": 1, "name": "blog",
+    (fleet / "projects" / "blog" / "bay.lock").write_text(json.dumps({
+        "lock_version": 2, "name": "blog",
         "envs": {"production": {"adopted": {"database": "shop_prod", "role": "blog"}}},
     }))
     msgs = problems(fleet)
@@ -738,13 +752,13 @@ def test_invalid_bay_toml_stops_compile(fleet: Path) -> None:
 
 
 def test_lockfile_checks(fleet: Path) -> None:
-    edit_lock(fleet, lambda d: d.update(lock_version=2))
-    assert any(m.startswith("projects/shop.lock: lock_version") for m in problems(fleet))
+    edit_lock(fleet, lambda d: d.update(lock_version=3))
+    assert any(m.startswith("projects/shop/bay.lock: lock_version") for m in problems(fleet))
 
 
 def test_lockfile_name_must_match_the_file(fleet: Path) -> None:
     edit_lock(fleet, lambda d: d.update(name="shoppe"))
-    assert any("the file is named shop.lock" in m for m in problems(fleet))
+    assert any("the folder is named shop" in m for m in problems(fleet))
 
 
 def test_lockfile_env_must_exist_in_bay_toml(fleet: Path) -> None:

@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/AltanS/bay/schemas/bay_lock.schema.json",
-  "title": "projects/<name>.lock",
-  "description": "The per-project lockfile in the fleet repo. The CLI owns it: it pins the repo commit, the box per environment and the adopted data names. Version 1.",
+  "title": "projects/<name>/bay.lock",
+  "description": "The per-project lockfile in the fleet repo. The CLI owns it: it pins the repo commit, the box per environment and the adopted data names. Version 2: no path on this machine (a version 1 lock is read as version 2 with local_path dropped).",
   "type": "object",
   "additionalProperties": false,
   "required": ["lock_version", "name", "envs"],
   "properties": {
-    "lock_version": { "const": 1 },
+    "lock_version": { "const": 2 },
     "name": { "$ref": "#/$defs/name" },
     "repo": { "type": ["string", "null"], "minLength": 1 },
     "commit": {
@@ -18,7 +18,6 @@
       "type": "string",
       "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$"
     },
-    "local_path": { "type": ["string", "null"], "minLength": 1 },
     "envs": {
       "type": "object",
       "propertyNames": { "type": "string", "pattern": "^[a-z][a-z0-9]*$" },
@@ -56,6 +55,11 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "from_fleet_commit": {
+              "description": "Set by bay adopt: the fleet commit the project was read from before it moved to its own repo.",
+              "type": "string",
+              "pattern": "^[0-9a-f]{7,64}$"
+            },
             "database": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$" },
             "role": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$" },
             "volumes": {

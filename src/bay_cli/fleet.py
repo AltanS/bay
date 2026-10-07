@@ -4,11 +4,16 @@ A fleet repo holds:
 
 ``bay.fleet.toml``
     Hand-edited by the operator: fleet name, defaults, boxes, shared resources.
-``projects/<name>.lock``
-    Owned by the CLI (written by ``bay up`` later). Pins the repo, the commit,
-    the box per environment and the adopted data names. JSON, version 1.
+    ``format = 2`` says the fleet uses one folder per project. A CLI refuses
+    a format newer than it knows (:data:`FLEET_FORMAT`).
+``projects/<name>/bay.lock``
+    Owned by the CLI (written by ``bay up``). Pins the repo, the commit, the
+    box per environment and the adopted data names. JSON, version 2. The old
+    flat form ``projects/<name>.lock`` is moved here by
+    :func:`bay_cli.layout.migrate`.
 ``projects/<name>/bay.toml``
-    Apps that have no repo of their own (gatus, beszel) live here.
+    Apps that live in the fleet (gatus, beszel), with the files they mount
+    beside them. A repo project has only its ``bay.lock`` here.
 
 This module only reads. It never opens anything under ``group_vars/<env>/``
 (the encrypted secrets), and it reads ``group_vars/all/*.yml`` only to learn
@@ -19,6 +24,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,8 +36,15 @@ FLEET_FILE = "bay.fleet.toml"
 PROJECTS_DIR = "projects"
 #: The fleet's config files; a directory mount of an adopted path lists it.
 FILES_DIR = "files"
+#: The lock of a project: ``projects/<name>/bay.lock``.
+LOCK_FILE = "bay.lock"
+#: The old flat lock ``projects/<name>.lock`` (format 1).
 LOCK_SUFFIX = ".lock"
-LOCK_VERSION = 1
+LOCK_VERSION = 2
+#: The newest ``format`` of bay.fleet.toml this CLI knows. No key means 1.
+FLEET_FORMAT = 2
+#: ``from = "fleet:<path>"`` mounts ``<fleet>/files/<path>``.
+FLEET_PREFIX = "fleet:"
 
 _SCHEMAS = Path(__file__).parent / "schemas"
 FLEET_SCHEMA_PATH = _SCHEMAS / "bay_fleet.schema.json"
@@ -68,11 +81,11 @@ class LockEnv:
 
 @dataclass(frozen=True)
 class Lock:
-    """``projects/<name>.lock``.
+    """``projects/<name>/bay.lock``.
 
-    ``local_path`` is a transition aid: until fetching by ``repo`` and
-    ``commit`` exists, the compiler reads the pinned bay.toml from a local
-    checkout. A relative ``local_path`` is resolved against the fleet root.
+    It names no path on this machine. A repo project's bay.toml is read from
+    the checkout you stand in or from the fleet's repo cache
+    (:mod:`bay_cli.reposource`), at ``commit``.
     """
 
     path: Path
@@ -80,18 +93,38 @@ class Lock:
     repo: str | None
     commit: str | None
     toml_path: str
-    local_path: Path | None
     envs: dict[str, LockEnv]
 
     def env(self, env: str) -> LockEnv:
         return self.envs.get(env, LockEnv())
 
 
+def lock_file(fleet_root: Path, name: str) -> Path:
+    """``<fleet>/projects/<name>/bay.lock``."""
+    return fleet_root / PROJECTS_DIR / name / LOCK_FILE
+
+
+def flat_lock_file(fleet_root: Path, name: str) -> Path:
+    """The old form ``<fleet>/projects/<name>.lock``."""
+    return fleet_root / PROJECTS_DIR / f"{name}{LOCK_SUFFIX}"
+
+
+def upgrade_lock(raw: Any) -> Any:
+    """A version 1 lock as version 2, in memory: ``local_path`` is dropped.
+
+    Anything else is returned as it is (the schema check reports it).
+    """
+    if isinstance(raw, dict) and raw.get("lock_version") == 1:
+        raw = {k: v for k, v in raw.items() if k != "local_path"}
+        raw["lock_version"] = LOCK_VERSION
+    return raw
+
+
 def load_lock(path: Path, fleet_root: Path) -> Lock:
-    """Read and check one lockfile. Raise FleetError on any problem."""
+    """Read and check one ``projects/<name>/bay.lock``. Raise FleetError on any problem."""
     rel = _rel(path, fleet_root)
     try:
-        raw = json.loads(path.read_text())
+        raw = upgrade_lock(json.loads(path.read_text()))
     except OSError as exc:
         raise FleetError([f"{rel}: cannot read the file ({exc.strerror})"]) from exc
     except json.JSONDecodeError as exc:
@@ -100,9 +133,9 @@ def load_lock(path: Path, fleet_root: Path) -> Lock:
     problems = sorted(set(bay_toml.schema_violations(raw, schema)))
     if problems:
         raise FleetError([f"{rel}: {v}" for v in problems])
-    stem = path.name[: -len(LOCK_SUFFIX)]
+    stem = path.parent.name
     if raw["name"] != stem:
-        raise FleetError([f"{rel}: name: is {raw['name']}, but the file is named {stem}.lock"])
+        raise FleetError([f"{rel}: name: is {raw['name']}, but the folder is named {stem}"])
 
     envs: dict[str, LockEnv] = {}
     for env, body in raw.get("envs", {}).items():
@@ -116,18 +149,12 @@ def load_lock(path: Path, fleet_root: Path) -> Lock:
             images=dict(adopted.get("images", {})),
             files=dict(adopted.get("files", {})),
         )
-    local = raw.get("local_path")
-    local_path = None
-    if local:
-        lp = Path(local).expanduser()
-        local_path = lp if lp.is_absolute() else (fleet_root / lp)
     return Lock(
         path=path,
         name=raw["name"],
         repo=raw.get("repo"),
         commit=raw.get("commit"),
         toml_path=raw.get("toml_path", "bay.toml"),
-        local_path=local_path,
         envs=envs,
     )
 
@@ -168,7 +195,21 @@ def load_fleet_file(fleet_root: Path) -> dict[str, Any]:
     problems = validate_fleet(doc)
     if problems:
         raise FleetError([f"{FLEET_FILE}: {v}" for v in problems])
+    found = fleet_format(doc)
+    if found > FLEET_FORMAT:
+        raise FleetError(
+            [
+                f"{FLEET_FILE}: format: is {found}, but this Bay knows formats up to "
+                f"{FLEET_FORMAT}; run `bay self update`"
+            ]
+        )
     return doc
+
+
+def fleet_format(doc: Mapping[str, Any]) -> int:
+    """The ``format`` of a parsed bay.fleet.toml. No key means 1."""
+    value = doc.get("format", 1)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 1
 
 
 # ── Projects ────────────────────────────────────────────────────────────────
@@ -203,12 +244,20 @@ class FleetInputs:
     hand_keys: dict[str, str]
 
 
-def load_inputs(fleet_root: Path, *, output: Path | None = None) -> FleetInputs:
+def load_inputs(
+    fleet_root: Path,
+    *,
+    output: Path | None = None,
+    checkouts: Mapping[str, Path] | None = None,
+) -> FleetInputs:
     """Load the fleet file, every lockfile and every project bay.toml.
 
     ``output`` is the generated file; it is skipped when scanning
-    ``group_vars/all`` for hand-maintained keys. All problems are collected
-    and raised together as one FleetError.
+    ``group_vars/all`` for hand-maintained keys. ``checkouts`` maps a repo
+    project (one with no ``projects/<name>/bay.toml``) to the directory that
+    holds its repo files; ``bay plan`` passes the files it extracted at the
+    pinned commit. All problems are collected and raised together as one
+    FleetError.
     """
     errors: list[str] = []
     fleet: dict[str, Any] = {}
@@ -218,8 +267,13 @@ def load_inputs(fleet_root: Path, *, output: Path | None = None) -> FleetInputs:
         errors.extend(exc.lines)
 
     projects_dir = fleet_root / PROJECTS_DIR
+    for flat in sorted(projects_dir.glob(f"*{LOCK_SUFFIX}")):
+        errors.append(
+            f"{_rel(flat, fleet_root)}: a lock in the old place; it belongs in "
+            f"{PROJECTS_DIR}/{flat.stem}/{LOCK_FILE} (any bay plan or bay compile moves it)"
+        )
     locks: dict[str, Lock] = {}
-    for path in sorted(projects_dir.glob(f"*{LOCK_SUFFIX}")):
+    for path in sorted(projects_dir.glob(f"*/{LOCK_FILE}")):
         try:
             loaded = load_lock(path, fleet_root)
         except FleetError as exc:
@@ -232,24 +286,25 @@ def load_inputs(fleet_root: Path, *, output: Path | None = None) -> FleetInputs:
     for name in sorted(set(locks) | set(local_dirs)):
         lock = locks.get(name)
         in_fleet = local_dirs.get(name)
-        if lock is not None and lock.local_path is not None and in_fleet is not None:
-            errors.append(
-                f"{_rel(lock.path, fleet_root)}: {name} has a bay.toml in "
-                f"{_rel(in_fleet, fleet_root)} and a checkout at {lock.local_path}; keep one"
-            )
-            continue
-        if lock is not None and lock.local_path is not None:
-            repo_root = lock.local_path
-            toml_file = repo_root / lock.toml_path
-        elif in_fleet is not None:
+        checkout = (checkouts or {}).get(name)
+        if in_fleet is not None:
             repo_root = in_fleet.parent
             toml_file = in_fleet
+        elif checkout is not None:
+            assert lock is not None
+            repo_root = checkout
+            toml_file = repo_root / lock.toml_path
         else:
             assert lock is not None
+            what = (
+                f"its repo {lock.repo} is not read here (bay compile and bay plan read it "
+                "at the pinned commit)"
+                if lock.repo
+                else "the lock names no repo"
+            )
             errors.append(
-                f"{_rel(lock.path, fleet_root)}: no local_path and no "
-                f"{PROJECTS_DIR}/{name}/bay.toml, so there is no bay.toml to read "
-                "(fetching by repo and commit is not built yet)"
+                f"{_rel(lock.path, fleet_root)}: there is no {PROJECTS_DIR}/{name}/bay.toml "
+                f"and {what}"
             )
             continue
         project = _load_project(name, toml_file, repo_root, lock, fleet, fleet_root, errors)

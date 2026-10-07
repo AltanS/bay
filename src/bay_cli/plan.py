@@ -4,10 +4,11 @@ The three truths:
 
 WANTED
     ``bay.toml`` at the project's current commit (``git show <commit>:bay.toml``
-    in the checkout the lock names). Uncommitted edits are not part of it.
+    in the checkout you stand in, else in the fleet's repo cache, see
+    :mod:`bay_cli.reposource`). Uncommitted edits are not part of it.
 PINNED
-    ``projects/<name>.lock`` in the fleet, and the services file the fleet last
-    compiled from it.
+    ``projects/<name>/bay.lock`` in the fleet, and the services file the fleet
+    last compiled from it.
 RUNNING
     The box receipt (``docs/deploy-receipt.md``), only the part that names
     this project's containers.
@@ -21,7 +22,8 @@ How a plan is made:
    project whose lock pins no commit yet (just after ``bay init``) is left
    out: nothing of it is deployed. A project with no repo lives in the fleet
    (``projects/<name>/``); it is read from the fleet repo at its pin, or at
-   the fleet's HEAD when it has none. ``bay compile`` uses the same copy.
+   the fleet's HEAD when it has none. The files a bay.toml mounts are mapped
+   to ``files/<target>`` in the copy. ``bay compile`` uses the same copy.
 2. Compile that copy, so the whole fleet is compiled as ``bay up`` would.
 3. Diff the result against the services file in the fleet, entry by entry.
    Each difference becomes one or more steps; the risk of a step is set by
@@ -61,10 +63,17 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bay_cli import gitrepo, lockfile
+from bay_cli import gitrepo, layout, lockfile, reposource
 from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
-from bay_cli.fleet import FILES_DIR, FLEET_FILE, GENERATED_SERVICES, PROJECTS_DIR
+from bay_cli.fleet import (
+    FILES_DIR,
+    FLEET_FILE,
+    FLEET_PREFIX,
+    GENERATED_SERVICES,
+    LOCK_FILE,
+    PROJECTS_DIR,
+)
 
 PLAN_VERSION = 1
 PLANS_DIR = "plans"
@@ -98,20 +107,48 @@ class ProjectRef:
     fleet: dict[str, Any]
     lock_file: Path
     lock: dict[str, Any]
+    #: The git repo WANTED is read from: the fleet root for a project in the
+    #: fleet, else the checkout you stand in or the fleet's repo cache.
     checkout: Path
     toml_path: str
-    #: True for a project with no repo: its bay.toml is projects/<name>/bay.toml
-    #: in the fleet, and ``checkout`` is the fleet root.
+    #: True for a project whose bay.toml is projects/<name>/bay.toml in the
+    #: fleet; ``checkout`` is then the fleet root.
     in_fleet: bool = False
+    #: ``fleet``, ``checkout`` or ``cache``: where ``checkout`` came from.
+    source: str = "fleet"
+    #: The directory the command ran in, when it was given (a matching
+    #: checkout there is read before the cache).
+    cwd: Path | None = None
+    #: Lines for the reader: a lock move, a cache that could not be fetched.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def primary_env(self) -> str:
         return str(self.fleet.get("primary_env", "production"))
 
     @property
+    def repo(self) -> str | None:
+        repo = self.lock.get("repo")
+        return str(repo) if repo else None
+
+    @property
     def scope(self) -> str:
-        """The fleet path whose last commit is an in-fleet project's commit."""
+        """The fleet folder of the project: ``projects/<name>``."""
         return f"{PROJECTS_DIR}/{self.name}"
+
+    @property
+    def scope_spec(self) -> list[str]:
+        """Pathspecs whose last commit is an in-fleet project's commit.
+
+        The folder minus its ``bay.lock``: ``bay up`` commits the lock, and
+        that commit must not change the project's WANTED commit.
+        """
+        return scope_spec(self.name)
+
+
+def scope_spec(name: str) -> list[str]:
+    folder = f"{PROJECTS_DIR}/{name}"
+    return [folder, f":(exclude){folder}/{LOCK_FILE}"]
 
 
 def load_fleet_doc(cx: Context) -> dict[str, Any]:
@@ -126,7 +163,23 @@ def load_fleet_doc(cx: Context) -> dict[str, Any]:
         ) from None
 
 
-def load_project(cx: Context, name: str, *, expect_fleet: str | None = None) -> ProjectRef:
+def load_project(
+    cx: Context,
+    name: str,
+    *,
+    expect_fleet: str | None = None,
+    cwd: Path | None = None,
+    fetch: bool = True,
+) -> ProjectRef:
+    """The project ``name`` of the fleet at ``cx``.
+
+    A project with ``projects/<name>/bay.toml`` lives in the fleet. Any other
+    project is read from its ``repo``: the checkout at ``cwd`` when its
+    origin is that repo, else the fleet's repo cache (cloned when missing,
+    fetched first with ``fetch``). The flat locks of a format 1 fleet are
+    moved into project folders first (:func:`bay_cli.layout.ensure`).
+    """
+    moved = layout.ensure(cx.fleet_root)
     fleet_doc = load_fleet_doc(cx)
     if expect_fleet is not None and fleet_doc.get("name") != expect_fleet:
         raise BayError(
@@ -135,10 +188,11 @@ def load_project(cx: Context, name: str, *, expect_fleet: str | None = None) -> 
             hint="Pass --fleet with the right fleet directory.",
         )
     lock_file = lockfile.lock_path(cx.fleet_root, name)
+    lock_rel = f"{PROJECTS_DIR}/{name}/{LOCK_FILE}"
     try:
         raw = lockfile.read(lock_file)
     except ValueError as exc:
-        raise BayError(f"projects/{name}.lock is not valid JSON: {exc}") from None
+        raise BayError(f"{lock_rel} is not valid JSON: {exc}") from None
     in_dir = cx.fleet_root / PROJECTS_DIR / name / "bay.toml"
     if raw is None:
         if not in_dir.is_file():
@@ -147,33 +201,46 @@ def load_project(cx: Context, name: str, *, expect_fleet: str | None = None) -> 
                 code=ErrorCode.NOT_FOUND,
                 hint="Run `bay init` in the app repo first.",
             )
-        raw = lockfile.new_lock(name, repo=None, local_path=None)
-    checkout = lockfile.local_path(raw, cx.fleet_root)
-    if checkout is None:
-        if not in_dir.is_file():
-            raise BayError(
-                f"projects/{name}.lock names no local checkout, and there is no "
-                f"projects/{name}/bay.toml in the fleet"
-            )
+        raw = lockfile.new_lock(name, repo=None)
+    base = {
+        "cx": cx,
+        "name": name,
+        "fleet": fleet_doc,
+        "lock_file": lock_file,
+        "lock": raw,
+        "cwd": cwd,
+        "notes": [f"fleet layout: {line}" for line in moved],
+    }
+    if in_dir.is_file():
         return ProjectRef(
-            cx=cx,
-            name=name,
-            fleet=fleet_doc,
-            lock_file=lock_file,
-            lock=raw,
+            **base,
             checkout=cx.fleet_root,
             toml_path=f"{PROJECTS_DIR}/{name}/bay.toml",
             in_fleet=True,
+            source="fleet",
         )
-    return ProjectRef(
-        cx=cx,
-        name=name,
-        fleet=fleet_doc,
-        lock_file=lock_file,
-        lock=raw,
-        checkout=checkout,
-        toml_path=str(raw.get("toml_path", "bay.toml")),
-    )
+    repo = raw.get("repo")
+    if not repo:
+        raise BayError(
+            f"{lock_rel} names no repo, and there is no {PROJECTS_DIR}/{name}/bay.toml "
+            "in the fleet",
+            hint="Set repo in the lock (bay init does), or move the bay.toml into the fleet.",
+        )
+    toml_path = str(raw.get("toml_path", "bay.toml"))
+    checkout = reposource.checkout_for(cwd, str(repo))
+    if checkout is not None:
+        return ProjectRef(**base, checkout=checkout, toml_path=toml_path, source="checkout")
+    cache, problem = reposource.ensure_cache(cx.fleet_root, str(repo), fetch=fetch)
+    if cache is None:
+        raise BayError(
+            f"project {name}: {problem}",
+            hint="Check the repo URL in the lock and your access to it, or run the "
+            "command inside a checkout of the repo.",
+        )
+    ref = ProjectRef(**base, checkout=cache, toml_path=toml_path, source="cache")
+    if problem:
+        ref.notes.append(f"{problem}; the plan reads what the cache already holds")
+    return ref
 
 
 def project_containers(
@@ -234,7 +301,12 @@ def read_wanted(proj: ProjectRef, at: str | None) -> Wanted:
     checkout = proj.checkout
     if not gitrepo.is_repo(checkout):
         return Wanted(None, None, None, None, [f"the checkout {checkout} is not a git repo"])
-    dirty = gitrepo.path_dirty(checkout, proj.scope) if proj.in_fleet else gitrepo.dirty(checkout)
+    if proj.in_fleet:
+        dirty = gitrepo.path_dirty(checkout, proj.scope_spec)
+    elif proj.source == "cache":
+        dirty = None  # a mirror has no work tree
+    else:
+        dirty = gitrepo.dirty(checkout)
     ref = at or "HEAD"
     commit = gitrepo.resolve_commit(checkout, ref)
     if commit is None:
@@ -242,8 +314,9 @@ def read_wanted(proj: ProjectRef, at: str | None) -> Wanted:
         return Wanted(None, None, None, dirty, [f"{what} is not reachable in {checkout}"])
     if proj.in_fleet:
         # WANTED is the fleet's committed file; its commit is the last one that
-        # touched projects/<name>/ (the bay.toml or a file it mounts).
-        changed = gitrepo.last_change(checkout, proj.scope, commit)
+        # touched projects/<name>/ (the bay.toml or a file it mounts), never
+        # counting projects/<name>/bay.lock, which bay up commits itself.
+        changed = gitrepo.last_change(checkout, proj.scope_spec, commit)
         if changed is None:
             return Wanted(
                 None,
@@ -272,14 +345,47 @@ def read_wanted(proj: ProjectRef, at: str | None) -> Wanted:
 def doc_at(proj: ProjectRef, commit: str | None) -> dict[str, Any] | None:
     if not commit:
         return None
-    full = gitrepo.resolve_commit(proj.checkout, commit)
-    data = gitrepo.show_file(proj.checkout, full, proj.toml_path) if full else None
+    repo, full = proj.checkout, gitrepo.resolve_commit(proj.checkout, commit)
+    if full is None and not proj.in_fleet and proj.repo:
+        found = reposource.find_commit(proj.cx.fleet_root, proj.repo, commit, cwd=proj.cwd)
+        repo, full = found.path or repo, found.commit
+    data = gitrepo.show_file(repo, full, proj.toml_path) if full else None
     if data is None:
         return None
     try:
         return tomllib.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None
+
+
+def commit_on_remote(proj: ProjectRef, commit: str) -> bool | None:
+    """Is ``commit`` of a repo project on a branch of its remote? True for a fleet project.
+
+    Read in the checkout (its remote-tracking branches) and in the fleet's
+    repo cache (fetched before the plan). None when neither can tell.
+    """
+    if proj.in_fleet or not proj.repo:
+        return True
+    answers: list[bool | None] = []
+    if proj.source == "checkout":
+        answer = gitrepo.on_remote(proj.checkout, commit)
+        if answer:
+            return True
+        answers.append(answer)
+    # The cache was fetched when the project was loaded from it; a checkout
+    # may know an older remote, so the cache is fetched then.
+    cache, problem = reposource.ensure_cache(
+        proj.cx.fleet_root, proj.repo, fetch=proj.source != "cache"
+    )
+    if cache is not None and gitrepo.resolve_commit(cache, commit) is not None:
+        answers.append(gitrepo.on_remote(cache, commit))
+    elif cache is not None and problem is None:
+        answers.append(False)
+    if any(a is True for a in answers):
+        return True
+    if any(a is False for a in answers):
+        return False
+    return None
 
 
 # ── Compiling a copy of the fleet ───────────────────────────────────────────
@@ -298,6 +404,8 @@ class Compiled:
     commits: dict[str, str] = field(default_factory=dict)
     #: Repo projects left out because their lock pins no commit yet.
     unpinned: list[str] = field(default_factory=list)
+    #: Config files the deploy would not ship as compiled (see :func:`deploy_file_gaps`).
+    file_gaps: list[str] = field(default_factory=list)
 
     def services_file(self) -> Path | None:
         if self.result is None:
@@ -309,13 +417,20 @@ class Compiled:
 
 
 def _mount_sources(doc: Mapping[str, Any]) -> list[str]:
+    """Every ``from`` of the file's mounts, without the ``fleet:`` ones."""
     levels = [doc, *(v for v in (doc.get("services") or {}).values() if isinstance(v, dict))]
     out: list[str] = []
     for level in levels:
         for mount in level.get("mounts") or []:
             if isinstance(mount, dict) and isinstance(mount.get("from"), str):
-                out.append(mount["from"].rstrip("/"))
-    return out
+                src = mount["from"].rstrip("/")
+                if not src.startswith(FLEET_PREFIX):
+                    out.append(src)
+    return list(dict.fromkeys(out))
+
+
+def _join(directory: str, rel: str) -> str:
+    return rel if directory in ("", ".") else f"{directory}/{rel}"
 
 
 @dataclass
@@ -326,23 +441,34 @@ class _Copy:
     labels: dict[str, str]
     commits: dict[str, str] = field(default_factory=dict)
     unpinned: list[str] = field(default_factory=list)
+    #: Repo project -> the directory its files were extracted into.
+    checkouts: dict[str, Path] = field(default_factory=dict)
 
 
-def _materialize(cx: Context, tmp: Path, pins: Mapping[str, str]) -> _Copy:
+def _materialize(
+    cx: Context, tmp: Path, pins: Mapping[str, str], *, cwd: Path | None = None
+) -> _Copy:
     """Copy the fleet inputs to ``tmp/fleet`` with every project read at its pin.
 
-    * A project with a checkout is read at its lock ``commit`` (or its pin in
-      ``pins``). With no commit yet it is left out, with a note.
+    * A repo project (no ``projects/<name>/bay.toml``) is read at its lock
+      ``commit`` (or its pin in ``pins``) from the checkout at ``cwd`` when
+      its origin is the lock's repo, else from the fleet's repo cache
+      (:mod:`bay_cli.reposource`). Its bay.toml and the files it mounts land
+      in ``tmp/checkouts/<name>``. With no commit yet it is left out, with a
+      note. A commit found in neither place is a problem, never a skip.
     * A project in the fleet (``projects/<name>/``) is read from the fleet
       repo at its lock ``commit``; with no lock or no commit, at the fleet's
-      HEAD, with a note. The working tree is never read.
-    * The fleet's ``files/`` tree (the config files a directory mount expands
-      into) is read at the fleet's HEAD. Leave it out and the compiler cannot
-      list a mounted directory.
+      HEAD, with a note. The working tree is never read. Its lock is the one
+      in the working tree (the pin, not the pinned commit's copy).
+    * The fleet's ``files/`` tree (rig files, resource files, shared files)
+      is read at the fleet's HEAD.
+    * Every file a project mounts from beside its bay.toml is copied to
+      ``files/<target>`` in the copy, where ``<target>`` is the adopted path
+      from the lock or ``<name>/<from>``: the place the deploy reads.
 
     Every path the compiler and ``fleet.load_inputs`` read from the fleet root
     is copied here: ``bay.fleet.toml``, ``group_vars/all/*.y*ml``,
-    ``projects/`` (``bay.toml`` and ``*.lock``) and ``files/``.
+    ``projects/`` (``bay.toml``, its files and ``bay.lock``) and ``files/``.
     """
     root = tmp / "fleet"
     root.mkdir(parents=True)
@@ -365,65 +491,121 @@ def _materialize(cx: Context, tmp: Path, pins: Mapping[str, str]) -> _Copy:
         shutil.copy2(path, all_dst / path.name)
 
     locks: dict[str, dict[str, Any]] = {}
-    for lock in sorted(projects_src.glob("*.lock")) if projects_src.is_dir() else []:
+    for lock in sorted(projects_src.glob(f"*/{LOCK_FILE}")) if projects_src.is_dir() else []:
         try:
             raw = lockfile.read(lock)
         except (OSError, ValueError) as exc:
-            out.problems.append(f"projects/{lock.name}: {exc}")
+            out.problems.append(f"{PROJECTS_DIR}/{lock.parent.name}/{LOCK_FILE}: {exc}")
             continue
         if raw is not None:
-            locks[lock.name[: -len(".lock")]] = raw
+            locks[lock.parent.name] = raw
 
     fleet_head = gitrepo.head(src)
     _copy_files_tree(src, fleet_head, out)
+    in_fleet: set[str] = set()
     for child in sorted(projects_src.iterdir()) if projects_src.is_dir() else []:
         if child.is_dir() and (child / "bay.toml").is_file():
+            in_fleet.add(child.name)
             _copy_in_fleet(src, fleet_head, child.name, pins, locks.get(child.name), out)
 
     for stem, raw in locks.items():
-        name = str(raw.get("name") or stem)
-        checkout = lockfile.local_path(raw, src)
-        if checkout is None:
-            shutil.copy2(projects_src / f"{stem}.lock", projects_dst / f"{stem}.lock")
+        if stem in in_fleet:
             continue
-        commit = pins.get(name) or raw.get("commit")
-        if not commit:
-            out.notes.append(f"{name} has no pinned commit yet, so it is left out")
-            out.unpinned.append(name)
-            continue
-        if not gitrepo.is_repo(checkout):
-            out.problems.append(f"{name}: the checkout {checkout} is not a git repo")
-            continue
-        full = gitrepo.resolve_commit(checkout, str(commit))
-        if full is None:
-            out.problems.append(
-                f"{name}: commit {str(commit)[:12]} is not in the checkout {checkout}"
-            )
-            continue
-        toml_rel = str(raw.get("toml_path", "bay.toml"))
-        data = gitrepo.show_file(checkout, full, toml_rel)
-        if data is None:
-            out.problems.append(f"{name}: {toml_rel} is not in commit {full[:12]}")
-            continue
-        try:
-            doc = tomllib.loads(data.decode("utf-8"))
-        except (UnicodeDecodeError, tomllib.TOMLDecodeError):
-            doc = {}
-        rels = [toml_rel, *_mount_sources(doc)]
-        rels = [r for r in dict.fromkeys(rels) if gitrepo.has_path(checkout, full, r)]
-        dest = tmp / "checkouts" / name
-        try:
-            gitrepo.extract(checkout, full, rels, dest)
-        except gitrepo.GitError as exc:
-            out.problems.append(f"{name}: cannot read commit {full[:12]}: {exc}")
-            continue
-        out.labels[str(dest)] = f"{name}@{full[:12]}"
-        pinned = copy.deepcopy(raw)
-        pinned["local_path"] = str(dest)
-        pinned["commit"] = full
-        (projects_dst / f"{stem}.lock").write_text(json.dumps(pinned, indent=2) + "\n")
-        out.commits[name] = full
+        _copy_repo_project(cx, tmp, stem, raw, pins, out, cwd=cwd)
     return out
+
+
+def _write_lock(out: _Copy, name: str, raw: Mapping[str, Any]) -> None:
+    path = out.root / PROJECTS_DIR / name / LOCK_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(raw, indent=2) + "\n")
+
+
+def _copy_repo_project(
+    cx: Context,
+    tmp: Path,
+    stem: str,
+    raw: Mapping[str, Any],
+    pins: Mapping[str, str],
+    out: _Copy,
+    *,
+    cwd: Path | None,
+) -> None:
+    """Extract a repo project at its pin into ``tmp/checkouts/<name>``."""
+    name = str(raw.get("name") or stem)
+    commit = pins.get(name) or raw.get("commit")
+    if not commit:
+        out.notes.append(f"{name} has no pinned commit yet, so it is left out")
+        out.unpinned.append(name)
+        return
+    repo = raw.get("repo")
+    if not repo:
+        out.problems.append(
+            f"{name}: {PROJECTS_DIR}/{name}/{LOCK_FILE} names no repo, and there is no "
+            f"{PROJECTS_DIR}/{name}/bay.toml in the fleet"
+        )
+        return
+    found = reposource.find_commit(cx.fleet_root, str(repo), str(commit), cwd=cwd)
+    if found.path is None or found.commit is None:
+        out.problems.append(f"{name}: {found.problem}; push it, or fix the lock")
+        return
+    checkout, full = found.path, found.commit
+    toml_rel = str(raw.get("toml_path", "bay.toml"))
+    data = gitrepo.show_file(checkout, full, toml_rel)
+    if data is None:
+        out.problems.append(f"{name}: {toml_rel} is not in commit {full[:12]}")
+        return
+    try:
+        doc = tomllib.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        doc = {}
+    toml_dir = str(Path(toml_rel).parent)
+    rels = [toml_rel, *(_join(toml_dir, m) for m in _mount_sources(doc))]
+    rels = [r for r in dict.fromkeys(rels) if gitrepo.has_path(checkout, full, r)]
+    dest = tmp / "checkouts" / name
+    try:
+        gitrepo.extract(checkout, full, rels, dest)
+    except gitrepo.GitError as exc:
+        out.problems.append(f"{name}: cannot read commit {full[:12]}: {exc}")
+        return
+    out.labels[str(dest)] = f"{name}@{full[:12]}"
+    pinned = copy.deepcopy(dict(raw))
+    pinned["commit"] = full
+    _write_lock(out, stem, pinned)
+    out.checkouts[name] = dest
+    out.commits[name] = full
+    _map_files(name, doc, (dest / toml_rel).parent, pinned, out)
+
+
+def _map_files(
+    name: str, doc: Mapping[str, Any], toml_dir: Path, lock: Mapping[str, Any] | None, out: _Copy
+) -> None:
+    """Copy each file mounted from beside the bay.toml to ``files/<target>`` in the copy.
+
+    ``<target>`` is the adopted path of every env in the lock, else
+    ``<name>/<from>``. A ``from`` that is not beside the toml is left alone:
+    the compiler then reads the old place ``files/<target>``.
+    """
+    adopted: dict[str, set[str]] = {}
+    for record in ((lock or {}).get("envs") or {}).values():
+        files = ((record or {}).get("adopted") or {}).get("files") or {}
+        for key, target in files.items():
+            adopted.setdefault(str(key), set()).add(str(target))
+    for rel in _mount_sources(doc):
+        source = toml_dir / rel
+        if not source.exists() or ".." in Path(rel).parts:
+            continue
+        for target in sorted(adopted.get(rel) or {f"{name}/{rel}"}):
+            dest = out.root / FILES_DIR / target
+            if dest.is_dir() and not dest.is_symlink():
+                shutil.rmtree(dest)
+            elif dest.exists() or dest.is_symlink():
+                dest.unlink()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, dest, symlinks=True)
+            else:
+                shutil.copy2(source, dest)
 
 
 def _copy_files_tree(src: Path, fleet_head: str | None, out: _Copy) -> None:
@@ -450,11 +632,10 @@ def _copy_in_fleet(
 ) -> None:
     """Copy ``projects/<name>/`` as the fleet repo holds it at the project's pin."""
     scope = f"{PROJECTS_DIR}/{name}"
-    if lock is not None and lockfile.local_path(dict(lock), src) is not None:
-        return  # fleet.load_inputs reports the double definition
     if fleet_head is None:
         out.notes.append(f"{name}: the fleet is not a git repo, so its files are read as they are")
         shutil.copytree(src / scope, out.root / scope, symlinks=True)
+        _map_in_fleet(name, lock, out)
         return
     commit = pins.get(name) or (lock or {}).get("commit")
     if not commit:
@@ -477,25 +658,86 @@ def _copy_in_fleet(
     except gitrepo.GitError as exc:
         out.problems.append(f"{name}: cannot read fleet commit {full[:12]}: {exc}")
         return
-    out.commits[name] = gitrepo.last_change(src, scope, full) or full
+    # The lock is the pin as it is now, not the copy the pinned commit held.
+    stale = out.root / scope / LOCK_FILE
+    if stale.exists():
+        stale.unlink()
+    if lock is not None:
+        _write_lock(out, name, lock)
+    out.commits[name] = gitrepo.last_change(src, scope_spec(name), full) or full
+    _map_in_fleet(name, lock, out)
+
+
+def _map_in_fleet(name: str, lock: Mapping[str, Any] | None, out: _Copy) -> None:
+    toml = out.root / PROJECTS_DIR / name / "bay.toml"
+    try:
+        doc = tomllib.loads(toml.read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return  # fleet.load_inputs reports it
+    _map_files(name, doc, toml.parent, lock, out)
+
+
+def deploy_file_gaps(fleet_root: Path, copy_root: Path, data: Mapping[str, Any]) -> list[str]:
+    """Config files the deploy would not ship as compiled. One line each.
+
+    The deploy copies each ``config_files`` entry from the fleet's working
+    tree, ``<fleet>/files/<entry>``. The compile read the same entry from
+    its copy of the fleet: committed files, with the files beside each
+    bay.toml mapped in. An entry missing from the working tree, or with other
+    bytes there, would deploy something else than the plan shows.
+    """
+    entries: set[str] = set()
+    for section in ("services", "accessories"):
+        for value in (data.get(section) or {}).values():
+            if isinstance(value, Mapping):
+                entries.update(str(e) for e in value.get("config_files") or [])
+    gaps: list[str] = []
+    for entry in sorted(entries):
+        live, compiled = fleet_root / FILES_DIR / entry, copy_root / FILES_DIR / entry
+        if not compiled.is_file():
+            continue
+        if not live.is_file():
+            gaps.append(
+                f"{FILES_DIR}/{entry} is not in the fleet's work tree, and the deploy copies "
+                f"config files from there; keep a copy at {FILES_DIR}/{entry} for now"
+            )
+        elif live.read_bytes() != compiled.read_bytes():
+            gaps.append(
+                f"{FILES_DIR}/{entry} in the fleet's work tree differs from the compiled one "
+                "(uncommitted, or a file beside the bay.toml that differs); commit or "
+                "align it first"
+            )
+    return gaps
 
 
 @contextmanager
-def compiled_fleet(cx: Context, pins: Mapping[str, str] | None = None) -> Iterator[Compiled]:
-    """Compile the fleet with every project at its pin (``pins`` overrides some)."""
+def compiled_fleet(
+    cx: Context, pins: Mapping[str, str] | None = None, *, cwd: Path | None = None
+) -> Iterator[Compiled]:
+    """Compile the fleet with every project at its pin (``pins`` overrides some).
+
+    ``cwd`` is where the command ran: a repo project whose checkout is there
+    is read from it, the others from the fleet's repo cache.
+    """
     from bay_cli import compiler
     from bay_cli.fleet import FleetError, load_inputs
 
+    moved = layout.ensure(cx.fleet_root)
     with tempfile.TemporaryDirectory(prefix="bay-plan-") as tmp:
         work = Path(tmp)
-        made = _materialize(cx, work, pins or {})
+        made = _materialize(cx, work, pins or {}, cwd=cwd)
         errors = list(made.problems)
+        notes = [f"fleet layout: {line}" for line in moved] + list(made.notes)
         result = None
+        gaps: list[str] = []
         if not errors:
             try:
-                result = compiler.compile_fleet(load_inputs(made.root))
+                result = compiler.compile_fleet(load_inputs(made.root, checkouts=made.checkouts))
             except (FleetError, compiler.CompileError) as exc:
                 errors.extend(exc.lines)
+        if result is not None:
+            notes.extend(result.notes)
+            gaps = deploy_file_gaps(cx.fleet_root, made.root, result.data())
         cleaned = []
         for line in errors:
             for path, label in made.labels.items():
@@ -505,9 +747,10 @@ def compiled_fleet(cx: Context, pins: Mapping[str, str] | None = None) -> Iterat
             result=result,
             errors=cleaned,
             workdir=work,
-            notes=made.notes,
+            notes=notes,
             commits=dict(made.commits),
             unpinned=list(made.unpinned),
+            file_gaps=gaps,
         )
 
 
@@ -1150,9 +1393,16 @@ def make_plan(
         elif behind:
             blockers.append("the fleet repo is behind its remote; pull it first")
 
+    notes.extend(proj.notes)
+
     # WANTED
     wanted = read_wanted(proj, opts.at)
     blockers.extend(wanted.problems)
+    if wanted.commit and not wanted.problems and commit_on_remote(proj, wanted.commit) is not True:
+        notes.append(
+            f"commit {wanted.commit[:12]} is not on a branch of {proj.repo}; "
+            "bay up refuses it: push first"
+        )
     if wanted.dirty:
         notes.append(
             f"the project has uncommitted changes; the plan uses commit "
@@ -1163,9 +1413,9 @@ def make_plan(
         and opts.cwd_repo is not None
         and opts.cwd_repo.resolve() != proj.checkout.resolve()
     ):
+        where = "its repo cache" if proj.source == "cache" else str(proj.checkout)
         notes.append(
-            f"this command ran in {opts.cwd_repo}, but the fleet reads the project from "
-            f"{proj.checkout}"
+            f"this command ran in {opts.cwd_repo}, but the fleet reads the project from {where}"
         )
     if wanted.doc is not None:
         from bay_cli import bay_toml
@@ -1229,8 +1479,9 @@ def make_plan(
     prediction: dict[str, Any] = {"checked": False, "containers": [], "errors": []}
     pins = {proj.name: wanted.commit} if wanted.commit else {}
     if wanted.doc is not None and not wanted.problems:
-        with compiled_fleet(cx, pins) as comp:
+        with compiled_fleet(cx, pins, cwd=proj.cwd) as comp:
             blockers.extend(comp.errors)
+            blockers.extend(comp.file_gaps)
             notes.extend(comp.notes)
             if comp.result is not None:
                 unsupported = [str(u) for u in comp.result.unsupported]
@@ -1460,7 +1711,9 @@ def stale_reasons(saved: Mapping[str, Any], fresh: Mapping[str, Any]) -> list[st
     """Why a saved plan no longer holds. Empty when it still does."""
     reasons: list[str] = []
     if saved["pinned"]["lock_sha256"] != fresh["pinned"]["lock_sha256"]:
-        reasons.append(f"the pin moved: projects/{saved['project']}.lock changed since the plan")
+        reasons.append(
+            f"the pin moved: {PROJECTS_DIR}/{saved['project']}/{LOCK_FILE} changed since the plan"
+        )
     s_run, f_run = saved["running"], fresh["running"]
     if (
         s_run.get("checked")

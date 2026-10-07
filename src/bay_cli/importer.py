@@ -7,12 +7,16 @@ into the output directory:
 
 * ``bay.fleet.toml``: boxes, shared resources (today's ``accessories:``), the
   webhook and the repo tokens.
-* ``projects/<name>/bay.toml`` for every project.
-* ``projects/<name>.lock``: ``repo``, ``commit: null``, ``local_path: null``
-  and, per environment, the box and every adopted name (containers, images,
-  volumes, database, database user, config paths), so the compile reproduces
-  today's names exactly.
-* ``files/``: a copy of every config file a container reads today.
+* ``projects/<name>/bay.toml`` for every project, with the config files it
+  mounts beside it (``files/<name>/<path>`` today becomes
+  ``projects/<name>/<path>``, and ``from = "<path>"``).
+* ``projects/<name>/bay.lock``: ``repo``, ``commit: null`` and, per
+  environment, the box and every adopted name (containers, images, volumes,
+  database, database user, config paths), so the compile reproduces today's
+  names exactly.
+* ``files/``: a copy of every other config file a container reads today: a
+  path outside ``<name>/`` (adopted in the lock) and the resources' files.
+* ``format = 2`` in ``bay.fleet.toml``: one folder per project.
 
 Grouping (see :func:`_plan_projects`): a ``services:`` key becomes a project
 with that key as ``name``. ``<name>-prod``/``-staging``/``-dev`` keys are an
@@ -494,7 +498,9 @@ class _Importer:
             if pname in published:
                 doc["publish"] = True
             files[f"projects/{pname}/bay.toml"] = to_toml(_order_project(doc))
-            files[f"projects/{pname}.lock"] = json.dumps(lock, indent=2, sort_keys=False) + "\n"
+            files[f"projects/{pname}/bay.lock"] = (
+                json.dumps(lock, indent=2, sort_keys=False) + "\n"
+            )
 
         resources = {k: self._resource(k, a) for k, a in sorted(self.lg.accessories.items())}
         fleet_doc = self._fleet_doc(resources)
@@ -750,13 +756,17 @@ class _Importer:
             res["files_mode"] = acc["config_files_mode"]
         return res
 
-    def _copy_files(self, paths: list[str], where: str) -> None:
+    def _copy_files(self, paths: list[str], where: str, project: str | None = None) -> None:
+        """Copy config files. A project's own file (``<project>/<path>``) goes beside its toml."""
         for rel in paths:
             src = self.lg.root / "files" / rel
-            if src.is_file():
-                self.copies[f"files/{rel}"] = src
-            else:
+            if not src.is_file():
                 self.flags.append(f"{where}.config_files: files/{rel} does not exist in the fleet")
+                continue
+            if project is not None and rel.startswith(project + "/"):
+                self.copies[f"projects/{project}/{rel[len(project) + 1 :]}"] = src
+            else:
+                self.copies[f"files/{rel}"] = src
 
     # ── projects ────────────────────────────────────────────────────────
     def _project(self, plan: _Plan) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -765,11 +775,10 @@ class _Importer:
         primary = next((m for m in mains if m.env == PRIMARY_ENV), mains[0])
         doc: dict[str, Any] = {"name": plan.name, "fleet": self.name}
         lock: dict[str, Any] = {
-            "lock_version": 1,
+            "lock_version": 2,
             "name": plan.name,
             "repo": None,
             "commit": None,
-            "local_path": None,
             "envs": {},
         }
         repos = sorted(
@@ -1301,7 +1310,8 @@ class _Importer:
                 for f in config_files:
                     if f == path_on_box or f.startswith(path_on_box + "/"):
                         covered.add(f)
-                        self._copy_files([f], where)
+                        own = project if path_on_box.startswith(project + "/") else None
+                        self._copy_files([f], where, own)
                 continue
             parts = spec.split(":")
             name = parts[0]
@@ -1340,7 +1350,7 @@ class _Importer:
 
     # ── fleet file ──────────────────────────────────────────────────────
     def _fleet_doc(self, resources: dict[str, Any]) -> dict[str, Any]:
-        doc: dict[str, Any] = {"name": self.name, "default_box": self.default_box}
+        doc: dict[str, Any] = {"name": self.name, "format": 2, "default_box": self.default_box}
         domain = None
         if self.lg.webhook:
             wh_domain = self._resolve(

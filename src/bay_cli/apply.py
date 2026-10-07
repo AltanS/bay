@@ -5,7 +5,9 @@
 1. Plan again (or re-check a saved plan with ``--plan-id``). Refuse
    ``blocked`` (exit 20) and ``stale`` (exit 30). Refuse ``approve`` (exit 10)
    unless ``bay approve`` recorded an approval, or ``--force --reason`` is
-   given; the reason is written to the lock's ``previous``.
+   given; the reason is written to the lock's ``previous``. Refuse a repo
+   project's commit that is on no branch of its remote ("push first"): the
+   box can only build what the remote has.
 2. Write the lock: the project pin moves to the planned commit, the env
    record gets ``result: pending`` and ``previous`` (the pin it replaces).
 3. Compile the fleet into its services file (hash header).
@@ -176,6 +178,13 @@ def up(
     box_env = str(plan["box_env"])
     commit = str(plan["wanted"]["commit"])
     short = commit[:12]
+    on_remote = planmod.commit_on_remote(proj, commit)
+    if on_remote is not True:
+        why = "is not" if on_remote is False else "cannot be checked to be"
+        raise Refused(
+            plan,
+            f"commit {short} of {proj.name} {why} on a branch of {proj.repo}; push first",
+        )
 
     # 2. the lock
     lock = copy.deepcopy(proj.lock)
@@ -197,7 +206,7 @@ def up(
     lockfile.write(proj.lock_file, lock)
 
     # 3. compile into the fleet
-    with planmod.compiled_fleet(cx) as comp:
+    with planmod.compiled_fleet(cx, cwd=proj.cwd) as comp:
         if comp.result is None:
             raise BayError(
                 "compile failed after the lock was written:\n  " + "\n  ".join(comp.errors)
@@ -401,7 +410,7 @@ def _pin_deployed(
         if name == skip:
             continue
         try:
-            other = planmod.load_project(cx, name)
+            other = planmod.load_project(cx, name, fetch=False)
         except BayError:
             continue
         commit = commits[name]

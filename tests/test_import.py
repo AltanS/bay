@@ -73,7 +73,7 @@ def toml(out: Path, rel: str) -> dict[str, Any]:
 
 
 def lock(out: Path, name: str) -> dict[str, Any]:
-    data: dict[str, Any] = json.loads((out / "projects" / f"{name}.lock").read_text())
+    data: dict[str, Any] = json.loads((out / "projects" / name / "bay.lock").read_text())
     return data
 
 
@@ -131,12 +131,32 @@ def test_import_writes_the_fleet_layout(imported: tuple[importer.ImportResult, P
     assert result.resources == ["cache", "postgres", "shop-backup"]
     for name in result.projects:
         assert (out / "projects" / name / "bay.toml").is_file()
-        assert lock(out, name)["commit"] is None and lock(out, name)["local_path"] is None
+        assert lock(out, name)["commit"] is None and "local_path" not in lock(out, name)
     assert sorted(str(p.relative_to(out)) for p in (out / "files").rglob("*") if p.is_file()) == [
         "files/legal-site/beta/de/imprint.md",
         "files/legal-site/beta/terms.md",
-        "files/status/config.yaml",
     ]
+
+
+def test_import_writes_folder_per_project(imported: tuple[importer.ImportResult, Path]) -> None:
+    """Spec 03: one folder per project, the lock inside, own files beside the toml."""
+    result, out = imported
+    assert not list((out / "projects").glob("*.lock")), "no flat lock in the new layout"
+    for name in result.projects:
+        assert lock(out, name)["lock_version"] == 2
+        assert lock(out, name)["name"] == name
+    # status mounts files/status/config.yaml today: it moves beside its toml,
+    # and from = stays relative to the toml.
+    assert (out / "projects" / "status" / "config.yaml").is_file()
+    assert not (out / "files" / "status").exists()
+    froms = [m.get("from") for m in toml(out, "projects/status/bay.toml").get("mounts", [])]
+    assert "config.yaml" in froms
+    # A path outside the project's own folder stays in files/, adopted in the lock.
+    assert (out / "files" / "legal-site" / "beta" / "terms.md").is_file()
+    assert toml(out, "bay.fleet.toml")["format"] == 2
+    # The compile reads the file beside the toml and keeps today's path on the box.
+    data = yaml.safe_load(compiler.compile_fleet(load_inputs(out)).body())
+    assert "status/config.yaml" in data["services"]["status"]["config_files"]
 
 
 def test_import_compiles_without_unsupported(imported: tuple[importer.ImportResult, Path]) -> None:
@@ -521,7 +541,7 @@ def test_image_project_lock_has_no_repo(tmp_path: Path) -> None:
 
 def test_fixture_image_projects_have_no_repo(imported: tuple[importer.ImportResult, Path]) -> None:
     _, out = imported
-    for path in sorted((out / "projects").glob("*.lock")):
+    for path in sorted((out / "projects").glob("*/bay.lock")):
         raw = json.loads(path.read_text())
         doc = toml(out, f"projects/{raw['name']}/bay.toml")
         builds = "build" in doc or any("build" in s for s in (doc.get("services") or {}).values())

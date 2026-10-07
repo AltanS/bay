@@ -1,10 +1,14 @@
-"""Read and write ``projects/<name>.lock`` as raw JSON.
+"""Read and write ``projects/<name>/bay.lock`` as raw JSON.
 
 :mod:`bay_cli.fleet` reads a lock for the compiler. This module is the only
 writer: ``bay init`` creates a lock, ``bay up`` and ``bay rollback`` pin a
 commit and record the deploy. Every write is checked against
 ``schemas/bay_lock.schema.json`` first and lands atomically (temp file plus
 rename), so a reader never sees half a lock.
+
+Version 2 (2.1.0) has ``repo``, ``toml_path``, ``commit`` and ``envs``, and
+no path on this machine. A version 1 lock is read as version 2 (its
+``local_path`` is dropped); the next write stores version 2.
 
 Deploy record of one environment (all optional, see ``docs/plan.md``)::
 
@@ -29,7 +33,8 @@ from pathlib import Path
 from typing import Any
 
 from bay_cli import bay_toml
-from bay_cli.fleet import LOCK_SCHEMA_PATH, LOCK_SUFFIX, LOCK_VERSION, PROJECTS_DIR
+from bay_cli.fleet import LOCK_SCHEMA_PATH, LOCK_VERSION, upgrade_lock
+from bay_cli.fleet import lock_file as _lock_file
 
 
 class LockWriteError(Exception):
@@ -37,14 +42,15 @@ class LockWriteError(Exception):
 
 
 def lock_path(fleet_root: Path, name: str) -> Path:
-    return fleet_root / PROJECTS_DIR / f"{name}{LOCK_SUFFIX}"
+    """``<fleet>/projects/<name>/bay.lock``."""
+    return _lock_file(fleet_root, name)
 
 
 def read(path: Path) -> dict[str, Any] | None:
-    """The parsed lock, or None when there is no file."""
+    """The parsed lock as version 2, or None when there is no file."""
     if not path.is_file():
         return None
-    data = json.loads(path.read_text())
+    data = upgrade_lock(json.loads(path.read_text()))
     if not isinstance(data, dict):
         raise ValueError(f"{path}: not a JSON object")
     return data
@@ -62,16 +68,13 @@ def problems(raw: dict[str, Any]) -> list[str]:
     return sorted({str(v) for v in bay_toml.schema_violations(raw, schema)})
 
 
-def new_lock(
-    name: str, *, repo: str | None, local_path: str | None, toml_path: str = "bay.toml"
-) -> dict[str, Any]:
+def new_lock(name: str, *, repo: str | None, toml_path: str = "bay.toml") -> dict[str, Any]:
     return {
         "lock_version": LOCK_VERSION,
         "name": name,
         "repo": repo,
         "commit": None,
         "toml_path": toml_path,
-        "local_path": local_path,
         "envs": {},
     }
 
@@ -97,15 +100,6 @@ def write(path: Path, raw: dict[str, Any]) -> None:
         except FileNotFoundError:
             pass
         raise
-
-
-def local_path(raw: dict[str, Any], fleet_root: Path) -> Path | None:
-    """``local_path`` resolved like :func:`bay_cli.fleet.load_lock` does."""
-    local = raw.get("local_path")
-    if not local:
-        return None
-    path = Path(str(local)).expanduser()
-    return path if path.is_absolute() else fleet_root / path
 
 
 def env_pin(raw: dict[str, Any], env: str) -> str | None:

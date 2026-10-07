@@ -8,6 +8,12 @@
   "required": ["name", "default_box", "default_domain", "boxes"],
   "properties": {
     "name": { "$ref": "#/$defs/name" },
+    "format": {
+      "description": "The fleet layout. 2 = one folder per project (projects/<name>/bay.lock). No key = 1. A CLI refuses a format newer than it knows.",
+      "type": "integer",
+      "minimum": 1,
+      "x-messages": { "type": "must be a whole number such as 2", "minimum": "must be 1 or more" }
+    },
     "default_box": { "$ref": "#/$defs/name" },
     "default_domain": { "$ref": "#/$defs/domain" },
     "primary_env": { "$ref": "#/$defs/env_name" },

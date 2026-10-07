@@ -1,10 +1,9 @@
 {
-  "lock_version": 1,
+  "lock_version": 2,
   "name": "shop",
   "repo": "git@github.com:acme/shop.git",
   "commit": "0123456789ab",
   "toml_path": "bay.toml",
-  "local_path": "checkouts/shop",
   "envs": {
     "production": {
       "box": "eu-1",

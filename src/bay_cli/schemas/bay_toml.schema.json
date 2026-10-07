@@ -341,7 +341,8 @@
         "from": {
           "type": "string",
           "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$",
-          "x-messages": { "pattern": "must be a path inside this repo, without a leading / and without .." }
+          "description": "A path relative to the directory of this bay.toml, or fleet:<path> for a shared file under the fleet's files/.",
+          "x-messages": { "pattern": "must be a path beside this bay.toml (or fleet:<path>), without a leading / and without .." }
         },
         "owner": {
           "type": "string",

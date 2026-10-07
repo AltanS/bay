@@ -205,25 +205,31 @@ def world(tmp_path: Path, box: FakeBox) -> dict[str, Path]:
         (fleet / GENERATED_SERVICES).write_text(comp.result.text())
     commit_all(fleet, "compile")
 
+    # The app's remote is a bare repo; the app checkout is a clone of it. The
+    # lock names the remote (repo), never the checkout.
+    remote = tmp_path / "remotes" / "webapp.git"
+    remote.parent.mkdir()
+    git(tmp_path, "init", "-q", "--bare", str(remote))
     app_repo = tmp_path / "webapp"
-    app_repo.mkdir()
+    git(tmp_path, "clone", "-q", str(remote), str(app_repo))
     (app_repo / "bay.toml").write_text(APP_TOML)
-    git(app_repo, "init", "-q")
     commit_all(app_repo, "app")
+    git(app_repo, "push", "-q", "-u", "origin", "main")
     lockfile.write(
         lockfile.lock_path(fleet, "webapp"),
-        lockfile.new_lock("webapp", repo=None, local_path=str(app_repo)),
+        lockfile.new_lock("webapp", repo=str(remote)),
     )
     commit_all(fleet, "bay: init webapp")
-    return {"fleet": fleet, "app": app_repo}
+    return {"fleet": fleet, "app": app_repo, "remote": remote}
 
 
 def cx_of(world: dict[str, Path]) -> Context:
     return Context.for_fleet_root(world["fleet"])
 
 
-def project(world: dict[str, Path]) -> planmod.ProjectRef:
-    return planmod.load_project(cx_of(world), "webapp")
+def project(world: dict[str, Path], *, cwd: Path | None = None) -> planmod.ProjectRef:
+    """The webapp project as a command run inside its checkout sees it."""
+    return planmod.load_project(cx_of(world), "webapp", cwd=cwd or world["app"])
 
 
 def make(world: dict[str, Path], **kw: Any) -> dict[str, Any]:
@@ -239,12 +245,19 @@ def do_up(world: dict[str, Path], **kw: Any) -> dict[str, Any]:
     )
 
 
-def edit_app(world: dict[str, Path], old: str, new: str, *, commit: bool = True) -> str:
+def edit_app(
+    world: dict[str, Path], old: str, new: str, *, commit: bool = True, push: bool = True
+) -> str:
     path = world["app"] / "bay.toml"
     text = path.read_text()
     assert old in text
     path.write_text(text.replace(old, new, 1))
-    return commit_all(world["app"], f"edit {new[:20]}") if commit else ""
+    if not commit:
+        return ""
+    sha = commit_all(world["app"], f"edit {new[:20]}")
+    if push:
+        git(world["app"], "push", "-q", "origin", "main")
+    return sha
 
 
 def cli(world: dict[str, Path], *args: str, cwd: Path | None = None) -> Any:
@@ -899,7 +912,8 @@ def test_init_writes_a_valid_draft_and_registers(
     raw = lockfile.read(lockfile.lock_path(world["fleet"], "shopfront"))
     assert raw is not None and raw["commit"] is None
     assert raw["repo"] == "git@example.com:acme/shopfront.git"
-    assert raw["local_path"] == str(repo.resolve())
+    assert "local_path" not in raw and raw["lock_version"] == 2
+    assert raw["toml_path"] == "bay.toml"
     assert git(world["fleet"], "log", "-1", "--format=%s") == "bay: init shopfront"
     assert doc["fleet_commit"] == git(world["fleet"], "rev-parse", "HEAD")
 
@@ -1001,9 +1015,8 @@ def test_compile_reads_the_pinned_commit(world: dict[str, Path], box: FakeBox) -
     edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')  # committed, not pinned
     pinned = runner.invoke(app, ["compile", "--fleet", str(world["fleet"]), "--check"])
     assert pinned.exit_code == 0, pinned.output
-    live = runner.invoke(
-        app, ["compile", "--fleet", str(world["fleet"]), "--check", "--working-tree"]
-    )
+    # --working-tree reads the checkout you stand in as it is.
+    live = cli(world, "compile", "--check", "--working-tree")
     assert live.exit_code == 1 and "LOG_LEVEL: debug" in live.output
 
 
@@ -1020,7 +1033,7 @@ def test_compile_skips_an_unpinned_project_with_a_note(
     commit_all(other, "app")
     lockfile.write(
         lockfile.lock_path(world["fleet"], "other"),
-        lockfile.new_lock("other", repo=None, local_path=str(other)),
+        lockfile.new_lock("other", repo=str(other)),
     )
     result = runner.invoke(app, ["compile", "--fleet", str(world["fleet"]), "--check"])
     assert result.exit_code == 0, result.output
@@ -1080,7 +1093,7 @@ def test_in_fleet_project_plan_up_show_rollback(
     assert up.exit_code == 0, up.output
     raw = lockfile.read(lockfile.lock_path(world["fleet"], "status"))
     assert raw is not None
-    assert raw["repo"] is None and raw["local_path"] is None and raw["commit"] == first
+    assert raw["repo"] is None and "local_path" not in raw and raw["commit"] == first
     assert json.loads(run("show", "--json").stdout)["envs"][0]["status"] == "ok"
 
     path.write_text(path.read_text().replace('MODE = "one"', 'MODE = "two"'))
@@ -1879,3 +1892,4 @@ def test_a_pinned_repo_project_keeps_its_commit(world: dict[str, Path], box: Fak
     assert ("webapp", "production", pinned) in {
         (r["project"], r["env"], r["commit"]) for r in up["pinned"]
     }
+

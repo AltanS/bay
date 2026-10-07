@@ -1,7 +1,8 @@
 # Minimal fleet for the compiler tests: two boxes, shared postgres and redis,
-# one project pinned by lockfile (checkouts/shop) and one that lives here
-# (projects/gatus).
+# one repo project (its lock in projects/shop/, its files in checkouts/shop)
+# and one that lives here (projects/gatus).
 name = "minfleet"
+format = 2
 default_box = "eu-1"
 default_domain = "example.com"
 primary_env = "production"
