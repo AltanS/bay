@@ -8,6 +8,13 @@ Status: the schema and the validator ship today, and so do the commands that act
 file (`bay init`, `bay plan`, `bay up`, `bay show`, `bay rollback`, see [plan.md](plan.md)).
 This page is the contract they follow. `bay up` deploys the whole box environment, not one project.
 
+**Validated is not deployed.** The validator accepts a few keys that the compiler cannot deploy
+yet. In the Keys tables below, each of them carries the tag `(validated, not deployed yet)`.
+`bay plan` and `bay compile` list a file that uses one in `unsupported` and block it, unless you
+pass `--allow-unsupported`, and then the container runs without that feature. The list is
+[plan.md, Features Bay cannot deploy yet](plan.md#features-bay-cannot-deploy-yet), and the
+`unsupported` field of a plan is the truth for one file.
+
 ## Check a file
 
 ```bash
@@ -125,7 +132,7 @@ Data names and volumes:
 - A volume name is shared by the whole project. Two services that mount the same volume
   name share one volume.
 
-Jobs and release:
+Jobs and release (both are validated, not deployed yet: this is the behaviour they are meant to have):
 
 - Jobs run as one-shot containers named `<name>-job-<job>` in the primary environment
   and `<name>-<env>-job-<job>` in the others.
@@ -186,7 +193,11 @@ Secrets:
 ## Full example
 
 This is the corrected v3 example. It passes `bay toml validate`. The test suite checks
-that this block and `tests/fixtures/bay_toml/corrected-example.toml` stay identical.
+that this block and `tests/fixtures/bay_toml/corrected-example.toml` stay identical. It is a
+schema example, not a file to deploy as it stands: it uses keys that carry the tag
+`(validated, not deployed yet)` in the Keys tables (`release`, `[backup]`, `[[jobs]]`,
+`aliases`, `owner`, `backup`, `extensions`, a service `path`, `[access.identity]`, a build
+`memory` and `open` beside a password), so `bay plan` blocks it without `--allow-unsupported`.
 
 <!-- corrected-example -->
 ```toml
@@ -351,12 +362,12 @@ These keys sit at the top level. Every key in this table may also be set in a
 | `image` | string | none | Pull this image instead of building. Not together with `[build]`. |
 | `port` | integer 1-65535 | none | Container port that receives traffic. |
 | `command` | string | image CMD | Command to run. |
-| `release` | string | none | Runs once per environment per deploy, in a one-shot container of the new image, before traffic moves. A failure stops the deploy and the old container stays. |
-| `health` | string | `"/"` when there is a port, else `"none"` | Health check path, or `"none"`. Bay probes it on the container, not through the route. A failed check removes the new container and starts the previous one again. |
-| `replicas` | integer >= 1 | `1` | Number of containers. |
-| `memory` | size | none | Memory limit. Swap is never allowed: Bay turns swap off in a later 2.x release. Until then only the memory limit applies. |
+| `release` | string | none | (validated, not deployed yet) Runs once per environment per deploy, in a one-shot container of the new image, before traffic moves. A failure stops the deploy and the old container stays. |
+| `health` | string | `"/"` when there is a port, else `"none"` | Health check path, or `"none"`. Bay probes it on the container, not through the route. A failed check removes the new container and starts the previous one again. A path other than `/` on an internal container (no `domain`, no `path`) is (validated, not deployed yet). |
+| `replicas` | integer >= 1 | `1` | Number of containers. More than 1 on an internal container is (validated, not deployed yet). |
+| `memory` | size | none | Memory limit. Bay sets `mem_limit` and `memswap_limit` to this one value, so the container gets no swap (a `docker run --memory-swap` equal to `--memory`). A container that ran with `mem_limit` alone is recreated once by the first deploy of the compiled file, and the box prediction names it as `memory: memswap_limit <now> -> <memory>` (see [plan.md](plan.md#the-box-prediction---remote)). |
 | `update` | `notify`, `auto`, `off` | `notify` | What happens when a newer image appears. |
-| `zero_downtime` | bool | `false` | `true`: the previous container keeps running until the new one is healthy. `false`: there is a gap. |
+| `zero_downtime` | bool | `false` | `true`: the previous container keeps running until the new one is healthy. `false`: there is a gap. `true` on an internal container is (validated, not deployed yet). |
 | `logs` | `"off"` or duration | fleet setting | How long the log archive on the box keeps logs. Rotation is always on. |
 | `secrets` | list of names | `[]` | Secret names. The values are in the encrypted secrets file of the box env (`group_vars/<box env>/secrets.yml`), so two deploy envs on one box env share one value per name. |
 
@@ -386,11 +397,14 @@ env = "GF_DATABASE_URL"
 
 | Need | Injects | Options |
 |------|---------|---------|
-| `postgres` | `DATABASE_URL` | `env` (an extra variable name with the same value), `extensions` (list) |
+| `postgres` | `DATABASE_URL` | `env` (an extra variable name with the same value), `extensions` (list; (validated, not deployed yet)) |
 | `redis` | `REDIS_URL` | `env` |
 | any other name | `<NAME>_URL`, or the `env` name instead | `env` (the variable name to use instead of `<NAME>_URL`). The name is a published project, or a shared resource the fleet defines. |
 
-Each environment gets its own database and user. A project cannot need itself. Removing a
+Each environment gets its own database and user. A project cannot need itself. A need of a
+shared resource that sits on another box than the project's deploy env is (validated, not deployed yet) (it is
+the "cross-box" case of [layout-scenarios.md](layout-scenarios.md#5-several-boxes-shared-resources-mixed-apps)).
+`needs.postgres` on an internal container is (validated, not deployed yet) too. Removing a
 need never deletes data. Adopted names are not options here: they live in the fleet
 lockfile (see Behavior).
 
@@ -401,7 +415,7 @@ lockfile (see Behavior).
 | `dockerfile` | string | `Dockerfile` | Path to the Dockerfile. |
 | `context` | string | `.` | Build context, relative to the repo root. |
 | `strategy` | `local`, `remote`, `registry` | fleet setting | Where the image is built. |
-| `memory` | size | fleet setting | Build memory cap. |
+| `memory` | size | fleet setting | Build memory cap. (validated, not deployed yet) when it differs from the fleet's build memory. |
 | `watch` | list of globs | everything | A push that touches none of these files does not rebuild. This filter runs first, before the config-only and hold checks, and it filters a push of `bay.toml` too (see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push)). |
 | `ignore` | list of globs | none | Files that never trigger a rebuild. Applied after `watch`. |
 | `[build.args]` | table of strings | none | Build arguments. |
@@ -429,11 +443,11 @@ A service with no `domain` and no `path` is internal whatever the project mode i
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `mode` | `public`, `tailnet`, `internal` | none: the top-level `[access]` table and its `mode` are required | `public`: the internet, HTTPS via Let's Encrypt. `tailnet`: only devices on the fleet VPN. `internal`: no route; only containers that need it can reach it. |
-| `open` | list of paths | `[]` | Open to the public. These paths skip the mode and the password. They stay open in every environment unless that environment overrides `access.open`. |
+| `open` | list of paths | `[]` | Open to the public. These paths skip the mode and the password. They stay open in every environment unless that environment overrides `access.open`. Together with `[access.password]` it is (validated, not deployed yet). |
 | `locked` | list of paths | `[]` | Only reachable from the tailnet. They also need the password when `[access.password]` is set. A path may not be both open and locked. |
 | `[access.limits]` | `rate`, `burst`, `concurrent` | fleet setting | Per source IP. |
 | `[access.password]` | `users` (required), `realm` | none | HTTP basic auth on everything not in `open`. The password for user `admin` is the secret `PASSWORD_ADMIN`. |
-| `[access.identity]` | `header` (required) | none | Valid in every mode, `public` included. The app receives the caller's device name in this header. Bay sets the header only on requests that arrive from the tailnet and strips it on all others. |
+| `[access.identity]` | `header` (required) | none | (validated, not deployed yet) Valid in every mode, `public` included. The app receives the caller's device name in this header. Bay sets the header only on requests that arrive from the tailnet and strips it on all others. |
 
 ### `[[mounts]]`
 
@@ -444,8 +458,8 @@ Each mount sets `path` and exactly one of `volume` or `from`.
 | `path` | absolute path | required | Where the mount appears inside the container. |
 | `volume` | name | none | A named volume that Bay manages. It survives recreation. |
 | `from` | path | none | A file or directory relative to the directory of this `bay.toml`, read-only. A change recreates the container. No leading `/` and no `..`. `fleet:<path>` mounts the shared fleet file `files/<path>` instead. |
-| `owner` | `uid` or `uid:gid` | root | Volume mounts only. |
-| `backup` | bool | `true` | Volume mounts only. |
+| `owner` | `uid` or `uid:gid` | root | (validated, not deployed yet) Volume mounts only. |
+| `backup` | bool | `true` | Volume mounts only. Every volume mount with `backup` true, which is the default, is (validated, not deployed yet): write `backup = false` to deploy it. |
 | `mode` | octal string | `"0600"` | `from` mounts only. |
 
 Two mounts in one container may not use the same `path`. A volume name is shared by the
@@ -487,10 +501,13 @@ commit and moves no code, so the push is config only on the box. See
 [plan.md, bay adopt](plan.md#bay-adopt).
 
 **Config-only push.** In an app repo, a push that changes only the `bay.toml` and the
-files its mounts read (not `fleet:` ones) builds nothing and deploys nothing. Run
-`bay up` to deploy it. See [build-pipeline.md](build-pipeline.md), "Config-only push".
+files its mounts read (not `fleet:` ones) builds nothing and deploys nothing: no image, no `:latest`
+move, no recreate. The box tags the image of the previous commit with the pushed commit, so that
+`bay up` to that commit finds its image. Run `bay up` to deploy the change. See [build-pipeline.md](build-pipeline.md), "Config-only push".
 
 ### `[backup]`
+
+The whole table is (validated, not deployed yet).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
@@ -500,6 +517,8 @@ files its mounts read (not `fleet:` ones) builds nothing and deploys nothing. Ru
 Databases follow the fleet backup policy.
 
 ### `[[jobs]]`
+
+The whole table is (validated, not deployed yet).
 
 | Key | Type | Meaning |
 |-----|------|---------|
@@ -518,13 +537,14 @@ An extra container in the same project. The main container is not a `[services.*
 service may use that name. Container names are in rule 8.
 
 - Inherited by default: `image` or `[build]`, `env`, `secrets`, `fleet_secrets`, `needs`.
-  `inherit = false` starts the service empty.
+  `inherit = false` starts the service empty. A service with neither `image` nor its own
+  `build` shares the project's build, and that is (validated, not deployed yet).
 - The service inherits `update` and `logs` from the project. `replicas` defaults to `1`
   and `zero_downtime` to `false`.
 - The service may set its own: `command`, `port`, `health`, `memory`, `replicas`,
   `zero_downtime`, `update`, `logs`, `log_rotation`, `access`, `mounts`, `env`,
   `secrets`, `fleet_secrets`, `needs`, `image` or `build`.
-- Routing: `path = "/api"` routes a prefix of the main domain. `domain = "..."` gives
+- Routing: `path = "/api"` routes a prefix of the main domain (`path` is (validated, not deployed yet)).  `domain = "..."` gives
   the service its own domain. Set one of them, or neither. With neither, the service is
   internal and may not set `access`.
 - A routed service takes the project's `access.mode` unless it sets its own. Password
@@ -548,7 +568,7 @@ deploy envs on one box env share them (see
 |-----|------|---------|---------|
 | `box` | name | fleet default box | The box this environment runs on. |
 | `domain` | domain | `<name>.<fleet default domain>` | Main domain. |
-| `aliases` | list of domains | `[]` | Extra domains that redirect to `domain` with HTTP 308. The path and the query are kept. Bay issues a certificate for every alias. |
+| `aliases` | list of domains | `[]` | Extra domains that redirect to `domain` with HTTP 308. The path and the query are kept. Bay issues a certificate for every alias. The redirect is (validated, not deployed yet): with `redirect` left at `true`, `bay plan` blocks, and with `--allow-unsupported` the aliases are served instead. Set `redirect = false` to deploy them. |
 | `redirect` | bool | `true` | `false` serves the aliases instead of redirecting them. |
 | `branch` | git branch | `main` | Webhook builds follow this branch. |
 | `track` | `"branch"` or `"pin"` | `"branch"` | What a push does. `branch`: a push builds and deploys new code under the pinned config. `pin`: a push only builds; `bay up` deploys. |
