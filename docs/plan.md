@@ -622,7 +622,10 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
   and Bay commits and pushes that record.
   Exit 40 needs all of these. A build container of a project that this `bay up` pins has no
   commit in RUNNING (it is not in the receipt, or its `commit` is null). The box has no
-  `<image>:<commit12>` for the pin and no `<image>:latest` (Bay asks with `docker image ls`). Every
+  `<image>:<commit12>` for the pin and no `<image>:latest` (Bay asks with `docker image ls`).
+  For a project that lives in the fleet, the pin is a fleet commit and no image carries it, so
+  Bay checks `<image>:latest` only, and the note names the container instead of a commit:
+  `first deploy of <project>: the box has no image for <container> yet.` Every
   failed action of the deploy belongs to such a container: a container that the receipt marks
   `failed`, or a `missing` code move. Any other failure exits 1, and so does a box that wrote no
   receipt for this deploy or a receipt from before 2.2.0, which marks no failed action.
@@ -1341,7 +1344,9 @@ and the next write stores version 2.
   `commit` and `image` it ran before the `bay up` that set `previous`, from the receipt the
   plan read. `commit` is null when the receipt named none. Plain `bay rollback` takes its code
   target from it. A lock written before 2.2.0 has no map: `bay rollback` then falls back to the
-  box's `<env>.prev.json`. Bay records no map when the plan did not read the box.
+  box's `<env>.prev.json`. Bay records no map when the plan did not read the box, when a box
+  returned an error during the plan, or when the bay.toml of the old pin cannot be read. The
+  fallback applies in each of those cases, and the rollback note says so.
 - `adopted.from_fleet_commit` is written by `bay adopt`: the fleet commit the
   project was read from before its `bay.toml` moved into the app repo. While
   an environment has it and no `previous`, `bay rollback` is refused.

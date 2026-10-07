@@ -355,10 +355,13 @@ bay plan production                       # 4. then see plan.md "The first image
 
 Expect step 2 to fail. The first `bay up` of an app that builds from source fails on purpose:
 `bay up` builds no image, and `shop` has none yet, so the box cannot create the container
-([plan.md, The first image](plan.md#the-first-image)). Bay has no special code or message for this
-case. It looks like any failed deploy: the command exits 1 with
-`deploy failed: Command failed with exit code N`, the JSON has `"result": "failed"` and an `error`
-text, the lock records `result: failed`, and Bay still commits that record and pushes the fleet.
+([plan.md, The first image](plan.md#the-first-image)). Bay knows this case. `bay up` exits 40, not 1.
+It prints `deploy failed: ... bay show says HALF until a deploy succeeds.` and a note that names the
+way out: `first deploy of shop: the box has no image for <commit12> yet. Push to <branch> so the
+webhook builds it, wait for the build, then run bay up again.` The JSON has `"result": "failed"`, an
+`error` text, the same line in `notes`, and `first_image`, the list of the containers with no image.
+Any other failed deploy still exits 1. The lock records `result: failed`, and Bay still commits that
+record and pushes the fleet.
 `bay show` says `HALF` (the last `bay up` failed; all status words are in the
 [bay show table](plan.md#bay-show)). The pin, the webhook script, the receiver entry for `shop` and
 its build trigger are in place, which is what step 2 is for. To be sure that this is the expected failure and not another one, read the Ansible
@@ -1160,8 +1163,8 @@ alone is not enough to deploy. If the shell cannot find `bay`, run `uv tool upda
   repo holds it. It is the one file `.vault_pass` in the root of the fleet clone, here
   `~/.config/bay/fleets/acme/.vault_pass` ([install.md](install.md#the-vault-password)). After you
   copy it, run `git status` in the fleet. `bay fleet init --from` clones the repo and leaves its
-  `.gitignore` as it is, and a fleet that was made with `bay fleet init <name>` ignores only
-  `.bay-cache/`. If `.vault_pass` shows as untracked, add the line `.vault_pass` to the `.gitignore`,
+  `.gitignore` as it is and warns when that file does not ignore `.vault_pass`. A fleet that was
+  made with `bay fleet init <name>` already ignores `.vault_pass` and `.bay-cache/`. If `.vault_pass` shows as untracked, add the line `.vault_pass` to the `.gitignore`,
   commit it and push it: an untracked file makes the fleet dirty, and the receipt records
   `fleet_dirty: true`. Without the file `bay doctor` fails its Vault check, and `bay vault edit` and
   every deploy stop. `bay doctor` checks that the vault opens. It prints no name and no value.

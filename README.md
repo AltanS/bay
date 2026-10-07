@@ -232,7 +232,7 @@ Secrets are managed with `ansible-vault`. The setup:
 1. **`group_vars/production/secrets.yml`** (in your fleet) holds all secret values under a `secrets:` dict
 2. An app lists secret names in `bay.toml` (`secrets = ["DB_PASSWORD"]`). The compiled `services.yml` carries the names as `env.secret`. Values are never in either file.
 3. At deploy time, the `deploy_stack` role resolves secrets and writes per-service `.env` files
-4. The vault password lives in `.vault_pass` in the fleet root. Keep it out of git: add it to the fleet's `.gitignore`. Bay reads exactly that file. See [docs/install.md](docs/install.md#the-vault-password).
+4. The vault password lives in `.vault_pass` in the fleet root. Keep it out of git. `bay fleet init <name>` adds it to the new `.gitignore`. A fleet cloned with `bay fleet init --from` keeps its own `.gitignore`, so add the line there. Bay reads exactly that file. See [docs/install.md](docs/install.md#the-vault-password).
 
 Manage secrets with `bay vault` (edit, view, encrypt, decrypt, set) and generate values with `bay secret` — see `bay vault --help` and `bay secret --help` for examples and the secrets key-casing convention.
 
