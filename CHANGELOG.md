@@ -8,6 +8,18 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [Unreleased]
+
+### Fixed
+
+- Test only, no behaviour change: `test_adopt_prints_plan_hint` now collapses whitespace in the
+  captured output, so it passes at any console width (rich wraps the `push it after bay up` hint
+  across lines at some widths).
+
+### Upgrade notes
+
+No change on any box or fleet.
+
 ## [2.1.4] - 2026-10-07
 
 ### Changed
