@@ -47,13 +47,20 @@ def test_rename_migration_runs_from_both_playbooks() -> None:
         )
 
 
+# Units born after the rename (2.3.0 [[jobs]]): there is no pre-1.0 unit to remove.
+_POST_RENAME_UNITS = {
+    "bay-job@.service",
+    "bay-job@.timer",
+}
+
+
 def test_rename_migration_unit_list_covers_every_unit_template() -> None:
     """Every rendered unit template has a pre-1.0 name in the removal list."""
     listed = set(_defaults()["rename_migration_units"])
     missing = []
     for template in (REPO / "roles").rglob("templates/bay-*.j2"):
         unit = template.name[: -len(".j2")]
-        if not unit.endswith(_UNIT_SUFFIXES):
+        if not unit.endswith(_UNIT_SUFFIXES) or unit in _POST_RENAME_UNITS:
             continue
         legacy = "argo-" + unit[len("bay-") :]  # kept-argo: pre-1.0 unit basename
         if legacy not in listed:
@@ -70,6 +77,7 @@ _POST_RENAME_SCRIPTS = {
     "bay-journal",
     "bay-systemctl-ro",
     "bay-docker-ro",
+    "bay-job.sh",  # 2.3.0 [[jobs]]
 }
 
 
