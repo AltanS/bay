@@ -516,16 +516,15 @@ class _Compiler:
             routed = mode in ("public", "tailnet")
         else:
             own = level.get("access", {})
-            if "path" in level:
-                self._todo(unit, _p(base, "path"), "routing a service by path on the main domain")
-                return
-            routed = "domain" in level
+            # `path` routes a prefix of the main domain; `domain` its own domain.
+            route_key = "path" if "path" in level else "domain"
+            routed = route_key in level
             access = own
             mode = own.get("mode", unit.access["mode"]) if routed else "internal"
             if routed and mode == "internal":
                 self._err(
-                    f"{unit.label}: {_p(base, 'domain')}: the service has a domain but takes "
-                    "access.mode internal from the project; set its own access.mode"
+                    f"{unit.label}: {_p(base, route_key)}: the service has a {route_key} but "
+                    "takes access.mode internal from the project; set its own access.mode"
                 )
                 return
 
@@ -618,7 +617,14 @@ class _Compiler:
             entry["replicas"] = replicas
         if isinstance(health, str) and health.startswith("/") and health != "/":
             entry["healthcheck_path"] = health
-        entry["domains"] = self._domains(unit, service, level, base, name)
+        if "path" in level:
+            # The main domains of this env, not claimed again: the router
+            # matches Host() and the path, and outranks the main router
+            # (bay_traefik_labels). The prefix is not stripped.
+            entry["path"] = level["path"]
+            entry["domains"] = self._main_domains(unit)
+        else:
+            entry["domains"] = self._domains(unit, service, level, base, name)
         self._routes(unit, access, base, mode, entry)
         middleware = self._middleware(unit, access, base)
         if middleware:
@@ -1068,6 +1074,12 @@ class _Compiler:
         return "the repo root" if parent == "." else f"the repo's {parent}"
 
     # ── routing ─────────────────────────────────────────────────────────
+    def _main_domains(self, unit: _Unit) -> list[str]:
+        """The main container's domains in the unit's env: the domain, then the aliases."""
+        deploy = unit.deploy
+        domain = deploy.get("domain", f"{unit.project.name}.{self.fleet['default_domain']}")
+        return [domain, *deploy.get("aliases", [])]
+
     def _domains(
         self, unit: _Unit, service: str, level: dict[str, Any], base: str, name: str
     ) -> list[str]:

@@ -909,7 +909,6 @@ UNSUPPORTED = [
     pytest.param(SHOP, 'volume = "data"\nbackup = false', 'volume = "data"', "volume backups", id="volume-backup"),
     pytest.param(SHOP, 'realm = "Staff only"', 'realm = "Staff only"\n\n[access.identity]\nheader = "X-Tailnet-Device"', "the tailnet identity header", id="identity"),
     pytest.param(SHOP, 'env = "SHOP_DATABASE_URL"', 'env = "SHOP_DATABASE_URL"\nextensions = ["vector"]', "postgres extensions", id="pg-extensions"),
-    pytest.param(SHOP, 'command = "warm --every 5m"', 'command = "warm --every 5m"\npath = "/warm"', "routing a service by path on the main domain", id="service-path"),
     pytest.param(SHOP, 'locked = ["/admin"]', 'locked = ["/admin"]\nopen = ["/hooks"]', "open paths that skip the password", id="open-with-password"),
     pytest.param(SHOP, 'memory = "2g"\nwatch', 'memory = "4g"\nwatch', "a build memory cap per project", id="build-memory"),
     pytest.param(SHOP, 'inherit = false\nimage = "ghcr.io/acme/warmer:1"\n', "", "an internal service that shares the project build", id="internal-shared-build"),
@@ -1022,6 +1021,59 @@ def test_compile_service_shares_project_image(fleet: Path) -> None:
     s = yaml.safe_load(compiled(fleet).body())["services"]
     assert s["shop-api"]["build"] == {**s["shop"]["build"], "shared_from": "shop"}
     assert "image" not in s["shop-api"] and "image" not in s["shop"]
+
+
+def test_compile_service_path_routes(fleet: Path) -> None:
+    """A service with ``path`` routes a prefix of the main domains and outranks the main router.
+
+    The compiled entries go through the label filter the reconciler uses
+    (roles/container_lifecycle/filter_plugins/bay_filters.py).
+    """
+    import importlib.util
+
+    from bay_cli.commands import validate as v
+
+    spec = importlib.util.spec_from_file_location(
+        "_role_filters", ROOT / "roles/container_lifecycle/filter_plugins/bay_filters.py"
+    )
+    assert spec is not None and spec.loader is not None
+    role = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(role)
+
+    edit(fleet, SHOP, 'command = "warm --every 5m"', 'command = "warm --every 5m"\npath = "/warm"')
+    result = compiled(fleet)
+    assert not any(u.path.endswith("path") for u in result.unsupported)
+    s = yaml.safe_load(result.body())["services"]
+    warmer, main = s["shop-warmer"], s["shop"]
+    assert warmer["path"] == "/warm"
+    assert warmer["domains"] == main["domains"] == ["shop.example.com", "www.shop.example.com"]
+    assert warmer["access"] == "public"
+    assert "middleware" not in warmer or "basic_auth" not in warmer["middleware"]
+    assert s["shop-staging-warmer"]["domains"] == ["staging.shop.example.com"]
+
+    config = {"traefik_docker_network": "services", "stack_name": "minfleet"}
+    path_labels = role.bay_traefik_labels(warmer, "shop-warmer", config)
+    rule = path_labels["traefik.http.routers.shop-warmer.rule"]
+    assert rule == (
+        "(Host(`shop.example.com`) || Host(`www.shop.example.com`)) "
+        "&& (Path(`/warm`) || PathPrefix(`/warm/`))"
+    )
+    rank = int(path_labels["traefik.http.routers.shop-warmer.priority"])
+    main_labels = role.bay_traefik_labels(main, "shop", config)
+    for key, value in main_labels.items():
+        if key.endswith(".rule") and "-health" not in key:
+            router = key.split(".")[3]
+            main_rank = int(main_labels.get(f"traefik.http.routers.{router}.priority", len(value)))
+            assert rank > main_rank, (key, rank, main_rank)
+
+    # The shared domain is not a collision for bay validate: (domain, path) is.
+    result_v = v.ValidationResult()
+    v._check_domain_uniqueness(s, result_v)
+    assert result_v.failed == [], result_v.failed
+    twin = {**s, "twin": {**warmer}}
+    result_v = v.ValidationResult()
+    v._check_domain_uniqueness(twin, result_v)
+    assert any("with path '/warm'" in f for f in result_v.failed), result_v.failed
 
 
 @pytest.mark.parametrize(("line", "want"), [

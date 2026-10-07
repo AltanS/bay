@@ -112,6 +112,11 @@
           "minItems": 1,
           "description": "Domain names for Traefik routing."
         },
+        "path": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9._~%+/*-]*$",
+          "description": "bay.toml path: route only this path prefix of `domains` (the main domains), on a / boundary. The router outranks the main container's router. The prefix is not stripped."
+        },
         "ports": {
           "$ref": "#/$defs/ports_block"
         },

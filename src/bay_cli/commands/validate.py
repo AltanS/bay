@@ -1250,28 +1250,35 @@ def _check_domain_uniqueness(
     services: dict[str, Any],
     result: ValidationResult,
 ) -> None:
-    """Verify no two services claim the same domain (with region overlap)."""
-    # Map: domain -> list of (svc_name, regions)
-    domain_map: dict[str, list[tuple[str, list[str]]]] = {}
+    """Verify no two services claim the same domain (with region overlap).
+
+    A service with ``path`` (bay.toml: routed by path on the main domain)
+    claims the pair (domain, path), so it shares the domain with the main
+    container. Two services with the same domain and the same path collide.
+    """
+    # Map: (domain, path) -> list of (svc_name, regions)
+    domain_map: dict[tuple[str, str], list[tuple[str, list[str]]]] = {}
 
     for svc_name, svc in services.items():
         if not isinstance(svc, dict):
             continue
         domains = svc.get("domains", [])
         regions = list(svc.get("regions", []))
+        path = str(svc.get("path") or "")
         for domain in domains:
-            domain_map.setdefault(str(domain), []).append((svc_name, regions))
+            domain_map.setdefault((str(domain), path), []).append((svc_name, regions))
 
     has_dups = False
-    for domain, owners in domain_map.items():
+    for (domain, path), owners in domain_map.items():
         if len(owners) < 2:
             continue
+        what = f"Domain '{domain}'" + (f" with path '{path}'" if path else "")
         # Check for region overlap among the owners
         for i, (name_a, regions_a) in enumerate(owners):
             for name_b, regions_b in owners[i + 1:]:
                 if _regions_overlap(regions_a, regions_b):
                     result.fail(
-                        f"Domain '{domain}' is claimed by both '{name_a}' and '{name_b}' "
+                        f"{what} is claimed by both '{name_a}' and '{name_b}' "
                         f"(overlapping regions) -- this causes silent Traefik routing conflicts"
                     )
                     has_dups = True

@@ -505,6 +505,8 @@ def _add_router_labels(labels, name, svc, public_mw, vpn_mw, config=None):
     access = svc.get("access", "public")
     port = str(svc.get("ports", {}).get("internal", 80))
     domains = svc.get("domains", [])
+    # A service routed by path on the main domain (bay.toml `path`).
+    path = svc.get("path") or None
 
     # Entrypoints per router class. Mirror _service.j2: VPN routers bind
     # `vpn_entrypoints`, public routers bind `public_entrypoints` — both
@@ -531,11 +533,13 @@ def _add_router_labels(labels, name, svc, public_mw, vpn_mw, config=None):
                 primary_entrypoints=public_ep,
                 secondary_entrypoints=vpn_ep,
                 secondary_path_matcher=_vpn_route_matcher,
+                path=path,
             )
         else:
             _add_single_router_labels(
                 labels, name, domains, port, public_mw, suffix="",
                 entrypoints=public_ep,
+                path=path,
             )
     elif access == "vpn":
         public_routes = svc.get("public_routes", [])
@@ -552,11 +556,13 @@ def _add_router_labels(labels, name, svc, public_mw, vpn_mw, config=None):
                 secondary_priority="20",
                 primary_entrypoints=vpn_ep,
                 secondary_entrypoints=public_ep,
+                path=path,
             )
         else:
             _add_single_router_labels(
                 labels, name, domains, port, vpn_mw, suffix="-vpn",
                 entrypoints=vpn_ep,
+                path=path,
             )
 
     # ── Health-probe carve-out ───────────────────────────────────────
@@ -692,8 +698,14 @@ def _add_health_router_labels(
     health_mw = [m for m in base_mw if m != f"{name}-basicauth"]
 
     router = f"{name}-health"
-    host_expr = _host_rule(domains)
-    sec_host = f"({host_expr})" if len(domains) > 1 else host_expr
+    # A path-routed service only owns the paths under its own: a health path
+    # outside it is the main container's, and a carve-out there would take
+    # that path away from the main container.
+    route_path = svc.get("path")
+    if route_path and not _path_under(path, [route_path]):
+        return
+    host_expr = _host_rule(domains, route_path)
+    sec_host = f"({host_expr})" if len(domains) > 1 and not route_path else host_expr
     # Exact Path, never PathPrefix: /healthcheck must not open /healthcheck-admin.
     labels[f"traefik.http.routers.{router}.rule"] = f"{sec_host} && Path(`{_rule_literal(path)}`)"
     labels[f"traefik.http.routers.{router}.service"] = service_ref
@@ -741,25 +753,63 @@ def _rule_literal(value):
     return text
 
 
-def _host_rule(domains):
+def _host_rule(domains, path=None):
     """Build the Host() match expression for a router.
 
     Multi-domain: Host(`d1`) || Host(`d2`). Single domain: Host(`d1`).
+
+    With `path` (a service routed by path on the main domain, bay.toml
+    `[services.<s>] path`): the Host() group AND the path on a segment
+    boundary, `Host(`d1`) && (Path(`/api`) || PathPrefix(`/api/`))`, so
+    `/api` matches `/api` and `/api/x`, never `/apiary`. The OR group of
+    several domains is parenthesised, because `&&` binds tighter than `||`.
     """
     if not domains:
         raise ValueError(
             "cannot build a Traefik router rule: service has no domains"
         )
-    return " || ".join(f"Host(`{_rule_literal(d)}`)" for d in domains)
+    expr = " || ".join(f"Host(`{_rule_literal(d)}`)" for d in domains)
+    if not path:
+        return expr
+    if len(domains) > 1:
+        expr = f"({expr})"
+    return f"{expr} && {_path_matcher(path)}"
+
+
+def _path_matcher(path):
+    """The path of a path-routed service: the exact path or a prefix on a `/` boundary."""
+    prefix = _rule_literal(path).rstrip("/")
+    if not prefix:
+        return "PathPrefix(`/`)"
+    return f"(Path(`{prefix}`) || PathPrefix(`{prefix}/`))"
+
+
+def _path_priorities(rule):
+    """Explicit priorities for the routers of a path-routed service.
+
+    A router without a priority ranks by the length of its rule. The main
+    container's routers have no priority (rank = length of its Host() rule,
+    the same domains as here, so always shorter than a rule that adds the
+    path) or the explicit 10 and 20 of a split router (below any rule that
+    holds a Host() and a path). So a path router whose priority is the length
+    of its own rule outranks every router of the main container, whatever
+    shape that one has, and a longer path outranks a shorter one. The
+    path-matched router of a split pair gets one more, so it beats its
+    catch-all. Only the health carve-outs (1000000) rank higher.
+    """
+    return str(len(rule)), str(len(rule) + 1)
 
 
 def _add_single_router_labels(
-    labels, name, domains, port, mw_list, suffix="", entrypoints="websecure"
+    labels, name, domains, port, mw_list, suffix="", entrypoints="websecure", path=None
 ):
     """Add router + service labels for a single-router service."""
     router = f"{name}{suffix}"
 
-    labels[f"traefik.http.routers.{router}.rule"] = _host_rule(domains)
+    rule = _host_rule(domains, path)
+    labels[f"traefik.http.routers.{router}.rule"] = rule
+    if path:
+        labels[f"traefik.http.routers.{router}.priority"] = _path_priorities(rule)[0]
     labels[f"traefik.http.routers.{router}.entrypoints"] = entrypoints
     labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
     labels[f"traefik.http.routers.{router}.middlewares"] = ",".join(mw_list)
@@ -773,7 +823,7 @@ def _add_dual_router_labels(
     primary_suffix, secondary_suffix,
     primary_priority, secondary_priority,
     primary_entrypoints="websecure", secondary_entrypoints="websecure",
-    secondary_path_matcher=None,
+    secondary_path_matcher=None, path=None,
 ):
     """Add labels for a dual-router service (public + vpn split).
 
@@ -783,7 +833,11 @@ def _add_dual_router_labels(
     # Shared service backend
     labels[f"traefik.http.services.{name}.loadbalancer.server.port"] = port
 
-    host_expr = _host_rule(domains)
+    host_expr = _host_rule(domains, path)
+    if path:
+        # A path-routed service: rank above the main container (see
+        # _path_priorities); its own Host() group is already parenthesised.
+        primary_priority, secondary_priority = _path_priorities(host_expr)
     # `&&` binds tighter than `||` in Traefik rules, so the OR-group must be
     # parenthesised — otherwise Host(a) || Host(b) && PathPrefix(p) parses as
     # Host(a) || (Host(b) && PathPrefix(p)) and the secondary router matches
@@ -791,7 +845,7 @@ def _add_dual_router_labels(
     # public_routes that serves the entire first domain publicly. Single
     # domain stays unwrapped so existing labels are byte-identical and don't
     # trigger a spurious config-hash recreation.
-    sec_host = f"({host_expr})" if len(domains) > 1 else host_expr
+    sec_host = f"({host_expr})" if len(domains) > 1 and not path else host_expr
 
     # Secondary router (higher priority, path-matched)
     sec = f"{name}{secondary_suffix}"

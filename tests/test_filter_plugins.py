@@ -779,8 +779,90 @@ class TestFilterCopyParity:
                 "healthcheck_path": "/hz",
                 "middleware": {"basic_auth": {"users": ["u:h"]}},
             },
+            # Services routed by path on the main domain (M118/04).
+            {"access": "public", "domains": ["a.com"], "path": "/api", "ports": {"internal": 80}},
+            {
+                "access": "public",
+                "domains": ["a.com", "www.a.com"],
+                "path": "/api/",
+                "vpn_routes": ["/api/admin"],
+                "healthcheck_path": "/api/health",
+                "middleware": {"basic_auth": {"users": ["u:h"]}},
+                "ports": {"internal": 80},
+            },
+            {
+                "access": "vpn",
+                "domains": ["a.com"],
+                "path": "/api",
+                "public_routes": ["/api/hook"],
+                "healthcheck_path": "/hz",
+                "middleware": {"basic_auth": {"users": ["u:h"]}},
+            },
         ]
         for i, svc in enumerate(cases):
             assert top.bay_traefik_labels(svc, "svc", _BASE_CONFIG) == role.bay_traefik_labels(
                 svc, "svc", _BASE_CONFIG
             ), f"filter copies disagree on case {i}"
+
+
+class TestPathRoutedService:
+    """A service with `path` routes a prefix of the main domain (M118/04)."""
+
+    MAIN = {"access": "public", "domains": ["a.com", "www.a.com"], "ports": {"internal": 80}}
+
+    def _rank(self, labels, router):
+        rule = labels[f"traefik.http.routers.{router}.rule"]
+        return int(labels.get(f"traefik.http.routers.{router}.priority", len(rule)))
+
+    def test_rule_is_host_and_path_on_a_segment_boundary(self):
+        svc = {**self.MAIN, "path": "/api"}
+        labels = bay_traefik_labels(svc, "app-api", _BASE_CONFIG)
+        assert labels["traefik.http.routers.app-api.rule"] == (
+            "(Host(`a.com`) || Host(`www.a.com`)) && (Path(`/api`) || PathPrefix(`/api/`))"
+        )
+        one = bay_traefik_labels({**svc, "domains": ["a.com"]}, "app-api", _BASE_CONFIG)
+        assert one["traefik.http.routers.app-api.rule"] == (
+            "Host(`a.com`) && (Path(`/api`) || PathPrefix(`/api/`))"
+        )
+        # No stripprefix: the app sees the full path.
+        assert not any("stripprefix" in k for k in labels)
+
+    def test_path_router_outranks_every_shape_of_the_main_router(self):
+        path = bay_traefik_labels({**self.MAIN, "path": "/a"}, "app-api", _BASE_CONFIG)
+        rank = self._rank(path, "app-api")
+        mains = [
+            bay_traefik_labels(self.MAIN, "app", _BASE_CONFIG),
+            bay_traefik_labels({**self.MAIN, "vpn_routes": ["/admin"]}, "app", _BASE_CONFIG),
+            bay_traefik_labels(
+                {**self.MAIN, "access": "vpn", "public_routes": ["/hook"]}, "app", _BASE_CONFIG
+            ),
+        ]
+        for labels in mains:
+            for key in labels:
+                if key.endswith(".rule") and "-health" not in key:
+                    router = key.split(".")[3]
+                    assert rank > self._rank(labels, router), (key, rank)
+        # A longer path outranks a shorter one on the same domain.
+        longer = bay_traefik_labels({**self.MAIN, "path": "/a/b"}, "app-b", _BASE_CONFIG)
+        assert self._rank(longer, "app-b") > rank
+
+    def test_split_path_router_keeps_its_own_order(self):
+        svc = {**self.MAIN, "path": "/api", "vpn_routes": ["/api/admin"]}
+        labels = bay_traefik_labels(svc, "app-api", _BASE_CONFIG)
+        assert self._rank(labels, "app-api-vpn") == self._rank(labels, "app-api") + 1
+        assert labels["traefik.http.routers.app-api-vpn.rule"].startswith(
+            "(Host(`a.com`) || Host(`www.a.com`)) && (Path(`/api`) || PathPrefix(`/api/`)) && ("
+        )
+
+    def test_health_carve_out_only_under_the_service_path(self):
+        base = {**self.MAIN, "path": "/api", "middleware": {"basic_auth": {"users": ["u:h"]}}}
+        inside = bay_traefik_labels({**base, "healthcheck_path": "/api/hz"}, "x", _BASE_CONFIG)
+        assert inside["traefik.http.routers.x-health.rule"].endswith(
+            "&& (Path(`/api`) || PathPrefix(`/api/`)) && Path(`/api/hz`)"
+        )
+        outside = bay_traefik_labels({**base, "healthcheck_path": "/hz"}, "x", _BASE_CONFIG)
+        assert "traefik.http.routers.x-health.rule" not in outside
+
+    def test_root_path_is_a_plain_prefix(self):
+        labels = bay_traefik_labels({**self.MAIN, "path": "/"}, "x", _BASE_CONFIG)
+        assert labels["traefik.http.routers.x.rule"].endswith("&& PathPrefix(`/`)")

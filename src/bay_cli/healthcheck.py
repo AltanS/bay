@@ -146,6 +146,12 @@ def readiness_note(result: CheckResult) -> str:
     return f" (ready after {result.elapsed_ms / 1000:.0f}s, {result.attempts} attempts)"
 
 
+def _under(path: str, route: str) -> bool:
+    """True when ``path`` is ``route`` or below it on a ``/`` boundary."""
+    prefix = route.rstrip("/")
+    return not prefix or path == prefix or path.startswith(prefix + "/")
+
+
 def _path_covered_by_public_routes(path: str, public_routes: list[str]) -> bool:
     """Return True iff `path` is publicly reachable through any route.
     Traefik matches public_routes with PathPrefix, so /foo covers /foo
@@ -427,6 +433,11 @@ def _collect_targets(
         if not domains:
             continue
         path = svc.get("healthcheck_path") or "/"
+        route = svc.get("path")
+        if route and not _under(path, str(route)):
+            # A service routed by path on the main domain: only paths under
+            # its own reach it through the route; others reach the main one.
+            path = str(route)
         skip, reason = should_skip_vpn_only(svc, include_vpn)
         # A gated service is not probed at all. We already know the answer is
         # 401 and that it means nothing, so spending the retry budget to
