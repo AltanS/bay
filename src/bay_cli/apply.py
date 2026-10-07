@@ -354,7 +354,9 @@ def up_env(
     """Apply a whole-environment plan (``bay up <env>`` in a fleet, no ``--project``).
 
     Every project of the plan is pinned to its WANTED commit, then the box
-    environment is deployed once, as :func:`up` does for one project.
+    environment is deployed once, as :func:`up` does for one project. A
+    route-only plan (no project, ``box_env`` set: the ingress box env) goes to
+    :func:`_apply_route_plan`, which pins nothing.
     """
     say = echo or (lambda _msg: None)
     if force and not (reason and reason.strip()):
@@ -369,12 +371,23 @@ def up_env(
     else:
         plan = planmod.make_env_plan(cx, opts, cwd=cwd, read_receipts=seen)
     planmod.save(cx, plan)
-    if not plan["projects"]:
+    if not plan["projects"] and not plan.get("box_env"):
         raise BayError(
             f"no project has [deploy.{plan['env']}], so there is nothing to deploy",
             code=ErrorCode.NOT_FOUND,
         )
     forced = _gate(plan, force, reason, say)
+    if not plan["projects"]:
+        return _with_layout_notes(moved, _apply_route_plan(
+            cx,
+            plan,
+            forced=forced,
+            cwd=cwd,
+            read_receipts=read_receipts,
+            deploy=deploy,
+            say=say,
+            push=push,
+        ))
     members = [
         (planmod.load_project(cx, p["name"], cwd=cwd, fetch=False), str(p["wanted"]["commit"]))
         for p in plan["projects"]
@@ -698,6 +711,120 @@ def _apply_plan(
         push_fleet(cx, result, say)
     if failure:
         raise DeployFailed(result, exit_code=FIRST_IMAGE_EXIT if first_exit else 1)
+    return result
+
+
+def _apply_route_plan(
+    cx: Context,
+    plan: dict[str, Any],
+    *,
+    forced: bool,
+    cwd: Path | None,
+    read_receipts: planmod.ReceiptReader | None,
+    deploy: Deployer | None,
+    say: Echo,
+    push: bool,
+) -> dict[str, Any]:
+    """Apply a route-only plan: compile, commit, deploy the ingress box env, push.
+
+    No lock is read for a pin move and none is written: the compile is the
+    one ``bay compile`` makes (every project at its pin), so the services
+    file changes only where the fleet file changed (routes, the tailnet
+    allowlist). The plan has no project step (:func:`planmod._route_only_diff`
+    blocks one). A plan with zero steps still deploys, so the ingress box
+    writes a receipt that lists its routes.
+    """
+    from bay_cli import routes
+
+    env = str(plan["env"])
+    box_env = str(plan["box_env"])
+    failure: str | None = None
+    with planmod.compiled_fleet(cx, cwd=cwd) as comp:
+        if comp.result is None:
+            raise BayError("compile failed:\n  " + "\n  ".join(comp.errors))
+        services = _write_services(cx, comp.result.text())
+        paths = [services, planmod.plan_file(cx, plan["plan_id"])]
+        approval = planmod.approval_file(cx, plan["plan_id"])
+        if approval.is_file():
+            paths.append(approval)
+        try:
+            fleet_commit = gitrepo.commit_paths(cx.fleet_root, paths, f"bay: up {env} (routes)")
+        except gitrepo.GitError as exc:
+            raise BayError(f"cannot commit the fleet repo: {exc}") from None
+        say(f"fleet commit {fleet_commit}")
+
+        tags = routes.deploy_tags(plan["steps"], UP_DEPLOY_TAGS)
+        if tags != UP_DEPLOY_TAGS:
+            say(f"deploy tags: {tags} (the plan changes a tailnet route)")
+        extra: dict[str, Any] = {"tags": tags} if tags != UP_DEPLOY_TAGS else {}
+        try:
+            (deploy or default_deploy)(cx, box_env, config_files_root=comp.files_root, **extra)
+        except (BayError, OSError) as exc:
+            failure = str(exc) or type(exc).__name__
+        except SystemExit as exc:
+            failure = f"deploy exited with {exc.code}"
+
+    reader = read_receipts or planmod.default_receipt_reader
+    entries: list[dict[str, Any]] = []
+    try:
+        entries = reader(cx, box_env)
+    except (BayError, OSError) as exc:
+        say(f"cannot read the receipt: {exc}")
+    if failure is None and any(
+        isinstance(e.get("receipt"), Mapping) and e["receipt"].get("result") == "failed"
+        for e in entries
+    ):
+        failure = "the box receipt says the deploy failed"
+    applied, stale_boxes = applied_from(entries, fleet_commit)
+    notes = [
+        f"box {b}: the receipt is not from this deploy, so `applied` leaves it out"
+        for b in stale_boxes
+    ]
+    for note in notes:
+        say(f"note: {note}")
+
+    pruned: list[str] = []
+    try:
+        pruned = prune_plans(cx)
+    except (gitrepo.GitError, PruneRefused) as exc:
+        say(f"warning: plans/ was not pruned: {exc}")
+    if pruned:
+        say(f"pruned {len(pruned)} old plan file(s) from {planmod.PLANS_DIR}/")
+
+    result: dict[str, Any] = {
+        "project": None,
+        "projects": [],
+        "env": env,
+        "box_env": box_env,
+        "action": "up",
+        "plan_id": plan["plan_id"],
+        "verdict": plan["verdict"],
+        "forced": forced,
+        "commit": None,
+        "previous_commit": None,
+        "fleet_commit": fleet_commit,
+        # No lock records the receipt of a route-only up: nothing to commit.
+        "receipt_commit": fleet_commit,
+        "result": "failed" if failure else "ok",
+        "error": failure,
+        "pushed": False,
+        "push_error": None,
+        "push_skipped": None,
+        "steps": plan["steps"],
+        "applied": applied,
+        "pinned": [],
+        "pruned": pruned,
+        "notes": notes,
+        "code_targets": {},
+        "code_kept": [],
+        "first_image": [],
+        "frozen": False,
+        "route_only": True,
+    }
+    if push:
+        push_fleet(cx, result, say)
+    if failure:
+        raise DeployFailed(result, exit_code=1)
     return result
 
 

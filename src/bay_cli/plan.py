@@ -2550,6 +2550,13 @@ def make_env_plan(
     recheck), the fleet is compiled once, and every step carries the project
     it belongs to. The record has ``project: null`` and lists the projects in
     ``projects``. Verdict and exit code as for one project.
+
+    Route-only: when no project has ``[deploy.<env>]`` and ``<env>`` is the
+    box env of ``[tailnet] ingress_box``, the plan compiles the whole fleet at
+    its pins (:func:`_route_only_diff`) with ``box_env`` set to ``<env>``.
+    ``projects`` stays empty, and the steps are the route steps plus any other
+    compile difference. Any other env with no project gets a note and no
+    compile.
     """
     check_data_mode(opts.data)
     layout.note_pending(cx.fleet_root)
@@ -2617,8 +2624,15 @@ def make_env_plan(
                 },
             }
         )
+    route_only = False
     if not members:
-        notes.append(f"no project of fleet {fleet_doc.get('name')} has [deploy.{env}]")
+        from bay_cli import routes
+
+        route_only = routes.ingress_env(fleet_doc) == env
+        if route_only:
+            notes.append(f"route-only plan for {env}")
+        else:
+            notes.append(f"no project of fleet {fleet_doc.get('name')} has [deploy.{env}]")
     if len(by_box_env) > 1:
         blockers.append(
             f"the projects of {env} sit on boxes of more than one box environment ("
@@ -2628,12 +2642,20 @@ def make_env_plan(
     box_env = next(iter(by_box_env)) if len(by_box_env) == 1 else None
     boxes_used = {p["box"] for p in projects}
     box = next(iter(boxes_used)) if len(boxes_used) == 1 else None
+    if route_only:
+        # Route-only: the box env of the ingress box, where the routes deploy.
+        box_env = env
+        box = str((fleet_doc.get("tailnet") or {}).get("ingress_box"))
     all_names = set().union(*env_names.values()) if env_names else set()
 
     running, receipt_entries = _read_running(cx, opts, box_env, all_names, notes, read_receipts)
 
     diff = _Diff()
-    if members and not any(w.problems for _, w in members):
+    if route_only:
+        diff = _route_only_diff(
+            cx, opts, env, cwd, current, running, blockers, notes, check_box, fleet_doc
+        )
+    elif members and not any(w.problems for _, w in members):
         diff = _compile_and_diff(
             cx,
             opts,
@@ -2722,6 +2744,53 @@ def make_env_plan(
         # Hashed: it changes what bay up does with the code.
         plan["code"] = {"keep": sorted(keep)}
     return _finish(cx, plan, state, fleet_doc, diff.box_checked, box_env)
+
+
+def _route_only_diff(
+    cx: Context,
+    opts: PlanOptions,
+    env: str,
+    cwd: Path | None,
+    current: Mapping[str, Any],
+    running: Mapping[str, Any],
+    blockers: list[str],
+    notes: list[str],
+    check_box: BoxCheck | None,
+    fleet_doc: Mapping[str, Any],
+) -> _Diff:
+    """The diff of a route-only plan: the whole fleet at its pins against PINNED.
+
+    The compile is the one ``bay compile`` makes (no pin moves), with the box
+    env of the ingress box. A route-only ``bay up`` pins nothing, so a step
+    of a project would land in the services file with no lock behind it:
+    that blocks, and the project gets its own ``bay up``.
+    """
+    diff = _compile_and_diff(
+        cx,
+        opts,
+        pins={},
+        boxes={},
+        cwd=cwd,
+        current=current,
+        project=None,
+        mine=set(),
+        names=set(),
+        resources=set((fleet_doc.get("resources") or {}).keys()),
+        box_env=env,
+        running=running,
+        blockers=blockers,
+        notes=notes,
+        check_box=check_box,
+        fleet_doc=fleet_doc,
+    )
+    owned = sorted({str(s["project"]) for s in diff.steps if s.get("project")})
+    if owned:
+        blockers.append(
+            f"route-only plan for {env}: the compile also changes project(s) "
+            f"{', '.join(owned)}, and a route-only bay up pins nothing; "
+            "run bay up for those projects first"
+        )
+    return diff
 
 
 def _missing_secrets(
@@ -3012,9 +3081,14 @@ def render(plan: Mapping[str, Any]) -> str:
         else "not read"
     )
     if plan.get("projects") is not None:
+        scope = (
+            "routes only, no project"
+            if not plan["projects"] and plan.get("box_env")
+            else f"whole environment, {len(plan['projects'])} projects"
+        )
         lines = [
-            f"plan {plan['plan_id']}  {plan['env']} (whole environment, "
-            f"{len(plan['projects'])} projects) -> box environment {plan['box_env']}",
+            f"plan {plan['plan_id']}  {plan['env']} ({scope}) "
+            f"-> box environment {plan['box_env']}",
         ]
         for proj in plan["projects"]:
             pw = proj["wanted"]

@@ -587,6 +587,9 @@ def _apply(
         if as_json:
             _echo_json(exc.result)
         else:
+            if exc.result.get("route_only"):
+                console.error(f"{exc}. No lock changed; run bay up {exc.result['env']} again.")
+                raise typer.Exit(exc.exit_code) from None
             pins = (
                 f"the fleet pins {exc.result['commit'][:12]}"
                 if exc.result.get("commit")
@@ -609,6 +612,8 @@ def _apply(
         f"{result['project']} {result['env']}: "
         f"{(previous or 'none')[:12]} -> {result['commit'][:12]}"
         if result.get("project")
+        else f"{result['env']} (routes only, no project pinned)"
+        if result.get("route_only")
         else f"{result['env']} (whole environment, {len(result['projects'])} projects)"
     )
     console.success(

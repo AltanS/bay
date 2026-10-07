@@ -146,7 +146,7 @@ class FakeBox:
                 for n, e in sorted(entries.items())
             ],
             "projects": {},
-            # What the receipt module will add: the routes the box renders.
+            # What the receipt module writes: the routes the box renders.
             "routes": [
                 {"name": k, **v} for k, v in sorted((data.get("tailnet_proxies") or {}).items())
             ],
@@ -345,6 +345,118 @@ def test_up_runs_headscale_and_traefik_tags_on_route_change(
     assert not [s for s in make(world)["steps"] if s["kind"] == "route"]
     do_up(world)
     assert box.tags[-1] is None
+
+
+# ── route-only plan and up (M118/05, gap 11) ────────────────────────────────
+
+
+@pytest.fixture
+def gw_world(world: dict[str, Path]) -> dict[str, Path]:
+    """The world with the ingress on box gw, box env infra, where no project deploys."""
+    fleet = world["fleet"]
+    text = fleet_text(world).replace(
+        '[boxes.stage-1]\nenv = "staging"\n',
+        '[boxes.stage-1]\nenv = "staging"\n\n[boxes.gw]\nenv = "infra"\n',
+    ).replace('ingress_box = "box-1"', 'ingress_box = "gw"')
+    (fleet / "bay.fleet.toml").write_text(text)
+    (fleet / "hosts" / "infra").write_text("[infra]\ngw\n")
+    commit_all(fleet, "gw box")
+    return world
+
+
+def _env_plan(world: dict[str, Path], env: str) -> dict[str, Any]:
+    cx = Context.for_fleet_root(world["fleet"])
+    return planmod.make_env_plan(cx, planmod.PlanOptions(env=env), cwd=world["fleet"])
+
+
+def test_plan_route_only_env(gw_world: dict[str, Path], box: FakeBox) -> None:
+    import jsonschema
+
+    assert add_route(gw_world, "notes", **NOTES).exit_code == 0
+    plan = _env_plan(gw_world, "infra")
+    assert plan["projects"] == []
+    assert (plan["box_env"], plan["box"]) == ("infra", "gw")
+    assert "route-only plan for infra" in plan["notes"]
+    assert plan["blockers"] == []
+    assert [(s["kind"], s["resource"], s["action"], s["risk"]) for s in plan["steps"]] == [
+        ("route", "notes", "route_added", "shared")
+    ]
+    assert plan["verdict"] == "approve"
+    schema = json.loads((ROOT / "src/bay_cli/schemas/plan.schema.json").read_text())
+    jsonschema.validate(plan, schema)
+    assert "routes only, no project" in planmod.render(plan)
+
+    # The CLI: bay plan infra in the fleet, no --project.
+    shown = cli(gw_world, "plan", "infra", "--json")
+    assert shown.exit_code == 10, shown.output
+    assert json.loads(shown.stdout)["plan_id"] == plan["plan_id"]
+
+    # Another env with no project: today's note, no compile, no step.
+    other = _env_plan(gw_world, "staging")
+    assert other["steps"] == [] and other["box_env"] is None
+    assert "no project of fleet testfleet has [deploy.staging]" in other["notes"]
+    assert not any("route-only" in n for n in other["notes"])
+
+    # A route-only up pins nothing, so a project change in the compile blocks.
+    ctx = Context.for_fleet_root(gw_world["fleet"])
+    data = yaml.safe_load((gw_world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1])
+    proj = planmod.load_project(ctx, "webapp", cwd=gw_world["app"])
+    lock = dict(proj.lock)
+    lock["commit"] = git(gw_world["app"], "rev-parse", "HEAD")
+    lockfile.write(proj.lock_file, lock)
+    commit_all(gw_world["fleet"], "pin webapp by hand")
+    assert "webapp" not in (data.get("services") or {})
+    blocked = _env_plan(gw_world, "infra")
+    assert blocked["verdict"] == "blocked"
+    assert any(
+        "route-only plan for infra: the compile also changes project(s) webapp" in b
+        for b in blocked["blockers"]
+    ), blocked["blockers"]
+
+
+def test_up_route_only_env(gw_world: dict[str, Path], box: FakeBox) -> None:
+    fleet = gw_world["fleet"]
+    lock_path = lockfile.lock_path(fleet, "webapp")
+    lock_before = lock_path.read_bytes()
+    assert add_route(gw_world, "notes", **NOTES).exit_code == 0
+    cx = Context.for_fleet_root(fleet)
+
+    # Approve, then up by plan id, as for any plan (route steps are shared).
+    planned = cli(gw_world, "plan", "infra", "--json")
+    plan_id = json.loads(planned.stdout)["plan_id"]
+    refused = cli(gw_world, "up", "infra", "--plan-id", plan_id, "--json")
+    assert refused.exit_code == 10, refused.output
+    assert box.tags == []
+    approved = cli(gw_world, "approve", plan_id, "--reason", "new route")
+    assert approved.exit_code == 0, approved.output
+    up = cli(gw_world, "up", "infra", "--plan-id", plan_id, "--json")
+    assert up.exit_code == 0, up.output
+    result = json.loads(up.stdout)
+    assert result["route_only"] is True
+    assert result["projects"] == [] and result["pinned"] == []
+    assert box.tags == ["deploy_stack,headscale,traefik"]
+    assert git(fleet, "log", "-1", "--format=%s") == "bay: up infra (routes)"
+    assert git(fleet, "status", "--porcelain") == ""
+    # The services file holds the route; no lock moved.
+    data = yaml.safe_load((fleet / GENERATED_SERVICES).read_text().split("\n", 1)[1])
+    assert data["tailnet_proxies"]["notes"]["upstream"] == NOTES["upstream"]
+    assert lock_path.read_bytes() == lock_before
+    assert [r["name"] for r in box.receipts["infra"]["routes"]] == ["notes"]
+    # The receipt is from this deploy: its fleet commit is the up commit.
+    assert box.receipts["infra"]["fleet_commit"] == result["fleet_commit"]
+
+    # Zero steps: the plan is auto and the up still deploys (receipt rewrite).
+    again = planmod.make_env_plan(cx, planmod.PlanOptions(env="infra"), cwd=fleet)
+    assert again["steps"] == [] and again["verdict"] == "auto"
+    result = applymod.up_env(cx, planmod.PlanOptions(env="infra"), cwd=fleet)
+    assert box.tags[-1] is None, "no route step: the default tags"
+    assert len(box.tags) == 2
+    assert result["route_only"] is True and result["steps"] == []
+    assert lock_path.read_bytes() == lock_before
+
+    # Another env with no project still refuses.
+    with pytest.raises(Exception, match=r"no project has \[deploy.staging\]"):
+        applymod.up_env(cx, planmod.PlanOptions(env="staging"), cwd=fleet)
 
 
 # ── RUNNING: the receipt reader and bay show --routes ───────────────────────

@@ -20,7 +20,7 @@
       "oneOf": [{ "$ref": "#/$defs/name" }, { "type": "null" }]
     },
     "projects": {
-      "description": "Only in a whole-environment plan: every project with [deploy.<env>], each at its WANTED commit.",
+      "description": "Only in a whole-environment plan: every project with [deploy.<env>], each at its WANTED commit. Empty in a route-only plan (no project, box_env is the box env of the ingress box).",
       "type": "array",
       "items": {
         "type": "object",
