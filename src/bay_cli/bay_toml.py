@@ -89,6 +89,25 @@ def load_schema() -> dict[str, Any]:
     return schema
 
 
+#: ``[deploy.<env>] track``: what a push to the branch does (docs/bay-toml.md).
+#: ``branch``: a push builds and deploys, unless the push changes bay.toml (then
+#: it is held until ``bay up``). ``pin``: a push only builds; ``bay up`` deploys.
+TRACK_MODES = ("branch", "pin")
+DEFAULT_TRACK = "branch"
+
+
+def track(doc: dict[str, Any], env: str) -> str:
+    """The ``track`` mode of one environment, with the default filled in.
+
+    The default is ``branch``: the push-to-deploy flow a fleet with a webhook
+    runs today. A fleet without a webhook never builds on a push, so the mode
+    changes nothing there.
+    """
+    deploy = (doc.get("deploy") or {}).get(env) or {}
+    value = deploy.get("track", DEFAULT_TRACK) if isinstance(deploy, dict) else DEFAULT_TRACK
+    return str(value)
+
+
 def validate(doc: dict[str, Any]) -> list[Violation]:
     """Return every violation in ``doc``, sorted and without duplicates.
 

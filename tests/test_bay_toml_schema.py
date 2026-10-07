@@ -396,6 +396,21 @@ def test_identity_is_valid_in_public_mode():
     assert bay_toml.validate(doc) == []
 
 
+def test_track_schema_and_default():
+    """Spec M117/05: `[deploy.<env>] track` is branch or pin, branch when unset."""
+    assert bay_toml.track(_doc(), "production") == "branch" == bay_toml.DEFAULT_TRACK
+    for mode in ("branch", "pin"):
+        doc = _doc(deploy={"production": {"track": mode}})
+        assert bay_toml.validate(doc) == []
+        assert bay_toml.track(doc, "production") == mode
+    assert bay_toml.track(_doc(), "staging") == "branch", "an unknown env is branch too"
+    bad = _doc(deploy={"production": {"track": "nightly"}})
+    assert _paths(bay_toml.validate(bad)) == {"deploy.production.track"}
+    assert _paths(bay_toml.validate(_doc(deploy={"production": {"track": True}}))) == {
+        "deploy.production.track"
+    }
+
+
 # ── Schema hygiene ───────────────────────────────────────────────────────────
 
 def _walk(node: Any, where: str = "#"):

@@ -477,6 +477,7 @@
           "pattern": "^[A-Za-z0-9._][A-Za-z0-9._/-]*$",
           "x-messages": { "pattern": "must be a git branch name" }
         },
+        "track": { "type": "string", "enum": ["branch", "pin"] },
         "image": { "$ref": "#/$defs/image" },
         "port": { "$ref": "#/$defs/port" },
         "command": { "$ref": "#/$defs/command" },
