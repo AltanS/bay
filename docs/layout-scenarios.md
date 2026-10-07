@@ -100,8 +100,8 @@ The one-line list is near the top of this page. This is the full table. Four wor
 
 | Word | Where it is set | What it is |
 |---|---|---|
-| Box | `[boxes.<name>]` in `bay.fleet.toml` | One server. The name (`eu-1`) is a label: `box = "eu-1"` in a deploy table, the lock, `default_box`, a resource's `box` list and `ingress_box` use it. Bay never reads `hosts/` to find a box. The compiler writes only the `group` of the box, and the deploy puts a container on the inventory hosts that are in that group. The `box` field of a receipt, and the `box` that a plan prints for a box prediction, is the `inventory_hostname`: the name at the start of the line in `hosts/<env>` (`eu-1 ansible_host=...`). Give the host line the same name as the box, so that one name shows everywhere. No check enforces it. |
-| Box env | `env` of the box | The box environment. It names the inventory file `hosts/<env>`, the folder `group_vars/<env>/` (the secrets), and the receipt `/var/lib/bay/receipts/<env>.json`. Every command passes it to Ansible as a host pattern, so a group (or host) with this name must exist in the inventory. A hosts file with only `[eu]` and `[eu2]` headings has no such group: add `[<box env>:children]` and list the groups under it (scenario 11). `bay provision <box env>` and the deploy of `bay up` run on every host of that group. |
+| Box | `[boxes.<name>]` in `bay.fleet.toml` | One server. The name (`eu-1`) is a label: `box = "eu-1"` in a deploy table, the lock, `default_box`, a resource's `box` list and `ingress_box` use it. Bay never reads `hosts/` to find a box. The compiler writes only the `group` of the box, and the deploy puts a container on the inventory hosts that are in that group. The `box` field of a receipt, and the `box` that a plan prints for a box prediction, is the `inventory_hostname`: the name at the start of the line in `hosts/<env>` (`eu-1 ansible_host=...`). Give the box the name of its inventory group or of its host line, so that one name shows everywhere. `bay validate` checks the names. The `group` of a box must be a group in `hosts/<box env>` (an error). A box name that is neither a host nor a group there gets a warning. |
+| Box env | `env` of the box | The box environment. It names the inventory file `hosts/<env>`, the folder `group_vars/<env>/` (the secrets), and the receipt `/var/lib/bay/receipts/<env>.json`. Every command passes it to Ansible as a host pattern, so a group (or host) with this name must exist in the inventory. A hosts file with only `[eu]` and `[eu2]` headings has no such group: add `[<box env>:children]` and list the groups under it (scenario 11). `bay validate` fails when the group is missing. `bay provision <box env>` and the deploy of `bay up` run on every host of that group. |
 | Group | `group` of the box | The inventory group: the `[eu]` heading inside the hosts file. It limits a container to the boxes of that group. |
 | Deploy env | `[deploy.<env>]` in a `bay.toml` | An environment of one app: own box, data and container suffix, and its own record in the lock. `bay plan <env>` and `bay up <env>` take this name. Its secret values come from the box env of its box (below). |
 
@@ -1243,8 +1243,9 @@ bay --fleet $F up production --plan-id <plan-id>   # runs the deploy_stack, head
 own, but `bay plan` and `bay up` take a deploy env, and they need a project in it. Give the deploy env of
 a project that deploys on a box of the ingress box's box env (`production` here, if `shop` deploys there
 as `[deploy.production]` on `infra`'s box env). A plan for another box env is blocked while a route
-change is pending. If no project deploys on the ingress box's env, there is no route-only plan (a gap:
-`bay up` stops with "no project has [deploy.production]"). Run from the fleet directory,
+change is pending. If no project has `[deploy.<env>]` for the ingress box's box env, give that box env
+name: run from the fleet directory, `bay plan <box env>` is then a route-only plan and the `bay up` after
+it pins no project ([plan.md](plan.md#the-whole-environment)). Otherwise, run from the fleet directory,
 `bay plan production` covers the whole env and `bay up production` pins every covered project to its
 WANTED commit, so the route ships every pending app change too. Run `bay plan production` first and
 read all the steps, not only the route step. To ship the route with one project only, run `bay up` from
@@ -1256,7 +1257,7 @@ host of the ingress box's box env. `deploy_stack` covers the Traefik role (the D
 file, the route file) and the identity sidecar. The `headscale` tag runs the tasks of the Headscale
 role: the split-DNS records, and the ACL render when the fleet defines `headscale_acl_policy`. So that
 `bay up` also deploys ACL edits you made by hand, on the hosts of that env that are the Headscale
-server. Make `ingress_box` the Headscale control host: Bay does not check it, and a Headscale host in
+server. Make `ingress_box` the Headscale control host: `bay validate` checks it, and a Headscale host in
 another box env is never reached by this `bay up` (deploy it with
 `bay deploy <its box env> --tags headscale`). A plain `bay up` with no route step runs `deploy_stack`
 only, which does not render the ACL. Deploy the ACL first with `bay deploy <box env> --tags headscale`

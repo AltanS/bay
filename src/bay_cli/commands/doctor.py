@@ -492,7 +492,9 @@ def _environment_checks(cx: Context, env: str, report: Report) -> None:
     domains_cfg = _load_yaml(cx.env_file(env, "domains.yml"))
     vpn_cfg = _load_yaml(cx.env_file("all", "vpn_access.yml"))
 
-    gateway_type = access_gw_cfg.get("access_gateway", "none") if access_gw_cfg else "none"
+    from bay_cli.config import access_gateway_type
+
+    gateway_type = access_gateway_type(root, cx.framework_root)
     headscale_domain = access_gw_cfg.get("headscale_domain") if access_gw_cfg else None
     headscale_control_region = (
         access_gw_cfg.get("headscale_control_region") if access_gw_cfg else None
@@ -535,7 +537,9 @@ def _environment_checks(cx: Context, env: str, report: Report) -> None:
             report.add("DNS", "fail", f"{headscale_domain} NXDOMAIN{hint}")
 
     # ── Gateway config ───────────────────────────────────────────────
-    gw_issues = _check_gateway_config(gateway_type, headscale_domain, vpn_cfg)
+    gw_issues = _check_gateway_config(
+        gateway_type, headscale_domain, vpn_cfg, _vpn_services(services_file)
+    )
     if gw_issues:
         for msg in gw_issues:
             report.add("Gateway config", "fail", msg)
@@ -869,8 +873,16 @@ def _check_gateway_config(
     gateway_type: str,
     headscale_domain: str | None,
     vpn_cfg: dict | None,
+    vpn_services: list[str] | None = None,
 ) -> list[str]:
-    """Validate gateway-specific configuration, returning a list of issues."""
+    """Validate gateway-specific configuration, returning a list of issues.
+
+    ``vpn_services`` are the services with ``access: vpn``; None when unknown.
+    With wireguard, ``vpn_allowed_ips`` is the only source of the vpn-only
+    allowlist, but it matters only to a vpn service: a fleet that serves
+    everything public (the role default gateway, no access_gateway.yml) needs
+    no list.
+    """
     issues: list[str] = []
 
     if gateway_type == "headscale":
@@ -879,7 +891,26 @@ def _check_gateway_config(
 
     if gateway_type in ("headscale", "wireguard"):
         allowed = vpn_cfg.get("vpn_allowed_ips", []) if vpn_cfg else []
-        if not allowed:
+        needed = gateway_type == "headscale" or vpn_services is None or bool(vpn_services)
+        if not allowed and needed:
             issues.append("vpn_allowed_ips is empty in vpn_access.yml — add trusted IPs")
 
     return issues
+
+
+def _vpn_services(services_file: Path | None) -> list[str]:
+    """Names of the services with ``access: vpn`` in the services file; [] without one."""
+    if services_file is None:
+        return []
+    try:
+        data = yaml.safe_load(services_file.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    services = data.get("services") if isinstance(data, dict) else None
+    if not isinstance(services, dict):
+        return []
+    return sorted(
+        str(name)
+        for name, svc in services.items()
+        if isinstance(svc, dict) and svc.get("access") == "vpn"
+    )

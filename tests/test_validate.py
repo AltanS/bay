@@ -791,3 +791,206 @@ def test_validate_names_every_place_when_the_file_is_in_none(tmp_path: Path):
     standalone = _check_config_files(fleet, ["gatus/config.yaml"])
     assert standalone.total_issues == 1
     assert "compile" not in standalone.failed[0]
+
+
+# ── M118/05: ingress box, box names and the hosts pattern ───────────────
+
+
+def _box_fleet(tmp_path: Path, fleet_toml: str, hosts: dict[str, str]) -> Path:
+    """A fleet dir with bay.fleet.toml, the hosts files and an empty group_vars/all."""
+    (tmp_path / "group_vars" / "all").mkdir(parents=True)
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "bay.fleet.toml").write_text(fleet_toml)
+    for env, text in hosts.items():
+        (tmp_path / "hosts" / env).write_text(text)
+    return tmp_path
+
+
+def _gv(root: Path, group: str, text: str, name: str = "main.yml") -> None:
+    (root / "group_vars" / group).mkdir(parents=True, exist_ok=True)
+    (root / "group_vars" / group / name).write_text(text)
+
+
+def _parsed(root: Path) -> dict:
+    import yaml as pyyaml
+
+    out = {}
+    for path in sorted((root / "group_vars").glob("*/*.yml")):
+        out[str(path.relative_to(root))] = pyyaml.safe_load(path.read_text())
+    return out
+
+
+def _ingress(root: Path, bay_dir: Path | None = None) -> ValidationResult:
+    from bay_cli.commands.validate import _validate_ingress_box
+
+    result = ValidationResult()
+    with _JsonMode():
+        _validate_ingress_box(root, _parsed(root), bay_dir, result)
+    return result
+
+
+_THREE_BOXES = """\
+name = "acme"
+[boxes.eu]
+env = "prod"
+group = "eu"
+[boxes.gw]
+env = "prod"
+group = "gw"
+[boxes.na]
+env = "prod"
+group = "na"
+[tailnet]
+ingress_box = "gw"
+"""
+
+# The live shape: IP host lines, one group per box, the box env as a parent group.
+_THREE_HOSTS = """\
+[eu]
+192.0.2.10
+[na]
+192.0.2.11
+[gw]
+192.0.2.12
+[prod:children]
+eu
+na
+gw
+"""
+
+
+def test_validate_ingress_box_is_headscale_host(tmp_path: Path) -> None:
+    root = _box_fleet(tmp_path, _THREE_BOXES, {"prod": _THREE_HOSTS})
+
+    # The gateway is not headscale (the role default, read from the role file).
+    fake_framework = tmp_path / "framework"
+    _gv_dir = fake_framework / "roles" / "access_gateway" / "defaults"
+    _gv_dir.mkdir(parents=True)
+    (_gv_dir / "main.yml").write_text("---\naccess_gateway: wireguard\n")
+    result = _ingress(root, fake_framework)
+    assert result.failed == ["Ingress box         ingress_box gw is not the Headscale host "
+                             "(access_gateway = wireguard)"]
+
+    # headscale, control region set and different.
+    _gv(root, "all", "---\naccess_gateway: headscale\nheadscale_control_region: eu\n",
+        "access_gateway.yml")
+    _gv(root, "gw", "---\nregion: gw\n")
+    result = _ingress(root)
+    assert len(result.failed) == 1
+    assert "ingress_box gw is not the Headscale host (headscale_control_region = eu)" in (
+        result.failed[0]
+    )
+
+    # Control region set and equal: ok. The region comes from group_vars/<group>/.
+    _gv(root, "all", "---\naccess_gateway: headscale\nheadscale_control_region: gw\n",
+        "access_gateway.yml")
+    result = _ingress(root)
+    assert result.failed == [] and result.warnings == []
+    assert result.passed and "gw runs Headscale" in result.passed[0]
+
+    # A region var wins over the group name.
+    _gv(root, "gw", "---\nregion: infra-zone\n")
+    assert len(_ingress(root).failed) == 1
+    _gv(root, "all", "---\naccess_gateway: headscale\nheadscale_control_region: infra-zone\n",
+        "access_gateway.yml")
+    assert _ingress(root).failed == []
+    # No region var: the box group is the region.
+    (root / "group_vars" / "gw" / "main.yml").unlink()
+    assert len(_ingress(root).failed) == 1
+    _gv(root, "all", "---\naccess_gateway: headscale\nheadscale_control_region: gw\n",
+        "access_gateway.yml")
+    assert _ingress(root).failed == []
+
+    # No control region: every host runs Headscale, so any ingress box is fine.
+    _gv(root, "all", "---\naccess_gateway: headscale\n", "access_gateway.yml")
+    result = _ingress(root)
+    assert result.failed == [] and result.warnings == [] and result.passed
+
+    # No ingress_box: nothing to check.
+    (root / "bay.fleet.toml").write_text(_THREE_BOXES.replace('ingress_box = "gw"\n', ""))
+    result = _ingress(root)
+    assert result.failed == [] and result.passed == []
+
+
+def _boxes(root: Path) -> ValidationResult:
+    from bay_cli.commands.validate import _validate_box_inventory
+
+    result = ValidationResult()
+    with _JsonMode():
+        _validate_box_inventory(root, result)
+    return result
+
+
+def test_validate_box_names_match_inventory(tmp_path: Path) -> None:
+    # The live shape passes with no warning.
+    root = _box_fleet(tmp_path / "a", _THREE_BOXES, {"prod": _THREE_HOSTS})
+    result = _boxes(root)
+    assert result.failed == [] and result.warnings == []
+    assert result.passed == ["Boxes               3 box(es) match the inventory"]
+
+    # One box per env, box name = group name, no group key.
+    single = _box_fleet(
+        tmp_path / "b",
+        'name = "acme"\n[boxes.prod]\nenv = "prod"\n',
+        {"prod": "[prod]\n192.0.2.20\n"},
+    )
+    result = _boxes(single)
+    assert result.failed == [] and result.warnings == []
+
+    # Two box envs, each its own file; an extra group in one file.
+    two = _box_fleet(
+        tmp_path / "c",
+        'name = "acme"\n[boxes.test]\nenv = "test"\n',
+        {"test": "[test]\n192.0.2.30\n[gw]\n192.0.2.31\n"},
+    )
+    result = _boxes(two)
+    assert result.failed == [] and result.warnings == []
+
+    # A box group that is not in the hosts file: error.
+    text = _THREE_HOSTS.replace("[na]\n192.0.2.11\n", "").replace("na\n", "")
+    (root / "hosts" / "prod").write_text(text)
+    result = _boxes(root)
+    assert result.failed == ["Boxes               box na: group na is not in hosts/prod"]
+    # ...and the box name is then neither a host nor a group: a warning.
+    assert len(result.warnings) == 1
+    assert "box na is neither a host nor a group in hosts/prod" in result.warnings[0]
+    assert "receipt `box` field" in result.warnings[0]
+
+    # A box name that is a host line is fine.
+    hosted = _box_fleet(
+        tmp_path / "d",
+        'name = "acme"\n[boxes.app-1]\nenv = "prod"\n',
+        {"prod": "[prod]\napp-1 ansible_host=192.0.2.40\n"},
+    )
+    assert _boxes(hosted).warnings == []
+    # A box whose name the inventory does not know: warning only.
+    other = _box_fleet(
+        tmp_path / "e",
+        'name = "acme"\n[boxes.web]\nenv = "prod"\n',
+        {"prod": "[prod]\n192.0.2.50\n"},
+    )
+    result = _boxes(other)
+    assert result.failed == [] and len(result.warnings) == 1
+    assert "box web is neither a host nor a group in hosts/prod" in result.warnings[0]
+
+
+def test_validate_hosts_pattern_matches_box_env(tmp_path: Path) -> None:
+    # Only the region groups: the box env matches no host.
+    text = "[eu]\n192.0.2.10\n[na]\n192.0.2.11\n[gw]\n192.0.2.12\n"
+    root = _box_fleet(tmp_path, _THREE_BOXES, {"prod": text})
+    result = _boxes(root)
+    assert result.failed == [
+        "Boxes               hosts/prod has no host or group named prod; Ansible gets that "
+        "name as its host pattern. Add [prod:children] and list the groups under it"
+    ]
+    # The fix the hint names.
+    (root / "hosts" / "prod").write_text(text + "[prod:children]\neu\nna\ngw\n")
+    assert _boxes(root).failed == []
+
+    # Through run_validation: the check is part of bay validate.
+    from bay_cli.commands.validate import run_validation
+
+    (root / "hosts" / "prod").write_text(text)
+    with _JsonMode():
+        full = run_validation(root, "prod", show_banner=False)
+    assert any("has no host or group named prod" in f for f in full.failed)

@@ -257,8 +257,10 @@ def _get_gateway_config(cx: Context) -> dict:
     """Read access gateway configuration from consumer group_vars."""
     import yaml
 
+    from bay_cli.config import access_gateway_type
+
     config: dict = {
-        "access_gateway": "wireguard",
+        "access_gateway": access_gateway_type(cx.fleet_root, cx.framework_root),
         "vpn_allowed_ips": [],
         "headscale_domain": "",
         "headscale_tailnet_cidr": ["100.64.0.0/10"],
@@ -628,7 +630,7 @@ def _make_backend(
     never going to reach a control server. Callers that already validated the
     gateway type may omit `config`.
     """
-    gateway_type = (config or {}).get("access_gateway", "headscale")
+    gateway_type = (config if config is not None else _get_gateway_config(cx))["access_gateway"]
     if gateway_type != "headscale":
         return NullGatewayBackend(gateway_type)
     control_host = _get_control_host(cx, region)
@@ -685,7 +687,7 @@ def status(
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
-    gateway_type = config.get("access_gateway", "wireguard")
+    gateway_type = config["access_gateway"]
 
     con.header("Access Gateway")
 

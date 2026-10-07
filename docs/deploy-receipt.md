@@ -117,7 +117,10 @@ checks that the two match.
     {"name": "postgres", "image": "postgres:16", "image_ref": "postgres:16", "commit": null, "config_hash": "c3d4...", "action": "noop", "healthy": true},
     {"name": "old-worker", "image": null, "image_ref": null, "commit": null, "config_hash": null, "action": "remove", "healthy": null}
   ],
-  "projects": {}
+  "projects": {},
+  "routes": [
+    {"name": "notes", "domains": ["notes.ts.example.com"], "upstream": "http://100.64.0.9:8080", "pass_host_header": true, "identity_inject": false, "entrypoint": "websecure_tailnet"}
+  ]
 }
 ```
 
@@ -125,7 +128,7 @@ checks that the two match.
 |-------|------|---------|
 | `receipt_version` | integer | Always `1` for this format. |
 | `env` | string | The environment name. |
-| `box` | string | The `inventory_hostname` of the host: the name at the start of its line in `hosts/<env>`. It is the box name of `bay.fleet.toml` when the host line uses that name (see [layout-scenarios.md](layout-scenarios.md#words-deploy-env-box-env-and-group): Bay does not match the two for you). |
+| `box` | string | The `inventory_hostname` of the host: the name at the start of its line in `hosts/<env>`. It is the box name of `bay.fleet.toml` when the host line uses that name (see [layout-scenarios.md](layout-scenarios.md#words-deploy-env-box-env-and-group)). `bay validate` warns when a box name is neither a host nor a group of `hosts/<env>`. |
 | `deployed_at` | string | Time the receipt was written, RFC 3339 in UTC (`YYYY-MM-DDTHH:MM:SSZ`). |
 | `framework_version` | string or null | `bay_version` from the framework's `version.yml`. |
 | `framework_commit` | string or null | Full git SHA of the framework checkout. Null when the deploy did not come from `bay deploy`, or the framework is not a git checkout. |
@@ -135,6 +138,7 @@ checks that the two match.
 | `containers` | array | One entry per container in the deploy, then one per container it removed. |
 | `projects` | object | Empty in version 1. |
 | `code_moves` | array | Only when the deploy passed code targets (`bay up`, `bay rollback`): one `{name, status, detail}` per target, the report of `bay_reconcile.codepin`. `status` is `retag`, `noop`, `skipped` (the container keeps its image) or `missing` (a strict target; the deploy stopped). Absent in receipts written before 2.1. |
+| `routes` | array | The tailnet routes the box serves, read from the route file the traefik role rendered (`dynamic/tailnet-proxies.yml` in the stack directory). One `{name, domains, upstream, pass_host_header, identity_inject, entrypoint}` per route. Empty on a box with no route file, so only the ingress box lists routes. `bay show --routes` reads it as RUNNING. Absent in receipts written before 2.3.0. |
 
 Each container entry:
 
@@ -160,9 +164,10 @@ stamp is a log line, never a failed build. `bay plan` hashes `image_ref`, so a
 stamp is not drift; it reads `commit` for "code at X, config pinned at Y" (see
 [plan.md](plan.md), "Code and config").
 
-These fields, and `failed` (2.2.0), are additive, so the receipt stays `receipt_version` 1
+These fields, `failed` (2.2.0) and `routes` (2.3.0) are additive, so the receipt stays `receipt_version` 1
 and `bay status --json` stays `status_version` 2. A reader of an older receipt
-must treat a missing `commit` or `image_ref` as null, and a missing `failed` as unknown.
+must treat a missing `commit` or `image_ref` as null, a missing `failed` as unknown,
+and a missing `routes` as "this receipt does not say".
 
 `bay up` deploys the whole box environment, so the receipt covers every project on it. It reads `action` back: every container that is not `noop` goes into
 the `applied` list of its JSON result, when the receipt's `fleet_commit` is
@@ -185,8 +190,10 @@ bay status --json --env production    # one environment
 bay status --json --no-remote         # no SSH, boxes is []
 ```
 
-The human `bay status` output does not change. `--env` and `--no-remote`
-apply to `--json` only.
+The human `bay status` reads no box by default. With `--env <env>` it also
+reads the receipt of each box of that environment and prints one line per box:
+the result, the deploy time, the container count and, for a receipt that lists
+routes, the route count. `--no-remote` skips that read.
 
 ### How boxes are read
 

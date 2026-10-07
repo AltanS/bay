@@ -114,7 +114,7 @@ All services are publicly accessible. No VPN.
 
 **When to choose**: All your services are public, or you'll add VPN later. It is the shortest path to a working first deploy. Set `access_gateway: none` in `group_vars/all/access_gateway.yml` to choose it.
 
-**The default is not `none`.** A fleet that does not set `access_gateway` gets `wireguard`, the default in `roles/access_gateway/defaults/main.yml`.
+**The default is not `none`.** A fleet that does not set `access_gateway` gets `wireguard`, the default in `roles/access_gateway/defaults/main.yml`. `bay doctor`, `bay gateway` and `bay validate` read the default from that same file.
 
 **Note**: With `none`, the deploy stops with an error if a service sets `access: vpn`. Use `access: public` for all services, or add a gateway later by setting `access_gateway` in `group_vars/all/access_gateway.yml`.
 

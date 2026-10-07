@@ -276,3 +276,49 @@ class StackConfig:
                 with main_yml.open() as f:
                     merged.update(scalars(self._yaml.load(f)))
         return {env: merged} if merged else {}
+
+
+# ── access_gateway ────────────────────────────────────────────────────────
+
+#: The fleet file that sets ``access_gateway``, relative to the fleet root.
+ACCESS_GATEWAY_FILE = Path("group_vars") / "all" / "access_gateway.yml"
+#: The role default the deploy falls back to, relative to the framework root.
+ACCESS_GATEWAY_DEFAULTS = Path("roles") / "access_gateway" / "defaults" / "main.yml"
+
+
+def _yaml_value(path: Path, key: str) -> str | None:
+    """``key`` of the YAML mapping in ``path`` as a string; None when absent or unreadable."""
+    import yaml
+
+    try:
+        data = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get(key)
+    return str(value) if isinstance(value, str) and value else None
+
+
+def access_gateway_type(fleet_root: Path, framework_root: Path) -> str:
+    """The ``access_gateway`` the boxes of this fleet deploy with.
+
+    The fleet's ``group_vars/all/access_gateway.yml`` wins. Without it, the
+    value comes from ``roles/access_gateway/defaults/main.yml`` of the
+    framework checkout, read at run time, so the CLI never keeps a second copy
+    of the default. A ``framework_root`` with no roles (a test context) falls
+    back to the checkout of the running package.
+    """
+    from bay_cli.context import package_root
+
+    value = _yaml_value(fleet_root / ACCESS_GATEWAY_FILE, "access_gateway")
+    if value is not None:
+        return value
+    for root in (framework_root, package_root()):
+        default = _yaml_value(root / ACCESS_GATEWAY_DEFAULTS, "access_gateway")
+        if default is not None:
+            return default
+    raise BayError(
+        f"cannot read access_gateway from {framework_root / ACCESS_GATEWAY_DEFAULTS}",
+        hint="The framework checkout is incomplete; run `bay self version` to see which one runs.",
+    )

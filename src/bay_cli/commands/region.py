@@ -95,18 +95,11 @@ def _get_domain_base(root: Path) -> str:
     )
 
 
-def _get_access_gateway(root: Path) -> str:
-    """Read the access gateway type from group_vars."""
-    import yaml
+def _get_access_gateway(root: Path, framework_root: Path) -> str:
+    """The access gateway type: group_vars, else the role default (one resolver)."""
+    from bay_cli.config import access_gateway_type
 
-    gw_file = root / "group_vars" / "all" / "access_gateway.yml"
-    if gw_file.exists():
-        try:
-            data = yaml.safe_load(gw_file.read_text()) or {}
-            return data.get("access_gateway", "wireguard")
-        except Exception:
-            pass
-    return "wireguard"
+    return access_gateway_type(root, framework_root)
 
 
 def _ensure_headscale_control_region(root: Path, existing_regions: dict[str, str]) -> None:
@@ -252,7 +245,7 @@ def add(
 
     existing = _parse_existing_regions(inventory_path)
     domain_base = _get_domain_base(root)
-    access_gateway = _get_access_gateway(root)
+    access_gateway = _get_access_gateway(root, cx.framework_root)
 
     # Prompt for region name
     while True:

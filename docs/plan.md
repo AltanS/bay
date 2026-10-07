@@ -513,6 +513,30 @@ one-project plan given from the fleet directory applies that project.
 
 In an app repo, `bay plan <env>` keeps its one-project meaning.
 
+**Route-only plan.** A tailnet route belongs to no project. When no project
+has `[deploy.<env>]` and `<env>` is the box env of `[tailnet] ingress_box`,
+`bay plan <env>` makes a route-only plan:
+
+- It compiles the whole fleet at its pins, as `bay compile` does, with
+  `box_env` set to `<env>`, and compares the result with `services.yml`.
+- The steps are the route steps and any other difference of the compile,
+  such as the `tailnet` allowlist step. `projects` is empty, and the notes
+  say `route-only plan for <env>`.
+- A route-only `bay up` pins no project. So a step that belongs to a project
+  blocks the plan: run `bay up` for that project first.
+
+`bay up <env>` applies it. It writes `services.yml`, commits
+`bay: up <env> (routes)` and deploys `<env>`, with the `headscale` and
+`traefik` tags when a route step is present. It reads the receipts and
+pushes the fleet, as every `bay up` does. It writes no lock, so there is no
+receipt commit. A route-only plan with no step still deploys, so the ingress
+box writes a receipt that lists its routes. `--plan-id` and `bay approve`
+work as for any plan: a route step has risk `shared`.
+
+Any other `<env>` with no project gets the note
+`no project of fleet <name> has [deploy.<env>]`, no step, and `bay up`
+stops with "nothing to deploy".
+
 ### bay approve
 
 ```bash
@@ -1147,9 +1171,10 @@ project in the receipt, and `code ?` when the receipt names no commit for it (se
 WANTED (`bay.fleet.toml`), PINNED (the compiled `tailnet_proxies`) and RUNNING
 (the routes the ingress box receipt lists) and one status: `ok`, `pending`
 (the fleet file differs from the compiled file), `drift` (the box serves
-something else) or `unknown` (no receipt lists routes). No receipt lists
-routes yet, so RUNNING is `unknown` for every route today, and `bay status`
-does not show routes at all.
+something else) or `unknown` (no receipt lists routes). The ingress box
+writes `routes` into its receipt on every deploy (see
+[deploy-receipt.md](deploy-receipt.md)). `bay status --json` passes it
+through, and `bay status --env <env>` prints the route count.
 
 ## bay compile
 

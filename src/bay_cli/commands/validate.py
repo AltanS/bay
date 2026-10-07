@@ -2232,6 +2232,183 @@ def _source_built_repos(doc: dict[str, Any]) -> list[str | None]:
     return found
 
 
+def _load_fleet_toml(root: Path) -> dict[str, Any] | None:
+    """``bay.fleet.toml`` as a dict; None when there is none or it does not parse."""
+    import tomllib
+
+    from bay_cli.fleet import FLEET_FILE
+
+    path = root / FLEET_FILE
+    if not path.is_file():
+        return None
+    try:
+        return tomllib.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None  # the compile reports an unreadable fleet file
+
+
+def _fleet_boxes(fleet: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw = fleet.get("boxes")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+
+
+def _inventory_names(path: Path) -> tuple[set[str], set[str]]:
+    """``(hosts, groups)`` named in an INI inventory file.
+
+    A group is a ``[name]`` section, the parent of a ``[name:children]``
+    section, or a child listed under one: Ansible knows all three as groups.
+    """
+    hosts: set[str] = set()
+    groups: set[str] = set()
+    section = ""
+    for raw in path.read_text(errors="replace").splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            name, _, kind = section.partition(":")
+            if kind in ("", "children"):
+                groups.add(name)
+            continue
+        name = line.split()[0]
+        if section.endswith(":children"):
+            groups.add(name)
+        elif not section.endswith(":vars"):
+            hosts.add(name)
+    return hosts, groups
+
+
+def _validate_box_inventory(root: Path, result: ValidationResult) -> None:
+    """The box names of ``bay.fleet.toml`` against the inventory of their box env.
+
+    * The box env is the Ansible host pattern (``bay deploy <box env>``,
+      ``ansible <box env>``): ``hosts/<box env>`` must name a host or a group
+      after it, else the deploy matches no host.
+    * The box ``group`` is where the box's containers go: it must be a group
+      in ``hosts/<box env>``.
+    * The box name only names receipts. A box name that is neither a host nor
+      a group there is a warning.
+    """
+    fleet = _load_fleet_toml(root)
+    boxes = _fleet_boxes(fleet or {})
+    if not boxes:
+        return
+    console.header("Boxes")
+    problems = 0
+    by_env: dict[str, list[str]] = {}
+    for name, box in sorted(boxes.items()):
+        env = box.get("env")
+        if isinstance(env, str) and env:
+            by_env.setdefault(env, []).append(name)
+    for env, names in sorted(by_env.items()):
+        inv = _resolve_inventory(root, env)
+        if inv is None:
+            result.warn(
+                f"Boxes               box {', '.join(names)}: no inventory for box env {env} "
+                f"(hosts/{env})"
+            )
+            problems += 1
+            continue
+        label = inv.relative_to(root)
+        hosts, groups = _inventory_names(inv)
+        if env not in hosts and env not in groups:
+            result.fail(
+                f"Boxes               {label} has no host or group named {env}; Ansible gets "
+                f"that name as its host pattern. Add [{env}:children] and list the groups "
+                "under it"
+            )
+            problems += 1
+        for name in names:
+            group = boxes[name].get("group")
+            if isinstance(group, str) and group and group not in groups:
+                result.fail(f"Boxes               box {name}: group {group} is not in {label}")
+                problems += 1
+            if name not in hosts and name not in groups:
+                result.warn(
+                    f"Boxes               box {name} is neither a host nor a group in {label}; "
+                    "the receipt `box` field prints the host name instead"
+                )
+                problems += 1
+    if not problems:
+        result.ok(f"Boxes               {len(boxes)} box(es) match the inventory")
+
+
+def _group_vars_value(parsed_files: dict[str, Any], group: str, key: str) -> Any:
+    """``key`` from the parsed files of ``group_vars/<group>/``; None when unset."""
+    prefix = f"group_vars/{group}/"
+    for rel, data in sorted(parsed_files.items()):
+        if rel.startswith(prefix) and isinstance(data, dict) and key in data:
+            return _to_plain(data[key])
+    return None
+
+
+def _validate_ingress_box(
+    root: Path,
+    parsed_files: dict[str, Any],
+    bay_dir: Path | None,
+    result: ValidationResult,
+) -> None:
+    """``[tailnet] ingress_box`` must be the box that runs Headscale.
+
+    The deploy picks the Headscale host by vars, not by box:
+    ``access_gateway: headscale`` and, with ``headscale_control_region`` set,
+    the host whose ``region`` equals it. The ingress box's region is
+    ``region`` from ``group_vars/<box group>/``, else the box group, else the
+    box name.
+    """
+    from bay_cli.config import access_gateway_type
+    from bay_cli.context import package_root
+
+    fleet = _load_fleet_toml(root)
+    if fleet is None:
+        return
+    tailnet = fleet.get("tailnet")
+    ingress = tailnet.get("ingress_box") if isinstance(tailnet, dict) else None
+    if not isinstance(ingress, str) or not ingress:
+        return
+    box = _fleet_boxes(fleet).get(ingress)
+    if box is None:
+        return  # the compile reports an ingress_box that is not in [boxes]
+    console.header("Ingress Box")
+    try:
+        gateway = access_gateway_type(root, bay_dir or package_root())
+    except BayError as exc:
+        result.fail(f"Ingress box         {exc}")
+        return
+    if gateway != "headscale":
+        result.fail(
+            f"Ingress box         ingress_box {ingress} is not the Headscale host "
+            f"(access_gateway = {gateway})"
+        )
+        return
+    control = _group_vars_value(parsed_files, "all", "headscale_control_region")
+    if control is None or control == "":
+        result.ok(f"Ingress box         {ingress} (no headscale_control_region: every host)")
+        return
+    group = box.get("group")
+    group = group if isinstance(group, str) and group else ingress
+    region = _group_vars_value(parsed_files, group, "region")
+    region = str(region) if region not in (None, "") else group
+    if region != str(control):
+        result.fail(
+            f"Ingress box         ingress_box {ingress} is not the Headscale host "
+            f"(headscale_control_region = {control})"
+        )
+        return
+    result.ok(f"Ingress box         {ingress} runs Headscale (region {region})")
+
+
+def _has_key(node: Any, key: str) -> bool:
+    if isinstance(node, dict):
+        return key in node or any(_has_key(v, key) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_key(v, key) for v in node)
+    return False
+
+
 def _validate_build_repos(root: Path, result: ValidationResult) -> None:
     """A project in the fleet that builds from source names its repo.
 
@@ -3097,6 +3274,12 @@ def run_validation(
 
     # 8c. Tailnet routes in bay.fleet.toml, and the ACL that guards their upstreams
     _validate_tailnet_routes(root, parsed, result)
+
+    # 8c2. The ingress box is the Headscale host
+    _validate_ingress_box(root, parsed, bay_dir, result)
+
+    # 8c3. Box names, box groups and box envs against the inventory
+    _validate_box_inventory(root, result)
 
     # 8d. A project in the fleet that builds from source names its repo
     _validate_build_repos(root, result)

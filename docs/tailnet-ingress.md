@@ -87,7 +87,7 @@ as good as the ACL — see [Locking the upstream](#locking-the-upstream-headscal
   makes the service unreachable, never public.
 
 Run it on the **Headscale control region host** (`headscale_control_region`),
-co-located with the coordinator + MagicDNS (so `ingress_box` is that host; Bay does not check it, see
+co-located with the coordinator + MagicDNS (so `ingress_box` is that host; `bay validate` checks it, see
 [Add a route, in order](#add-a-route-in-order)). Prefer a host that doesn't serve
 public sites, so the fail-closed split has a small blast radius.
 
@@ -289,9 +289,10 @@ One list. Do every step in this order. Run the `bay` commands with `--fleet <pat
    route belongs to no project, but a plan is made for a project: give the deploy env name of a
    project that deploys on a box of the ingress box's box env (its `[deploy.<env>]` names that box).
    A plan for a box env other than the ingress box's is blocked while a route change is pending.
-   If no project deploys on the ingress box's env, there is no route-only plan: `bay up` stops with
-   "no project has [deploy.<env>], so there is nothing to deploy". This is a gap: no verb deploys a
-   route without such a project. Run from the fleet directory, the plan covers the whole env
+   If no project has `[deploy.<env>]` for the ingress box's box env, give that box env: from the
+   fleet directory, `bay plan <box env>` makes a route-only plan. It compiles the fleet at its pins,
+   and the `bay up` after it pins no project (see [plan.md](plan.md#the-whole-environment)).
+   Otherwise, run from the fleet directory, the plan covers the whole env
    and the `bay up` after it pins every covered project (see [the scenario](layout-scenarios.md#15-tailnet-route)).
    A route change is a step of kind `route` (`route_added`, `route_changed`, `route_removed`) at
    risk `shared`, so it needs `bay approve <plan-id> --reason "<why>"`. When the domains change,
@@ -306,8 +307,10 @@ One list. Do every step in this order. Run the `bay` commands with `--fleet <pat
    [Diagnosing a broken route](#diagnosing-a-broken-route)).
 
 **The ingress box and the Headscale host.** Make `ingress_box` the Headscale control host (the
-architecture above runs the route Traefik and Headscale on one host). Bay does not check it: the
-compile only requires `ingress_box` to be a box of `[boxes]`. The route `bay up` runs on the hosts of
+architecture above runs the route Traefik and Headscale on one host). `bay validate` checks it.
+`access_gateway` must be `headscale`. When `headscale_control_region` is set, the region of the
+ingress box must equal it. That region is `region` from `group_vars/<box group>/`, else the box
+group, else the box name. The route `bay up` runs on the hosts of
 the ingress box's box env, and it deploys the ACL and the split-DNS records on those of them that are
 the Headscale server (`headscale_control_region` unset, or equal to the host's region). If the
 Headscale host is in another box env, the route `bay up` never reaches it: deploy it yourself with
@@ -315,7 +318,7 @@ Headscale host is in another box env, the route `bay up` never reaches it: deplo
 
 `bay show --routes` prints one status per route: `ok`, `pending` (the fleet file differs
 from the compiled file; plan and up), `drift` (the box serves something else) or `unknown`
-(no receipt lists routes yet).
+(no receipt lists routes: the ingress box has had no deploy since 2.3.0).
 
 ### Before 2.1: the hand-written `tailnet_proxies` file
 

@@ -1350,3 +1350,84 @@ class TestEnrollEpilogue:
         )
         assert result.exit_code == 0, result.output
         assert "tag:agent" in _strip_ansi(result.output)
+
+
+# ── M118/05: one access_gateway default ──────────────────────────────────
+
+
+def test_gateway_default_shared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every caller reads access_gateway through config.access_gateway_type.
+
+    The default comes from the role defaults file of the framework checkout:
+    a framework whose file says ``none`` makes every caller say ``none``.
+    """
+    import re
+
+    import yaml as pyyaml
+
+    from bay_cli.commands import region
+    from bay_cli.commands.gateway_backend import NullGatewayBackend
+    from bay_cli.config import ACCESS_GATEWAY_DEFAULTS, access_gateway_type
+    from bay_cli.context import package_root
+
+    repo = package_root()
+    role_default = pyyaml.safe_load((repo / ACCESS_GATEWAY_DEFAULTS).read_text())["access_gateway"]
+
+    fleet = tmp_path / "fleet"
+    (fleet / "group_vars" / "all").mkdir(parents=True)
+    (fleet / "hosts").mkdir()
+    framework = tmp_path / "framework"
+    (framework / ACCESS_GATEWAY_DEFAULTS).parent.mkdir(parents=True)
+    (framework / ACCESS_GATEWAY_DEFAULTS).write_text("---\naccess_gateway: none\n")
+
+    # The resolver: the role file, then the fleet file wins.
+    assert access_gateway_type(fleet, repo) == role_default
+    assert access_gateway_type(fleet, framework) == "none"
+    cx = Context.for_fleet_root(fleet, framework)
+    assert _get_gateway_config(cx)["access_gateway"] == "none"
+    assert isinstance(gateway._make_backend(cx, "production"), NullGatewayBackend)
+    assert region._get_access_gateway(fleet, framework) == "none"
+    (fleet / "group_vars" / "all" / "access_gateway.yml").write_text(
+        "---\naccess_gateway: headscale\n"
+    )
+    assert access_gateway_type(fleet, framework) == "headscale"
+    assert region._get_access_gateway(fleet, framework) == "headscale"
+    assert _get_gateway_config(cx)["access_gateway"] == "headscale"
+
+    # No caller keeps a literal default of its own.
+    src = repo / "src" / "bay_cli"
+    literal = re.compile(r"""get\(\s*["']access_gateway["']\s*,\s*["'](none|headscale|wireguard)""")
+    offenders = [
+        str(p.relative_to(src)) for p in src.rglob("*.py") if literal.search(p.read_text())
+    ]
+    assert offenders == []
+
+    # bay doctor reads the role default: a fleet with no access_gateway.yml is
+    # wireguard, and an empty vpn_allowed_ips fails only with a vpn service.
+    (fleet / "group_vars" / "all" / "access_gateway.yml").unlink()
+    (fleet / ".vault_pass").write_text("x\n")
+    (fleet / "hosts" / "production").write_text("[production]\n203.0.113.10\n")
+    (fleet / "group_vars" / "all" / "main.yml").write_text("---\nadmin_user: bay-admin\n")
+    services = fleet / "group_vars" / "all" / "services.yml"
+    services.write_text(
+        "---\nservices:\n  gatus:\n    access: public\n    domains:\n"
+        "      - status.example.com\n"
+    )
+    monkeypatch.setattr("bay_cli.commands.doctor._probe_ssh", lambda h, u: (True, "root", ""))
+    monkeypatch.setattr("bay_cli.commands.doctor._resolve_domain", lambda d: "203.0.113.10")
+    monkeypatch.setattr(
+        "bay_cli.commands.validate._probe_webhook_health",
+        lambda root, env, services, parsed, result: None,
+    )
+    monkeypatch.chdir(fleet)
+    doctor = runner.invoke(app, ["--fleet", str(fleet), "--json", "doctor"])
+    doc = json.loads(doctor.stdout)
+    lines = doc.get("data", doc)["lines"]
+    gw = [ln for ln in lines if ln["check"] == "Gateway config"]
+    assert [(ln["status"], ln["detail"]) for ln in gw] == [("ok", f"{role_default} configured")]
+    services.write_text(services.read_text().replace("access: public", "access: vpn"))
+    doctor = runner.invoke(app, ["--fleet", str(fleet), "--json", "doctor"])
+    doc = json.loads(doctor.stdout)
+    gw = [ln for ln in doc.get("data", doc)["lines"] if ln["check"] == "Gateway config"]
+    assert [ln["status"] for ln in gw] == ["fail"]
+    assert "vpn_allowed_ips is empty" in gw[0]["detail"]
