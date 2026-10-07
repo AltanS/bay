@@ -8,6 +8,22 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [Unreleased]
+
+### Changed
+
+- Docs: fourth reader round. Every key that the compiler validates but does not deploy is tagged
+  `(validated, not deployed yet)` in `docs/bay-toml.md`, and the list in `docs/plan.md` follows the
+  compiler (a volume mount with the default `backup = true` is on it, and so is a need of a
+  resource on another box). The box name, the inventory host name and the `[<box env>:children]
+  group` that the box env needs are defined once, and the sample hosts files are fixed. One
+  procedure for adding a tailnet route, with the env name, the deploy of the prerequisites, the
+  ACL commit and the Headscale host. The rules for rollback (which record gives the config and
+  which gives the code, the approval path, the half rolled-back pin mode), for the config-only
+  push (it tags the previous image), for the first `bay up` of an app with no image, for adopt with
+  several deploy envs, for the first plan of a new env, for what a plain `bay plan` cannot see, and
+  for the risk of a box-predicted step are stated from the code.
+
 ## [2.1.3] - 2026-10-07
 
 ### Fixed

@@ -24,15 +24,20 @@ No verb asks a question. No verb takes a secret on the command line.
 - The fleet is picked in one fixed order, defined once in
   [install.md](install.md#pick-a-fleet): `--fleet <path>`, `BAY_FLEET`, the `fleet =`
   line of the `bay.toml` you stand in, `BAY_FLEET_NAME`, and last the fleet directory
-  you stand in (a `bay.fleet.toml` here or above). That last rule applies to `plan`,
-  `up`, `approve`, `rollback`, `remove`, `doctor` and `show <name>` only (the list is in
-  [install.md](install.md#pick-a-fleet)). `bay init` and `bay adopt` run in an app
+  you stand in (a `bay.fleet.toml` here or above). That last rule (rule 5) applies to these
+  verbs only: `plan`, `up`, `approve`, `rollback`, `remove`, `doctor` and `show <name>`. Every
+  other verb (`deploy`, `provision`, `vault`, `secret`, `route`, `status`, `compile` and the
+  rest) needs `--fleet <path>` or `BAY_FLEET` when you stand in the fleet directory (`service` and
+  `server` edits are the one exception). The full rule is in [install.md](install.md#pick-a-fleet). `bay init` and `bay adopt` run in an app
   repo that has no `bay.toml` yet, so they cannot use the `fleet =` line (see
   [bay init](#bay-init)).
 - `--project <name>` works from any directory. The fleet then comes from the order above.
 - With no `bay.toml` here or above and no `--project`, `bay plan <env>` and
   `bay up <env>` cover the whole environment (see
-  [The whole environment](#the-whole-environment)).
+  [The whole environment](#the-whole-environment)). **Covered** is the word for a project that a
+  plan or a `bay up` reaches: it has a `[deploy.<e>]` table (any name `<e>`) on the same box
+  environment as the plan's box. `bay up` pins every covered project that it deploys (see
+  [Every deployed project is pinned](#every-deployed-project-is-pinned)).
 - Every verb that writes to a fleet repo or acts on a box prints
   `fleet: <name> (<path>)` as its first line on stderr, before it does
   anything. With `--json` the line stays on stderr, so stdout holds one
@@ -152,9 +157,16 @@ leave it out.
 ### bay plan
 
 1. **WANTED** (defined at the top of this page): for a project with an app repo, the
-   branch that `[deploy.<env>].branch` names is the branch the webhook builds. Bay reads
-   it from the pinned `bay.toml`, else the cache's HEAD. With no `branch` declared, it is
-   the cache's HEAD: the remote's default branch. `--at` picks another commit.
+   checkout you stand in gives its HEAD, whatever the branch (run `git switch <branch>` first).
+   With no checkout, Bay reads the fleet's repo cache. A cache has no work tree, so Bay needs a
+   branch name, and it takes `[deploy.<env>].branch` (the branch the webhook builds) from
+   `bay.toml` at the pinned commit, else from `bay.toml` at the cache's HEAD. The result is
+   `refs/heads/<branch>` in the cache. With no `branch` declared there, WANTED is the cache's
+   HEAD: the remote's default branch. So the first plan of a new env that is declared only on a
+   non-default branch (`[deploy.staging]` on `develop`) finds no branch, reads the default
+   branch, and blocks with "no `[deploy.staging]`". For that first plan, plan from a checkout of
+   the branch, or pass `--project <name> --at <commit of the branch>` (`--at` needs `--project` in the
+   fleet directory). `--at` picks another commit.
    Uncommitted edits are not part of the plan. The plan
    records them as `wanted.dirty`. When the WANTED commit is on no branch of
    the remote, the plan says so in a note: `bay up` will refuse it. For the `bay adopt`
@@ -175,6 +187,17 @@ leave it out.
    (`--tags deploy_stack`, `-e bay_reconciler_plan_only=true`, `--check`),
    with the compiled file given as extra variables. Without `--remote`, the
    steps come from the compiled files alone and `box_checked` is `false`.
+
+**What a plain `bay plan` cannot see.** It compiles and compares files, and it reads a secret by
+name only (never a value). So it sees a change of `bay.toml` at the commit, and it sees that a secret
+name is missing. It does not see a changed secret value in the vault, nor any change of an env
+file that the deploy renders on the box. The container hash covers the bytes of that env file, and
+the env file holds the secret values. So a plan without `--remote` can show 0 steps and the verdict
+`auto`, and `bay up` then recreates the containers that use that secret. Only the box check
+(`bay plan --remote`) predicts it, as a `source: box` step with the reason `env_file`. Run
+`bay plan --remote` before you approve or run `bay up` after a change of a secret value, an env
+file or anything else that is not in `bay.toml`. `bay up` has no `--remote`: it does not check the
+box before it deploys.
 
 `bay up` has no `--remote` option. Plain `bay up` plans again with the receipt read and
 no box check. The fields `box_checked`, `box_prediction`, `running` and `fleet` are part of
@@ -260,7 +283,7 @@ The verb exits with the verdict's code:
 
 | Verdict | Exit | Meaning |
 |---|---|---|
-| `auto` | 0 | `bay up` may apply the plan. |
+| `auto` | 0 | `bay up` may apply the plan. Read first every step with `source: box` and `project: null`: Bay rates a box-predicted create, recreate or start `safe`, also for a container that no project owns (see [What is shared](#risk)). It asks no approval, so the `reason` is the only warning. |
 | `approve` | 10 | A step is destructive or shared. Run `bay approve` first. |
 | `blocked` | 20 | Something must be fixed first. `blockers` says what. |
 | `stale` | 30 | With `--plan-id`: PINNED or RUNNING moved since the plan was made. |
@@ -293,24 +316,36 @@ A plan is **blocked** when:
 
 The validator accepts some `bay.toml` keys that the compiler cannot deploy yet. `bay plan`
 (and `bay compile`) blocks and lists each one in `unsupported`. `--allow-unsupported` plans
-and applies anyway, and the container then runs without that feature. These are the
+and applies anyway, and the container then runs without that feature (a service with `path`
+and an internal container that builds from source are left out altogether). The Keys tables of
+[bay-toml.md](bay-toml.md#keys) tag each such key `(validated, not deployed yet)`. These are the
 unsupported cases of 2.1:
 
-- `release` (a command before traffic moves) and `[[jobs]]` (scheduled jobs).
-- A project `[backup]` schedule, and the mount options `backup` and `owner` of a volume.
+- `release` (a command before traffic moves, at the top level or in `[deploy.<env>]`) and
+  `[[jobs]]` (scheduled jobs).
+- A project `[backup]` schedule, the mount option `owner` of a volume, and the mount option
+  `backup` of a volume left at its default `true`. Every volume mount needs `backup = false`
+  to deploy today.
 - `path` on a service (routing it by path on the main domain).
 - A service that shares the build of the project (the project builds from source and the
   service has no `image` and no own `build`).
 - An internal container (no `domain`, no `path`) that builds from source, has a database
-  (`needs.postgres`), has a health path other than `/`, or sets `replicas` or `zero_downtime`.
-- `needs.postgres` with `extensions`, and a build `memory` cap per project.
-- `aliases` with the default redirect (the aliases are served instead of redirecting).
+  (`needs.postgres`), has a health path other than `/`, or sets `replicas` other than 1 or
+  `zero_downtime`.
+- `needs.postgres` with `extensions`, and a build `memory` cap that differs from the fleet's.
+- `aliases` with the default redirect (the aliases are served instead of redirecting). With
+  `redirect = false` they deploy.
 - `access.open` together with `[access.password]`, and `[access.identity]`.
-- A need of a shared resource that is on another box than the project (see
-  [layout-scenarios.md](layout-scenarios.md#4-two-environments-two-boxes)).
+- A need of a shared resource that is on another box than the project's deploy env, for a
+  postgres, a redis or a container resource: "cross-box data access". It is the same
+  `unsupported` blocker as the rest of this list, with the same escape flag: with
+  `--allow-unsupported` the container deploys with no database and no URL for that need. The
+  fix is to list the project's box in the resource's `box` (see
+  [layout-scenarios.md](layout-scenarios.md#5-several-boxes-shared-resources-mixed-apps)).
 
 The list follows the compiler, not this page: the `unsupported` field of the plan is the
-truth for one file.
+truth for one file. One case has no tag and no blocker (a gap): `access` keys such as `open`,
+`locked`, `limits` and `password` on an internal container are accepted and are not emitted.
 
 ### Risk
 
@@ -365,8 +400,10 @@ every `bay up` but are not steps (see the note below). A step whose
 that no project owns (a shared resource's container, for example). A `source: box` step is `safe`
 (create, start, recreate) or `destructive` (remove) by the last two rows of the table, whoever owns
 the container. So a recreate of the shared postgres container that only the box predicted reads
-`safe`, while any change to the `[resources.*]` entry in the fleet file is `shared`. Read the
-`reason` of such a step before you skip an approval.
+`safe`, while any change to the `[resources.*]` entry in the fleet file is `shared`. The code gives
+no `shared` rating to a `source: box` step, so a plan whose only steps are such recreates has the
+verdict `auto` and asks for no approval. The `reason` of the step names what the box will change:
+read it before you run `bay up` (use `bay plan --remote` to see these steps at all).
 
 `bay up` also refreshes the shared proxy, the gateway and the update watcher
 on the boxes. That work comes from the fleet, not from `bay.toml`. The plan
@@ -528,6 +565,14 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
   (`git_deploy`). There is no `bay build` verb that builds: `bay build` has `status` and
   `reset` only. Until an image exists, the container cannot be created: the receipt has a
   failed action and `bay show` says `HALF`. `bay plan` does not check for it.
+  **So the first `bay up` of such an app fails, and that is the documented path.** It exits 1 with
+  `deploy failed: Command failed with exit code N. the fleet pins <commit12>; bay show says HALF until
+  a deploy succeeds.` The JSON result has `"result": "failed"` and an `error` text. The lock keeps the
+  new pin with `result: failed`, and Bay commits and pushes that record. No exit code or field
+  marks this failure as the expected one: tell it from another failed deploy by the log (`--log`, the
+  failed action names a container that has no image) or the receipt on the box. The recovery is the
+  list below: build the image with a push, then run `bay up` again. This is a gap: a first `bay up`
+  that is expected to fail has no code of its own.
 - **Later deploys**: in `branch` mode a missing image at the code-target step is skipped and
   `:latest` stays. In `pin` mode it stops the deploy before any container changes (see
   [Code and config](#code-and-config)).
@@ -609,10 +654,12 @@ you name. Plain rollback takes the environment's `previous` commit and runs `bay
 it. The two pins swap, so a second rollback undoes the first. Bay refuses when there is no
 `previous`. The output names the old and the new commit and the steps.
 
-- Config: the pin moves back, and Bay compiles that commit's `bay.toml`.
+- Config: the pin moves back to `previous` in the lock, and Bay compiles that commit's
+  `bay.toml`. `previous` changes only when a `bay up` changes the pin.
 - Code: the box points `:latest` of every build container of the project at
-  the image that the previous receipt (`<env>.prev.json`) names, then the
-  deploy runs. The result lists this in `code_targets`. When the box cannot
+  the image that the previous receipt (`<env>.prev.json` of the box env) names, then the
+  deploy runs. This is a second source. The receipt file is rotated by every full deploy of
+  the box env, a `bay up` that changes nothing included (see the warning below). The result lists this in `code_targets`. When the box cannot
   do it, the container keeps its image and the result says so: `code_kept`
   in the JSON, and `code: kept <container> (<reason>)` in the output. The
   usual reasons are a previous receipt from before 2.1, which names no commit
@@ -626,6 +673,24 @@ it. The two pins swap, so a second rollback undoes the first. Bay refuses when t
   The alert `build.held` says so. The next `bay up` to a newer commit (a
   descendant of `frozen_commit`) clears the freeze. A `bay up` to the same or an
   older commit, or to a commit Bay cannot order against it, keeps it.
+
+**Plain rollback is safe only straight after the bad `bay up`.** The config target (`previous` in
+the lock) and the code target (`<env>.prev.json` on the box) are two records, and only the lock's
+one waits. Any full deploy of the box env after the bad `bay up` rotates `<env>.prev.json` to the
+bad state: a second `bay up` that changes nothing, or a `bay up` for another project of the same
+box env. A plain rollback then moves the pin back, and its code target is the image that already
+runs, so the code stays and only the config rolls back. After any later deploy of that box env,
+use `bay rollback --to <commit>`: it names the code itself and refuses when the image is not on
+the box.
+
+**The rollback plan and its verdict.** `bay rollback` plans, then applies, like `bay up`. It has
+no `--plan-id`. A verdict of `blocked` (exit 20) or `stale` (exit 30) stops it, and `--force`
+never overrides those. A verdict of `approve` (exit 10) stops it unless you pass
+`--force --reason "<why>"` (the reason goes into the lock as `previous.force_reason`). `bay approve
+<plan-id> --reason "<why>"` works too: the refusal prints the plan id of the rollback plan, and the
+approval counts when the next `bay rollback` makes a plan with the same hash, so nothing may move in
+between. `--force --reason` is the sure form. A rollback across a box move needs `--data keep`
+(see [Box move](#box-move)).
 
 **An image-only project.** A project with no build container has no code target. Plain rollback
 moves the config pin back and nothing else. `--to` refuses with "builds no image". The freeze is
@@ -665,7 +730,9 @@ box by itself (see [build-pipeline.md](build-pipeline.md)).
 
 With `track = "pin"` every push already holds, so the freeze adds nothing you can see.
 Plain `bay rollback` moves the pin back and points the code at the image of the previous
-receipt, and skips the code move (`code_kept`) when that image is not on the box.
+receipt, and skips the code move (`code_kept`) when that image is not on the box. After that skip
+the env is half rolled back: the config is the old pin, and the box still runs the newer code.
+Pin mode means the code follows the pin, and here it does not.
 `bay rollback --to <commit>` refuses before anything moves when `<image>:<commit12>` is not
 on the box:
 
@@ -677,6 +744,20 @@ Commit tags on the box: ...
 To go forward again: push the fix, wait until its build has finished (the image is tagged
 with the commit), then `bay up` to that commit. In `pin` mode the image must be on the box,
 or the deploy stops before any container changes.
+
+What you see in the half rolled-back state:
+
+- Nothing moves by itself. The env is frozen and every push in `pin` mode only builds and holds.
+  The code does not say whether old config on newer code is safe for your app: if it is not, fix
+  it forward at once, or run `bay rollback --to <commit>` once the image of that commit is on the box.
+- `bay plan` compares the running commit with WANTED (the HEAD of the checkout, or `--at`), not with
+  the pin. With HEAD at the code that runs, there is no `image` step. A step of kind `image`
+  (`the box runs code <running>; bay up deploys <wanted> (track = "pin")`) appears when WANTED is
+  another commit, for example `--at <the rolled-back commit>`. The plan also prints that the env is
+  frozen. It does not check that the image is on the box.
+- `bay show` reads only the image references and config hashes of the receipt, so it has no word for
+  the code. It says `behind` while HEAD is ahead of the pin, and `HALF` after a failed `bay up`.
+- The stop for a missing image happens only in `bay up`, before any container changes.
 
 Straight after `bay adopt`, `bay rollback` is refused with "the previous pin
 is a fleet commit; use `bay up --at <commit>`". The adopt clears `previous`,
@@ -707,8 +788,14 @@ bay --fleet ~/fleets/prod adopt shop --check   # the files and the lock change; 
 bay --fleet ~/fleets/prod adopt shop
 bay plan production                            # must show 0 steps
 bay up production                              # takes the unpushed adopt commit
-git push                                       # config only: the box does nothing
+git push                                       # config only: no build, no recreate, one image tag
 ```
+
+With several deploy envs: run `bay up <env>` for each deploy env on another box env before the push
+(one `bay up` covers one box env, and only that box gets the new `rebuild.sh`). Run the adopt on the
+branch the webhook follows (`[deploy.<env>].branch`, default `main`): the commit lands on the branch
+you have checked out, `bay adopt` does not check it, and a push of another branch triggers no build
+on that env.
 
 `bay up` comes before the push because of the reason above. It
 accepts the adopt commit before it is pushed (the one exception to "push
@@ -719,8 +806,9 @@ for it: no code target, the running image stays. The box only gets the new
 adopt commit is not in the fleet's repo cache yet. Then push. The adopt
 commit changes only the `bay.toml` and the files beside it, so the new script
 sees a config-only push (see [build-pipeline.md](build-pipeline.md),
-"Config-only push"): it tags the running image with the adopt commit and ends
-with exit 0. This also holds for a container built before 2.1.0, which has no
+"Config-only push"): it tags the image of the previous commit (the running one) with the adopt
+commit, builds nothing, moves no `:latest`, recreates nothing, and ends with exit 0. A later
+`bay up` to the adopt commit finds `<image>:<commit12>`, also in `pin` mode. This also holds for a container built before 2.1.0, which has no
 `com.bay.commit` label and whose image has only `:latest`: the script then
 takes the commit that the box's checkout was at before the pull, and tags
 `:latest` when that image holds it. The next `bay plan` shows zero steps. Any
