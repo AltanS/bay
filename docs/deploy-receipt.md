@@ -80,6 +80,12 @@ the box together with the container engine. The steps are:
 A rename in one directory is atomic. A reader sees the old receipt or the new
 one, never half of a file.
 
+Every full deploy of the box env rotates the file, so `<env>.prev.json` is the state just before
+the last deploy of that env, whichever project or verb ran it. A `bay up` that changes nothing, and
+a `bay up` for another project on the same box env, both overwrite it with the state you had
+before. `bay rollback` reads its code target from this file (see
+[plan.md](plan.md#bay-rollback)). A webhook stamp does not rotate it.
+
 The task is "Write the deploy receipt" in
 `roles/container_lifecycle/tasks/reconcile.yml`. The directory
 `/var/lib/bay/receipts` is fixed. It is not a setting, because the box and
@@ -113,7 +119,7 @@ checks that the two match.
 |-------|------|---------|
 | `receipt_version` | integer | Always `1` for this format. |
 | `env` | string | The environment name. |
-| `box` | string | The box name in the fleet (`inventory_hostname`). |
+| `box` | string | The `inventory_hostname` of the host: the name at the start of its line in `hosts/<env>`. It is the box name of `bay.fleet.toml` when the host line uses that name (see [layout-scenarios.md](layout-scenarios.md#words-deploy-env-box-env-and-group): Bay does not match the two for you). |
 | `deployed_at` | string | Time the receipt was written, RFC 3339 in UTC (`YYYY-MM-DDTHH:MM:SSZ`). |
 | `framework_version` | string or null | `bay_version` from the framework's `version.yml`. |
 | `framework_commit` | string or null | Full git SHA of the framework checkout. Null when the deploy did not come from `bay deploy`, or the framework is not a git checkout. |

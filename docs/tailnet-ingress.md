@@ -87,7 +87,8 @@ as good as the ACL — see [Locking the upstream](#locking-the-upstream-headscal
   makes the service unreachable, never public.
 
 Run it on the **Headscale control region host** (`headscale_control_region`),
-co-located with the coordinator + MagicDNS. Prefer a host that doesn't serve
+co-located with the coordinator + MagicDNS (so `ingress_box` is that host; Bay does not check it, see
+[Add a route, in order](#add-a-route-in-order)). Prefer a host that doesn't serve
 public sites, so the fail-closed split has a small blast radius.
 
 ## Routes in bay.fleet.toml (2.1)
@@ -153,13 +154,15 @@ instead of repeating them.
 
    Without `tailnet_identity_enabled`, `identity = true` does nothing: the middleware is
    dropped. See [Per-device identity](#per-device-identity-tailnet_identity_enabled--identity_inject).
+   The group_vars of items 1 and 2 need no deploy of their own: the route's `bay up` deploys them
+   (step 8 of [Add a route, in order](#add-a-route-in-order)).
 3. **The ingress box and the certificate domain in the fleet file.** The first
    `bay route add` needs `--ingress-box <box> --cert-domain <domain>`. They write the two
    `[tailnet]` keys. Every later `add` reads them from the file.
 4. **The ACL**, when the fleet has `headscale_acl_policy`. **No `bay` verb edits the ACL.**
    `bay route add` does not, and `bay plan` shows no step for an ACL edit. You make two edits
-   by hand in `group_vars/all/headscale_acl.yml` for each route, and deploy them with
-   `bay deploy <env> --tags headscale`. This is steps 2 to 4 of
+   by hand in `group_vars/all/headscale_acl.yml` for each route, commit and push them, and deploy them with
+   `bay deploy <box env> --tags headscale`. This is steps 2 to 5 of
    [Add a route, in order](#add-a-route-in-order), before `bay route add`. The two edits are
    explained once in [Adding a proxy under default-deny](#adding-a-proxy-under-default-deny).
 
@@ -227,13 +230,18 @@ which is legal, so there is no warning then.
 ### The verbs
 
 ```bash
-bay route add homelab-app --domain homelab-app.ts.example.com \
+F=~/.config/bay/fleets/acme      # the fleet; `route` and `show --routes` skip the directory you stand in
+bay --fleet $F route add homelab-app --domain homelab-app.ts.example.com \
   --upstream http://laptop.acme.tailnet.internal:8787 --host upstream --identity
-bay route ls                     # name, domain, upstream, host, identity
-bay route rm homelab-app
-bay route import                 # the file from before 2.1, once per fleet
-bay show --routes                # WANTED (fleet file), PINNED (compiled), RUNNING (box)
+bay --fleet $F route ls          # name, domain, upstream, host, identity
+bay --fleet $F route rm homelab-app
+bay --fleet $F route import      # the file from before 2.1, once per fleet
+bay --fleet $F show --routes     # WANTED (fleet file), PINNED (compiled), RUNNING (box)
 ```
+
+Without `--fleet`, these verbs find the fleet through `BAY_FLEET`, `BAY_FLEET_NAME`, or the `fleet =`
+line of the `bay.toml` of an app repo you stand in. From inside the fleet directory they stop with
+"no fleet selected" (rule 5 of [install.md](install.md#pick-a-fleet) does not cover them).
 
 Options of `add`: `--domain`, `--upstream`, `--host client|upstream`, `--identity`,
 `--alias` (repeatable), `--entrypoint`, `--ingress-box`, `--cert-domain`, `--no-commit`.
@@ -248,31 +256,56 @@ would take them along.
 
 ### Add a route, in order
 
-One list. Do every step in this order.
+One list. Do every step in this order. Run the `bay` commands with `--fleet <path>` (or
+`BAY_FLEET`): `route`, `deploy` and `validate` do not use the fleet directory you stand in
+(rule 5 of [install.md](install.md#pick-a-fleet)).
 
-1. Do the prerequisites above, once per fleet (items 1 to 3).
-2. Only when the fleet has `headscale_acl_policy`: edit `group_vars/all/headscale_acl.yml`
-   by hand. Grant the ingress box the route's upstream port (edit 1 in
-   [Adding a proxy under default-deny](#adding-a-proxy-under-default-deny)).
-3. Only with the policy: edit the same file again. Carve the port out of any broader
-   range that already covers the node (edit 2 in the same section). Run `bay validate`.
-4. Only with the policy: deploy the ACL with `bay deploy <env> --tags headscale`. A plain
-   `bay up` with no route step runs `deploy_stack` only, which does not refresh the ACL. (The
-   route `bay up` of step 7 does, see there.) Until the grant is live the route answers 502.
-5. `bay route add ...` (add `--ingress-box` and `--cert-domain` the first time).
-6. `bay plan <env>` for a project on the ingress box's env. A route change is a step of
-   kind `route` (`route_added`, `route_changed`, `route_removed`) at risk `shared`, so it
-   needs `bay approve <plan-id> --reason "<why>"`. When the domains change, the step says
-   "Headscale restarts": the split-DNS records change.
-7. `bay up <env>`. With a route step it runs the tags `deploy_stack,headscale,traefik`. The
-   `headscale` tag runs every task of the Headscale role, the ACL render included, so this
-   `bay up` also deploys ACL edits when the Headscale server is a box of the plan's box env. Step 4
-   stays: it applies and checks the ACL before the route moves. Like
-   every `bay up`, it deploys the whole box environment. A plan for a project on another
-   env is blocked while a route change is pending, because that deploy would never reach the
-   ingress box.
-8. Probe from a peer, not from the ingress host (see
+1. **Pull the fleet.** `git pull` in the fleet repo. A clone that is behind its remote makes the
+   plan block, and an old clone could deploy old group_vars.
+2. **Edit the group_vars, by hand.** The prerequisites above, once per fleet (items 1 and 2, with the
+   secrets in the vault of the ingress box's box env). Only when the fleet has `headscale_acl_policy`,
+   also edit `group_vars/all/headscale_acl.yml`: grant the ingress box the route's upstream port
+   (edit 1 in [Adding a proxy under default-deny](#adding-a-proxy-under-default-deny)), and carve
+   the port out of any broader range that already covers the node (edit 2 in the same section).
+3. **Validate.** `bay validate`.
+4. **Commit and push the group_vars edits.** `bay route add` commits `bay.fleet.toml` only, and
+   `bay up` commits only locks, plan records and the compiled file. Neither commits an ACL or
+   prerequisite edit. A deploy still reads those files from the working tree, so the box gets them,
+   but the fleet stays dirty and the receipt records `fleet_dirty: true`. Another machine with a
+   clone that lacks the edit would deploy the old ACL and take the route away. Commit and push now.
+5. **Deploy the ACL first** (only with the policy): `bay deploy <box env> --tags headscale`, where
+   `<box env>` is the `env` of the ingress box. A bad policy then fails before the route moves. Until
+   the grant is live the route answers 502. A plain `bay up` with no route step runs `deploy_stack`
+   only, which does not refresh the ACL.
+6. **Add the route.** `bay route add ...` (add `--ingress-box` and `--cert-domain` the first time).
+   It edits and commits `bay.fleet.toml`. It does not compile or deploy.
+7. **Plan.** `bay plan <deploy env>`. `bay plan` and `bay up` take a deploy env, not a box env. A
+   route belongs to no project, but a plan is made for a project: give the deploy env name of a
+   project that deploys on a box of the ingress box's box env (its `[deploy.<env>]` names that box).
+   A plan for a box env other than the ingress box's is blocked while a route change is pending.
+   If no project deploys on the ingress box's env, there is no route-only plan: `bay up` stops with
+   "no project has [deploy.<env>], so there is nothing to deploy". This is a gap: no verb deploys a
+   route without such a project. Run from the fleet directory, the plan covers the whole env
+   and the `bay up` after it pins every covered project (see [the scenario](layout-scenarios.md#15-tailnet-route)).
+   A route change is a step of kind `route` (`route_added`, `route_changed`, `route_removed`) at
+   risk `shared`, so it needs `bay approve <plan-id> --reason "<why>"`. When the domains change,
+   the step says "Headscale restarts": the split-DNS records change.
+8. **Up.** `bay up <deploy env> --plan-id <plan-id>`. With a route step it runs the tags
+   `deploy_stack,headscale,traefik` on every host of the ingress box's box env, and this deploys the
+   prerequisites of step 2: `deploy_stack` covers the Traefik role (the DNS-01 resolver, the token
+   file, the route file) and the `tailnet_identity` sidecar role, and `headscale` covers the
+   split-DNS records and the ACL render. Like every `bay up`, it deploys the whole box environment.
+   Step 5 stays: it checks the ACL before the route moves.
+9. **Probe from a peer**, not from the ingress host (see
    [Diagnosing a broken route](#diagnosing-a-broken-route)).
+
+**The ingress box and the Headscale host.** Make `ingress_box` the Headscale control host (the
+architecture above runs the route Traefik and Headscale on one host). Bay does not check it: the
+compile only requires `ingress_box` to be a box of `[boxes]`. The route `bay up` runs on the hosts of
+the ingress box's box env, and it deploys the ACL and the split-DNS records on those of them that are
+the Headscale server (`headscale_control_region` unset, or equal to the host's region). If the
+Headscale host is in another box env, the route `bay up` never reaches it: deploy it yourself with
+`bay deploy <its box env> --tags headscale`.
 
 `bay show --routes` prints one status per route: `ok`, `pending` (the fleet file differs
 from the compiled file; plan and up), `drift` (the box serves something else) or `unknown`
@@ -571,7 +604,7 @@ Once `headscale_acl_policy` exists, a new route is **not** self-contained. `bay 
 edits `bay.fleet.toml` only: it never touches the ACL, so these two edits are always by
 hand, in `group_vars/all/headscale_acl.yml`. This is the one place that lists them; other
 docs link here. Two separate edits are needed, and only the first one fails loudly.
-Deploy them with `bay deploy <env> --tags headscale`, before the route's `bay up`
+Commit and push them, and deploy them with `bay deploy <box env> --tags headscale`, before the route's `bay up`
 (`bay plan` shows no step for an ACL edit). The order is in
 [Add a route, in order](#add-a-route-in-order).
 
