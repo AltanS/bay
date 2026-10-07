@@ -949,7 +949,7 @@ def _changed_keys(old: Mapping[str, Any], new: Mapping[str, Any]) -> list[str]:
 #: Build keys that only the build side reads (the hold guard, docs/plan.md).
 #: The container hash leaves the whole ``build`` table out, so a change of
 #: these alone recreates nothing; ``bay up`` still writes them to the box.
-_HOLD_KEYS = ("bay_toml_hash", "bay_toml_path", "bay_toml_files")
+_HOLD_KEYS = ("bay_toml_hash", "bay_build_hash", "bay_toml_path", "bay_toml_files")
 
 
 def _hold_only(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:

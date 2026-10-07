@@ -71,8 +71,9 @@ the push may deploy. The rules for each webhook build:
      change does not count. A file that is gone, is not valid TOML, or that the
      box cannot hash (no `tomllib`, Python older than 3.11, and no `tomli`)
      holds too: Bay never deploys a config it could not check.
-   `bay_toml_hash` is compiled only for a project whose `bay.toml` lives in the
-   app repo. A project in the fleet has nothing to compare.
+   `bay_toml_hash` (and `bay_build_hash`, see "Config-only push") is compiled
+   only for a project whose `bay.toml` lives in the app repo. A project in the
+   fleet has nothing to compare.
 3. **A held build is not a failure.** `_hold_build` logs
    `HOLD <svc> at <commit>: <reason>`, sends one `build.held` alert (warn) with
    the commit, the image and what to do ("config changed, run bay up"), and
@@ -120,7 +121,17 @@ no `build.held` or other alert. The circuit breaker is not touched, and the
 trigger was consumed at the start. The image of the previous commit also gets
 the tag `<image>:<commit12>` (a tag, not a build), so `bay up` finds the code
 for the pushed commit. When no previous commit is known, the commit is not in
-the checkout, or nothing changed, the normal path runs. The webhook's
+the checkout, or nothing changed, the normal path runs.
+
+A change of what the image is built from is never config only. `bay compile`
+writes `build.bay_build_hash` next to `bay_toml_hash`: the canonical hash of
+`[build]`, `image` and their `[deploy.<env>]` and `[services.<name>]`
+overrides (`python -m bay_reconcile.tomlhash --section build <file>`). A push
+is config only when that hash of the pushed `bay.toml` equals the pinned one.
+An edit of `[build.args]`, `dockerfile`, `context` or `target` therefore
+builds the new image, and the hold guard holds it (the whole `bay.toml` hash
+differs): `bay up` deploys it. A services file with no `bay_build_hash` is
+never config only. The webhook's
 `watch`/`ignore` filter runs before this (in the receiver, before the trigger),
 so a push that it filters out never reaches `rebuild.sh`. "Edit `bay.toml`,
 push, `bay up`" is the clean flow: the push does nothing on the box, and

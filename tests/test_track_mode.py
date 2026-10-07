@@ -103,20 +103,60 @@ def test_reconcile_helper_hash_matches_cli(tmp_path: Path) -> None:
     shutil.copytree(SRC / "bay_reconcile", shipped / "bay_reconcile")
     env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(shipped)}
 
-    def helper(path: Path) -> subprocess.CompletedProcess[str]:
+    def helper(*args: str | Path) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, "-s", "-m", "bay_reconcile.tomlhash", str(path)],
+            [sys.executable, "-s", "-m", "bay_reconcile.tomlhash", *map(str, args)],
             capture_output=True, text=True, env=env, cwd=tmp_path, check=False,
         )
 
     proc = helper(fleet / "checkouts" / "shop" / "bay.toml")
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip() == compiled
+    build_hash = data["services"]["shop"]["build"]["bay_build_hash"]
+    proc = helper("--section", "build", fleet / "checkouts" / "shop" / "bay.toml")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == build_hash != compiled
 
     bad = tmp_path / "bad.toml"
     bad.write_text("name = = 1\n")
     assert helper(bad).returncode == 4
     assert helper(tmp_path / "missing.toml").returncode == 2
+
+
+BUILD_TOML = TOML + """
+[build]
+dockerfile = "Dockerfile"
+
+[build.args]
+NODE_ENV = "production"
+"""
+
+
+def test_tomlhash_section_build() -> None:
+    first = tomlhash.section_hash(BUILD_TOML.encode(), "build")
+    assert first.startswith("sha256:") and first != tomlhash.canonical_hash(BUILD_TOML.encode())
+    # Config that does not feed the image: the build hash stays.
+    for same in (
+        BUILD_TOML.replace("port = 3000", "port = 3001"),
+        BUILD_TOML.replace('domain = "app.example.com"', 'domain = "other.example.com"'),
+        "# a comment\n" + BUILD_TOML,
+    ):
+        assert tomlhash.section_hash(same.encode(), "build") == first
+    # What the image is built from: the build hash moves.
+    for other in (
+        BUILD_TOML.replace('NODE_ENV = "production"', 'NODE_ENV = "staging"'),
+        BUILD_TOML.replace('dockerfile = "Dockerfile"', 'dockerfile = "web.Dockerfile"'),
+        BUILD_TOML + '\n[deploy.production.build.args]\nNODE_ENV = "prod"\n',
+        BUILD_TOML + '\n[services.worker]\ncommand = "w"\n\n[services.worker.build]\n'
+        'target = "worker"\n',
+        BUILD_TOML.replace('name = "app"', 'name = "app"\nimage = "ghcr.io/acme/app:1"'),
+    ):
+        assert tomlhash.section_hash(other.encode(), "build") != first, other
+    assert tomlhash.build_inputs({"deploy": {"production": {"domain": "x"}}}) == {}
+    with pytest.raises(KeyError):
+        tomlhash.section_hash(BUILD_TOML.encode(), "env")
+    # The CLI: --section build prints the same hash; an unknown section is a usage error.
+    assert tomlhash.main(["--section", "env", "bay.toml"]) == 2
 
 
 # ── rebuild.sh harness ──────────────────────────────────────────────────
@@ -387,6 +427,17 @@ def _commit(repo: Path, files: dict[str, str]) -> str:
     return _git(repo, "rev-parse", "--short=12", "HEAD")
 
 
+def _pinned_env(text: str = TOML) -> dict[str, str]:
+    """The hold inputs ``bay compile`` writes for a project pinned at ``text``."""
+    return {
+        "BAY_TOML_PATH": "bay.toml",
+        "PINNED_TOML_HASH": tomlhash.canonical_hash(text.encode()),
+        "PINNED_BUILD_HASH": tomlhash.section_hash(text.encode(), "build"),
+        "TRACK": "branch",
+        "FROZEN": "",
+    }
+
+
 def _decide(repo: Path, label: str, *, strategy: str = "local") -> str:
     """The decision site as rebuild.sh runs it, with a fake docker that knows ``label``."""
     log = repo.parent / "docker.log"
@@ -414,8 +465,7 @@ def test_config_only_push_does_not_build(
     pushed = _commit(repo, {"bay.toml": TOML_CHANGED, "conf/site.yaml": "site: 2\n"})
     trigger = tmp_path / "svc.trigger.running"
     trigger.write_text("corr-1\n")
-    env = {"BAY_TOML_PATH": "bay.toml", "PINNED_TOML_HASH": tomlhash.canonical_hash(TOML.encode()),
-           "TRACK": "branch", "FROZEN": ""}
+    env = _pinned_env()
     script = f"""
 trap 'rm -f {str(trigger)!r}' EXIT
 _record_failure "0000aaaa1111" "Build" "earlier failure" >/dev/null
@@ -474,8 +524,7 @@ cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
 def test_push_touching_code_and_toml_builds_and_holds(local_sh: str, tmp_path: Path) -> None:
     repo, first = _app_repo(tmp_path)
     _commit(repo, {"bay.toml": TOML_CHANGED, "app.js": "console.log(2)\n"})
-    env = {"BAY_TOML_PATH": "bay.toml", "PINNED_TOML_HASH": tomlhash.canonical_hash(TOML.encode()),
-           "TRACK": "branch", "FROZEN": ""}
+    env = _pinned_env()
     proc, _, alerts = _harness(local_sh, _decide(repo, first), tmp_path, env=env)
     assert proc.returncode == 0, proc.stderr
     assert "config-only push" not in proc.stdout
@@ -493,11 +542,57 @@ def test_push_touching_code_and_toml_builds_and_holds(local_sh: str, tmp_path: P
     assert "BUILD []" in proc.stdout and "config-only" not in proc.stdout
 
 
+def test_build_section_change_is_not_config_only(local_sh: str, tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    (repo / "conf").mkdir(parents=True)
+    _git(tmp_path, "init", "-q", "-b", "main", str(repo))
+    (repo / "app.js").write_text("console.log(1)\n")
+    (repo / "bay.toml").write_text(BUILD_TOML)
+    (repo / "conf" / "site.yaml").write_text("site: 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "app")
+    first = _git(repo, "rev-parse", "--short=12", "HEAD")
+    env = _pinned_env(BUILD_TOML)
+
+    # Only a build arg changes, in bay.toml alone: not config only. It builds,
+    # and the hold guard holds it (new image, bay up releases it).
+    _commit(repo, {"bay.toml": BUILD_TOML.replace('"production"', '"staging"', 1)})
+    proc, _, _ = _harness(local_sh, _decide(repo, first), tmp_path, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert "config-only push" not in proc.stdout
+    assert "BUILD [config changed: bay.toml differs from the pinned one]" in proc.stdout
+
+    # The same file list with a non-build edit stays config only.
+    repo2 = tmp_path / "second"
+    repo2.mkdir()
+    repo2, first2 = _app_repo(repo2)
+    _commit(repo2, {"bay.toml": TOML_CHANGED})
+    proc, _, _ = _harness(local_sh, _decide(repo2, first2), tmp_path, env=_pinned_env())
+    assert "config-only push" in proc.stdout
+    # No pinned build hash (a services file from before 2.1): never config only.
+    proc, _, _ = _harness(
+        local_sh, _decide(repo2, first2), tmp_path, env={**_pinned_env(), "PINNED_BUILD_HASH": ""}
+    )
+    assert "config-only push" not in proc.stdout
+
+    # The compiled hash reaches the rendered script next to PINNED_TOML_HASH.
+    svc = _local_service()
+    svc["localapp"]["build"].update(
+        bay_toml_path="bay.toml",
+        bay_toml_hash="sha256:" + "0" * 64,
+        bay_build_hash="sha256:" + "1" * 64,
+    )
+    rendered = _render_rebuild_sh(svc, ["localapp"], git_deploy_services=["localapp"])
+    assert f'PINNED_BUILD_HASH="sha256:{"1" * 64}"' in rendered
+    assert 'PINNED_BUILD_HASH=""' in _render_rebuild_sh(
+        _local_service(), ["localapp"], git_deploy_services=["localapp"]
+    )
+
+
 def test_config_only_rule_needs_a_previous_commit(local_sh: str, tmp_path: Path) -> None:
     repo, first = _app_repo(tmp_path)
     _commit(repo, {"bay.toml": TOML_REWORDED})
-    env = {"BAY_TOML_PATH": "bay.toml", "PINNED_TOML_HASH": tomlhash.canonical_hash(TOML.encode()),
-           "TRACK": "branch", "FROZEN": ""}
+    env = _pinned_env()
 
     def runs(script: str, extra: dict[str, str] | None = None) -> str:
         proc, _, _ = _harness(local_sh, script, tmp_path, env={**env, **(extra or {})})

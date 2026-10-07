@@ -3524,6 +3524,9 @@ def test_adopt_build_project_plans_zero_steps(
     build = after["services"]["old-shop"]["build"]
     assert build.pop("bay_toml_path") == "bay.toml"
     assert build.pop("bay_toml_hash") == tomlhash.canonical_hash(BUILD_SHOP_TOML.encode())
+    assert build.pop("bay_build_hash") == tomlhash.section_hash(
+        BUILD_SHOP_TOML.encode(), "build"
+    )
     build.pop("bay_toml_files", None)
     assert after == before
     plan = planmod.make_plan(proj, planmod.PlanOptions())

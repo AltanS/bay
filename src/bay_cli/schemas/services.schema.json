@@ -389,6 +389,11 @@
           "pattern": "^sha256:[0-9a-f]{64}$",
           "description": "Canonical hash of the pinned bay.toml (bay_reconcile.tomlhash). Only for a project whose bay.toml lives in the app repo. A push whose bay.toml hashes differently is held until bay up."
         },
+        "bay_build_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Canonical hash of what the image is built from in the pinned bay.toml: [build], image and their per-env and per-service overrides (python -m bay_reconcile.tomlhash --section build). Written next to bay_toml_hash. A push whose bay.toml has another build hash is never config only: it builds, and the hold guard holds it."
+        },
         "bay_toml_path": {
           "type": "string",
           "minLength": 1,

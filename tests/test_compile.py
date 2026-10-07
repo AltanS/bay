@@ -246,7 +246,7 @@ def test_image_and_build(data: dict[str, Any]) -> None:
     build = {
         k: v
         for k, v in s["shop"]["build"].items()
-        if k not in ("bay_toml_hash", "bay_toml_path", "bay_toml_files")
+        if k not in ("bay_toml_hash", "bay_build_hash", "bay_toml_path", "bay_toml_files")
     }
     assert build == {
         "repo": "git@github.com:acme/shop.git",
@@ -287,6 +287,22 @@ def test_bay_toml_hash_written_to_services_yml(fleet: Path) -> None:
     edit(fleet, SHOP, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
     moved = yaml.safe_load(compiled(fleet).body())["services"]["shop"]["build"]["bay_toml_hash"]
     assert moved != want and moved.startswith("sha256:")
+
+
+def test_bay_build_hash_written_next_to_the_toml_hash(fleet: Path) -> None:
+    """B2: the hash of what the image is built from, so a [build] edit is never config only."""
+    from bay_reconcile.tomlhash import section_hash
+
+    first = yaml.safe_load(compiled(fleet).body())["services"]
+    want = section_hash((fleet / SHOP).read_bytes(), "build")
+    for name in ("shop", "shop-staging", "shop-api"):
+        assert first[name]["build"]["bay_build_hash"] == want
+    # A config edit leaves it; the toml hash moves alone.
+    edit(fleet, SHOP, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    build = yaml.safe_load(compiled(fleet).body())["services"]["shop"]["build"]
+    assert build["bay_build_hash"] == want and build["bay_toml_hash"] != first["shop"]["build"][
+        "bay_toml_hash"
+    ]
 
 
 def test_bay_toml_files_written_to_services_yml(fleet: Path) -> None:

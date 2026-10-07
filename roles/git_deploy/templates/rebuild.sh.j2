@@ -359,13 +359,16 @@ _hold_reason() {
 # A push that changes only the project's bay.toml (BAY_TOML_PATH) and the files
 # its mounts read (BAY_TOML_FILES, relative to the repo root) carries no code:
 # only `bay up` can deploy it. True (0) when the files changed between the
-# previous commit and HEAD of the checkout are all such files. False when the
-# bay.toml is not in the app repo, when no previous commit is known or found,
-# or when nothing changed: then the normal path runs.
+# previous commit and HEAD of the checkout are all such files, and what the
+# image is built from ([build], image: `tomlhash --section build`) at HEAD still
+# hashes to the pinned PINNED_BUILD_HASH. False when the bay.toml is not in the
+# app repo, when no previous commit is known or found, when nothing changed, or
+# when the build inputs changed or cannot be hashed: then the normal path runs
+# (a [build] edit builds, and the hold guard holds it).
 #   $1  the checkout at the pushed commit   $2  the previous commit (may be empty)
 _config_only() {
-  local repo_dir="$1" prev="$2" files f p hit
-  [[ -n "${BAY_TOML_PATH:-}" && -n "${prev}" ]] || return 1
+  local repo_dir="$1" prev="$2" files f p hit have
+  [[ -n "${BAY_TOML_PATH:-}" && -n "${PINNED_BUILD_HASH:-}" && -n "${prev}" ]] || return 1
   git -C "${repo_dir}" cat-file -e "${prev}^{commit}" 2>/dev/null || return 1
   files=$(git -C "${repo_dir}" diff --name-only "${prev}" HEAD 2>/dev/null) || return 1
   [[ -n "${files}" ]] || return 1
@@ -380,6 +383,8 @@ _config_only() {
     done
     [[ -n "${hit}" ]] || return 1
   done <<< "${files}"
+  have=$(PYTHONPATH="${RECONCILE_PYTHONPATH}" python3 -m bay_reconcile.tomlhash --section build "${repo_dir}/${BAY_TOML_PATH}" 2>/dev/null) || return 1
+  [[ "${have}" == "${PINNED_BUILD_HASH}" ]] || return 1
   return 0
 }
 
@@ -764,6 +769,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   FROZEN="{{ 'true' if (build.frozen | default(false)) else '' }}"
   BAY_TOML_PATH="{{ dq(build.bay_toml_path | default('')) }}"
   PINNED_TOML_HASH="{{ dq(build.bay_toml_hash | default('')) }}"
+  PINNED_BUILD_HASH="{{ dq(build.bay_build_hash | default('')) }}"
   BAY_TOML_FILES=({% for f in build.bay_toml_files | default([]) %}"{{ dq(f) }}"{% if not loop.last %} {% endif %}{% endfor %})
 {#
   The three command strings below are handed to `eval`, so every consumer
@@ -826,6 +832,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   FROZEN=""
   BAY_TOML_PATH=""
   PINNED_TOML_HASH=""
+  PINNED_BUILD_HASH=""
   BAY_TOML_FILES=()
   PRIMARY_IMAGE=""
   BUILD_ARGS=()

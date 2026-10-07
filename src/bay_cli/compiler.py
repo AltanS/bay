@@ -680,12 +680,16 @@ class _Compiler:
           (``fleet:`` ones aside), relative to the repo root. A push that
           changes only these files and the bay.toml is config only: the build
           side neither builds nor deploys it (``bay up`` does).
+        * ``bay_build_hash``: the hash of what the image is built from
+          (``tomlhash.build_inputs``: ``[build]``, ``image`` and their
+          per-env and per-service overrides). A push whose bay.toml changes
+          it is never config only: it builds, and the hold guard holds it.
 
         Every key is left out at its default, so a fleet that uses none of
         this compiles byte-identically to before.
         """
         from bay_cli import bay_toml
-        from bay_reconcile.tomlhash import canonical_hash
+        from bay_reconcile.tomlhash import canonical_hash, section_hash
 
         in_fleet = self._in_fleet(unit.project)
         if bay_toml.track(unit.doc, unit.env) == "pin":
@@ -700,7 +704,9 @@ class _Compiler:
         if in_fleet or unit.project.lock is None:
             return
         try:
-            out["bay_toml_hash"] = canonical_hash(unit.project.toml_file.read_bytes())
+            data = unit.project.toml_file.read_bytes()
+            out["bay_toml_hash"] = canonical_hash(data)
+            out["bay_build_hash"] = section_hash(data, "build")
         except (OSError, ValueError) as exc:
             self._err(f"{unit.label}: cannot hash {unit.project.toml_file.name}: {exc}")
             return
