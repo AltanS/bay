@@ -88,7 +88,8 @@ apply of a `bay remove` plan, and a `bay deploy <env>` with no `--tags` or with 
 the container pass (`deploy_stack`). So `<env>.prev.json` is the state just before
 the last deploy of that env, whichever project or verb ran it. A `bay up` that changes nothing, and
 a `bay up` for another project on the same box env, both overwrite it with the state you had
-before. `bay rollback` reads its code target from this file (see
+before. Since 2.2.0, `bay rollback` reads its code target from the lock's
+`previous.containers` instead. It reads this file only for a lock written before 2.2.0 (see
 [plan.md](plan.md#bay-rollback)). A webhook stamp does not rotate it.
 
 The task is "Write the deploy receipt" in
@@ -142,9 +143,10 @@ Each container entry:
 | `name` | string | Container name. |
 | `image` | string or null | The image the container runs. `<repo>:<commit12>` when that commit tag resolves on the box to the running image, else the reference the deploy asked for. Null for a removed container. |
 | `image_ref` | string or null | The image reference the deploy asked for (the spec, often `:latest`). Absent in receipts written before 2.1. |
-| `commit` | string or null | The 12-character commit the running image was built from: the image label `com.bay.commit`, or `org.opencontainers.image.revision` for older builds. Null when the image has neither (a pulled third-party image). Absent before 2.1. |
+| `commit` | string or null | The 12-character commit the running image was built from: the image label `com.bay.commit`, or `org.opencontainers.image.revision` for older builds. Null when the image has neither (a pulled third-party image). A container built from source before 2.1 has no `com.bay.commit` label, so its `commit` is null until its first build after 2.1. Absent before 2.1. |
 | `config_hash` | string or null | The config hash the deploy compared. Null for a removed container. |
 | `action` | string or null | `noop`, `create`, `recreate`, `start` or `remove`. A zero-downtime swap is `recreate`. Null when the pass crashed before it reported. `start` is reserved; version 1 does not write it. |
+| `failed` | boolean | True when the container pass reported this container's action as failed. `bay up` reads it to tell the first image apart (exit 40, see [plan.md](plan.md#the-first-image)). Absent in receipts written before 2.2.0. |
 | `healthy` | boolean or null | Read once, right after the pass. `true`: running and healthy. `false`: not running, or unhealthy. `null`: running with no health check, still starting, removed, or unknown. |
 
 A webhook build changes the code without a deploy. After it recreates a
@@ -158,9 +160,9 @@ stamp is a log line, never a failed build. `bay plan` hashes `image_ref`, so a
 stamp is not drift; it reads `commit` for "code at X, config pinned at Y" (see
 [plan.md](plan.md), "Code and config").
 
-The two new fields are additive, so the receipt stays `receipt_version` 1 and
-`bay status --json` stays `status_version` 2. A reader of an older receipt
-must treat a missing `commit` or `image_ref` as null.
+These fields, and `failed` (2.2.0), are additive, so the receipt stays `receipt_version` 1
+and `bay status --json` stays `status_version` 2. A reader of an older receipt
+must treat a missing `commit` or `image_ref` as null, and a missing `failed` as unknown.
 
 `bay up` deploys the whole box environment, so the receipt covers every project on it. It reads `action` back: every container that is not `noop` goes into
 the `applied` list of its JSON result, when the receipt's `fleet_commit` is

@@ -8,6 +8,25 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.2.0] - 2026-10-08
+
+Spec 01: plan, show and rollback tell the truth
+
+- `bay plan` in branch mode shows a step when the box runs code older than WANTED (a held push, or a build not deployed yet): kind `image`, action `update`, risk `safe`, one per container. `bay up` already moved that code; the plan said nothing before. The note `code at <running>, config pinned at <pin>` ends with `, WANTED <commit>` when WANTED is not the running code.
+- `bay show` names the running code: RUNNING prints `<container> code <commit12>` per build container (`code ?` when the receipt names none). `bay show --json` has `envs[].running.code`, and each container has `commit`.
+- New status word `ahead`: WANTED is ahead of the pin and every build container runs WANTED (a push deployed it). Run `bay up` to pin it. `behind` now means the box does not run WANTED yet. Order: HALF, unknown, drift, ahead, behind, ok.
+- `bay up` exits 40 when the deploy failed only because a build container has no image yet (the first deploy of a build app). It names the way out: push to the deploy branch, wait for the build, run `bay up` again. The JSON result adds `first_image`. Any other failed deploy still exits 1. The receipt marks a failed container action with `failed: true`, so `bay up` can tell the two apart.
+- Plain `bay rollback` takes its code target from the lock: `bay up` records `previous.containers` (the commit and image each build container ran before it) when it moves a pin. A later deploy of the box env no longer moves the rollback target. A container with `commit: null` keeps its image and shows in `code_kept`.
+- `bay status --json` schema: `fleet.source` lists only the four sources Bay sets; `cwd` is gone.
+- deploy-receipt.md: a container built from source before 2.1 has `commit: null` until its first build after 2.1.
+
+### Upgrade notes
+
+- New status word `ahead` in `bay show`. A script that matches status words must accept it.
+- New exit code 40 from `bay up` (and `bay up <env>`): the expected first-image failure. A script that treats every non-zero exit as an error still works; one that matches exit 1 for a failed deploy must accept 40 too.
+- New lock field `previous.containers`, written by the next `bay up` that moves a pin. A lock written before 2.2 has none, so a plain `bay rollback` falls back to the box's `<env>.prev.json` and says so in a note, until the next pin move.
+- New receipt field `failed` per container. It ships with the deploy, so it needs no manual step.
+
 ## [2.1.13] - 2026-10-07
 
 Docs only. README and features.md checked sentence by sentence against the v2 docs and the code.

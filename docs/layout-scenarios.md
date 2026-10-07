@@ -881,13 +881,11 @@ bay show shop
 ```
 
 - It moves the pin back to `previous` (a record in the lock).
-- It asks the box to point `:latest` at the image of the previous receipt (`<env>.prev.json`, a second
-  record, on the box). When the box cannot, the output says `code: kept <container> (<reason>)`. The
-  usual reason is a previous receipt from before 2.1: then only the config rolls back.
-- Plain rollback is safe only straight after the bad `bay up`. Every deploy of the box env that
-  reaches the container pass rotates `<env>.prev.json`, so after a later deploy (even a `bay up` that changes nothing, or one for
-  another project of the same box env) the plain rollback moves the pin back and keeps the code that
-  runs. Use `--to <commit>` then.
+- It asks the box to point `:latest` at the code the lock records in `previous.containers`: the
+  commit each build container ran before the bad `bay up`. A later deploy does not move that
+  record. When the box cannot, the output says `code: kept <container> (<reason>)`: then only the
+  config rolls back. A lock from before 2.2.0 has no such record, so the box's `<env>.prev.json` is
+  the target, and a note says so.
 - It plans like `bay up`. A verdict `approve` stops it unless you pass `--force --reason "<why>"`
   (`--data keep` after a box move). `blocked` and `stale` stop it whatever you pass. There is no
   `--plan-id` ([plan.md](plan.md#bay-rollback)).

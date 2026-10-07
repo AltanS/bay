@@ -303,6 +303,7 @@ The verb exits with the verdict's code:
 | `approve` | 10 | A step is destructive or shared. Run `bay approve` first. |
 | `blocked` | 20 | Something must be fixed first. `blockers` says what. |
 | `stale` | 30 | With `--plan-id`: PINNED or RUNNING moved since the plan was made. |
+| first image | 40 | Not a verdict. `bay up` exits 40 after a failed deploy when every failed action belongs to a build container that has no image yet. The JSON result lists those containers in `first_image`. See [The first image](#the-first-image). Any other failed deploy exits 1. |
 
 `blocked` wins over `stale`, and `stale` wins over `approve`.
 
@@ -589,14 +590,20 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
   `reset` only. Until an image exists, the container cannot be created: the receipt has a
   failed action and `bay show` says `HALF` (the last `bay up` failed, see the status table of
   [bay show](#bay-show)). `bay plan` does not check for it.
-  **So the first `bay up` of such an app fails, and that is the documented path.** It exits 1 with
-  `deploy failed: Command failed with exit code N. the fleet pins <commit12>; bay show says HALF until
-  a deploy succeeds.` The JSON result has `"result": "failed"` and an `error` text. The lock keeps the
-  new pin with `result: failed`, and Bay commits and pushes that record. No exit code or field
-  marks this failure as the expected one: tell it from another failed deploy by the log (`--log`, the
-  failed action names a container that has no image) or the receipt on the box. The recovery is the
-  list below: build the image with a push, then run `bay up` again. This is a gap: a first `bay up`
-  that is expected to fail has no code of its own.
+  **So the first `bay up` of such an app fails, and that is the documented path.** `bay up`
+  then exits 40, not 1. It prints `deploy failed: ... the fleet pins <commit12>; bay show says HALF
+  until a deploy succeeds.` and the way out: `first deploy of <project>: the box has no image for
+  <commit12> yet. Push to <branch> so the webhook builds it, wait for the build, then run bay up
+  again.` The JSON result has `"result": "failed"`, an `error` text, the same line in `notes`, and
+  `first_image`: the list of those containers. The lock keeps the new pin with `result: failed`,
+  and Bay commits and pushes that record.
+  Exit 40 needs all of these. A build container of a project that this `bay up` pins has no
+  commit in RUNNING (it is not in the receipt, or its `commit` is null). The box has no
+  `<image>:<commit12>` for the pin and no `<image>:latest` (Bay asks with `docker image ls`). Every
+  failed action of the deploy belongs to such a container: a container that the receipt marks
+  `failed`, or a `missing` code move. Any other failure exits 1, and so does a box that wrote no
+  receipt for this deploy or a receipt from before 2.2.0, which marks no failed action.
+  The recovery is the list below: build the image with a push, then run `bay up` again.
 - **Later deploys**: in `branch` mode a missing image at the code-target step is skipped and
   `:latest` stays. In `pin` mode it stops the deploy before any container changes (see
   [Code and config](#code-and-config)).
@@ -680,15 +687,16 @@ it. The two pins swap, so a second rollback undoes the first. Bay refuses when t
 
 - Config: the pin moves back to `previous` in the lock, and Bay compiles that commit's
   `bay.toml`. `previous` changes only when a `bay up` changes the pin.
-- Code: the box points `:latest` of every build container of the project at
-  the image that the previous receipt (`<env>.prev.json` of the box env) names, then the
-  deploy runs. This is a second source. The receipt file is rotated by every deploy that
-  reaches the container pass (`bay up` included, even one that changes nothing; see the warning below). The result lists this in `code_targets`. When the box cannot
-  do it, the container keeps its image and the result says so: `code_kept`
-  in the JSON, and `code: kept <container> (<reason>)` in the output. The
-  usual reasons are a previous receipt from before 2.1, which names no commit
-  ("the previous receipt names no commit for this container"), and a previous
-  image that is no longer on the box; then only the config rolled back. Use
+- Code: the code target is the lock's `previous.containers`. When `bay up` moves a pin, it
+  records there the commit and the image that each build container of the project ran before
+  that `bay up`, from the receipt the plan read. Plain rollback asks the box to point `:latest`
+  of each container at `<image>:<commit12>` of that commit, then the deploy runs. The record waits
+  in the lock like `previous` itself, so a later deploy of the box env does not move it. The
+  result lists the targets in `code_targets`. When the box cannot do it, the container keeps its
+  image and the result says so: `code_kept` in the JSON, and `code: kept <container> (<reason>)`
+  in the output. The usual reasons are a container that the lock names with `commit: null` ("the
+  lock names no commit for this container", for example a receipt from before 2.1), and an image
+  that is no longer on the box; then only the config rolled back. Use
   `bay rollback --to <commit>` to move the code: it refuses instead of skipping.
 - Freeze: Bay sets `frozen = true` and `frozen_commit` on the environment in
   the lock. `frozen_commit` is the commit that the rollback went **to**: the
@@ -698,14 +706,8 @@ it. The two pins swap, so a second rollback undoes the first. Bay refuses when t
   descendant of `frozen_commit`) clears the freeze. A `bay up` to the same or an
   older commit, or to a commit Bay cannot order against it, keeps it.
 
-**Plain rollback is safe only straight after the bad `bay up`.** The config target (`previous` in
-the lock) and the code target (`<env>.prev.json` on the box) are two records, and only the lock's
-one waits. Any deploy of the box env that reaches the container pass after the bad `bay up` rotates `<env>.prev.json` to the
-bad state: a second `bay up` that changes nothing, or a `bay up` for another project of the same
-box env. A plain rollback then moves the pin back, and its code target is the image that already
-runs, so the code stays and only the config rolls back. After any later deploy of that box env,
-use `bay rollback --to <commit>`: it names the code itself and refuses when the image is not on
-the box.
+A lock written before 2.2.0 has no `previous.containers`. Then the code target is the box's
+`<env>.prev.json`, which every deploy of the box env rotates, and the result says so in a note.
 
 **The rollback plan and its verdict.** `bay rollback` plans, then applies, like `bay up`. It has
 no `--plan-id`. A verdict of `blocked` (exit 20) or `stale` (exit 30) stops it, and `--force`
@@ -748,9 +750,8 @@ container uses, and every volume that Bay makes has a name (`<stack_name>_<volum
 
 In `branch` mode a push to the deploy branch can put bad code on the box after your last
 `bay up`. A push stamps the current receipt (`<env>.json`) for that container. It never
-touches `<env>.prev.json` or the lock's `previous`. Only a deploy that reaches the container
-pass rotates `<env>.prev.json`, and only `bay up` and `bay rollback` move `previous`. So plain
-`bay rollback` goes to the state before your last `bay up`. That skips the last `bay up`'s
+touches the lock's `previous` or its `previous.containers`. Only `bay up` and `bay rollback`
+move them. So plain `bay rollback` goes to the state before your last `bay up`. That skips the last `bay up`'s
 code too, and it can restore older code than the last good push. To undo only the bad push:
 
 ```bash
@@ -774,17 +775,16 @@ box by itself (see [build-pipeline.md](build-pipeline.md)).
 
 The happy path names one verb:
 
-1. Straight after a bad `bay up`: `bay rollback <env> --project <p>`. It goes back to the previous
-   pin and to the image of the previous receipt.
-2. For an older commit, or after any later deploy of the box env: `bay rollback <env> --project <p>
-   --to <commit>`. The image `<image>:<commit12>` must be on the box (see "How far back `--to`
+1. After a bad `bay up`: `bay rollback <env> --project <p>`. It goes back to the previous
+   pin and to the code the lock records in `previous.containers`.
+2. For an older commit: `bay rollback <env> --project <p> --to <commit>`. The image `<image>:<commit12>` must be on the box (see "How far back `--to`
    reaches" above).
 3. To go forward: push the fix, wait until its build has tagged the image (in `pin` mode the
    build ends with the alert `build.held`), then `bay up`.
 
 With `track = "pin"` every push already holds, so the freeze adds nothing you can see.
-Plain `bay rollback` moves the pin back and points the code at the image of the previous
-receipt, and skips the code move (`code_kept`) when that image is not on the box. After that skip
+Plain `bay rollback` moves the pin back and points the code at the commit in
+`previous.containers`, and skips the code move (`code_kept`) when that image is not on the box. After that skip
 the env is half rolled back: the config is the old pin, and the box still runs the newer code.
 Pin mode means the code follows the pin, and here it does not.
 `bay rollback --to <commit>` refuses before anything moves when `<image>:<commit12>` is not
@@ -809,8 +809,9 @@ What you see in the half rolled-back state:
   (`the box runs code <running>; bay up deploys <wanted> (track = "pin")`) appears when WANTED is
   another commit, for example `--at <the rolled-back commit>`. The plan also prints that the env is
   frozen. It does not check that the image is on the box.
-- `bay show` reads only the image references and config hashes of the receipt, so it has no word for
-  the code. It says `behind` while HEAD is ahead of the pin, and `HALF` after a failed `bay up`.
+- `bay show` names the code that each build container runs. It says `behind` while HEAD is ahead
+  of the pin and the box does not run HEAD, `ahead` when the box runs HEAD, and `HALF` after a failed
+  `bay up`.
 - The stop for a missing image happens only in `bay up`, before any container changes.
 
 Straight after `bay adopt`, `bay rollback` is refused with "the previous pin
@@ -1043,7 +1044,8 @@ the image of every container (see [deploy-receipt.md](deploy-receipt.md)).
 - `branch` (the default): a push deploys new code under the pinned config. The
   code commit and the config commit can then differ, and that is expected.
   `bay plan` prints one information line, `code at <commit>, config pinned at
-  <commit>`. It is not a step.
+  <commit>`. When WANTED is not the code that runs (a held push), the line
+  ends with `, WANTED <commit>`. The line is not a step.
 - `pin`: only `bay up` deploys code. When a container runs another commit than
   the one `bay up` would pin, `bay plan` shows a step of kind `image`, action
   `update`, risk `safe`.
@@ -1065,7 +1067,8 @@ commit), with `git merge-base --is-ancestor`:
 | The running commit is | `bay up` does |
 |---|---|
 | newer than the pin (a push deployed it after the pin) | keeps the code: no code target, `:latest` stays. The plan prints `code at <running>, config pinned at <pin>` and lists the container in `code.keep`. Only the config changes. |
-| the same as the pin, or older (a held build, the first deploy) | points `:latest` at the pin's image, as above |
+| older than the pin (a held build, or a build not deployed yet) | points `:latest` at the pin's image, as above. The plan shows a step of kind `image`, action `update`, risk `safe`: `the box runs code <running>; bay up deploys <pin> (a held build, or a build not deployed yet); with no image for <pin> on the box, :latest stays`. One step per container, and none when another step already names the container. |
+| the same as the pin | points `:latest` at the pin's image. No step. |
 | unknown (a commit in neither the checkout nor the cache, or on another branch) | refuses: `cannot order <pin> and <running>; fetch the repo or pass --force-code` |
 
 `bay plan --force-code` and `bay up --force-code` turn the refusal into a step
@@ -1095,10 +1098,18 @@ box receipt), and one status word per environment:
 | Status | Meaning |
 |---|---|
 | `ok` | WANTED, PINNED and RUNNING agree. |
-| `behind` | The project's HEAD is ahead of the pin. Run `bay plan`. |
+| `ahead` | The project's HEAD is ahead of the pin, and every build container of the project in RUNNING runs that commit: a push deployed it. Run `bay up` to pin it. |
+| `behind` | The project's HEAD is ahead of the pin, and the box does not run WANTED yet. Run `bay plan`. |
 | `drift` | The box runs something else than the pin: the receipt differs from the one `bay up` recorded, or the fleet pins a commit this environment never got. |
 | `unknown` | The box was not read, has no receipt, or `bay up` never ran here. |
 | `HALF` | The last `bay up` failed or never reported back. |
+
+Bay checks the words in this order: `HALF`, `unknown`, `drift`, `ahead`, `behind`, `ok`.
+
+RUNNING also names the code: `<container> code <commit12>` for each build container of the
+project in the receipt, and `code ?` when the receipt names no commit for it (see
+[deploy-receipt.md](deploy-receipt.md)). `bay show --json` has the same map in
+`envs[].running.code`, and each container in `envs[].running.boxes[].containers[]` has `commit`.
 
 `bay show --routes` prints the fleet's tailnet routes instead, each with
 WANTED (`bay.fleet.toml`), PINNED (the compiled `tailnet_proxies`) and RUNNING
@@ -1243,8 +1254,8 @@ know.
   The image is the reference the deploy asked for (`image_ref`), so a webhook
   build that stamps a new commit into the receipt is not drift either.
 - `kind` is one of `container`, `volume`, `database`, `database_user`,
-  `secret`, `resource`, `tailnet`, `route`, `fleet`, `image` (`track = "pin"`
-  only, see "Code and config"). `action` is one of `create`,
+  `secret`, `resource`, `tailnet`, `route`, `fleet`, `image` (the code moves,
+  see "Code and config"). `action` is one of `create`,
   `update`, `remove`, `rename`, `move`, and for a box step also `recreate`
   and `start`. A `route` step has `route_added`, `route_changed` or
   `route_removed`, and names the route in `resource`.
@@ -1283,7 +1294,8 @@ and the next write stores version 2.
     "result": "ok",
     "plan_id": "3f2a9c0d1e2b",
     "last_receipt_sha256": "<64 hex>",
-    "previous": {"commit": "<sha>", "deployed_at": "...", "receipt_sha256": "<64 hex>"},
+    "previous": {"commit": "<sha>", "deployed_at": "...", "receipt_sha256": "<64 hex>",
+                 "containers": {"webapp": {"commit": "<12 hex>", "image": "<image>:<12 hex>"}}},
     "adopted": {"...": "..."}
   }
 }
@@ -1302,6 +1314,11 @@ and the next write stores version 2.
   removes them. Merge the `[deploy.<env>]` tables into every deploy branch.
 - `result` is `pending` while a deploy runs, then `ok` or `failed`.
 - `previous` is one level of history: enough for `bay rollback`.
+- `previous.containers` (since 2.2.0) maps each build container of the project to the
+  `commit` and `image` it ran before the `bay up` that set `previous`, from the receipt the
+  plan read. `commit` is null when the receipt named none. Plain `bay rollback` takes its code
+  target from it. A lock written before 2.2.0 has no map: `bay rollback` then falls back to the
+  box's `<env>.prev.json`. Bay records no map when the plan did not read the box.
 - `adopted.from_fleet_commit` is written by `bay adopt`: the fleet commit the
   project was read from before its `bay.toml` moved into the app repo. While
   an environment has it and no `previous`, `bay rollback` is refused.
