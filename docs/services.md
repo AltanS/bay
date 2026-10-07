@@ -274,6 +274,18 @@ services:
 | `secrets` | (none) | Docker build secrets mounted via `--secret` (BuildKit) |
 | `token` | (none) | Vault reference to an access token for private repos |
 
+`bay compile` also writes these keys for a project whose `bay.toml` lives in the
+app repo. Never write them by hand (see [build-pipeline.md](build-pipeline.md),
+"Hold guard" and "Config-only push"):
+
+| Field | Description |
+|-------|-------------|
+| `track`, `frozen` | `[deploy.<env>] track` and the rollback freeze: whether a push may deploy. |
+| `bay_toml_path` | Path of the `bay.toml` in the repo. |
+| `bay_toml_hash` | Canonical hash of the pinned `bay.toml` (`sha256:<hex>`). A push that changes it is held. |
+| `bay_build_hash` | Canonical hash of the `[build]` part of the pinned `bay.toml` (`python -m bay_reconcile.tomlhash --section build`). A push is config-only only when this matches. |
+| `bay_toml_files` | The files the mounts read, relative to the repo root. |
+
 ### Build Strategy
 
 The `build.strategy` field controls where images are built. Set a server-level default in `group_vars`:

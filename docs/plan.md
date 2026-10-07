@@ -583,8 +583,8 @@ What it does:
 The compiled output does not change. On the box a mounted file stays at
 `config/<name>/<from>` (or `config/<adopted path>`), wherever the file lives.
 A project that builds from source gains `build.bay_toml_hash`,
-`build.bay_toml_path` and `build.bay_toml_files` (the hold guard and the
-config-only rule, see [Code and config](#code-and-config)). The container hash
+`build.bay_build_hash`, `build.bay_toml_path` and `build.bay_toml_files` (the
+hold guard and the config-only rule, see [Code and config](#code-and-config)). The container hash
 leaves the `build` table out, so the plan shows no step for that: the first
 `bay up` after the adopt writes them to the box.
 
@@ -737,7 +737,9 @@ box receipt), and one status word per environment:
 WANTED (`bay.fleet.toml`), PINNED (the compiled `tailnet_proxies`) and RUNNING
 (the routes the ingress box receipt lists) and one status: `ok`, `pending`
 (the fleet file differs from the compiled file), `drift` (the box serves
-something else) or `unknown` (no receipt lists routes).
+something else) or `unknown` (no receipt lists routes). No receipt lists
+routes yet, so RUNNING is `unknown` for every route today, and `bay status`
+does not show routes at all.
 
 ## bay compile
 
@@ -745,8 +747,9 @@ something else) or `unknown` (no receipt lists routes).
 same temporary copy of the fleet that `bay plan` and `bay up` compile. A
 project with no pinned commit is left out, with a note on stderr.
 `bay compile --working-tree` reads the fleet and the checkout you stand in as
-they are instead. A repo project you do not stand in is not read, and the
-compile names it. Use it while you develop, never to deploy.
+they are instead. It reads only that one checkout: a repo project you do not
+stand in is not read (not from the repo cache either), and the compile names
+it. Use it while you develop, never to deploy.
 
 ## The project folder
 

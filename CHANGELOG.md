@@ -156,7 +156,13 @@ needing manual action is called out under **Upgrade notes**. Entries for
   its commit tag, the container keeps running, the circuit breaker is not
   touched, and the new alert `build.held` (warn) says "config changed, run bay
   up". A comment edit does not hold. `track = "pin"` and a frozen environment
-  hold every push. `bay up` releases a hold.
+  hold every push. So `build.held` fires on every push of a `track = "pin"`
+  project, by design. `bay up` releases a hold.
+- `bay compile` also writes `build.bay_build_hash`: the canonical hash of the
+  `[build]` keys (top level, `[deploy.<env>]` and `[services.<name>]`), from
+  `python -m bay_reconcile.tomlhash --section build`. A push is config-only only
+  when this hash matches: a `[build]` edit (a new Dockerfile, a build arg) always
+  builds.
 - The receipt names the `commit` and the `image` of every container, plus
   `image_ref` (the reference the deploy asked for). A webhook build stamps the
   new commit into the receipt. Additive: `receipt_version` 1, `status_version` 2.
@@ -209,6 +215,27 @@ needing manual action is called out under **Upgrade notes**. Entries for
 - A webhook build now keeps the `com.bay.config-hash` label of the container it
   replaces, so the next `bay up` no longer recreates it for `no config-hash
   label` (M116/03).
+- `bay up` of several boxes (a box move) stops at the first failed deploy. The
+  old box is never deployed after the new one failed, so its container stays.
+- After a failed health check, `rebuild.sh` removes the failed `<image>:<commit12>`
+  tag and records the commit in `/var/lib/bay/failed-commits/<svc>`. `bay up` and
+  the code pin never promote that commit again ("failed its health check on this
+  box, so it is never deployed again; push a fix"). A later healthy build of the commit clears the record.
+- `_promote_latest` keeps `:previous` when `:latest` already is the candidate image
+  (a rebuild of the running commit), so the health-check rollback keeps the last
+  good image. The pull path does the same.
+- On a build server, the previous commit of a config-only check falls back to the
+  checkout's last build only when `<image>:<commit12>` is in the registry.
+- The box-move notes name volumes with the stack prefix (`<stack_name>_<volume>`),
+  the name Docker uses on the box.
+- A tailnet route upstream is never `localhost` or a loopback address.
+- `plans/` prune refuses, with a warning, when a lock cannot be read.
+- `:previous` rotates at promote time, before the health check: it is the image
+  that ran before the push.
+- `bay compile --working-tree` reads only the checkout you stand in. Another repo
+  project is not read, not from the repo cache either, and the compile names it.
+- `bay status` does not show routes yet. `bay show --routes` prints RUNNING as
+  `unknown` until a receipt lists routes.
 
 ### Upgrade notes
 
@@ -254,6 +281,9 @@ needing manual action is called out under **Upgrade notes**. Entries for
   with `python3 -c 'import tomllib'`.
 - Images built before this release have no commit tag. `bay rollback --to`
   works only for commits built after the upgrade.
+- A config-only push needs `build.bay_build_hash` on the box. Until the next
+  `bay up` writes it, every push of the project builds as before. The same deploy
+  creates `/var/lib/bay/failed-commits` (group `docker`, mode `0775`).
 - The config-only rule lives in `rebuild.sh`. Run `bay up` for an adopted
   project before you push its adopt commit (plus `bay deploy <env> --tags
   git_deploy` on build servers). A box with the old script builds and deploys

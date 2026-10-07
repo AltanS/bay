@@ -62,7 +62,10 @@ the push may deploy. The rules for each webhook build:
    `docker buildx imagetools create` (a failure is `build.failed`, "Registry
    retag").
 2. **Hold guard.** `_hold_reason` decides. The push is held when:
-   - the compiled `build.track` is `pin` (`[deploy.<env>] track = "pin"`);
+   - the compiled `build.track` is `pin` (`[deploy.<env>] track = "pin"`).
+     This holds every push, so `build.held` (warn) fires on every push of a
+     `pin` project, by design: each one waits for `bay up`. Mute it per
+     service with a TTL'd override (docs/alerting.md) if that is too loud;
    - the compiled `build.frozen` is true (`bay rollback` froze the env);
    - the `bay.toml` at the pushed commit has another canonical hash than the
      pinned one (`build.bay_toml_hash`, path `build.bay_toml_path`). The hash
@@ -82,7 +85,10 @@ the push may deploy. The rules for each webhook build:
    circuit breaker is neither counted nor reset. A remote build that is held
    sends no pull signal.
 4. **Deploy.** When the push may deploy, `_promote_latest` tags the old
-   `:latest` as `:previous` and moves `:latest` to `:<commit12>`. When
+   `:latest` as `:previous` and moves `:latest` to `:<commit12>`. So
+   `:previous` rotates at promote time, before the health check: it is the
+   image that ran before this push, not the last image that passed a check.
+   A held build or a config-only push does not rotate it. When
    `:latest` already is that image (a rebuild of the running commit),
    `:previous` stays where it was, so the health-check rollback still has the
    last good image. The pull path does the same: the running image becomes
