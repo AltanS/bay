@@ -125,9 +125,13 @@ When a hand-written `services.yml` has `backup: true`, the role detects the meth
 
 | Image contains | Method | Dump command |
 |---------------|--------|-------------|
-| `postgres` | `pg_dump` | `docker compose exec -T <name> pg_dump -U <user> <db>` |
-| `mysql` or `mariadb` | `mysql` | `docker compose exec -T <name> mysqldump -u <user> <db>` |
-| `redis` | `redis` | BGSAVE + `docker compose cp <name>:/data/dump.rdb` |
+| `postgres` | `pg_dump` | `docker exec <name> pg_dump -U <user> <db>` |
+| `mysql` or `mariadb` | `mysql` | `docker exec -e MYSQL_PWD=<password> <name> mysqldump -u <user> <db>` |
+| `redis` | `redis` | `docker exec <name> redis-cli BGSAVE`, then `docker cp <name>:/data/dump.rdb -` |
+
+`<name>` is the accessory key in `services.yml`. Bay creates the accessory container with
+`docker run` under that name, so the script reaches it with `docker exec` and `docker cp`.
+The rendered compose file only describes the stack. The script does not use `docker compose`.
 
 If the image doesn't match any pattern and no explicit `method:` is set, the deploy **fails with an error** — it never silently falls back.
 
@@ -155,9 +159,9 @@ volume whose container runs on the host:
   (UTC) and `keep` (whole days). Without either, `backup_schedule` and `backup_retain` apply.
 - Nothing runs while `backup_enabled` is false. The plan says so: `volume backups are
   compiled, but backup_enabled is false: no backup runs`.
-- A new or changed volume backup is a plan step of kind `backup`. `bay up` deploys the whole
-  box environment, and with such a step it also runs the `backup` tag, so the script and the
-  timer are installed in the same deploy.
+- A new or changed volume backup is a plan step of kind `backup`.
+  `bay up` deploys the whole box environment, and with such a step it also runs the `backup`
+  tag, so the script and the timer are installed in the same deploy.
 - Like an accessory, a volume that is gone keeps its timer and its repo. Remove them by hand.
 - `backup = false` on the mount leaves the volume out. A volume from `bay import` carries it,
   because the old YAML fleet backed up no volume. Drop it to start the backups.
@@ -208,11 +212,15 @@ set -a; . /opt/<stack>/backup/restic.env; set +a
 export RESTIC_REPOSITORY="s3:$BACKUP_S3_ENDPOINT/$BACKUP_S3_BUCKET/$BACKUP_S3_PREFIX/$(hostname)/headscale"
 
 restic snapshots                                   # pick the snapshot to restore
-docker compose -f /opt/<stack>/docker-compose.yml stop headscale
+docker stop headscale
 restic dump latest headscale.tar | tar -x -C /opt/headscale/data --strip-components=1
-docker compose -f /opt/<stack>/docker-compose.yml start headscale
+docker start headscale
 bay gateway nodes                             # confirm nodes + IPs came back
 ```
+
+The container is named `headscale` (`backup_headscale_container`). Bay creates it with
+`docker run`, so stop and start it with `docker stop` and `docker start`. Do not use
+`docker compose` here: the rendered compose file only describes the stack.
 
 (`--strip-components=1` drops the leading `headscale/` directory that `docker cp` puts in
 the tar so files land directly under `/opt/headscale/data`.)
