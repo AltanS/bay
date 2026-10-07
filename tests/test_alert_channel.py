@@ -23,6 +23,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -1207,3 +1208,102 @@ def test_the_telegram_allowlist_has_no_dead_entries():
         f"_TELEGRAM_ALLOWED entries no longer contain a Telegram request: {dead}. "
         "Remove them — an unused exemption silently re-opens the hole."
     )
+
+
+# ── Delivery log (M118 gap 17) ───────────────────────────────────────────
+
+
+def _alert_lines(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if line.startswith("alert ")]
+
+
+def test_bay_notify_logs_every_delivery(sink, tmp_path):
+    """One stderr line per delivery attempt, success or failure, with no env flag.
+
+    stderr of a systemd unit is its journal, so `journalctl -u <unit>` shows
+    whether an alert left the box. Before this only a failure was recorded,
+    and only when the caller set BAY_ALERT_FAILURE_LOG.
+    """
+    url, requests = sink
+    env = {"BAY_ALERT_FAILURE_LOG": ""}  # no flag of any kind
+
+    # Success: the level is the registry's (build.failed is warn).
+    proc = _run(_render(alert_webhook_url=url, alert_webhook_format="raw"),
+                'bay_notify build.failed "hello"\necho SURVIVED', env)
+    assert proc.returncode == 0, proc.stderr
+    assert "SURVIVED" in proc.stdout
+    assert len(requests) == 1
+    assert _alert_lines(proc.stderr) == ["alert build.failed warn sent webhook"]
+
+    # Unreachable sink: one failure line, and the caller still exits 0.
+    proc = _run(_render(alert_webhook_url="http://127.0.0.1:1/hook", alert_webhook_timeout=2),
+                'bay_notify build.failed "hello"\necho SURVIVED', env)
+    assert proc.returncode == 0, proc.stderr
+    assert "SURVIVED" in proc.stdout
+    assert _alert_lines(proc.stderr) == ["alert build.failed failed webhook unreachable"]
+
+    # An explicit recipient logs under its name, next to the legacy sink.
+    snippet = _render_with(
+        [{"name": "ops", "adapter": "webhook", "min_level": "debug",
+          "config": {"url": url, "format": "raw"}}],
+        alert_webhook_url=url, alert_webhook_format="raw",
+    )
+    proc = _run(snippet, 'bay_notify alerts.test "hi"', env)
+    assert proc.returncode == 0, proc.stderr
+    assert _alert_lines(proc.stderr) == [
+        "alert alerts.test info sent webhook",
+        "alert alerts.test info sent ops",
+    ]
+
+    # A recipient that fails gives its reason; an HTTP error code is named.
+    snippet = _render_with(
+        [{"name": "dead", "adapter": "webhook", "min_level": "debug",
+          "config": {"url": "http://127.0.0.1:1/nope", "format": "raw"}}]
+    )
+    proc = _run(snippet, 'bay_notify alerts.test "hi"\necho SURVIVED', env)
+    assert proc.returncode == 0, proc.stderr
+    assert "SURVIVED" in proc.stdout
+    assert _alert_lines(proc.stderr) == ["alert alerts.test failed dead unreachable"]
+
+    # An ID the registry does not know logs level `unknown`.
+    proc = _run(_render(alert_webhook_url=url, alert_webhook_format="raw"),
+                'bay_notify no.such_alert "x"', env)
+    assert proc.returncode == 0, proc.stderr
+    assert _alert_lines(proc.stderr) == ["alert no.such_alert unknown sent webhook"]
+
+    # A muted alert logs that it was muted, and nothing is sent.
+    policy = tmp_path / "alert-overrides"
+    policy.write_text(
+        f"BAY_ALERTS_SCHEMA=1\nBAY_ALERTS_MUTE=alerts.test\nBAY_ALERTS_MUTE_UNTIL={int(time.time()) + 3600}\n"
+    )
+    before = len(requests)
+    proc = _run(_render(alert_webhook_url=url, alert_webhook_format="raw",
+                        alert_policy_path=str(policy)),
+                'bay_notify alerts.test "x"', env)
+    assert proc.returncode == 0, proc.stderr
+    assert len(requests) == before
+    assert _alert_lines(proc.stderr) == ["alert alerts.test info muted"]
+
+    # No sink configured: nothing is sent and nothing is logged.
+    proc = _run(_render(alert_webhook_url=""), 'bay_notify alerts.test "x"', env)
+    assert proc.returncode == 0, proc.stderr
+    assert _alert_lines(proc.stderr) == []
+
+
+def test_delivery_log_never_fails_the_caller_with_stderr_closed(sink):
+    url, _ = sink
+    proc = _run(_render(alert_webhook_url=url, alert_webhook_format="raw"),
+                'bay_notify alerts.test "x" 2>&-\necho SURVIVED')
+    assert proc.returncode == 0, proc.stderr
+    assert "SURVIVED" in proc.stdout
+
+
+def test_alert_level_table_matches_the_registry():
+    """The rendered _bay_alert_level covers every registry ID with its level."""
+    registry = yaml.safe_load((Path(__file__).resolve().parent.parent / "alerts" / "registry.yml").read_text())
+    snippet = _render()
+    body = "\n".join(f'printf "%s=%s\\n" {i} "$(_bay_alert_level {i})"' for i in sorted(registry))
+    proc = _run(snippet, body)
+    assert proc.returncode == 0, proc.stderr
+    got = dict(line.split("=", 1) for line in proc.stdout.splitlines())
+    assert got == {i: registry[i]["level"] for i in registry}

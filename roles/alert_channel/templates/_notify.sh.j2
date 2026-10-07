@@ -35,6 +35,16 @@
       BAY_ALERT_FOOTER           appended to every message    (default: empty)
       BAY_ALERT_FAILURE_LOG      append delivery failures here (default: off)
 
+  Every delivery attempt also writes one line to stderr, with no flag, so it
+  lands in the journal of the unit that sent it (journalctl -u <unit>):
+
+      alert <id> <level> sent <adapter>
+      alert <id> failed <adapter> <reason>     reason: http_code=<n> | unreachable
+      alert <id> <level> muted
+
+  <adapter> is telegram, webhook (the legacy pair) or the recipient's name.
+  <level> comes from alerts/registry.yml at render time, else `unknown`.
+
   Credentials are NOT baked in. They live in one root-owned env file
   (/etc/bay/alert.env, 0600 root:root, rendered by roles/alert_channel).
   systemd units set EnvironmentFile=; cron and manual runs fall back to the
@@ -138,8 +148,42 @@ _bay_strip_tags() {
   _bay_html_unescape "${s}"
 }
 
-# Record a delivery failure when the caller asked for one. Never fails.
+# The severity of an alert ID, from alerts/registry.yml at render time.
+_bay_alert_level() {
+  case "$1" in
+{% set _bay_registry = none | bay_alert_registry %}
+{% for _lvl in ('debug', 'info', 'warn', 'critical') %}
+{% set _bay_lvl_ids = [] %}
+{% for _id in _bay_registry | sort %}
+{% if (_bay_registry[_id].level | default('')) == _lvl %}
+{% set _ = _bay_lvl_ids.append(_id) %}
+{% endif %}
+{% endfor %}
+{% if _bay_lvl_ids %}
+    {{ _bay_lvl_ids | join('|') }}) printf '%s' {{ _lvl }} ;;
+{% endif %}
+{% endfor %}
+    *) printf '%s' unknown ;;
+  esac
+}
+
+# One stderr line per successful delivery: `alert <id> <level> sent <adapter>`.
+# bay_notify sets the ID and level for the senders it calls. The write never
+# fails the caller, even with stderr closed.
+_bay_log_sent() {
+  printf 'alert %s %s sent %s\n' "${_bay_alert_cur_id:-unknown}" \
+    "${_bay_alert_cur_level:-unknown}" "$1" >&2 2>/dev/null || true
+}
+
+# One stderr line per failed delivery: `alert <id> failed <adapter> <reason>`,
+# always. Plus a record in BAY_ALERT_FAILURE_LOG when the caller asked for
+# one. $1 is the sink name of that record, $2 the HTTP code (000: curl could
+# not connect), $3 the adapter of the stderr line (default: $1). Never fails.
 _bay_log_send_failure() {
+  local reason="http_code=$2"
+  [[ "$2" == "000" ]] && reason="unreachable"
+  printf 'alert %s failed %s %s\n' "${_bay_alert_cur_id:-unknown}" \
+    "${3:-$1}" "${reason}" >&2 2>/dev/null || true
   [[ -z "${BAY_ALERT_FAILURE_LOG:-}" ]] && return 0
   mkdir -p "$(dirname "${BAY_ALERT_FAILURE_LOG}")" 2>/dev/null || true
   printf '[%s] %s send failed sink=%s http_code=%s\n' \
@@ -158,7 +202,10 @@ _bay_send_telegram() {
     --data-urlencode "parse_mode=HTML" \
     --data-urlencode "disable_web_page_preview=true" \
     2>/dev/null) || http_code="000"
-  [[ "${http_code}" == "200" ]] && return 0
+  if [[ "${http_code}" == "200" ]]; then
+    _bay_log_sent telegram
+    return 0
+  fi
   _bay_log_send_failure telegram "${http_code}"
   return 0
 }
@@ -195,8 +242,11 @@ _bay_send_webhook() {
         --data-binary @- 2>/dev/null) || http_code="000"
       ;;
   esac
-  [[ "${http_code}" == 2* ]] && return 0
-  _bay_log_send_failure "${BAY_ALERT_FORMAT}" "${http_code}"
+  if [[ "${http_code}" == 2* ]]; then
+    _bay_log_sent webhook
+    return 0
+  fi
+  _bay_log_send_failure "${BAY_ALERT_FORMAT}" "${http_code}" webhook
   return 0
 }
 
@@ -254,7 +304,10 @@ _bay_send_r{{ loop.index }}() {
     --data-urlencode "parse_mode=HTML" \
     --data-urlencode "disable_web_page_preview=true" \
     2>/dev/null) || http_code="000"
-  [[ "${http_code}" == "200" ]] && return 0
+  if [[ "${http_code}" == "200" ]]; then
+    _bay_log_sent {{ _rn.name | default('unnamed') | quote }}
+    return 0
+  fi
   _bay_log_send_failure {{ _rn.name | default('unnamed') | quote }} "${http_code}"
   return 0
 {% else %}
@@ -289,7 +342,10 @@ _bay_send_r{{ loop.index }}() {
     -H {{ (_hk ~ ': ' ~ _hv) | quote }} \
 {% endfor %}
     --data-binary @- 2>/dev/null) || http_code="000"
-  [[ "${http_code}" == 2* ]] && return 0
+  if [[ "${http_code}" == 2* ]]; then
+    _bay_log_sent {{ _rn.name | default('unnamed') | quote }}
+    return 0
+  fi
   _bay_log_send_failure {{ _rn.name | default('unnamed') | quote }} "${http_code}"
   return 0
 {% endif %}
@@ -364,9 +420,17 @@ _bay_route() {
 bay_notify() {  # bay-alert-id: forwarder
   local alert_id="$1"
   local message="${BAY_ALERT_HEADER:-}$2${BAY_ALERT_FOOTER:-}"
+  # Read by _bay_log_sent / _bay_log_send_failure in the senders below (bash
+  # locals are visible to the functions this one calls).
+  local _bay_alert_cur_id="${alert_id}"
+  local _bay_alert_cur_level
+  _bay_alert_cur_level="$(_bay_alert_level "${alert_id}")" || _bay_alert_cur_level=unknown
   # A mute suppresses every sink, legacy included — otherwise "disable this
   # alert" would still deliver to the two sinks people actually have.
-  _bay_muted "${alert_id}" && return 0
+  if _bay_muted "${alert_id}"; then
+    printf 'alert %s %s muted\n' "${alert_id}" "${_bay_alert_cur_level}" >&2 2>/dev/null || true
+    return 0
+  fi
   _bay_send_telegram "${message}"
   _bay_send_webhook "${message}"
   _bay_route "${alert_id}" "${message}"

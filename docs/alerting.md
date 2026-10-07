@@ -596,6 +596,43 @@ not run. That is the structural fix for the GH#33 class of bug.
   or `&` produces malformed HTML, Telegram rejects it with a 400, and the
   failure alert is lost exactly when it matters most.
 
+### The delivery log
+
+Every shell emitter writes one line to stderr for each delivery attempt. No
+setting turns it on, and it is never off. The line goes to the journal of the
+unit that sent the alert. For a build, that is `journalctl -u bay-build@<container>`.
+For the stall watchdog, it is `journalctl -u bay-trigger-watchdog`.
+
+The line has one of three forms:
+
+```
+alert <id> <level> sent <adapter>
+alert <id> failed <adapter> <reason>
+alert <id> <level> muted
+```
+
+- `<id>` is the alert ID, for example `build.held`.
+- `<level>` is the alert's severity from `alerts/registry.yml`, as the
+  rendered script knows it. An ID that is not in the registry logs `unknown`.
+- `<adapter>` is `telegram` or `webhook` for the two legacy sinks, or the
+  `name` of a recipient.
+- `<reason>` is `http_code=<n>` when the sink answered with an error, or
+  `unreachable` when curl could not connect.
+
+A muted alert logs the `muted` line and sends nothing. A sink with no URL or
+no token sends nothing and logs nothing. A failed write of the line never
+fails the script. The file `${stack_dir}/state/telegram-failures.log` keeps
+working as before, for callers that set `BAY_ALERT_FAILURE_LOG`.
+
+To check that an alert left the box:
+
+```bash
+journalctl -u bay-build@shop | grep 'alert build.held'
+```
+
+The webhook receiver and the container monitor send their alerts from Python.
+They do not write this line.
+
 ### Secret hygiene, honestly
 
 Alert credentials are no longer inlined into rendered emitter scripts. They
@@ -635,8 +672,10 @@ bay alerts test <alert.id>
 
 **Nothing arrives.** Check the URL is non-empty and the vault key is lowercase
 (see above). Then confirm the alert clears the recipient's `min_level` —
-`alerts list` shows effective state, which is usually the answer. Delivery
-failures land in `${stack_dir}/state/telegram-failures.log`.
+`alerts list` shows effective state, which is usually the answer. Then read
+the delivery log in the journal of the sending unit (see *The delivery log*):
+`alert <id> failed <adapter> <reason>` names the sink and the reason. Build
+failures also land in `${stack_dir}/state/telegram-failures.log`.
 
 **One alert never arrives, others do.** It is probably below that recipient's
 `min_level`, or muted. `bay alerts test <id>` says exactly where it would
