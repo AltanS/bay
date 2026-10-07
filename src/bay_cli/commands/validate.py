@@ -2730,17 +2730,52 @@ def _validate_memswap_limits(
         result.ok(f"Memory limits  {checked} memswap_limit setting(s) consistent with mem_limit")
 
 
+def _config_file_places(
+    root: Path, rel: str, files_root: Path | None
+) -> list[Path]:
+    """The places a ``config_files`` entry may live, in the order the deploy reads them.
+
+    The entry is ``<name>/<from>``. The compile and the deploy take it from
+    the scratch compile's ``files/<name>/<from>`` (where a file mounted from
+    beside a project's ``bay.toml`` is placed, :func:`bay_cli.plan._map_files`),
+    then from ``projects/<name>/<from>`` at the fleet root, then from the
+    deprecated ``files/<name>/<from>``. ``bay validate`` has no scratch compile,
+    so it uses the last two.
+    """
+    places: list[Path] = []
+    if files_root is not None:
+        places.append(files_root / rel)
+    places.append(root / "projects" / rel)
+    places.append(root / "files" / rel)
+    return places
+
+
+def _show_place(root: Path, files_root: Path | None, place: Path) -> str:
+    """A place as the error text names it: relative to the fleet, or the scratch ``files/``."""
+    if files_root is not None and place.is_relative_to(files_root):
+        return f"the compile's files/{place.relative_to(files_root).as_posix()}"
+    if place.is_relative_to(root):
+        return place.relative_to(root).as_posix()
+    return str(place)
+
+
 def _validate_config_files(
     root: Path,
     services_data: dict[str, Any],
     result: ValidationResult,
+    files_root: Path | None = None,
 ) -> None:
-    """Every ``config_files`` entry must exist under the consumer's ``files/``.
+    """Every ``config_files`` entry must exist where the deploy reads it from.
 
-    deploy_stack copies each entry from ``files/<entry>`` to
+    deploy_stack copies each entry ``<name>/<from>`` to
     ``<stack_dir>/config/<entry>``, and a service that mounts a config it
     never received starts and immediately dies. This used to be found on
     the server, mid-deploy; the default (Gatus) project shipped that way.
+
+    The entry is looked up as :func:`_config_file_places` lists: the compile's
+    files root when ``bay up`` passes one, then ``projects/<name>/<from>``
+    (Bay 2.1: a file beside the project's ``bay.toml``), then the deprecated
+    ``files/<name>/<from>``. The first place that has the file is enough.
     """
     console.header("Config Files")
 
@@ -2758,11 +2793,12 @@ def _validate_config_files(
                 continue
             for rel in config_files:
                 total += 1
-                expected = root / "files" / str(rel)
-                if not expected.is_file():
+                places = _config_file_places(root, str(rel), files_root)
+                if not any(p.is_file() for p in places):
+                    looked = ", ".join(_show_place(root, files_root, p) for p in places)
                     missing.append(
                         f"{kind}.{name}.config_files: '{rel}' has no file at "
-                        f"{expected.relative_to(root) if expected.is_relative_to(root) else expected}"
+                        f"{looked}"
                         f" -- create it, or drop the entry"
                     )
 
@@ -2889,6 +2925,7 @@ def run_validation(
     check_token_scope: bool = False,
     check_webhook_health: bool = False,
     use_probe_cache: bool = True,
+    config_files_root: Path | None = None,
 ) -> ValidationResult:
     """Run all validation checks and return the result.
 
@@ -2914,6 +2951,10 @@ def run_validation(
             every probe and refreshes the cache. Set ``BAY_PROBE_CACHE_DIR``
             to write the cache somewhere else, for example a scratch
             directory in a test.
+        config_files_root: The ``files/`` of the scratch compile ``bay up``
+            deploys from (``bay_config_files_root``). The config-files check
+            looks there first. ``None`` (``bay validate``) checks
+            ``projects/<name>/<from>`` and then ``files/<name>/<from>``.
 
     Returns:
         A ValidationResult with all checks applied.
@@ -2939,9 +2980,9 @@ def run_validation(
         _validate_reserved_names(services_data, result)
         _validate_memswap_limits(services_data, result)
 
-    # 3c. Declared config files exist in the consumer's files/
+    # 3c. Declared config files exist where the deploy reads them
     if services_data is not None:
-        _validate_config_files(root, services_data, result)
+        _validate_config_files(root, services_data, result, config_files_root)
 
     # 3d. The admin account can still get in after hardening
     _validate_admin_ssh_keys(parsed, result)

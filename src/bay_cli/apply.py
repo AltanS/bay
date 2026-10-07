@@ -109,7 +109,13 @@ def default_deploy(
     from bay_cli.healthcheck import new_report_dir, report_dir_vars
     from bay_cli.receipts import deploy_extra_vars
 
-    result = run_validation(cx.fleet_root, box_env, bay_dir=cx.framework_root, show_banner=False)
+    result = run_validation(
+        cx.fleet_root,
+        box_env,
+        bay_dir=cx.framework_root,
+        show_banner=False,
+        config_files_root=config_files_root,
+    )
     if result.total_issues:
         raise BayError(f"validation failed with {result.total_issues} problem(s)")
     # The per-box reconciler reports go to a temp dir outside every working

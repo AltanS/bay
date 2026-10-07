@@ -8,6 +8,22 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [Unreleased]
+
+### Fixed
+
+- `bay up` no longer stops in its pre-deploy validation for a fleet that moved a mounted
+  file beside its `bay.toml` (for example `projects/gatus/config.yaml`, as 2.1 documents).
+  The "Config Files" check read only the deprecated `files/<name>/<from>` and failed with
+  "has no file at files/gatus/config.yaml", while `bay plan` and the deploy accepted the
+  file. The check now looks where the compile and the deploy look: the files root of the
+  `bay up` compile, then `projects/<name>/<from>`, then `files/<name>/<from>`. The error
+  names every place it looked. `bay validate` uses the last two.
+
+### Upgrade notes
+
+- A fleet that moved a mounted file beside its bay.toml can run `bay up` again.
+
 ## [2.1.2] - 2026-10-07
 
 ### Fixed

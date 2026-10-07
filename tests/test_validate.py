@@ -17,6 +17,7 @@ from bay_cli.commands.validate import (
     _load_schema,
     _regions_overlap,
     _to_plain,
+    _validate_config_files,
     _validate_cross_references,
 )
 
@@ -684,3 +685,109 @@ def test_deploy_skip_validate_flag():
     assert "--skip-validate" not in result.output or "Error" not in result.output
     # The key test: it should NOT say "No such option"
     assert "No such option: --skip-validate" not in result.output
+
+
+# ── config_files: where a mounted file may live ─────────────────────────
+
+
+def _config_files_services(*entries: str) -> dict:
+    return {"services": {"gatus": {"image": "example/gatus:1", "config_files": list(entries)}}}
+
+
+def _check_config_files(root: Path, entries: list[str], files_root: Path | None = None):
+    from bay_cli.console.output import set_json_mode
+
+    result = ValidationResult()
+    set_json_mode(True)  # suppress Rich output
+    try:
+        _validate_config_files(root, _config_files_services(*entries), result, files_root)
+    finally:
+        set_json_mode(False)
+    return result
+
+
+def _write(path: Path, text: str = "x: 1\n") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_validate_accepts_a_mount_beside_the_toml(tmp_path: Path):
+    """A file moved beside the project's bay.toml (Bay 2.1) is found without files/."""
+    _write(tmp_path / "projects" / "gatus" / "bay.toml", 'name = "gatus"\n')
+    _write(tmp_path / "projects" / "gatus" / "config.yaml")
+    assert not (tmp_path / "files").exists()
+
+    result = _check_config_files(tmp_path, ["gatus/config.yaml"])
+
+    assert result.total_issues == 0, result.failed
+
+
+def test_validate_still_accepts_the_deprecated_files_place(tmp_path: Path):
+    _write(tmp_path / "files" / "gatus" / "config.yaml")
+
+    result = _check_config_files(tmp_path, ["gatus/config.yaml"])
+
+    assert result.total_issues == 0, result.failed
+
+
+def test_up_validation_reads_the_scratch_files_root(tmp_path: Path):
+    """With the compile's files root, a file only there counts, and run_validation passes it on."""
+    fleet = tmp_path / "fleet"
+    scratch = tmp_path / "scratch" / "files"
+    fleet.mkdir()
+    _write(scratch / "gatus" / "config.yaml")
+
+    assert _check_config_files(fleet, ["gatus/config.yaml"], scratch).total_issues == 0
+    # Without the scratch root the same entry is missing, so the root decides.
+    assert _check_config_files(fleet, ["gatus/config.yaml"]).total_issues == 1
+
+
+def test_up_passes_its_files_root_into_the_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """default_deploy hands config_files_root to run_validation (the call bay up makes)."""
+    from types import SimpleNamespace
+
+    from bay_cli import apply as applymod
+    from bay_cli.commands import ops, validate
+
+    seen: dict = {}
+
+    def fake_validation(root, env, **kw):
+        seen.update(kw)
+        return SimpleNamespace(total_issues=0)
+
+    monkeypatch.setattr(validate, "run_validation", fake_validation)
+    monkeypatch.setattr(ops, "_run_playbook", lambda *a, **k: None)
+    monkeypatch.setattr(ops, "_invalidate_rig_cache", lambda *_: None)
+    monkeypatch.setattr(ops, "_run_post_deploy_healthcheck", lambda *a, **k: None)
+    cx = SimpleNamespace(
+        fleet_root=tmp_path, framework_root=tmp_path, cache_dir=tmp_path / "cache"
+    )
+    monkeypatch.setattr("bay_cli.receipts.deploy_extra_vars", lambda _cx: [])
+
+    applymod.default_deploy(cx, "production", config_files_root=tmp_path / "scratch" / "files")
+
+    assert seen["config_files_root"] == tmp_path / "scratch" / "files"
+
+
+def test_validate_names_every_place_when_the_file_is_in_none(tmp_path: Path):
+    fleet = tmp_path / "fleet"
+    scratch = tmp_path / "scratch" / "files"
+    fleet.mkdir()
+    scratch.mkdir(parents=True)
+
+    result = _check_config_files(fleet, ["gatus/config.yaml"], scratch)
+
+    assert result.total_issues == 1
+    message = result.failed[0]
+    assert "services.gatus.config_files: 'gatus/config.yaml' has no file at" in message
+    assert "the compile's files/gatus/config.yaml" in message
+    assert "projects/gatus/config.yaml" in message
+    assert "files/gatus/config.yaml" in message
+    assert "create it, or drop the entry" in message
+
+    standalone = _check_config_files(fleet, ["gatus/config.yaml"])
+    assert standalone.total_issues == 1
+    assert "compile" not in standalone.failed[0]
