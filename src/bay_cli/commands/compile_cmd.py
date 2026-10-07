@@ -96,7 +96,7 @@ def compile_fleet(
         from bay_cli.plan import compiled_fleet
 
         with compiled_fleet(cx, cwd=Path.cwd()) as comp:
-            for note in [*comp.notes, *comp.file_gaps]:
+            for note in [*comp.notes, *comp.uncommitted]:
                 typer.echo(f"note: {note}", err=True)
             if comp.result is None:
                 for line in comp.errors:

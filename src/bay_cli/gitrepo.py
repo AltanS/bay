@@ -130,6 +130,34 @@ def path_dirty(repo: Path, rel: str | Sequence[str]) -> bool | None:
     return None if out is None else bool(out)
 
 
+def uncommitted_paths(repo: Path, specs: Sequence[str]) -> list[str]:
+    """Untracked or changed files under ``specs``, relative to ``repo``. Empty outside git."""
+    proc = _run(
+        repo, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--", *specs
+    )
+    if proc is None or proc.returncode != 0:
+        return []
+    out: list[str] = []
+    parts = proc.stdout.split("\0")
+    i = 0
+    while i < len(parts):
+        entry = parts[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        status, path = entry[:2], entry[3:]
+        if "R" in status or "C" in status:
+            i += 1  # the source path of a rename follows
+        if status.strip() == "D":
+            continue
+        out.append(path)
+    top = toplevel(repo)
+    if top is not None and top.resolve() != repo.resolve():
+        prefix = repo.resolve().relative_to(top.resolve()).as_posix() + "/"
+        out = [p[len(prefix) :] if p.startswith(prefix) else p for p in out]
+    return sorted(set(out))
+
+
 def is_bare(repo: Path) -> bool:
     return _out(repo, "rev-parse", "--is-bare-repository") == "true"
 

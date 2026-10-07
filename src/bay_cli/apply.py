@@ -13,6 +13,10 @@
 3. Compile the fleet into its services file (hash header).
 4. Commit the fleet repo: ``bay: up <name> <env> <short sha>``.
 5. Run today's deploy for the box env, limited to the ``deploy_stack`` tag.
+   The deploy copies config files from the ``files/`` of the scratch fleet
+   step 3 compiled (``bay_config_files_root``): the committed files, with
+   each file a bay.toml mounts from beside it mapped in. That scratch fleet
+   is removed when the deploy has finished.
 6. Read the receipt back. The deploy covered the whole box env, so every
    project the compile read that has a ``[deploy.<env>]`` on that box env is
    pinned (:func:`_pin_deployed`): ``commit``, ``result``, ``deployed_at``,
@@ -44,8 +48,9 @@ from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
 from bay_cli.fleet import GENERATED_SERVICES
 
-#: ``(cx, box_env) -> None``. Raises on a failed deploy. Tests swap in a fake.
-Deployer = Callable[[Context, str], None]
+#: ``(cx, box_env, config_files_root=<dir>) -> None``. Raises on a failed
+#: deploy. Tests swap in a fake.
+Deployer = Callable[..., None]
 Echo = Callable[[str], None]
 
 
@@ -65,8 +70,13 @@ class Refused(Exception):
 UP_DEPLOY_TAGS = "deploy_stack"
 
 
-def default_deploy(cx: Context, box_env: str) -> None:
-    """Today's ``bay deploy <env> --tags deploy_stack``, without the prompts and the banner."""
+def default_deploy(cx: Context, box_env: str, *, config_files_root: Path | None = None) -> None:
+    """Today's ``bay deploy <env> --tags deploy_stack``, without the prompts and the banner.
+
+    ``config_files_root`` is the ``files/`` of the scratch fleet ``bay up``
+    compiled; the deploy copies config files from there
+    (``bay_config_files_root``), so it ships the committed files the plan read.
+    """
     from bay_cli.commands import ops
     from bay_cli.commands.validate import run_validation
     from bay_cli.healthcheck import new_report_dir, report_dir_vars
@@ -86,6 +96,7 @@ def default_deploy(cx: Context, box_env: str) -> None:
             "_rig_write=false",
             *deploy_extra_vars(cx),
             *report_dir_vars(report_dir),
+            *planmod.config_files_vars(config_files_root),
         ]
         ops._run_playbook(cx, "deploy", box_env, UP_DEPLOY_TAGS, extra)
         ops._invalidate_rig_cache(cx.cache_dir)
@@ -205,7 +216,9 @@ def up(
     envs[env] = record
     lockfile.write(proj.lock_file, lock)
 
-    # 3. compile into the fleet
+    # 3. compile into the fleet. The scratch fleet stays until the deploy
+    # has finished: the deploy copies config files from its files/.
+    failure: str | None = None
     with planmod.compiled_fleet(cx, cwd=proj.cwd) as comp:
         if comp.result is None:
             raise BayError(
@@ -215,27 +228,26 @@ def up(
         compiled_commits = dict(comp.commits)
         left_out = list(comp.unpinned)
 
-    # 4. commit
-    paths = [proj.lock_file, services, planmod.plan_file(cx, plan["plan_id"])]
-    approval = planmod.approval_file(cx, plan["plan_id"])
-    if approval.is_file():
-        paths.append(approval)
-    try:
-        fleet_commit = gitrepo.commit_paths(
-            cx.fleet_root, paths, f"bay: {action} {proj.name} {env} {short}"
-        )
-    except gitrepo.GitError as exc:
-        raise BayError(f"cannot commit the fleet repo: {exc}") from None
-    say(f"fleet commit {fleet_commit}")
+        # 4. commit
+        paths = [proj.lock_file, services, planmod.plan_file(cx, plan["plan_id"])]
+        approval = planmod.approval_file(cx, plan["plan_id"])
+        if approval.is_file():
+            paths.append(approval)
+        try:
+            fleet_commit = gitrepo.commit_paths(
+                cx.fleet_root, paths, f"bay: {action} {proj.name} {env} {short}"
+            )
+        except gitrepo.GitError as exc:
+            raise BayError(f"cannot commit the fleet repo: {exc}") from None
+        say(f"fleet commit {fleet_commit}")
 
-    # 5. deploy
-    failure: str | None = None
-    try:
-        (deploy or default_deploy)(cx, box_env)
-    except (BayError, OSError) as exc:
-        failure = str(exc) or type(exc).__name__
-    except SystemExit as exc:
-        failure = f"deploy exited with {exc.code}"
+        # 5. deploy
+        try:
+            (deploy or default_deploy)(cx, box_env, config_files_root=comp.files_root)
+        except (BayError, OSError) as exc:
+            failure = str(exc) or type(exc).__name__
+        except SystemExit as exc:
+            failure = f"deploy exited with {exc.code}"
 
     # 6. receipt
     reader = read_receipts or planmod.default_receipt_reader

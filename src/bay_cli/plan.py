@@ -58,6 +58,7 @@ import tempfile
 import tomllib
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from functools import partial
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -72,6 +73,7 @@ from bay_cli.fleet import (
     FLEET_PREFIX,
     GENERATED_SERVICES,
     LOCK_FILE,
+    LOCK_SUFFIX,
     PROJECTS_DIR,
 )
 
@@ -404,8 +406,20 @@ class Compiled:
     commits: dict[str, str] = field(default_factory=dict)
     #: Repo projects left out because their lock pins no commit yet.
     unpinned: list[str] = field(default_factory=list)
-    #: Config files the deploy would not ship as compiled (see :func:`deploy_file_gaps`).
-    file_gaps: list[str] = field(default_factory=list)
+    #: Uncommitted fleet files that are not deployed (see :func:`uncommitted_notes`).
+    uncommitted: list[str] = field(default_factory=list)
+
+    @property
+    def files_root(self) -> Path:
+        """``files/`` of the scratch fleet: what the deploy copies config files from.
+
+        The fleet's ``files/`` at its commit plus every file a bay.toml mounts
+        from beside it (:func:`_map_files`). Passed to the deploy as
+        ``bay_config_files_root``. It lives as long as this compile.
+        """
+        path = self.workdir / "fleet" / FILES_DIR
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def services_file(self) -> Path | None:
         if self.result is None:
@@ -677,37 +691,25 @@ def _map_in_fleet(name: str, lock: Mapping[str, Any] | None, out: _Copy) -> None
     _map_files(name, doc, toml.parent, lock, out)
 
 
-def deploy_file_gaps(fleet_root: Path, copy_root: Path, data: Mapping[str, Any]) -> list[str]:
-    """Config files the deploy would not ship as compiled. One line each.
+def uncommitted_notes(fleet_root: Path) -> list[str]:
+    """One note per uncommitted fleet file that a mount could read. Never a blocker.
 
-    The deploy copies each ``config_files`` entry from the fleet's working
-    tree, ``<fleet>/files/<entry>``. The compile read the same entry from
-    its copy of the fleet: committed files, with the files beside each
-    bay.toml mapped in. An entry missing from the working tree, or with other
-    bytes there, would deploy something else than the plan shows.
+    The deploy copies config files from the scratch copy at the fleet's
+    commit (``bay_config_files_root``), so an untracked or changed file under
+    ``files/`` or in a project folder (its ``bay.toml`` and ``bay.lock`` aside:
+    the plan reads those on its own) is not deployed.
     """
-    entries: set[str] = set()
-    for section in ("services", "accessories"):
-        for value in (data.get(section) or {}).values():
-            if isinstance(value, Mapping):
-                entries.update(str(e) for e in value.get("config_files") or [])
-    gaps: list[str] = []
-    for entry in sorted(entries):
-        live, compiled = fleet_root / FILES_DIR / entry, copy_root / FILES_DIR / entry
-        if not compiled.is_file():
-            continue
-        if not live.is_file():
-            gaps.append(
-                f"{FILES_DIR}/{entry} is not in the fleet's work tree, and the deploy copies "
-                f"config files from there; keep a copy at {FILES_DIR}/{entry} for now"
-            )
-        elif live.read_bytes() != compiled.read_bytes():
-            gaps.append(
-                f"{FILES_DIR}/{entry} in the fleet's work tree differs from the compiled one "
-                "(uncommitted, or a file beside the bay.toml that differs); commit or "
-                "align it first"
-            )
-    return gaps
+    specs = [
+        FILES_DIR,
+        PROJECTS_DIR,
+        f":(exclude){PROJECTS_DIR}/*/{LOCK_FILE}",
+        f":(exclude){PROJECTS_DIR}/*/bay.toml",
+        f":(exclude){PROJECTS_DIR}/*{LOCK_SUFFIX}",
+    ]
+    return [
+        f"uncommitted file {rel} is not deployed; commit it first"
+        for rel in gitrepo.uncommitted_paths(fleet_root, specs)
+    ]
 
 
 @contextmanager
@@ -729,7 +731,6 @@ def compiled_fleet(
         errors = list(made.problems)
         notes = [f"fleet layout: {line}" for line in moved] + list(made.notes)
         result = None
-        gaps: list[str] = []
         if not errors:
             try:
                 result = compiler.compile_fleet(load_inputs(made.root, checkouts=made.checkouts))
@@ -737,7 +738,6 @@ def compiled_fleet(
                 errors.extend(exc.lines)
         if result is not None:
             notes.extend(result.notes)
-            gaps = deploy_file_gaps(cx.fleet_root, made.root, result.data())
         cleaned = []
         for line in errors:
             for path, label in made.labels.items():
@@ -750,7 +750,7 @@ def compiled_fleet(
             notes=notes,
             commits=dict(made.commits),
             unpinned=list(made.unpinned),
-            file_gaps=gaps,
+            uncommitted=uncommitted_notes(cx.fleet_root) if gitrepo.head(cx.fleet_root) else [],
         )
 
 
@@ -1190,7 +1190,7 @@ def default_receipt_reader(cx: Context, box_env: str) -> list[dict[str, Any]]:
 
 
 def default_box_check(
-    cx: Context, box_env: str, services_file: Path
+    cx: Context, box_env: str, services_file: Path, *, config_files_root: Path | None = None
 ) -> list[dict[str, Any]] | None:
     """Today's deploy, in check mode, with the plan-only switch, against the compiled file.
 
@@ -1209,6 +1209,9 @@ def default_box_check(
     removed when the reports are read. The real-run hand-off goes to its own
     temp dir too (``bay_reconciler_report_dir``), never to
     ``<framework>/.reconcile-report/``.
+
+    ``config_files_root`` is the ``files/`` of the plan's scratch fleet; the
+    check mode run copies config files from there, as ``bay up`` will.
     """
     from bay_cli.commands.ops import _run_playbook
     from bay_cli.healthcheck import new_report_dir, report_dir_vars
@@ -1233,6 +1236,7 @@ def default_box_check(
                 "-e",
                 "_rig_write=false",
                 *report_dir_vars(real_reports),
+                *config_files_vars(config_files_root),
                 "--check",
             ],
         )
@@ -1240,6 +1244,13 @@ def default_box_check(
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         shutil.rmtree(real_reports, ignore_errors=True)
+
+
+def config_files_vars(root: Path | None) -> list[str]:
+    """``-e`` arguments that point the deploy's config file copy at ``root``."""
+    if root is None:
+        return []
+    return ["-e", json.dumps({"bay_config_files_root": str(root)})]
 
 
 def read_box_predictions(directory: Path) -> list[dict[str, Any]]:
@@ -1481,8 +1492,8 @@ def make_plan(
     if wanted.doc is not None and not wanted.problems:
         with compiled_fleet(cx, pins, cwd=proj.cwd) as comp:
             blockers.extend(comp.errors)
-            blockers.extend(comp.file_gaps)
             notes.extend(comp.notes)
+            notes.extend(comp.uncommitted)
             if comp.result is not None:
                 unsupported = [str(u) for u in comp.result.unsupported]
                 if unsupported and not opts.allow_unsupported:
@@ -1513,8 +1524,11 @@ def make_plan(
                 if opts.box_check and box_env is not None and not blockers:
                     services_file = comp.services_file()
                     assert services_file is not None
+                    checker = check_box or partial(
+                        default_box_check, config_files_root=comp.files_root
+                    )
                     try:
-                        entries = (check_box or default_box_check)(cx, box_env, services_file)
+                        entries = checker(cx, box_env, services_file)
                         box_checked = True
                     except (BayError, OSError, SystemExit) as exc:
                         blockers.append(f"the check on the box failed: {exc}")
