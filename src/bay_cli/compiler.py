@@ -676,6 +676,10 @@ class _Compiler:
           the pushed commit and holds the build when the hash differs. An
           in-fleet project's bay.toml is not in the app repo, so a push never
           changes its config and there is nothing to compare.
+        * ``bay_toml_files`` next to them: every mount ``from`` of the project
+          (``fleet:`` ones aside), relative to the repo root. A push that
+          changes only these files and the bay.toml is config only: the build
+          side neither builds nor deploys it (``bay up`` does).
 
         Every key is left out at its default, so a fleet that uses none of
         this compiles byte-identically to before.
@@ -701,6 +705,9 @@ class _Compiler:
             self._err(f"{unit.label}: cannot hash {unit.project.toml_file.name}: {exc}")
             return
         out["bay_toml_path"] = unit.project.lock.toml_path
+        files = _repo_mount_paths(unit.project.doc, unit.project.lock.toml_path)
+        if files:
+            out["bay_toml_files"] = files
 
     def _repo_token(self, repo: str) -> str | None:
         tokens: dict[str, str] = self.fleet.get("repo_tokens", {})
@@ -1096,6 +1103,24 @@ class _Compiler:
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
+
+
+def _repo_mount_paths(doc: dict[str, Any], toml_path: str) -> list[str]:
+    """Every mount ``from`` of ``doc`` relative to the repo root, sorted; ``fleet:`` ones aside.
+
+    ``from`` is relative to the directory of the bay.toml (``toml_path``).
+    """
+    levels = [doc, *(v for v in (doc.get("services") or {}).values() if isinstance(v, dict))]
+    directory = Path(toml_path).parent.as_posix()
+    out: set[str] = set()
+    for level in levels:
+        for mount in level.get("mounts") or []:
+            src = mount.get("from") if isinstance(mount, dict) else None
+            if not isinstance(src, str) or src.startswith(FLEET_PREFIX):
+                continue
+            src = src.rstrip("/")
+            out.add(src if directory in ("", ".") else f"{directory}/{src}")
+    return sorted(out)
 
 
 def _p(base: str, key: str) -> str:

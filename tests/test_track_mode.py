@@ -163,6 +163,9 @@ format_timestamp() {{ echo "Jan 01, 00:00 UTC"; }}
             _extract_helper(rendered, "_hold_build"),
             _extract_helper(rendered, "_promote_latest"),
             _extract_helper(rendered, "_config_hash_of"),
+            _extract_helper(rendered, "_config_only"),
+            _extract_helper(rendered, "_running_commit"),
+            _extract_helper(rendered, "_config_only_push"),
         ]
     )
     proc = subprocess.run(
@@ -342,6 +345,192 @@ def test_webhook_build_stamps_config_hash(local_sh: str, remote_sh: str, tmp_pat
     assert proc.stdout == "[]"
     proc, _, _ = _harness(local_sh, "docker() { return 1; }\n" + fake, tmp_path)
     assert proc.stdout == "[]"
+
+
+# ── config-only push (M117/06) ──────────────────────────────────────────
+
+
+def _git(repo: Path, *args: str) -> str:
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "Test",
+        "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Test",
+        "GIT_COMMITTER_EMAIL": "test@example.com",
+    }
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True, env=env
+    )
+    return proc.stdout.strip()
+
+
+def _app_repo(tmp_path: Path) -> tuple[Path, str]:
+    """An app repo with code, a bay.toml and a mounted file. Returns it and its first commit."""
+    repo = tmp_path / "repo"
+    (repo / "conf").mkdir(parents=True)
+    _git(tmp_path, "init", "-q", "-b", "main", str(repo))
+    (repo / "app.js").write_text("console.log(1)\n")
+    (repo / "bay.toml").write_text(TOML)
+    (repo / "conf" / "site.yaml").write_text("site: 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "app")
+    return repo, _git(repo, "rev-parse", "--short=12", "HEAD")
+
+
+def _commit(repo: Path, files: dict[str, str]) -> str:
+    for rel, text in files.items():
+        (repo / rel).write_text(text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "push")
+    return _git(repo, "rev-parse", "--short=12", "HEAD")
+
+
+def _decide(repo: Path, label: str, *, strategy: str = "local") -> str:
+    """The decision site as rebuild.sh runs it, with a fake docker that knows ``label``."""
+    log = repo.parent / "docker.log"
+    return f"""
+docker() {{
+  printf '%s\\n' "$*" >> {str(log)!r}
+  [[ "$1" == "inspect" ]] && printf '%s' {label!r}
+  return 0
+}}
+BUILD_STRATEGY={strategy!r}
+BAY_TOML_FILES=("conf/site.yaml")
+SHA=$(git -C {str(repo)!r} rev-parse --short=12 HEAD)
+PREV_COMMIT=$(_running_commit svc)
+if _config_only {str(repo)!r} "${{PREV_COMMIT}}"; then
+  _config_only_push "bay-app/svc" "${{PREV_COMMIT}}"
+fi
+printf 'BUILD [%s]\\n' "$(_hold_reason {str(repo)!r})"
+"""
+
+
+def test_config_only_push_does_not_build(
+    local_sh: str, remote_sh: str, tmp_path: Path
+) -> None:
+    repo, first = _app_repo(tmp_path)
+    pushed = _commit(repo, {"bay.toml": TOML_CHANGED, "conf/site.yaml": "site: 2\n"})
+    trigger = tmp_path / "svc.trigger.running"
+    trigger.write_text("corr-1\n")
+    env = {"BAY_TOML_PATH": "bay.toml", "PINNED_TOML_HASH": tomlhash.canonical_hash(TOML.encode()),
+           "TRACK": "branch", "FROZEN": ""}
+    script = f"""
+trap 'rm -f {str(trigger)!r}' EXIT
+_record_failure "0000aaaa1111" "Build" "earlier failure" >/dev/null
+cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
+: > {str(tmp_path / "alerts.log")!r}
+""" + _decide(repo, first)
+    proc, _, alerts = _harness(local_sh, script, tmp_path, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert f"config-only push {pushed}: run bay up" in proc.stdout
+    assert "BUILD" not in proc.stdout, "a config-only push ends the run before the build"
+    assert not trigger.exists(), "the trigger is consumed"
+    before = json.loads((tmp_path / "before.json").read_text())
+    after = json.loads((tmp_path / "state" / "svc.json").read_text())
+    assert after == before and after["consecutive_failures"] == 1, "the breaker is untouched"
+    assert alerts == [], "no build.held, no other alert"
+    calls = (tmp_path / "docker.log").read_text().splitlines()
+    assert calls[0].startswith("inspect --format")
+    # No build and no :latest move: only the commit tag of the code it already runs.
+    assert calls[1:] == [f"tag bay-app/svc:{first} bay-app/svc:{pushed}"]
+    assert not any("build" in c or ":latest" in c for c in calls)
+
+    # The build server path: the same rule, the tag is made in the registry.
+    (tmp_path / "docker.log").unlink()
+    remote_script = _decide(repo, first, strategy="remote")
+    proc, _, alerts = _harness(remote_sh, remote_script, tmp_path, env=env)
+    assert f"config-only push {pushed}: run bay up" in proc.stdout and alerts == []
+    calls = (tmp_path / "docker.log").read_text().splitlines()
+    assert calls[1:] == [
+        f"buildx imagetools create -t bay-app/svc:{pushed} bay-app/svc:{first}"
+    ]
+
+    # Both rendered paths decide before the build and before the hold guard.
+    site = 'if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then'
+    local = local_sh.index(site)
+    assert local_sh.index('SHA=$(git rev-parse --short=12 HEAD)') < local
+    assert local < local_sh.index("_local_buildx() {", local)
+    assert local < local_sh.index('HOLD_REASON=$(_hold_reason "${REPO_DIR}")', local)
+    remote = remote_sh.index(site)
+    assert remote < remote_sh.index('HOLD_REASON=$(_hold_reason "${REPO_DIR}")', remote)
+    assert remote < remote_sh.index("_remote_buildx() {", remote)
+    assert 'PREV_COMMIT="${PREV_COMMIT:-${_PREV_HEAD}}"' in remote_sh
+    assert remote_sh.index("_PREV_HEAD=$(git rev-parse --short=12 HEAD") < remote_sh.index(
+        "git reset --hard FETCH_HEAD"
+    )
+
+    # A directory mount counts for every file under it.
+    (repo / "conf" / "extra").mkdir()
+    _commit(repo, {"conf/extra/a.yaml": "a\n"})
+    dir_script = _decide(repo, first).replace(
+        'BAY_TOML_FILES=("conf/site.yaml")', 'BAY_TOML_FILES=("conf")'
+    )
+    proc, _, _ = _harness(local_sh, dir_script, tmp_path, env=env)
+    assert "config-only push" in proc.stdout
+
+
+def test_push_touching_code_and_toml_builds_and_holds(local_sh: str, tmp_path: Path) -> None:
+    repo, first = _app_repo(tmp_path)
+    _commit(repo, {"bay.toml": TOML_CHANGED, "app.js": "console.log(2)\n"})
+    env = {"BAY_TOML_PATH": "bay.toml", "PINNED_TOML_HASH": tomlhash.canonical_hash(TOML.encode()),
+           "TRACK": "branch", "FROZEN": ""}
+    proc, _, alerts = _harness(local_sh, _decide(repo, first), tmp_path, env=env)
+    assert proc.returncode == 0, proc.stderr
+    assert "config-only push" not in proc.stdout
+    # It builds, then the hold guard holds it: the toml hash differs from the pin.
+    assert "BUILD [config changed: bay.toml differs from the pinned one]" in proc.stdout
+    calls = (tmp_path / "docker.log").read_text().splitlines()
+    assert all(c.startswith("inspect") for c in calls), "no tag before the build"
+
+    # Code only, toml unchanged: it builds and deploys as before.
+    repo2 = tmp_path / "second"
+    repo2.mkdir()
+    repo2, first2 = _app_repo(repo2)
+    _commit(repo2, {"app.js": "console.log(3)\n"})
+    proc, _, _ = _harness(local_sh, _decide(repo2, first2), tmp_path, env=env)
+    assert "BUILD []" in proc.stdout and "config-only" not in proc.stdout
+
+
+def test_config_only_rule_needs_a_previous_commit(local_sh: str, tmp_path: Path) -> None:
+    repo, first = _app_repo(tmp_path)
+    _commit(repo, {"bay.toml": TOML_REWORDED})
+    env = {"BAY_TOML_PATH": "bay.toml", "PINNED_TOML_HASH": tomlhash.canonical_hash(TOML.encode()),
+           "TRACK": "branch", "FROZEN": ""}
+
+    def runs(script: str, extra: dict[str, str] | None = None) -> str:
+        proc, _, _ = _harness(local_sh, script, tmp_path, env={**env, **(extra or {})})
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout
+
+    # The previous commit is known: config only.
+    assert "config-only push" in runs(_decide(repo, first))
+    # No label on the running container (or no container): the normal path.
+    assert runs(_decide(repo, "")) == "BUILD []\n"
+    assert runs(_decide(repo, "<no value>")) == "BUILD []\n"
+    # A previous commit the checkout does not know: the normal path.
+    assert runs(_decide(repo, "deadbeef0000")) == "BUILD []\n"
+    # Nothing changed (a manual rebuild of the running commit): the normal path.
+    head = _git(repo, "rev-parse", "--short=12", "HEAD")
+    assert runs(_decide(repo, head)) == "BUILD []\n"
+    # The bay.toml lives in the fleet (no BAY_TOML_PATH): never config only.
+    assert runs(_decide(repo, first), {"BAY_TOML_PATH": "", "PINNED_TOML_HASH": ""}) == (
+        "BUILD []\n"
+    )
+
+
+def test_bay_toml_files_reach_the_rendered_script() -> None:
+    svc = _local_service()
+    svc["localapp"]["build"].update(
+        bay_toml_path="apps/web/bay.toml",
+        bay_toml_hash="sha256:" + "0" * 64,
+        bay_toml_files=["apps/web/conf/site.yaml", "apps/web/rules"],
+    )
+    rendered = _render_rebuild_sh(svc, ["localapp"], git_deploy_services=["localapp"])
+    assert 'BAY_TOML_FILES=("apps/web/conf/site.yaml" "apps/web/rules")' in rendered
+    plain = _render_rebuild_sh(_local_service(), ["localapp"], git_deploy_services=["localapp"])
+    assert "BAY_TOML_FILES=()" in plain
 
 
 # ── the box side of bay up / bay rollback: bay_reconcile.codepin ───────────

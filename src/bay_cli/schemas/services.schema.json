@@ -393,6 +393,12 @@
           "type": "string",
           "minLength": 1,
           "description": "Where the bay.toml lives in the app repo, for the hold guard."
+        },
+        "bay_toml_files": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "description": "The files the bay.toml mounts (from = ..., not fleet:), relative to the app repo root. A push that changes only these and bay_toml_path is config only: rebuild.sh neither builds nor deploys it; bay up does."
         }
       },
       "additionalProperties": false

@@ -244,7 +244,9 @@ def test_image_and_build(data: dict[str, Any]) -> None:
     assert "build" not in s["gatus"]
     # The hold-guard keys have their own test (test_bay_toml_hash_written_to_services_yml).
     build = {
-        k: v for k, v in s["shop"]["build"].items() if k not in ("bay_toml_hash", "bay_toml_path")
+        k: v
+        for k, v in s["shop"]["build"].items()
+        if k not in ("bay_toml_hash", "bay_toml_path", "bay_toml_files")
     }
     assert build == {
         "repo": "git@github.com:acme/shop.git",
@@ -285,6 +287,49 @@ def test_bay_toml_hash_written_to_services_yml(fleet: Path) -> None:
     edit(fleet, SHOP, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
     moved = yaml.safe_load(compiled(fleet).body())["services"]["shop"]["build"]["bay_toml_hash"]
     assert moved != want and moved.startswith("sha256:")
+
+
+def test_bay_toml_files_written_to_services_yml(fleet: Path) -> None:
+    """Spec M117/06: the files a config-only push may change, next to the toml hash."""
+    first = yaml.safe_load(compiled(fleet).body())["services"]
+    for name in ("shop", "shop-staging", "shop-api"):
+        # from = "deploy/config.yaml", relative to the repo root (the toml is at the root)
+        assert first[name]["build"]["bay_toml_files"] == ["deploy/config.yaml"]
+    # A fleet: mount stays out: the fleet file is not in the app repo.
+    edit(
+        fleet,
+        SHOP,
+        "[services.api]",
+        '[[mounts]]\npath = "/etc/shop/rules.yaml"\nfrom = "fleet:shared/rules.yaml"\n\n'
+        "[services.api]",
+    )
+    shared = fleet / "files" / "shared" / "rules.yaml"
+    shared.parent.mkdir(parents=True, exist_ok=True)
+    shared.write_text("rules: 1\n")
+    out = yaml.safe_load(compiled(fleet).body())["services"]
+    assert out["shop"]["build"]["bay_toml_files"] == ["deploy/config.yaml"]
+    # No mount from the repo: the key is left out.
+    edit(
+        fleet,
+        SHOP,
+        '[[mounts]]\npath = "/etc/shop/config.yaml"\nfrom = "deploy/config.yaml"\nmode = "0644"\n',
+        "",
+    )
+    out = yaml.safe_load(compiled(fleet).body())["services"]
+    assert "bay_toml_files" not in out["shop"]["build"]
+    assert out["shop"]["build"]["bay_toml_path"] == "bay.toml"
+
+
+def test_bay_toml_files_are_relative_to_the_repo_root() -> None:
+    doc = {
+        "mounts": [{"from": "conf/app.yaml"}, {"from": "fleet:x.yaml"}, {"volume": "v"}],
+        "services": {"worker": {"mounts": [{"from": "rules/"}, {"from": "conf/app.yaml"}]}},
+    }
+    assert compiler._repo_mount_paths(doc, "bay.toml") == ["conf/app.yaml", "rules"]
+    assert compiler._repo_mount_paths(doc, "services/api/bay.toml") == [
+        "services/api/conf/app.yaml",
+        "services/api/rules",
+    ]
 
 
 def test_track_pin_and_freeze_reach_the_build_block(fleet: Path) -> None:

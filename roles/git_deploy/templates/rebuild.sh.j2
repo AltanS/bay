@@ -355,6 +355,63 @@ _hold_reason() {
   return 0
 }
 
+# ── Config-only push (docs/build-pipeline.md, "Config-only push") ──
+# A push that changes only the project's bay.toml (BAY_TOML_PATH) and the files
+# its mounts read (BAY_TOML_FILES, relative to the repo root) carries no code:
+# only `bay up` can deploy it. True (0) when the files changed between the
+# previous commit and HEAD of the checkout are all such files. False when the
+# bay.toml is not in the app repo, when no previous commit is known or found,
+# or when nothing changed: then the normal path runs.
+#   $1  the checkout at the pushed commit   $2  the previous commit (may be empty)
+_config_only() {
+  local repo_dir="$1" prev="$2" files f p hit
+  [[ -n "${BAY_TOML_PATH:-}" && -n "${prev}" ]] || return 1
+  git -C "${repo_dir}" cat-file -e "${prev}^{commit}" 2>/dev/null || return 1
+  files=$(git -C "${repo_dir}" diff --name-only "${prev}" HEAD 2>/dev/null) || return 1
+  [[ -n "${files}" ]] || return 1
+  while IFS= read -r f; do
+    [[ -z "${f}" ]] && continue
+    hit=""
+    for p in "${BAY_TOML_PATH}" "${BAY_TOML_FILES[@]}"; do
+      if [[ "${f}" == "${p}" || "${f}" == "${p}"/* ]]; then
+        hit=1
+        break
+      fi
+    done
+    [[ -n "${hit}" ]] || return 1
+  done <<< "${files}"
+  return 0
+}
+
+# The commit the running container was built from (its com.bay.commit label),
+# or nothing.
+#   $1  container
+_running_commit() {
+  local c
+  c=$(docker inspect --format '{% raw %}{{index .Config.Labels "com.bay.commit"}}{% endraw %}' "$1" 2>/dev/null || true)
+  [[ "${c}" == "<no value>" ]] && c=""
+  printf '%s' "${c}"
+}
+
+# End a config-only push: no build, no :latest move, no recreate, no alert, the
+# circuit breaker untouched; the trigger was consumed at the start of the run.
+# The code is the previous commit's, so its image also gets this commit's tag
+# (a tag, never a build): `bay up` (and track = "pin") then finds <image>:<commit12>.
+#   $1  image repo (no tag; may be empty)   $2  the previous commit
+_config_only_push() {
+  local repo="$1" prev="$2"
+  trap - ERR
+  if [[ -n "${repo}" && -n "${prev}" ]]; then
+    if [[ "${BUILD_STRATEGY:-local}" == "remote" ]]; then
+      docker buildx imagetools create -t "${repo}:${SHA}" "${repo}:${prev:0:12}" >/dev/null 2>&1 || true
+    else
+      docker tag "${repo}:${prev:0:12}" "${repo}:${SHA}" 2>/dev/null || true
+    fi
+  fi
+  echo "[rebuild] [${CORR_ID:-no-corr}] config-only push ${SHA}: run bay up"
+  exit 0
+}
+
 # A held build is not a failure. The image stays under its commit tag, `:latest`
 # and the running container are not touched, the circuit breaker is not touched
 # (no _record_failure, no _reset_cb), and the trigger was consumed at the start
@@ -707,6 +764,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   FROZEN="{{ 'true' if (build.frozen | default(false)) else '' }}"
   BAY_TOML_PATH="{{ dq(build.bay_toml_path | default('')) }}"
   PINNED_TOML_HASH="{{ dq(build.bay_toml_hash | default('')) }}"
+  BAY_TOML_FILES=({% for f in build.bay_toml_files | default([]) %}"{{ dq(f) }}"{% if not loop.last %} {% endif %}{% endfor %})
 {#
   The three command strings below are handed to `eval`, so every consumer
   value in them is referenced as an ESCAPED parameter expansion — `\"\${BRANCH}\"`
@@ -768,6 +826,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   FROZEN=""
   BAY_TOML_PATH=""
   PINNED_TOML_HASH=""
+  BAY_TOML_FILES=()
   PRIMARY_IMAGE=""
   BUILD_ARGS=()
   declare -A BUILD_SECRETS=()
@@ -1161,10 +1220,21 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
     fi
     exit ${_FETCH_EXIT}
   fi
+  # The commit this checkout last built, before it moves to the pushed one.
+  _PREV_HEAD=$(git rev-parse --short=12 HEAD 2>/dev/null || true)
   git reset --hard FETCH_HEAD
 
   # Get commit SHA (12-char for registry tags, matching remote_build.yml)
   SHA=$(git rev-parse --short=12 HEAD)
+
+  # Config-only push: checked before the hold guard and the build. The previous
+  # commit is the running container's (a build server that also runs it), else
+  # the commit this checkout built last.
+  PREV_COMMIT=$(_running_commit "${SERVICE}")
+  PREV_COMMIT="${PREV_COMMIT:-${_PREV_HEAD}}"
+  if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then
+    _config_only_push "${IMAGE_REPO}" "${PREV_COMMIT}"
+  fi
 
   # Hold guard, on the checkout of the pushed commit. A held build pushes only
   # the commit tag: the moving tag (IMAGE_REF) stays, and no box is told to pull.
@@ -1380,6 +1450,13 @@ eval "${PULL_CMD}"
 
 # ── Get new commit SHA (12 characters: the image's commit tag) ──
 SHA=$(git rev-parse --short=12 HEAD)
+
+# ── Config-only push: before the build and the hold guard ──
+# The previous commit is the one the running container was built from.
+PREV_COMMIT=$(_running_commit "${SERVICE}")
+if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then
+  _config_only_push "${IMAGE_NAME}" "${PREV_COMMIT}"
+fi
 
 # ── Check if image already exists for this SHA ──
 if docker image inspect "${IMAGE_NAME}:${SHA}" &>/dev/null; then

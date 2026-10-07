@@ -103,6 +103,29 @@ Troubleshooting a hold: `journalctl -u bay-build@<svc>` shows the `HOLD` line
 and its reason. `docker image ls <image>` on the box lists the commit tags
 that `bay rollback --to` can use.
 
+### Config-only push
+
+A push that changes only the project's `bay.toml` (`build.bay_toml_path`) and
+the files its mounts read (`build.bay_toml_files`: every `from =` path,
+relative to the repo root, without the `fleet:` ones; a directory counts for
+every file under it) carries no code. `rebuild.sh` checks this first, right
+after it reads the pushed commit and before the build and the hold guard, on
+the box (local builds) and on the build server (remote builds). The previous
+commit is the `com.bay.commit` label of the running container. On a build
+server with no such container, it is the commit that the checkout built last.
+The changed files are `git diff --name-only <previous> <pushed>`. A
+config-only push logs `config-only push <commit12>: run bay up` and ends the
+run. It builds no image, does not move `:latest`, recreates nothing, and sends
+no `build.held` or other alert. The circuit breaker is not touched, and the
+trigger was consumed at the start. The image of the previous commit also gets
+the tag `<image>:<commit12>` (a tag, not a build), so `bay up` finds the code
+for the pushed commit. When no previous commit is known, the commit is not in
+the checkout, or nothing changed, the normal path runs. The webhook's
+`watch`/`ignore` filter runs before this (in the receiver, before the trigger),
+so a push that it filters out never reaches `rebuild.sh`. "Edit `bay.toml`,
+push, `bay up`" is the clean flow: the push does nothing on the box, and
+`bay up` deploys the config. The adopt commit of `bay adopt` is such a push.
+
 ## Circuit Breaker State (rebuild.sh)
 
 `rebuild.sh` maintains a per-service state file at
