@@ -8,6 +8,44 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.3.0] - 2026-10-08
+
+Every key the validator accepts now deploys or is an error. The receipt lists routes, and `bay validate` checks the boxes against the inventory.
+
+Spec 04: the compiler deploys what it validates
+
+- `release`: the compile writes it on the main container (the env value wins). The reconciler runs it once in a one-shot container `<name>-release` of the new image, before it creates or recreates the container. A non-zero exit or a timeout (`bay_release_timeout`, 600 s) fails that action, and the old container keeps running. A push build runs it before the swap. On a failure `:latest` stays where it was, and `build.failed` fires. A change of `release` alone recreates nothing.
+- `[[jobs]]`: compiled to a top-level `jobs:` map (`of`, `schedule`, `on_calendar`, `command`, `memory`). `deploy_stack` installs a script, the one-shot `bay-job@.service` and a UTC `bay-job@<job>.timer` on the box of the main container. The job runs the main container's current image, env file, network and mounts. A job that is gone loses its timer and script. A cron line that sets both the day of the month and the day of the week is a compile error. A job change is a safe plan step of kind `job`.
+- A routed service with neither `image` nor its own `build` shares the project build. It gets a copy of the main build plus `build.shared_from`. `bay_build_dedup_map` makes the member without `shared_from` the primary, so the main container builds and the service re-tags its image. An internal service that does this stays unsupported.
+- Service `path`: the service gets the main domains and a `Host(...) && (Path(p) || PathPrefix(p/))` router. Its priority is the rule length, so it outranks the main container's router in every shape. The prefix is not stripped. `bay validate` checks (domain, path) pairs for collisions.
+- Volume backups: a volume mount with `backup` true (the default) compiles to a top-level `volume_backups:` entry (`container`, `path`, and `schedule` and `retain` from the project `[backup]`, then the fleet `[defaults.backup]`). The backup role adds a restic `file` target `<stack_name>_<volume>`. It reads the path through the Docker daemon (`docker cp`). `bay backup restore <env> <stack_name>_<volume>` extracts into the volume's mountpoint with the container stopped. A change is a safe plan step of kind `backup`, and `bay up` then also runs the `backup` tag.
+- `access` keys other than `mode` on a main container that is internal in an environment are a validation error. Before, the compiler dropped them silently.
+- `[tailnet] allowlist`: compiled to a top-level `tailnet_allowlist:` list. On every deploy it becomes `vpn_allowed_ips`, with `127.0.0.1` and `::1` kept, before the Headscale range is appended. `bay validate` warns while group_vars also sets `vpn_allowed_ips`. `bay doctor` and `bay gateway` show the enforced list.
+- Docs: plan.md, bay-toml.md, services.md, tailnet-ingress.md and backups.md describe the keys above as deployed.
+
+Spec 05: routes, boxes and validator checks
+
+- The deploy receipt lists the tailnet routes the box serves. `bay_reconcile.receipt` reads the route file the traefik role rendered (`dynamic/tailnet-proxies.yml` in the stack directory) and writes it as `routes`: one `{name, domains, upstream, pass_host_header, identity_inject, entrypoint}` per route, `[]` on a box with no route file. The role passes `stack_dir` in the receipt meta. The field is additive: `receipt_version` stays 1 and `status_version` stays 2. `status.schema.json` declares it. `bay show --routes` now has a RUNNING column to compare.
+- `bay status --env <env>` (no `--json`) prints one line per box of that env: the result, the deploy time, the container count and, for a receipt that lists routes, the route count. Plain `bay status` still reads no box. `--no-remote` skips the read.
+- Route-only plan and up. When no project has `[deploy.<env>]` and `<env>` is the box env of `[tailnet] ingress_box`, `bay plan <env>` compiles the whole fleet at its pins and shows the route steps (and any other compile difference). The plan has no project and the note `route-only plan for <env>`. `bay up <env>` writes `services.yml`, commits `bay: up <env> (routes)`, deploys `<env>` (with `headscale,traefik` on a route step), reads the receipts and pushes the fleet. It pins nothing and writes no lock. A plan with zero steps still deploys. A step that belongs to a project blocks a route-only plan, because nothing would pin it. Any other env with no project keeps the old note and refusal.
+- `bay validate` checks that `[tailnet] ingress_box` is the Headscale host: `access_gateway` must be `headscale`, and with `headscale_control_region` set, the ingress box's region (`region` from `group_vars/<box group>/`, else the box group, else the box name) must equal it.
+- `bay validate` checks the boxes against the inventory: the box env needs a host or a group of that name in `hosts/<box env>` (error, with the `[<box env>:children]` hint), a box `group` must be a group there (error), and a box name that is neither a host nor a group there is a warning.
+- One `access_gateway` default. `config.access_gateway_type()` returns the value of `group_vars/all/access_gateway.yml`, else the value in `roles/access_gateway/defaults/main.yml` of the framework checkout (`wireguard`). `bay doctor`, `bay gateway`, `bay region` and `bay validate` use it. Before, `bay doctor` read a fleet with no `access_gateway.yml` as `none`, and `bay gateway` assumed `headscale` in one place.
+- `bay doctor`: with `wireguard`, an empty `vpn_allowed_ips` (or an empty `[tailnet] allowlist`) fails only when a service uses `access: vpn`. A fleet that serves everything public needs no list.
+
+Docs fix
+
+- backups.md: the dump commands and the manual Headscale restore used `docker compose`. Bay creates the containers with `docker run`, and the compose file only describes the stack. The dump table now names `docker exec` and `docker cp` on the container named after the accessory key, and the Headscale restore runs `docker stop headscale` and `docker start headscale`.
+
+### Upgrade notes
+
+- `backup = false` is no longer needed on volume mounts. A volume mount with the default now gets a backup entry. The backup runs when `backup_enabled` is true in the box env. A backup change makes `bay up` run the `backup` tag as well.
+- When `bay.fleet.toml` sets `[tailnet] allowlist`, it is enforced: it replaces `vpn_allowed_ips` from group_vars for the `vpn-only` allowlist on the next deploy. No live fleet sets it today. If you add it, make sure it lists every address that must still reach tailnet-mode services. Run `bay validate` first and read the warning.
+- The first `bay up` (or `bay deploy`) of each box env after 2.3.0 ships the new `bay_reconcile` and rewrites that env's receipt with `routes`. Until then `bay show --routes` reports RUNNING as `unknown` and `bay status --json` shows no `routes`.
+- A `bay up <ingress box env>` with no project on that env now deploys (route-only) instead of stopping with "nothing to deploy". Read its plan first: it deploys the whole box environment.
+- `bay validate` (and the pre-deploy gate of `bay deploy` and `bay up`) can now fail on a fleet whose `ingress_box` is not the Headscale host, whose hosts file has no group named after the box env, or whose box `group` is missing from the hosts file. Fix the fleet file or the hosts file.
+- `bay doctor` on a fleet with no `group_vars/all/access_gateway.yml` now reports `wireguard` (what the boxes deploy), not "no access gateway".
+
 ## [2.2.0] - 2026-10-08
 
 Spec 01: plan, show and rollback tell the truth
