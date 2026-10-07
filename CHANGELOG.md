@@ -8,6 +8,19 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.1.6] - 2026-10-07
+
+Docs only. Reader round 6: nineteen points that confused two new readers.
+
+- bay-toml.md: says where the file lives for an app with no repo, defines WANTED where it first appears, and says before the mounts table to write `backup = false` on every volume mount.
+- Config-only push: names the signs that a `bay up` is due (`bay show` says `behind`, the `config-only push <commit12>: run bay up` log line, the new `<image>:<commit12>` tag), and says to add `bay.toml` and its mounted files to `watch`.
+- plan.md: lists the three ways `bay plan` reads the box (`--no-remote`, the default, `--remote`), and says which rig roles `bay up` runs and which need a full `bay deploy`.
+- Rollback: a happy path for pin mode, how far back `--to` reaches (the `docker system prune -af` cron job, weekly by default), and that `--to` also rolls config back; use `git revert` to keep newer config.
+- Two environments: the compile reads only the top-level lock `commit`, so every deploy branch must hold every `[deploy.<env>]` table.
+- layout-scenarios.md: the steps for a new box (provision, `bay deploy --rig`, the first full deploy), links to the `bay show` status table, and `service`/`server` take the working directory.
+- tailnet-ingress.md: run `bay validate` again after `bay route add`. Scenario 15 keeps the once-per-fleet setup apart from the two ACL edits each route needs.
+- README: puts the `bay.toml` or `bay.fleet.toml` form beside each compiled `services.yml` example.
+
 ## [2.1.5] - 2026-10-07
 
 ### Fixed
