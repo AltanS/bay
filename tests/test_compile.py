@@ -903,7 +903,6 @@ def test_webhook_domain_collision(fleet: Path) -> None:
 
 
 UNSUPPORTED = [
-    pytest.param(SHOP, 'secrets = ["SESSION_SECRET"]', 'secrets = ["SESSION_SECRET"]\nrelease = "migrate"', "a release command before traffic moves", id="release"),
     pytest.param(SHOP, "[deploy.production]", '[[jobs]]\nname = "nightly"\nschedule = "0 2 * * *"\ncommand = "x"\n\n[deploy.production]', "scheduled jobs", id="jobs"),
     pytest.param(SHOP, 'volume = "data"\nbackup = false', 'volume = "data"\nbackup = false\nowner = "472:472"', "a volume owner", id="mount-owner"),
     pytest.param(SHOP, "redirect = false\n", "", "alias redirect (HTTP 308); the aliases are served instead", id="alias-redirect"),
@@ -938,6 +937,22 @@ def test_unsupported_refuses_without_the_flag(fleet: Path, tmp_path: Path) -> No
     assert "# TODO(role) shop: jobs[0]: scheduled jobs\n" in text
     digest, body = compiler.split_header(text)
     assert digest == compiler.body_digest(body)
+
+
+# ── keys that deploy since 2.3.0 (M118/04) ───────────────────────────────────
+
+
+def test_compile_release_command(fleet: Path) -> None:
+    """``release`` lands on the main container; ``[deploy.<env>] release`` wins."""
+    edit(fleet, SHOP, 'secrets = ["SESSION_SECRET"]', 'secrets = ["SESSION_SECRET"]\nrelease = "bin/migrate"')
+    edit(fleet, SHOP, 'branch = "develop"', 'branch = "develop"\nrelease = "bin/migrate --staging"')
+    result = compiled(fleet)
+    assert not any(u.path == "release" for u in result.unsupported)
+    s = yaml.safe_load(result.body())["services"]
+    assert s["shop"]["release"] == "bin/migrate"
+    assert s["shop-staging"]["release"] == "bin/migrate --staging"
+    assert "release" not in s["shop-api"]
+    assert "release" not in s["gatus"]
 
 
 def test_cross_box_database_is_unsupported(fleet: Path) -> None:

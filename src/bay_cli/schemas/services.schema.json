@@ -171,6 +171,11 @@
           "additionalProperties": { "type": "string" },
           "description": "Additional Docker labels."
         },
+        "release": {
+          "type": "string",
+          "minLength": 1,
+          "description": "bay.toml release: a shell command run once in a one-shot container of the new image before the container is created or recreated. A failure stops that container's deploy and the old container stays."
+        },
         "command": {
           "description": "Container command override.",
           "oneOf": [
@@ -281,6 +286,11 @@
           "type": "object",
           "additionalProperties": { "type": "string" },
           "description": "Additional Docker labels."
+        },
+        "release": {
+          "type": "string",
+          "minLength": 1,
+          "description": "bay.toml release: a shell command run once in a one-shot container of the new image before the container is created or recreated. A failure stops that container's deploy and the old container stays."
         },
         "command": {
           "description": "Container command override.",

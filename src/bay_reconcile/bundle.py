@@ -69,8 +69,19 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         log_options=d.get("log_options"),
         zero_downtime=bool(d.get("zero_downtime", False)),
         build=bool(d.get("build", False)),
+        release=_release(d),
         env_file_change=_env_file_change(d),
     )
+
+
+def _release(d: Mapping[str, Any]) -> str | None:
+    """The spec's ``release`` command, or None. Checked at load time, before anything runs."""
+    raw = d.get("release")
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{d.get('name')!r}: release must be a non-empty string")
+    return raw
 
 
 def _env_file_change(d: Mapping[str, Any]) -> Mapping[str, object] | None:
@@ -101,6 +112,7 @@ _CONFIG_KEYS: Mapping[str, type] = {
     "stop_timeout": int,
     "healthcheck_timeout": float,
     "healthcheck_poll": float,
+    "release_timeout": float,
 }
 
 

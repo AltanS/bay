@@ -1286,7 +1286,9 @@ def bay_spec_hash(spec, env_digest=None):
     LEGACY_HASH_LABEL = "com.argo.config-hash"  # kept-argo: dual-read, remove in a future major release
 
     # Exclude transient / meta fields that should not drive recreation
-    _EXCLUDED = {"type", "build", "zero_downtime", "health_check_timeout", "env_file"}
+    # ``release`` runs once before a create; it is not container config, so
+    # a changed command alone recreates nothing.
+    _EXCLUDED = {"type", "build", "zero_downtime", "health_check_timeout", "env_file", "release"}
 
     # Labels: exclude the hash label itself to avoid a circular dependency
     labels = {

@@ -547,6 +547,38 @@ _promote_latest() {
   docker tag "${repo}:${sha}" "${repo}:latest"
 }
 
+# ── Release (bay.toml `release`, docs/build-pipeline.md "Release") ──
+# Runs the service's release command once, in a one-shot container of the image
+# that is about to go live, while the old container still serves. A service
+# without `release` has no _run_release and passes straight through. A failure
+# is a failed build: the circuit breaker counts it, build.failed alerts, `:latest`
+# does not move and the old container keeps running.
+#   $1  the new image   $2  a tag to point back at $3 on failure (optional)
+_release_or_fail() {
+  local image="$1" back_tag="${2:-}" back_id="${3:-}" out rc=0
+  declare -F _run_release >/dev/null || return 0
+  _log "Release for ${SERVICE} with ${image}"
+  out=$(mktemp)
+  _run_release "${image}" >"${out}" 2>&1 || rc=$?
+  if [[ ${rc} -eq 0 ]]; then
+    rm -f "${out}"
+    _log "Release for ${SERVICE} done"
+    return 0
+  fi
+  # A timeout kills the docker client, not the container: remove it here.
+  docker rm -f "${SERVICE}-release" >/dev/null 2>&1 || true
+  if [[ -n "${back_tag}" && -n "${back_id}" ]]; then
+    docker tag "${back_id}" "${back_tag}" 2>/dev/null || true
+  fi
+  local why="exit ${rc}"
+  [[ ${rc} -eq 124 ]] && why="timed out after {{ bay_release_timeout | default(600) }}s"
+  _log "Release for ${SERVICE} failed (${why}); :latest not moved, old container kept"
+  _record_failure "${SHA}" "Release" "${why}: $(tail -c 400 "${out}")"
+  rm -f "${out}"
+  trap - ERR
+  exit 1
+}
+
 # ── Failed builds (docs/build-pipeline.md, "Health check and rollback") ──
 # A build whose health check failed must never run again by its commit tag:
 # `bay up` and `bay rollback --to` find code by `<image>:<commit12>`. Untag it
@@ -986,6 +1018,36 @@ else
   exit 1
 fi
 
+{#
+  _run_release: one per service with `release`, run by _release_or_fail. The
+  same network, env file and mounts as the container itself, no ports, no
+  Traefik labels, and the label com.bay.release-of (never bay.managed, so the
+  deploy's orphan cleanup ignores it). `timeout` exits 124 when the release
+  runs longer than bay_release_timeout.
+#}
+{% for svc_name in git_deploy_rebuild_services if services[svc_name].release is defined %}
+{% set svc = services[svc_name] %}
+if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
+  _run_release() {
+    timeout --kill-after=10 {{ bay_release_timeout | default(600) }} docker run --rm \
+      --name "{{ svc_name }}-release" \
+      --label "com.bay.release-of={{ svc_name }}" \
+{% if svc.network_mode is defined %}
+      --network "{{ svc.network_mode }}" \
+{% else %}
+      --network "{{ traefik_docker_network | default('services') }}" \
+{% endif %}
+{% if svc.env is defined or svc.database is defined %}
+      --env-file "${STACK_DIR}/env/{{ svc_name }}.env" \
+{% endif %}
+{% for vol in svc.volumes | default([]) | bay_prefix_volumes(stack_name | default('bay')) %}
+      -v "{{ vol }}" \
+{% endfor %}
+      "$1" sh -c {{ svc.release | quote }}
+  }
+fi
+{% endfor %}
+
 # ── Circuit breaker ──
 # When the breaker is OPEN, blocking the push silently was the 2026-04-16
 # incident path: pushes returned exit 0 with only a journald log line, so
@@ -1104,6 +1166,10 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
     docker tag "${_PREV_DIGEST}" "${IMAGE_REPO}:previous" 2>/dev/null || true
     _log "Tagged running image as ${IMAGE_REPO}:previous for rollback"
   fi
+
+  # Release with the pulled image while the old container still serves. On a
+  # failure the local moving tag goes back to the running image.
+  _release_or_fail "${IMAGE_REF}" "${IMAGE_REF}" "${_PREV_DIGEST}"
 
   # Carry the deploy's config-hash label over to the recreated container.
   EXTRA_LABELS=()
@@ -1677,6 +1743,9 @@ exec 200>&-
 if [[ -n "${HOLD_REASON}" ]]; then
   _hold_build "${HOLD_REASON}" "${IMAGE_NAME}:${SHA}"
 fi
+
+# ── Release, with the new commit's image, before :latest moves ──
+_release_or_fail "${IMAGE_NAME}:${SHA}"
 
 # ── The push may deploy: move :latest to this commit ──
 _promote_latest "${IMAGE_NAME}" "${SHA}"

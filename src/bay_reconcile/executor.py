@@ -39,6 +39,10 @@ class _CanaryUnhealthy(RuntimeError):
     """Canary never reached a healthy state within the timeout."""
 
 
+class ReleaseFailed(RuntimeError):
+    """The spec's ``release`` command exited non-zero or ran out of time."""
+
+
 def execute(
     plan: Plan,
     client: DockerClient,
@@ -131,6 +135,7 @@ def _apply(action: Action, client: DockerClient, cfg: ReconcilerConfig) -> str:
     if isinstance(action, Create):
         if not action.spec.build:
             client.pull(action.spec.image)
+        _release(client, action.spec, cfg)
         client.create(action.spec)
         return f"created {action.spec.name}"
     if isinstance(action, CanarySwap):
@@ -139,6 +144,9 @@ def _apply(action: Action, client: DockerClient, cfg: ReconcilerConfig) -> str:
         # Pull first: the old container keeps serving while the image downloads.
         if not action.spec.build:
             client.pull(action.spec.image)
+        # The release runs while the old container still serves. A failure
+        # raises here, before the stop, so the old container stays.
+        _release(client, action.spec, cfg)
         _stop_then_remove(client, action.spec.name, cfg)
         client.create(action.spec)
         return f"recreated {action.spec.name}"
@@ -146,6 +154,25 @@ def _apply(action: Action, client: DockerClient, cfg: ReconcilerConfig) -> str:
         _stop_then_remove(client, action.name, cfg)
         return f"removed {action.name}"
     return "noop"
+
+
+def _release(client: DockerClient, spec: ContainerSpec, cfg: ReconcilerConfig) -> None:
+    """Run ``spec.release`` in a one-shot container of the new image, or do nothing.
+
+    Called after the pull and before anything stops the old container. A
+    non-zero exit or a timeout raises :class:`ReleaseFailed`, which fails the
+    action: the old container keeps serving and the receipt says ``failed``.
+    """
+    if not spec.release:
+        return
+    code, tail = client.run_release(spec, timeout=cfg.release_timeout)
+    if code == 0:
+        return
+    what = (
+        f"timed out after {cfg.release_timeout:g}s" if code is None else f"exited {code}"
+    )
+    detail = f"; last output: {tail[-500:]}" if tail else ""
+    raise ReleaseFailed(f"release of {spec.name} {what}; the old container stays{detail}")
 
 
 def _stop_then_remove(client: DockerClient, name: str, cfg: ReconcilerConfig) -> None:
@@ -168,6 +195,9 @@ def _canary_swap(spec: ContainerSpec, client: DockerClient, cfg: ReconcilerConfi
     canary = f"{spec.name}{cfg.canary_suffix}"
     if not spec.build:
         client.pull(spec.image)
+    # Before the try: a failed release must not reach the rescue below, which
+    # would recreate the container without it.
+    _release(client, spec, cfg)
     client.create(spec, name_override=canary)
     try:
         if not _wait_healthy(client, canary, cfg):

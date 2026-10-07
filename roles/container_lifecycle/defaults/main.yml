@@ -25,6 +25,11 @@ container_lifecycle_healthcheck_poll: 1
 # (seconds). Docker waits this long for the process to exit on its own.
 container_lifecycle_stop_timeout: 30
 
+# How long a `release` one-shot (bay.toml `release`) may run before the deploy
+# of that container fails (seconds). The old container keeps serving. The
+# webhook rebuild script reads the same name (roles/git_deploy/defaults).
+bay_release_timeout: 600
+
 # Suffix appended to canary containers during zero-downtime deploy
 container_lifecycle_canary_suffix: "-new"
 

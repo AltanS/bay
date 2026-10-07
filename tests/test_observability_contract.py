@@ -396,8 +396,8 @@ def test_exit_path_map_rows_all_carry_an_alert_id_cell():
         if re.match(r"^\|\s*\d+\s*\|\s*(?:\d+|ERR trap)\s*\|", ln)
     ]
     # 17, plus M117/05's hold exit (row 18) and registry-retag exit (row 19),
-    # plus M117/06's config-only exit (row 20).
-    assert len(rows) == 20, f"Expected 20 exit-path rows, found {len(rows)}"
+    # plus M117/06's config-only exit (row 20), plus M118/04's release exit (row 21).
+    assert len(rows) == 21, f"Expected 21 exit-path rows, found {len(rows)}"
 
     malformed: list[str] = []
     for row in rows:
@@ -408,3 +408,89 @@ def test_exit_path_map_rows_all_carry_an_alert_id_cell():
         "Exit-path rows are missing the trailing alert_id cell:\n"
         + "\n".join(malformed)
     )
+
+
+# ── release (bay.toml `release`, M118/04) ─────────────────────────────────────
+
+
+def _release_render_context():
+    ctx = _minimal_render_context()
+    ctx["services"]["svc-local"]["release"] = "bin/migrate --yes"
+    ctx["services"]["svc-local"]["env"] = {"clear": {"A": "1"}}
+    ctx["services"]["svc-local"]["volumes"] = ["data:/app/data"]
+    ctx["services"]["svc-pullonly"]["release"] = "bin/migrate"
+    return ctx
+
+
+def _function_body(rendered: str, name: str) -> str:
+    start = rendered.index(f"{name}() {{")
+    end = rendered.index("\n}\n", start)
+    return rendered[start : end + 3]
+
+
+def test_rebuild_runs_release_before_swap(tmp_path):
+    """The release runs with the new commit's image before the swap.
+
+    Local path: after the hold guard and before `_promote_latest`, so a failed
+    release leaves `:latest` where it was and the old container running. Pull
+    path: before the old container is stopped. A failure is a failed build
+    (`_record_failure ... "Release"`, exit 1).
+    """
+    env = _ansible_env()
+    rendered = env.get_template(_TEMPLATE.name).render(**_release_render_context())
+    out = tmp_path / "rebuild-release.sh"
+    out.write_text(rendered)
+    assert subprocess.run(["bash", "-n", str(out)], capture_output=True).returncode == 0
+
+    # One _run_release per service with `release`, with its own mounts and env file.
+    assert rendered.count("_run_release() {") == 2
+    local_def = rendered[rendered.index("if [[ \"${SERVICE}\" == 'svc-local' ]]; then\n  _run_release"):]
+    local_def = local_def[: local_def.index("\nfi\n")]
+    assert "sh -c 'bin/migrate --yes'" in local_def
+    assert '--name "svc-local-release"' in local_def
+    assert '--label "com.bay.release-of=svc-local"' in local_def
+    assert '--env-file "${STACK_DIR}/env/svc-local.env"' in local_def
+    assert '-v "test_data:/app/data"' in local_def
+    assert "timeout --kill-after=10 600 docker run --rm" in local_def
+    assert "-p " not in local_def and "traefik." not in local_def
+
+    # Local path: release, then :latest moves, then the old container stops.
+    rel = rendered.index('_release_or_fail "${IMAGE_NAME}:${SHA}"')
+    promote = rendered.index('_promote_latest "${IMAGE_NAME}" "${SHA}"')
+    hold = rendered.index('_hold_build "${HOLD_REASON}" "${IMAGE_NAME}:${SHA}"')
+    stop = rendered.index('docker stop "${SERVICE}"', promote)
+    assert hold < rel < promote < stop
+    # Pull path: release with the pulled image, before the old container stops.
+    pull_rel = rendered.index('_release_or_fail "${IMAGE_REF}" "${IMAGE_REF}" "${_PREV_DIGEST}"')
+    pull_stop = rendered.index('docker stop "${SERVICE}"', pull_rel)
+    assert rendered.index('docker pull "${IMAGE_REF}"') < pull_rel < pull_stop < promote
+
+    # Run the helper itself with stubs: a failure records a "Release" build
+    # failure, points the moving tag back, and exits 1; success returns 0.
+    helper = _function_body(rendered, "_release_or_fail")
+    for code, want in ((0, 0), (3, 1), (124, 1)):
+        log = tmp_path / f"calls-{code}.log"
+        script = tmp_path / f"harness-{code}.sh"
+        script.write_text(
+            "set -euo pipefail\n"
+            f"LOG={log}\nSERVICE=svc-local\nSHA=abc123abc123\n"
+            '_log() { echo "LOG $*" >>"$LOG"; }\n'
+            '_record_failure() { echo "FAIL $1|$2|$3" >>"$LOG"; }\n'
+            'docker() { echo "DOCKER $*" >>"$LOG"; }\n'
+            f'_run_release() {{ echo "RUN $1" >>"$LOG"; echo migrate-output; return {code}; }}\n'
+            + helper
+            + '_release_or_fail "img:abc" "img:latest" "sha256:old"\n'
+            'echo "AFTER" >>"$LOG"\n'
+        )
+        proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+        calls = log.read_text()
+        assert proc.returncode == want, (code, proc.stderr, calls)
+        assert "RUN img:abc" in calls
+        if want == 0:
+            assert "AFTER" in calls and "FAIL" not in calls
+        else:
+            assert "AFTER" not in calls
+            assert "FAIL abc123abc123|Release|" in calls and "migrate-output" in calls
+            assert "DOCKER rm -f svc-local-release" in calls
+            assert "DOCKER tag sha256:old img:latest" in calls
+            assert ("timed out" in calls) is (code == 124)

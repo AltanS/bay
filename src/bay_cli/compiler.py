@@ -453,8 +453,6 @@ class _Compiler:
     # ── projects ────────────────────────────────────────────────────────
     def _emit_unit(self, unit: _Unit) -> None:
         doc = unit.doc
-        if "release" in unit.eff:
-            self._todo(unit, "release", "a release command before traffic moves")
         for i, _job in enumerate(doc.get("jobs", [])):
             self._todo(unit, f"jobs[{i}]", "scheduled jobs")
         if "backup" in doc:
@@ -525,6 +523,9 @@ class _Compiler:
             entry["update"] = update
         if "command" in level:
             entry["command"] = level["command"]
+        if is_web and "release" in unit.eff:
+            # [deploy.<env>] release replaces the top-level one (_RUNTIME_KEYS).
+            entry["release"] = unit.eff["release"]
         logs = level.get("logs", unit.eff.get("logs", self.defaults.get("logs", "off")))
         retention = _log_retention(logs)
         if retention is not None:

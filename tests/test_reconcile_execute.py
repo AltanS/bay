@@ -195,3 +195,113 @@ class TestIdempotency:
 
         second = plan(specs, client.observe(MANAGED))
         assert second.is_noop
+
+
+# ── release (bay.toml `release`, M118/04) ─────────────────────────────────────
+
+
+class _ReleaseClient(FakeDockerClient):
+    """A fake that records ``run_release`` and answers with a given exit code."""
+
+    def __init__(
+        self, initial: dict[str, ContainerState] | None = None, *, code: int | None = 0
+    ) -> None:
+        super().__init__(initial)
+        self.code = code
+        self.release_timeouts: list[float] = []
+
+    def run_release(self, spec: ContainerSpec, *, timeout: float) -> tuple[int | None, str]:
+        with self._lock:
+            self.calls.append(("release", spec.name, spec.image, spec.release))
+            self.release_timeouts.append(timeout)
+        return self.code, "migrations: 3 applied" if self.code == 0 else "relation users missing"
+
+
+class TestRelease:
+    def test_reconcile_runs_release_before_recreate(self) -> None:
+        """The release runs after the pull and before the old container stops.
+
+        A failed release fails the action before any stop: the old container
+        keeps serving, and the receipt of the pass says ``failed``.
+        """
+        from bay_reconcile.receipt import build_receipt
+
+        old = {"web": ContainerState("web", exists=True, config_hash="old")}
+        spec = _spec("web", config_hash="new", release="bin/migrate")
+        cfg = ReconcilerConfig(stop_timeout=5, release_timeout=42)
+
+        good = _ReleaseClient(dict(old))
+        report = execute(Plan((Recreate(spec, "changed"),)), good, config=cfg)
+        assert report.ok
+        assert good.calls == [
+            ("pull", "web:latest"),
+            ("release", "web", "web:latest", "bin/migrate"),
+            ("stop", "web", 5),
+            ("remove", "web"),
+            ("create", "web"),
+        ]
+        assert good.release_timeouts == [42]
+
+        bad = _ReleaseClient(dict(old), code=3)
+        report = execute(Plan((Recreate(spec, "changed"),)), bad, config=cfg)
+        assert not report.ok
+        assert [c[0] for c in bad.calls] == ["pull", "release"]
+        assert bad.observe(MANAGED)["web"].config_hash == "old"  # the old one still runs
+        detail = report.failed[0].detail
+        assert detail.startswith("ReleaseFailed") and "exited 3" in detail
+        assert "relation users missing" in detail
+        receipt = build_receipt(
+            meta={"env": "production", "box": "eu-1", "reconcile_rc": 1},
+            bundle={"containers": [{"name": "web", "image": "web:latest", "config_hash": "new"}]},
+            report=report.to_dict(),
+        )
+        assert receipt["result"] == "failed"
+
+        slow = _ReleaseClient(dict(old), code=None)
+        report = execute(Plan((Recreate(spec, "changed"),)), slow, config=cfg)
+        assert not report.ok and "timed out after 42s" in report.failed[0].detail
+        assert [c[0] for c in slow.calls] == ["pull", "release"]
+
+    def test_release_runs_before_create_and_canary(self) -> None:
+        from bay_reconcile import CanarySwap
+
+        spec = _spec("web", release="bin/migrate")
+        client = _ReleaseClient()
+        assert execute(Plan((Create(spec),)), client).ok
+        assert [c[0] for c in client.calls] == ["pull", "release", "create"]
+
+        old = {"web": ContainerState("web", exists=True, config_hash="old", status="running")}
+        canary = _ReleaseClient(dict(old), code=1)
+        swap = CanarySwap(_spec("web", release="x", zero_downtime=True), "c")
+        report = execute(Plan((swap,)), canary)
+        # A failed release never reaches the canary rescue, which would recreate.
+        assert not report.ok
+        assert [c[0] for c in canary.calls] == ["pull", "release"]
+
+    def test_spec_without_release_runs_none(self) -> None:
+        client = _ReleaseClient({"web": ContainerState("web", exists=True, config_hash="old")})
+        execute(Plan((Recreate(_spec("web", config_hash="new"), "changed"),)), client)
+        assert "release" not in [c[0] for c in client.calls]
+
+    def test_bundle_carries_release_and_timeout(self) -> None:
+        import pytest
+
+        from bay_reconcile.bundle import load_bundle
+
+        b = load_bundle({
+            "containers": [{"name": "web", "image": "w", "type": "service", "config_hash": "h",
+                            "release": "bin/migrate"}],
+            "config": {"release_timeout": 30},
+        })
+        assert b.containers[0].release == "bin/migrate"
+        assert b.config.release_timeout == 30.0
+        with pytest.raises(ValueError, match="release must be a non-empty string"):
+            load_bundle({"containers": [{"name": "web", "image": "w", "type": "service",
+                                         "config_hash": "h", "release": " "}]})
+
+    def test_release_is_not_hashed(self) -> None:
+        sys.path.insert(0, str(Path(__file__).parent.parent / "filter_plugins"))
+        from bay_filters import bay_spec_hash
+
+        base = {"name": "web", "image": "w", "labels": {}}
+        assert bay_spec_hash(base) == bay_spec_hash({**base, "release": "bin/migrate"})

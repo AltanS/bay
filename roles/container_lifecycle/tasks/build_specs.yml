@@ -101,6 +101,9 @@
          | combine({'build': true}
                    if _svc.build is defined
                    else {})
+         | combine({'release': _svc.release}
+                   if _svc.release is defined
+                   else {})
          | combine({'health_check_timeout': _svc.health_check_timeout}
                    if _svc.health_check_timeout is defined
                    else {})
@@ -174,6 +177,9 @@
                    else {})
          | combine({'entrypoint': _acc.entrypoint}
                    if _acc.entrypoint is defined
+                   else {})
+         | combine({'release': _acc.release}
+                   if _acc.release is defined
                    else {})
          | combine(_log_rotation)
       }}

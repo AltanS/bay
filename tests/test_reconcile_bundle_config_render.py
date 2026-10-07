@@ -37,7 +37,11 @@ def _bundle_expression() -> str:
 
 def _render(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     defaults = yaml.safe_load((_ROLE / "defaults" / "main.yml").read_text())
-    variables = {k: v for k, v in defaults.items() if k.startswith("container_lifecycle_")}
+    variables = {
+        k: v
+        for k, v in defaults.items()
+        if k.startswith("container_lifecycle_") or k == "bay_release_timeout"
+    }
     variables.update({"stack_name": "bay", "_reconcile_entries": []})
     variables.update(overrides or {})
     env = jinja2.Environment()
@@ -59,13 +63,15 @@ def test_each_tunable_comes_from_its_role_variable() -> None:
             "container_lifecycle_stop_timeout": "45",
             "container_lifecycle_healthcheck_timeout": "90",
             "container_lifecycle_healthcheck_poll": "0.5",
+            "bay_release_timeout": "120",
         }
     )
     assert rendered["config"] == {
         "stop_timeout": 45,
         "healthcheck_timeout": 90.0,
         "healthcheck_poll": 0.5,
+        "release_timeout": 120.0,
     }
     assert load_bundle(rendered).config == ReconcilerConfig(
-        stop_timeout=45, healthcheck_timeout=90.0, healthcheck_poll=0.5
+        stop_timeout=45, healthcheck_timeout=90.0, healthcheck_poll=0.5, release_timeout=120.0
     )

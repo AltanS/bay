@@ -180,6 +180,7 @@
         'log_options': _spec.log_options | default(None),
         'zero_downtime': _spec.zero_downtime | default(false),
         'build': _spec.build | default(false),
+        'release': _spec.release | default(None),
         'env_file_change': (_env_changes[_spec.env_file]
                             if (_spec.env_file is defined and _spec.env_file in _env_changes)
                             else none)
@@ -208,7 +209,8 @@
             'config': {
               'stop_timeout': container_lifecycle_stop_timeout | int,
               'healthcheck_timeout': container_lifecycle_healthcheck_timeout | float,
-              'healthcheck_poll': container_lifecycle_healthcheck_poll | float
+              'healthcheck_poll': container_lifecycle_healthcheck_poll | float,
+              'release_timeout': bay_release_timeout | float
             },
             'containers': _reconcile_entries | default([])
           } | to_nice_json }}

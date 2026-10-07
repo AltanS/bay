@@ -159,6 +159,11 @@ git_deploy_cb_max_failures: 5
 # Use per-service health_check_timeout in services.yml for services with start_period > 90s.
 git_deploy_health_check_timeout: 90
 
+# How long a `release` one-shot (bay.toml `release`) may run in rebuild.sh
+# before the push counts as a failed build (seconds). Same name and value as
+# roles/container_lifecycle/defaults, which the reconciler reads.
+bay_release_timeout: 600
+
 # Systemd timeout: seconds before systemd kills a hung build process.
 # First-run builds of large images on constrained VPS can take 10+ minutes.
 # Override per-consumer in group_vars if needed.

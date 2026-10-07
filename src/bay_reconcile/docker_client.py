@@ -42,3 +42,14 @@ class DockerClient(Protocol):
     def pull(self, image: str) -> None:
         """Ensure ``image`` is present locally (no-op when already present)."""
         ...
+
+    def run_release(self, spec: ContainerSpec, *, timeout: float) -> tuple[int | None, str]:
+        """Run ``spec.release`` once in a one-shot container and remove it.
+
+        The container is ``<name>-release`` (``models.RELEASE_SUFFIX``): the
+        spec's image, env, volumes, network and user, the command
+        ``sh -c <release>``, no ports, and only the label
+        ``models.RELEASE_LABEL``. Returns ``(exit code, last log lines)``;
+        the exit code is None when the run passed ``timeout`` seconds.
+        """
+        ...

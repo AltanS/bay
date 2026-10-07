@@ -12,7 +12,13 @@ from typing import Any
 
 import docker
 
-from .models import ContainerSpec, ContainerState, healthcheck_to_sdk
+from .models import (
+    RELEASE_LABEL,
+    RELEASE_SUFFIX,
+    ContainerSpec,
+    ContainerState,
+    healthcheck_to_sdk,
+)
 from .observe import (
     HASH_LABEL as _HASH_LABEL,
 )
@@ -139,6 +145,58 @@ class SdkDockerClient:
         if spec.log_driver:
             kwargs["log_config"] = {"type": spec.log_driver, "config": dict(spec.log_options or {})}
         self._c.containers.run(**kwargs)
+
+    def run_release(self, spec: ContainerSpec, *, timeout: float) -> tuple[int | None, str]:
+        name = f"{spec.name}{RELEASE_SUFFIX}"
+        self._remove_release(name, spec.name)
+        kwargs: dict[str, Any] = {
+            "name": name,
+            "image": spec.image,
+            "command": ["sh", "-c", str(spec.release)],
+            "detach": True,
+            "environment": dict(spec.env),
+            "labels": {RELEASE_LABEL: spec.name},
+        }
+        if spec.network_mode:
+            kwargs["network_mode"] = spec.network_mode
+        elif spec.networks:
+            kwargs["network"] = spec.networks[0]
+        if spec.volumes:
+            kwargs["volumes"] = list(spec.volumes)
+        if spec.user:
+            kwargs["user"] = spec.user
+        ctr = self._c.containers.run(**kwargs)
+        try:
+            try:
+                result = ctr.wait(timeout=timeout)
+            except Exception:  # noqa: BLE001 - the SDK raises the transport's read timeout
+                return None, self._tail(ctr)
+            return int((result or {}).get("StatusCode", 1)), self._tail(ctr)
+        finally:
+            try:
+                ctr.remove(force=True)
+            except docker.errors.NotFound:
+                pass
+
+    @staticmethod
+    def _tail(ctr: Any) -> str:
+        try:
+            raw = ctr.logs(tail=20)
+        except Exception:  # noqa: BLE001 - the logs only explain a failure
+            return ""
+        return raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw)
+
+    def _remove_release(self, name: str, of: str) -> None:
+        """Remove a release container a crashed run left, never a container of another owner."""
+        try:
+            ctr = self._c.containers.get(name)
+        except docker.errors.NotFound:
+            return
+        if (ctr.labels or {}).get(RELEASE_LABEL) != of:
+            raise RuntimeError(
+                f"a container named {name} exists and is not the release container of {of}"
+            )
+        ctr.remove(force=True)
 
     def stop(self, name: str, *, timeout: int = 10) -> None:
         # Absent is as stopped as it gets; an exited container answers 304,

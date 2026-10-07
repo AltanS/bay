@@ -13,6 +13,12 @@ from typing import Any, Literal
 
 ContainerType = Literal["service", "accessory", "infra"]
 
+#: The one-shot ``release`` container of a spec is ``<name>-release`` and
+#: carries this label with ``<name>`` as its value (never the managed label,
+#: so orphan removal and the receipt never see it).
+RELEASE_SUFFIX = "-release"
+RELEASE_LABEL = "com.bay.release-of"
+
 _DURATION_UNITS_NS: dict[str, int] = {
     "ns": 1,
     "us": 1_000,
@@ -127,6 +133,12 @@ class ContainerSpec:
     log_options: Mapping[str, str] | None = None
     zero_downtime: bool = False
     build: bool = False
+    #: ``bay.toml`` ``release``: a shell command run once in a one-shot
+    #: container of the new image before this container is created or
+    #: recreated. A non-zero exit or a timeout fails the action before the old
+    #: container is touched. Not hashed: a changed command alone recreates
+    #: nothing.
+    release: str | None = None
     #: Only in a check-mode plan, and only when the env file the deploy would
     #: write differs from the one on the box: ``{"live", "added", "removed",
     #: "changed", "reordered"}``. KEY NAMES and booleans only, never a value.
@@ -321,3 +333,5 @@ class ReconcilerConfig:
     # worst case is unchanged.
     healthcheck_poll: float = 1.0
     stop_timeout: int = 30
+    #: Seconds a ``release`` one-shot may run (``bay_release_timeout``).
+    release_timeout: float = 600.0
