@@ -87,8 +87,12 @@ def default_deploy(
     *,
     config_files_root: Path | None = None,
     code_targets: Mapping[str, Any] | None = None,
+    tags: str = UP_DEPLOY_TAGS,
 ) -> None:
     """Today's ``bay deploy <env> --tags deploy_stack``, without the prompts and the banner.
+
+    ``tags`` adds ``headscale,traefik`` when the plan has a route step
+    (:func:`bay_cli.routes.deploy_tags`).
 
     ``config_files_root`` is the ``files/`` of the scratch fleet ``bay up``
     compiled; the deploy copies config files from there
@@ -121,7 +125,7 @@ def default_deploy(
         ]
         if code_targets:
             extra += ["-e", json.dumps({"bay_code_targets": dict(code_targets)})]
-        ops._run_playbook(cx, "deploy", box_env, UP_DEPLOY_TAGS, extra)
+        ops._run_playbook(cx, "deploy", box_env, tags, extra)
         ops._invalidate_rig_cache(cx.cache_dir)
         ops._run_post_deploy_healthcheck(
             box_env, cx.fleet_root, cx.framework_root, report_dir=report_dir
@@ -395,6 +399,13 @@ def _apply_plan(
 
         # 5. deploy. A move to a box of another box environment also deploys
         # the old one, so its reconciler removes the moved containers there.
+        # A route step adds the headscale and traefik tags (spec M117/07) on
+        # the plan's box environment, where the ingress box is.
+        from bay_cli import routes
+
+        tags = routes.deploy_tags(plan["steps"], UP_DEPLOY_TAGS)
+        if tags != UP_DEPLOY_TAGS:
+            say(f"deploy tags: {tags} (the plan changes a tailnet route)")
         deploy_envs = [box_env] + sorted(
             {
                 str(m["from_box_env"])
@@ -407,6 +418,8 @@ def _apply_plan(
             extra: dict[str, Any] = (
                 {"code_targets": code_targets} if code_targets and target == box_env else {}
             )
+            if target == box_env and tags != UP_DEPLOY_TAGS:
+                extra["tags"] = tags
             try:
                 (deploy or default_deploy)(
                     cx, target, config_files_root=comp.files_root, **extra

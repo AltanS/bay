@@ -1180,15 +1180,18 @@ def diff_steps(
 
 
 def tailnet_step(cx: Context, fleet_doc: Mapping[str, Any]) -> dict[str, Any] | None:
-    """A change of the fleet's tailnet allowlist since the fleet's last commit."""
+    """A change of the fleet's tailnet allowlist since the fleet's last commit.
+
+    Only ``allowlist``: a route change is a ``route`` step of its own.
+    """
     data = gitrepo.show_file(cx.fleet_root, "HEAD", f"./{FLEET_FILE}")
     if data is None:
         return None
     try:
-        before = tomllib.loads(data.decode("utf-8")).get("tailnet")
+        before = (tomllib.loads(data.decode("utf-8")).get("tailnet") or {}).get("allowlist")
     except (UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None
-    if before == fleet_doc.get("tailnet"):
+    if before == (fleet_doc.get("tailnet") or {}).get("allowlist"):
         return None
     return _step(
         "tailnet",
@@ -1907,6 +1910,7 @@ def _compile_and_diff(
     blockers: list[str],
     notes: list[str],
     check_box: BoxCheck | None,
+    fleet_doc: Mapping[str, Any],
 ) -> _Diff:
     """Compile the fleet copy, diff it against PINNED, check secrets and (``--remote``) the box.
 
@@ -1938,6 +1942,14 @@ def _compile_and_diff(
             owners=comp.owners,
             running_scope=names,
         )
+        # Tailnet routes (spec M117/07): steps, and a blocker off the ingress env.
+        from bay_cli import routes
+
+        route_steps, route_blockers = routes.plan_routes(
+            current, out.wanted_data, fleet_doc, box_env
+        )
+        out.steps.extend(route_steps)
+        blockers.extend(route_blockers)
         if box_env is not None:
             out.missing, problem = _missing_secrets(
                 cx, box_env, out.wanted_data, names, secrets_check
@@ -2102,6 +2114,7 @@ def make_plan(
             blockers=blockers,
             notes=notes,
             check_box=check_box,
+            fleet_doc=proj.fleet,
         )
     built = {
         n
@@ -2364,6 +2377,7 @@ def make_env_plan(
             blockers=blockers,
             notes=notes,
             check_box=check_box,
+            fleet_doc=fleet_doc,
         )
     moves: list[dict[str, Any]] = []
     for proj, _ in members:

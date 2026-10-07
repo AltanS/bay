@@ -228,7 +228,7 @@
       "properties": {
         "id": { "type": "string", "pattern": "^s[1-9][0-9]*$" },
         "kind": {
-          "enum": ["container", "volume", "database", "database_user", "secret", "resource", "tailnet", "fleet", "move", "image"]
+          "enum": ["container", "volume", "database", "database_user", "secret", "resource", "tailnet", "route", "fleet", "move", "image"]
         },
         "container": { "type": ["string", "null"] },
         "resource": {
@@ -239,7 +239,12 @@
           "description": "The project the step belongs to. null only for a fleet-wide thing: a [resources.*] entry, the webhook, the tailnet, or a container no project owns.",
           "type": ["string", "null"]
         },
-        "action": { "enum": ["create", "update", "remove", "rename", "move", "recreate", "start"] },
+        "action": {
+          "enum": [
+            "create", "update", "remove", "rename", "move", "recreate", "start",
+            "route_added", "route_changed", "route_removed"
+          ]
+        },
         "risk": { "enum": ["safe", "shared", "destructive"] },
         "reason": { "type": "string", "minLength": 1 },
         "source": { "enum": ["compile", "box"] }

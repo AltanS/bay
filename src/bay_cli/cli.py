@@ -5,7 +5,7 @@ from pathlib import Path
 import typer
 
 from bay_cli import console, fleet_line
-from bay_cli.commands import compile_cmd, fleet_cmd, import_cmd, project_cmd, self_cmd, toml_cmd
+from bay_cli.commands import compile_cmd, fleet_cmd, import_cmd, project_cmd, route_cmd, self_cmd, toml_cmd
 from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault, webhook
 from bay_cli.context import GlobalOptions, package_root
 from bay_cli.errors import BayError
@@ -128,6 +128,7 @@ app.command(rich_help_panel="Daily")(project_cmd.approve)
 app.command(rich_help_panel="Daily")(project_cmd.up)
 app.command(rich_help_panel="Daily")(project_cmd.show)
 app.command(rich_help_panel="Daily")(project_cmd.rollback)
+app.add_typer(route_cmd.app, name="route", rich_help_panel="Daily")
 
 # Framework commands (top-level)
 app.command(rich_help_panel="Framework")(framework.status)

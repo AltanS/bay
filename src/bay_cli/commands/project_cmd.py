@@ -647,15 +647,26 @@ def show(
     name: Annotated[str | None, typer.Argument(help="Project. Default: the bay.toml here.")] = None,
     as_json: _JsonOpt = False,
     no_remote: _NoRemoteOpt = False,
+    show_routes: Annotated[
+        bool,
+        typer.Option(
+            "--routes",
+            help="Show the fleet's tailnet routes instead: WANTED (bay.fleet.toml), "
+            "PINNED (the compiled file) and RUNNING (the ingress box receipt).",
+        ),
+    ] = False,
 ) -> None:
     """Print WANTED, PINNED and RUNNING for a project, and a status per environment.
 
     Status: ok, behind (the project is ahead of the pin), drift (the box
     differs from the pin), unknown (no receipt) or HALF (the last bay up
-    failed).
+    failed). With --routes: the same for every tailnet route of the fleet.
     """
     from bay_cli import apply as applymod
 
+    if show_routes:
+        _show_routes(ctx, as_json, no_remote)
+        return
     try:
         proj, _ = resolve(ctx, name)
         doc = applymod.show(proj, remote=not no_remote)
@@ -667,3 +678,32 @@ def show(
         _echo_json(doc)
     else:
         typer.echo(applymod.render_show(doc))
+
+
+def _show_routes(ctx: typer.Context, as_json: bool, no_remote: bool) -> None:
+    """``bay show --routes``: the fleet's tailnet routes, WANTED against PINNED and RUNNING."""
+    from bay_cli import plan as planmod
+    from bay_cli import routes
+
+    here = find_bay_toml(Path.cwd())
+    _, fleet_name = _read_identity(here) if here else (None, None)
+    try:
+        cx = fleet_context(ctx, fleet_name)
+        fleet = planmod.load_fleet_doc(cx)
+        pinned, _state = planmod.current_services(cx)
+        entries = None
+        env = routes.ingress_env(fleet)
+        if not no_remote and env is not None and routes.table(fleet):
+            try:
+                entries = planmod.default_receipt_reader(cx, env)
+            except (BayError, OSError) as exc:
+                console.warning(f"cannot read the receipt of {env}: {exc}")
+        doc = routes.show_routes(fleet, pinned, entries)
+    except BayError as exc:
+        if not as_json:
+            raise
+        _json_error(exc)
+    if as_json:
+        _echo_json(doc)
+    else:
+        typer.echo(routes.render_show(doc))

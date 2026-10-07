@@ -208,6 +208,11 @@ to reproduce it. The flags that change what a command *means*:
 - `bay init` — Draft a bay.toml in this app repo and register the app in the fleet.
 - `bay plan [env]` — Compare WANTED (bay.toml at HEAD), PINNED (the lock) and RUNNING (the box).
 - `bay rollback [env]` — Return an environment to its previous pin and its previous code, and freeze it.
+- `bay route` — Tailnet routes in bay.fleet.toml: add, list, remove, import.
+- `bay route add <name>` — Add a tailnet route to bay.fleet.toml.
+- `bay route import` — Move tailnet_proxies from the old YAML file into bay.fleet.toml, names kept.
+- `bay route ls` — List the tailnet routes in bay.fleet.toml: name, domain, upstream, host, identity.
+- `bay route rm <name>` — Remove a tailnet route from bay.fleet.toml.
 - `bay show [name]` — Print WANTED, PINNED and RUNNING for a project, and a status per environment.
 - `bay up [env]` — Pin the project's commit in the fleet and deploy it.
 
