@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from .bundle import Bundle, load_bundle
 from .docker_client import DockerClient
 from .executor import execute
+from .images import commit_from_labels, resolved_image
 from .planner import describe, plan
 
 
@@ -46,22 +47,32 @@ def reconcile(
 
 
 def _state_after(bundle: Bundle, client: DockerClient) -> dict[str, dict[str, str | None]]:
-    """Status and health of every desired container once the pass is done.
+    """Status, health, commit and image of every desired container once the pass is done.
 
     One more batched observe, read only. The deploy receipt
-    (``bay_reconcile.receipt``) turns it into each container's ``healthy``
-    field. A failed read is reported as no state, never as a failed deploy:
-    the containers are already in place by now.
+    (``bay_reconcile.receipt``) turns it into each container's ``healthy``,
+    ``commit`` and ``image`` fields. ``commit`` comes from the container's
+    labels (``images.commit_from_labels``); ``image`` is ``<repo>:<commit12>``
+    when that tag resolves to the image the container runs, else the spec's
+    reference. A failed read is reported as no state, never as a failed
+    deploy: the containers are already in place by now.
     """
     try:
         observed = client.observe(bundle.managed_label)
     except Exception:  # noqa: BLE001 - a status read must not fail the deploy
         return {}
+    lookup = getattr(client, "image_id", None)
     out: dict[str, dict[str, str | None]] = {}
     for spec in bundle.containers:
         current = observed.get(spec.name)
         if current is not None and current.exists:
-            out[spec.name] = {"status": current.status, "health": current.health}
+            commit = commit_from_labels(current.labels)
+            out[spec.name] = {
+                "status": current.status,
+                "health": current.health,
+                "commit": commit,
+                "image": resolved_image(spec.image, commit, current.image_id, lookup),
+            }
     return out
 
 

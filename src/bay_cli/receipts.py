@@ -184,6 +184,43 @@ def fetch_receipts(cx: Context, env: str, *, run: Runner | None = None) -> list[
     return [_box_entry(env, name, hosts[name]) for name in sorted(hosts)]
 
 
+def list_commit_tags(
+    cx: Context, env: str, repo: str, *, run: Runner | None = None
+) -> dict[str, list[str]]:
+    """``{box: [commit tags of repo]}`` for every box of ``env`` that answered.
+
+    One ``docker image ls <repo>`` per box (``bay rollback --to`` asks before
+    it moves anything). The default table output is parsed, because an ad-hoc
+    argument is templated by Ansible and a ``--format '{{...}}'`` would not
+    survive it. Raises OSError when no box answered.
+    """
+    import shlex
+
+    from bay_reconcile.images import is_commit
+
+    argv, extra_env = _adhoc_cat(cx, env)
+    argv[argv.index("-a") + 1] = f"docker image ls {shlex.quote(repo)}"
+    runner = run or _default_runner
+    try:
+        proc = runner(argv, extra_env, cx.fleet_root)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OSError(f"ansible failed: {exc}") from exc
+    hosts = _parse_adhoc(proc.stdout or "")
+    out: dict[str, list[str]] = {}
+    for name, result in sorted((hosts or {}).items()):
+        if result.get("unreachable") or result.get("failed") or result.get("rc") not in (0, None):
+            continue
+        tags: set[str] = set()
+        for line in str(result.get("stdout") or "").splitlines()[1:]:
+            cols = line.split()
+            if len(cols) >= 2 and cols[0] == repo and is_commit(cols[1]):
+                tags.add(cols[1])
+        out[name] = sorted(tags)
+    if not out:
+        raise OSError(f"no box of {env} answered `docker image ls {repo}`")
+    return out
+
+
 def framework_state(cx: Context) -> dict[str, Any]:
     """``{"version", "path"}``: ``bay_version`` from version.yml, and the install."""
     return {

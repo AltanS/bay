@@ -12,7 +12,11 @@ Inputs:
   reconciler's exit code. No secret is in it.
 * ``--bundle``: the reconcile bundle. It holds resolved env (secrets), so only
   ``name``, ``image`` and ``config_hash`` are ever read out of it.
-* stdin: the reconciler's JSON report, or nothing when it crashed.
+* stdin: the reconciler's JSON report, or nothing when it crashed. Its
+  ``state`` gives each container's health, ``commit`` and resolved ``image``.
+
+``python -m bay_reconcile.receipt stamp ...`` (:func:`stamp_main`) updates one
+container's ``commit`` and ``image`` after a webhook build recreated it.
 
 Stdlib only, like the rest of the package: it runs on the box.
 """
@@ -29,6 +33,8 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .images import is_commit, short
 
 RECEIPT_VERSION = 1
 RECEIPTS_DIR = Path("/var/lib/bay/receipts")
@@ -121,10 +127,19 @@ def build_receipt(
         if not isinstance(entry, Mapping):
             continue
         name = str(entry.get("name", ""))
+        seen = state.get(name)
+        seen = seen if isinstance(seen, Mapping) else {}
         containers.append(
             {
                 "name": name,
-                "image": entry.get("image"),
+                # The image the container runs: <repo>:<commit12> when that tag
+                # is provably it (see __main__._state_after), else the ref.
+                "image": seen.get("image") or entry.get("image"),
+                # The reference the deploy asked for (the spec's image). The
+                # plan's receipt hash reads this, so a webhook build that moves
+                # `image` and `commit` (stamp_receipt) is not drift.
+                "image_ref": entry.get("image"),
+                "commit": _commit_or_none(seen.get("commit")),
                 "config_hash": entry.get("config_hash"),
                 "action": actions.get(name),
                 "healthy": _healthy(state.get(name)),
@@ -135,6 +150,8 @@ def build_receipt(
             {
                 "name": name,
                 "image": None,
+                "image_ref": None,
+                "commit": None,
                 "config_hash": None,
                 "action": "remove",
                 "healthy": None,
@@ -155,6 +172,36 @@ def build_receipt(
         "containers": containers,
         "projects": {},
     }
+
+
+def _commit_or_none(value: object) -> str | None:
+    return short(str(value)) if is_commit(value) else None
+
+
+def stamp_receipt(
+    receipt: Mapping[str, Any], *, name: str, commit: str | None, image: str
+) -> dict[str, Any] | None:
+    """A copy of ``receipt`` with one container's ``commit`` and ``image`` replaced.
+
+    ``rebuild.sh`` calls this after a webhook build recreated the container,
+    so ``bay status`` and ``bay plan`` see the code the box runs now. Only
+    those two fields move: ``image_ref``, ``config_hash``, ``action`` and the
+    deploy fields stay what the last deploy wrote. None when the receipt does
+    not list the container (nothing to stamp).
+    """
+    out = dict(receipt)
+    rows = [dict(c) if isinstance(c, Mapping) else c for c in receipt.get("containers") or []]
+    hit = False
+    for row in rows:
+        if isinstance(row, dict) and row.get("name") == name:
+            row.setdefault("image_ref", row.get("image"))
+            row["image"] = image
+            row["commit"] = _commit_or_none(commit)
+            hit = True
+    if not hit:
+        return None
+    out["containers"] = rows
+    return out
 
 
 def write_receipt(receipt: Mapping[str, Any], path: Path) -> None:
@@ -198,12 +245,43 @@ def _load_report(text: str) -> Mapping[str, Any] | None:
     return data if isinstance(data, Mapping) else None
 
 
+def stamp_main(argv: Sequence[str]) -> int:
+    """``python -m bay_reconcile.receipt stamp --env E --name N --commit C --image I``.
+
+    Rewrites ``<env>.json`` in place (atomically). Never touches
+    ``<env>.prev.json``: a webhook build is not a deploy. Exit 0 when stamped,
+    1 when there is no receipt or it does not list the container.
+    """
+    parser = argparse.ArgumentParser(prog="python -m bay_reconcile.receipt stamp")
+    parser.add_argument("--env", required=True)
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--commit", default="")
+    parser.add_argument("--image", required=True)
+    parser.add_argument("--dir", default=str(RECEIPTS_DIR), help="receipts directory")
+    args = parser.parse_args(list(argv))
+    path = receipt_path(args.env, Path(args.dir))
+    try:
+        current = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 1
+    if not isinstance(current, Mapping):
+        return 1
+    stamped = stamp_receipt(current, name=args.name, commit=args.commit or None, image=args.image)
+    if stamped is None:
+        return 1
+    _atomic_write(path, (json.dumps(stamped, indent=2) + "\n").encode("utf-8"))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if raw[:1] == ["stamp"]:
+        return stamp_main(raw[1:])
     parser = argparse.ArgumentParser(prog="python -m bay_reconcile.receipt")
     parser.add_argument("--meta", required=True, help="receipt metadata as JSON")
     parser.add_argument("--bundle", required=True, help="path to the reconcile bundle")
     parser.add_argument("--dir", default=str(RECEIPTS_DIR), help="receipts directory")
-    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+    args = parser.parse_args(raw)
 
     meta = json.loads(args.meta)
     try:

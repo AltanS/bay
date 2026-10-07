@@ -79,7 +79,19 @@
             "additionalProperties": true,
             "properties": {
               "name": {"type": "string"},
-              "image": {"type": ["string", "null"]},
+              "image": {
+                "type": ["string", "null"],
+                "description": "The image the container runs: <repo>:<commit12> when that tag resolves to it on the box, else the reference the deploy asked for."
+              },
+              "image_ref": {
+                "type": ["string", "null"],
+                "description": "The image reference the deploy asked for. Absent in receipts written before track mode."
+              },
+              "commit": {
+                "type": ["string", "null"],
+                "pattern": "^[0-9a-f]{12}$",
+                "description": "The 12-character commit the running image was built from (label com.bay.commit), or null. A webhook build updates it in place."
+              },
               "config_hash": {"type": ["string", "null"]},
               "action": {"enum": ["noop", "create", "recreate", "start", "remove", null]},
               "healthy": {"type": ["boolean", "null"]}

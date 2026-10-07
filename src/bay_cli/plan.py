@@ -1208,6 +1208,12 @@ def running_slice(entries: list[dict[str, Any]], names: set[str]) -> dict[str, A
     ``receipt_sha256`` hashes only (box, name, image, config_hash) of this
     project's containers. Another project's deploy rewrites the receipt file
     but leaves this hash alone, so it does not make this project's plan stale.
+
+    ``image`` is the reference the deploy asked for (the receipt's
+    ``image_ref``; older receipts only have ``image``). The receipt's own
+    ``image`` and ``commit`` move when a webhook build recreates a container
+    (``python -m bay_reconcile.receipt stamp``); new code on a branch is not
+    drift, so neither is read here. :func:`running_commits` reads them.
     """
     boxes: list[dict[str, Any]] = []
     rows: list[list[Any]] = []
@@ -1223,7 +1229,11 @@ def running_slice(entries: list[dict[str, Any]], names: set[str]) -> dict[str, A
             seen_receipt = True
             for c in receipt.get("containers") or []:
                 if isinstance(c, Mapping) and c.get("name") in names:
-                    row = {k: c.get(k) for k in ("name", "image", "config_hash")}
+                    row = {
+                        "name": c.get("name"),
+                        "image": c.get("image_ref") or c.get("image"),
+                        "config_hash": c.get("config_hash"),
+                    }
                     box["containers"].append(row)
                     rows.append([entry.get("box"), row["name"], row["image"], row["config_hash"]])
         boxes.append(box)
@@ -1232,6 +1242,74 @@ def running_slice(entries: list[dict[str, Any]], names: set[str]) -> dict[str, A
         canon = json.dumps(sorted(rows, key=lambda r: [str(x) for x in r]), sort_keys=True)
         digest = hashlib.sha256(canon.encode("utf-8")).hexdigest()
     return {"checked": True, "receipt_sha256": digest, "boxes": boxes}
+
+
+def running_commits(entries: list[dict[str, Any]], names: set[str]) -> dict[str, str | None]:
+    """``{container: commit12 or None}`` for this project's containers, from the receipts."""
+    out: dict[str, str | None] = {}
+    for entry in entries:
+        receipt = entry.get("receipt")
+        if not isinstance(receipt, Mapping):
+            continue
+        for c in receipt.get("containers") or []:
+            if isinstance(c, Mapping) and c.get("name") in names:
+                commit = c.get("commit")
+                out[str(c["name"])] = str(commit)[:12] if commit else None
+    return out
+
+
+def code_status(
+    commits: Mapping[str, str | None],
+    *,
+    project: str,
+    track: str,
+    in_fleet: bool,
+    pinned_commit: str | None,
+    wanted_commit: str | None,
+    frozen: Mapping[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Code against config: ``(steps, info lines)``.
+
+    * ``track = "branch"``: a push deploys new code under the pinned config,
+      so a receipt commit that differs from the pin is expected, not drift.
+      One info line: ``code at <commit>, config pinned at <commit>``.
+    * ``track = "pin"`` (bay.toml in the app repo): the code must be the
+      commit ``bay up`` pins. A container that runs another commit is a step
+      ``image``, risk safe: ``bay up`` points ``:latest`` at the pinned image.
+    * ``frozen`` (the env record, when ``bay rollback`` froze it): one info
+      line that says pushes do not deploy.
+    """
+    steps: list[dict[str, Any]] = []
+    info: list[str] = []
+    if frozen and frozen.get("frozen"):
+        at = str(frozen.get("frozen_commit") or "")[:12] or "unknown"
+        info.append(
+            f"frozen by bay rollback at {at}: a push builds but does not deploy, until a "
+            "bay up to a newer commit"
+        )
+    known = {name: c for name, c in commits.items() if c}
+    if track == "pin" and not in_fleet and wanted_commit:
+        target = wanted_commit[:12]
+        for name in sorted(known):
+            if known[name] != target:
+                steps.append(
+                    _step(
+                        "image",
+                        "update",
+                        "safe",
+                        f"the box runs code {known[name]}; bay up deploys {target} "
+                        '(track = "pin")',
+                        container=name,
+                        project=project,
+                        source="box",
+                    )
+                )
+        return steps, info
+    pinned = (pinned_commit or "")[:12]
+    running = sorted(set(known.values()))
+    if pinned and running and running != [pinned]:
+        info.append(f"code at {', '.join(running)}, config pinned at {pinned}")
+    return steps, info
 
 
 def running_detail(entries: list[dict[str, Any]], names: set[str]) -> list[dict[str, Any]]:
@@ -1891,7 +1969,9 @@ def make_plan(
     env_names = set(names_by_env.get(env, {}).values())
 
     # RUNNING
-    running = _read_running(cx, opts, place.box_env, env_names, notes, read_receipts)
+    running, receipt_entries = _read_running(
+        cx, opts, place.box_env, env_names, notes, read_receipts
+    )
 
     # Compile WANTED and diff
     diff = _Diff()
@@ -1913,6 +1993,21 @@ def make_plan(
             notes=notes,
             check_box=check_box,
         )
+    if wanted.doc is not None and receipt_entries:
+        from bay_cli import bay_toml
+
+        code_steps, code_info = code_status(
+            running_commits(receipt_entries, env_names),
+            project=proj.name,
+            track=bay_toml.track(wanted.doc, env),
+            in_fleet=proj.in_fleet,
+            pinned_commit=pinned_commit,
+            wanted_commit=wanted.commit,
+            frozen=(proj.lock.get("envs") or {}).get(env),
+        )
+        explained = {str(s["container"]) for s in diff.steps if s["container"]}
+        diff.steps.extend(s for s in code_steps if s["container"] not in explained)
+        notes.extend(code_info)
     moves: list[dict[str, Any]] = []
     if place.move:
         move = move_record(
@@ -1988,17 +2083,20 @@ def _read_running(
     names: set[str],
     notes: list[str],
     read_receipts: ReceiptReader | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """``(running slice, raw receipt entries)``; the entries feed :func:`code_status`."""
     running: dict[str, Any] = {"checked": False, "receipt_sha256": None, "boxes": []}
+    entries: list[dict[str, Any]] = []
     if opts.read_running and box_env is not None:
         reader = read_receipts or default_receipt_reader
-        running = running_slice(reader(cx, box_env), names)
+        entries = reader(cx, box_env)
+        running = running_slice(entries, names)
         for b in running["boxes"]:
             if b.get("error"):
                 notes.append(f"box {b.get('box') or box_env}: {b['error']}")
     elif not opts.read_running:
         notes.append("the box receipt was not read (--no-remote)")
-    return running
+    return running, entries
 
 
 # ── The whole environment ───────────────────────────────────────────────────
@@ -2113,7 +2211,7 @@ def make_env_plan(
     box = next(iter(boxes_used)) if len(boxes_used) == 1 else None
     all_names = set().union(*env_names.values()) if env_names else set()
 
-    running = _read_running(cx, opts, box_env, all_names, notes, read_receipts)
+    running, _ = _read_running(cx, opts, box_env, all_names, notes, read_receipts)
 
     diff = _Diff()
     if members and not any(w.problems for _, w in members):

@@ -91,6 +91,10 @@ class SdkDockerClient:
             cache[ref] = self._image_id(ref)
         return cache[ref]
 
+    def image_id(self, reference: str) -> str | None:
+        """The local image id of ``reference``, or None (read by the receipt state)."""
+        return self._image_id(reference)
+
     def _image_id(self, reference: str) -> str | None:
         try:
             image = self._c.images.get(reference)

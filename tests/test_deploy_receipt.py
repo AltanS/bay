@@ -143,6 +143,8 @@ def test_deploy_receipt_roundtrip(tmp_path: Path) -> None:
     assert by_name["web"] == {
         "name": "web",
         "image": "acme/web:1",
+        "image_ref": "acme/web:1",
+        "commit": None,
         "config_hash": "h-web",
         "action": "recreate",
         "healthy": True,
@@ -242,7 +244,135 @@ def test_reconciler_report_carries_post_pass_state() -> None:
     )
     code, out = reconcile(bundle, Fake())
     assert code == 0
-    assert out["state"] == {"web": {"status": "running", "health": "healthy"}}
+    assert out["state"] == {
+        "web": {"status": "running", "health": "healthy", "commit": None, "image": "acme/web:1"}
+    }
+
+
+def test_receipt_records_commit_and_image_per_container(tmp_path: Path) -> None:
+    """M117/05: each container's commit (label) and the image it runs, by commit tag."""
+    commit = "0123456789ab" * 3 + "cdef"  # a full 40-character sha
+
+    class Fake:
+        def __init__(self) -> None:
+            self.state = {
+                "web": ContainerState(
+                    "web",
+                    exists=True,
+                    image="acme/web:latest",
+                    config_hash="h-web",
+                    managed=True,
+                    status="running",
+                    health="healthy",
+                    image_id="sha256:built",
+                    local_image_id="sha256:built",
+                    labels={"com.bay.commit": commit[:12]},
+                ),
+                # Built before the label existed: only the OCI revision label.
+                "api": ContainerState(
+                    "api",
+                    exists=True,
+                    image="acme/api:latest",
+                    config_hash="h-api",
+                    managed=True,
+                    status="running",
+                    image_id="sha256:api",
+                    local_image_id="sha256:api",
+                    labels={"org.opencontainers.image.revision": "abcdef012345"},
+                ),
+                "postgres": ContainerState(
+                    "postgres",
+                    exists=True,
+                    image="postgres:16",
+                    config_hash="h-pg",
+                    managed=True,
+                    status="running",
+                    image_id="sha256:pg",
+                    local_image_id="sha256:pg",
+                ),
+            }
+
+        def observe(self, managed_label):
+            return dict(self.state)
+
+        def image_id(self, ref: str) -> str | None:
+            # acme/web:<commit12> is on the box; acme/api:<commit12> is not.
+            return {f"acme/web:{commit[:12]}": "sha256:built"}.get(ref)
+
+    bundle_doc = {
+        "containers": [
+            {"name": "web", "image": "acme/web:latest", "type": "service", "config_hash": "h-web"},
+            {"name": "api", "image": "acme/api:latest", "type": "service", "config_hash": "h-api"},
+            {"name": "postgres", "image": "postgres:16", "type": "accessory", "config_hash": "h-pg"},
+        ]
+    }
+    code, report = reconcile(load_bundle(bundle_doc), Fake())
+    assert code == 0
+    receipt = box_receipt.build_receipt(meta=_META, bundle=bundle_doc, report=report)
+    jsonschema.validate(receipt, _RECEIPT_SCHEMA)
+    rows = {c["name"]: c for c in receipt["containers"]}
+    assert rows["web"]["commit"] == commit[:12]
+    assert rows["web"]["image"] == f"acme/web:{commit[:12]}"
+    assert rows["web"]["image_ref"] == "acme/web:latest"
+    # A commit tag that is not provably the running image is not claimed.
+    assert rows["api"]["commit"] == "abcdef012345"
+    assert rows["api"]["image"] == "acme/api:latest"
+    assert rows["postgres"]["commit"] is None and rows["postgres"]["image"] == "postgres:16"
+
+    # A webhook build stamps the new commit in place, without a deploy.
+    path = box_receipt.receipt_path("production", tmp_path)
+    box_receipt.write_receipt(receipt, path)
+    new = "fedcba987654"
+    assert (
+        box_receipt.main(
+            ["stamp", "--env", "production", "--name", "web", "--commit", new,
+             "--image", f"acme/web:{new}", "--dir", str(tmp_path)]
+        )
+        == 0
+    )
+    stamped = json.loads(path.read_text())
+    jsonschema.validate(stamped, _RECEIPT_SCHEMA)
+    web = next(c for c in stamped["containers"] if c["name"] == "web")
+    assert (web["commit"], web["image"], web["image_ref"]) == (new, f"acme/web:{new}", "acme/web:latest")
+    assert web["config_hash"] == "h-web" and stamped["deployed_at"] == receipt["deployed_at"]
+    assert not box_receipt.previous_path(path).exists(), "a stamp is not a deploy"
+    # The plan's drift hash reads image_ref, so the stamp is not drift.
+    from bay_cli import plan as planmod
+
+    names = {"web", "api"}
+    before = planmod.running_slice([{"box": "app-1", "receipt": receipt}], names)
+    after = planmod.running_slice([{"box": "app-1", "receipt": stamped}], names)
+    assert before["receipt_sha256"] == after["receipt_sha256"]
+    assert planmod.running_commits([{"box": "app-1", "receipt": stamped}], names) == {
+        "web": new,
+        "api": "abcdef012345",
+    }
+    # `bay rollback --to` asks every box for its commit tags (docker image ls table).
+    table = (
+        "REPOSITORY   TAG            IMAGE ID       CREATED       SIZE\n"
+        "acme/web     fedcba987654   1111aaaa2222   2 hours ago   90MB\n"
+        "acme/web     latest         1111aaaa2222   2 hours ago   90MB\n"
+        "acme/web     0123456789ab   3333bbbb4444   2 days ago    90MB\n"
+        "acme/webx    aaaaaaaaaaaa   5555cccc6666   2 days ago    90MB\n"
+    )
+
+    def ls(argv, extra_env, cwd):
+        assert argv[argv.index("-a") + 1] == "docker image ls acme/web"
+        doc = {"plays": [{"tasks": [{"hosts": {
+            "app-1": {"rc": 0, "stdout": table},
+            "app-2": {"unreachable": True, "msg": "timed out"},
+        }}]}]}
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(doc), stderr="")
+
+    cx = _fleet(tmp_path)
+    assert receipts.list_commit_tags(cx, "production", "acme/web", run=ls) == {
+        "app-1": ["0123456789ab", "fedcba987654"]
+    }
+
+    # Unknown container or no receipt: exit 1, nothing written.
+    args = ["--commit", new, "--image", "x:1", "--dir", str(tmp_path)]
+    assert box_receipt.main(["stamp", "--env", "production", "--name", "nope", *args]) == 1
+    assert box_receipt.main(["stamp", "--env", "staging", "--name", "web", *args]) == 1
 
 
 # ── the Ansible wiring ───────────────────────────────────────────────────

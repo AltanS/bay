@@ -326,6 +326,42 @@
             group: docker
             mode: "0640"
 
+    # ── Code pin (track mode, bay rollback) ─────────────────────────────────
+    # `bay up` and `bay rollback` pass `bay_code_targets`: per container, the
+    # commit whose image `:latest` must point at (`{"commit": ...}`), or
+    # `{"source": "prev"}` for the commit the previous receipt names. This
+    # retags before the pass, so the reconciler sees `:latest` resolve to
+    # another image and recreates the container like any rebuilt tag. A strict
+    # target whose image is not on the box (and cannot be pulled) stops the
+    # deploy here, before any container changes, and names the commit tags the
+    # box has. Never in a partial pass. `--check` skips it like the real run
+    # below: a command task does not run in check mode.
+    - name: Point :latest at the pinned commit images
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -m
+          - bay_reconcile.codepin
+          - --targets
+          - "{{ bay_code_targets | to_json }}"
+          - --images
+          - "{{ _reconcile_specs | items2dict(key_name='name', value_name='image') | to_json }}"
+          - --prev
+          # Same env expression as the receipt task below.
+          - >-
+            /var/lib/bay/receipts/{{ target_host | default(group_names | reject('equalto', 'all') | first | default('default')) }}.prev.json
+      environment:
+        PYTHONPATH: "{{ stack_dir }}/.reconcile"
+      register: _codepin_result
+      changed_when: >-
+        (_codepin_result.stdout | default('') | trim | length > 0)
+        and ((_codepin_result.stdout | from_json).changed | default(false))
+      failed_when: _codepin_result.rc != 0
+      when:
+        - bay_code_targets | default({}) | length > 0
+        - container_lifecycle_only | default([]) | length == 0
+        - not (bay_reconciler_plan_only | default(false) | bool)
+
     # `failed_when: false` so a failed pass still reaches the deploy receipt
     # below, which records `result: failed`. The deploy is NOT allowed to pass:
     # "Stop the deploy when the reconciler failed" re-raises it right after the
@@ -536,8 +572,12 @@
             path: /var/lib/bay/receipts
             state: directory
             owner: root
-            group: root
-            mode: "0755"
+            # Group docker, group-writable: rebuild.sh runs as app_user (a
+            # docker member) and stamps the commit and image a webhook build
+            # left running (`python -m bay_reconcile.receipt stamp`). Docker
+            # group members are root-equivalent already; nothing widens.
+            group: docker
+            mode: "0775"
 
         - name: Write the receipt for this environment
           ansible.builtin.command:
