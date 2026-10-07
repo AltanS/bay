@@ -15,6 +15,7 @@ the topic you need below.
 | [install.md](install.md) | Install the `bay` command once per machine, update it with `bay self update`, and make or clone a fleet. |
 | [features.md](features.md) | What Bay is, the full feature set, and how it compares to alternatives. |
 | [onboarding.md](onboarding.md) | Your first project: make a fleet, run `bay init`, the files a fleet keeps, and your first deploy. |
+| [layout-scenarios.md](layout-scenarios.md) | Where every file lives, in fifteen scenarios: one box, an app with its own repo, two environments, a box move, rollback, a tailnet route and a fresh machine. |
 
 ## Configuration
 

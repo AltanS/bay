@@ -232,6 +232,7 @@ Paths are relative to the framework root (`~/.local/share/bay/framework`).
 - `docs/install.md` — Install the `bay` command once per machine, update it with `bay self update`, and make or clone a fleet.
 - `docs/features.md` — What Bay is, the full feature set, and how it compares to alternatives.
 - `docs/onboarding.md` — Your first project: make a fleet, run `bay init`, the files a fleet keeps, and your first deploy.
+- `docs/layout-scenarios.md` — Where every file lives, in fifteen scenarios: one box, an app with its own repo, two environments, a box move, rollback, a tailnet route and a fresh machine.
 
 **Configuration**
 
