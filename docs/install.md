@@ -85,7 +85,7 @@ equal to the name of a box. `bay fleet init` runs
 `git init` and makes the first commit, `bay: fleet init`, so `bay init` accepts the fleet at once.
 If the commit fails (for example, git has no user name), the fleet stays and Bay prints the
 `git commit` line to run. Commit your edits to `bay.fleet.toml` before you run `bay up`. With
-`--from`, Bay clones and makes no commit. The fleet has no `hosts/` and no `group_vars/` yet. Add them before
+`--from`, Bay only clones, and adds no commit of its own. The fleet has no `hosts/` and no `group_vars/` yet. Add them before
 the first deploy (see [onboarding.md](onboarding.md#fleet-files)).
 
 ### The vault password
