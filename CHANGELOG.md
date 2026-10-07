@@ -8,6 +8,15 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.1.10] - 2026-10-07
+
+Docs only. Reader round 10: four places where two docs stated different facts.
+
+- README "Renaming `stack_name`": containers carry the project name (`shop`, `shop-worker`), not the stack name. A rename changes the volume prefix, the stack directory, the local image tag, the Headscale user and the MagicDNS domain. The migration steps find containers by the volumes they mount.
+- The stack name is the default Headscale user that owns the server nodes (`headscale_server_user`). README and tailnet-ingress.md say the same.
+- `bay provision` tests the SSH connection as `ansible_user` and falls back to `root` when the host is unreachable. README, onboarding.md and layout-scenarios.md no longer ask for `-- -u root`.
+- A `[resources.*.backup]` table in `bay.fleet.toml` requires `method`. Image-name detection applies only to a hand-written `backup: true` in a `services.yml` that `bay compile` does not own (features.md, backups.md).
+
 ## [2.1.9] - 2026-10-07
 
 Docs only. Reader round 9: four places where two docs stated different facts.

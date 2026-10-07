@@ -193,8 +193,9 @@ On a Headscale tailnet the full MagicDNS name of a node is `<node>.<base_domain>
 the `given_name` of the node, the NODE column of `bay gateway nodes`. `<base_domain>` is the
 variable `headscale_magic_dns_domain` of the fleet, which defaults to
 `<stack_name>.tailnet.internal`. So the name in `laptop.acme.tailnet.internal` is the node
-`laptop`, and `acme` is the stack name of the fleet: it is not a Headscale user and not the
-fleet name. The user that owns the node is not part of the name. If the fleet sets another
+`laptop`, and `acme` is the stack name of the fleet, not the fleet name. By default the stack
+name is also the Headscale user that owns the server nodes (`headscale_server_user`). The user
+that owns a node is never part of its name. If the fleet sets another
 `headscale_magic_dns_domain` that does not end in `.tailnet.internal`, use the IP or the one
 label. To read the exact name of a node, run `tailscale status --json` on a peer and read the
 `DNSName` of the node (drop the trailing dot), or build it from `bay gateway nodes` and the

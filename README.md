@@ -57,7 +57,7 @@ See the **[full index →](docs/README.md)** for everything, including build obs
 
 - [uv](https://docs.astral.sh/uv/) — Python package manager (installs Python, Ansible, and all dependencies automatically)
 - A target server running Ubuntu (tested on 22.04/24.04)
-- SSH access to the target (root or `bay-admin` — auto-detected)
+- SSH access to the target as `root` (first provision) or as `bay-admin` (every run after). `bay provision` tests the connection as `ansible_user` and falls back to `root` when the host is unreachable as that user, so you need no extra flag
 
 Install uv if you don't have it:
 
@@ -100,8 +100,8 @@ bay validate
 
 # Provision server (first time — hardens SSH, installs Docker, firewall)
 bay provision production
-# First provision needs root; if ansible_user isn't root yet, override the SSH user:
-bay provision production -- -u root
+# On a fresh box with only root, provision falls back to root on its own:
+# it tests the SSH connection as ansible_user first and uses root when that fails.
 
 # Deploy services
 bay deploy production
@@ -476,10 +476,12 @@ The `deploy_stack` role acquires a file-based deploy lock before deploying, prev
 
 The `stack_name` variable (set in `group_vars/all/main.yml`) controls more than the project label. Changing it has cascading effects across the deployment:
 
-- **Container and volume name prefixes** — all containers and volumes are named `{stack_name}-*` / `{stack_name}_*`
-- **Volume name prefixes** — all persistent volumes are named `{stack_name}_*`
-- **Stack directory** — `/opt/{stack_name}/` on the server (Compose file, env files, configs)
-- **Headscale user namespace** — if using the headscale gateway, `stack_name` is the Headscale user (since v0.40.0)
+- **Volume name prefixes**, all persistent named volumes are named `{stack_name}_*`
+- **Container names do not change**. A container carries the project name (`shop`, `shop-worker`), not the stack name. The `services` Docker network keeps its name too.
+- **Local image tag**. The local tag of an image built on the box contains the stack name, so a rename also makes a new tag
+- **Stack directory**, `/opt/{stack_name}/` on the server (Compose file, env files, configs), when `stack_dir` is derived from `stack_name` as in the example fleet
+- **Headscale user**. If you use the headscale gateway, the user that owns the server nodes defaults to `stack_name` (`headscale_server_user`)
+- **MagicDNS domain**. `headscale_magic_dns_domain` defaults to `<stack_name>.tailnet.internal`
 - **Node hostnames** — tailnet nodes are registered under the stack namespace
 - **Config/env file paths** — everything under `/opt/{stack_name}/`
 
@@ -489,18 +491,21 @@ Deploying with a new `stack_name` creates a fresh set of empty volumes (`newname
 
 ### Safe migration procedure
 
-1. **Stop old containers** (keep volumes):
+1. **Stop and remove the old containers** (keep volumes). The old and the new containers share their names, so find them by the volumes they mount:
    ```bash
-   docker stop $(docker ps -q --filter name=oldname-)
-   docker rm $(docker ps -aq --filter name=oldname-)
+   for v in $(docker volume ls -q --filter name=^oldname_); do
+     docker ps -aq --filter volume="$v"
+   done | sort -u | xargs -r docker rm -f
    ```
 2. **Deploy the new stack** so the new containers and volumes are created:
    ```bash
    bay deploy production
    ```
-3. **Stop new containers**:
+3. **Stop the new containers** that mount the new volumes:
    ```bash
-   docker stop $(docker ps -q --filter name=newname-)
+   for v in $(docker volume ls -q --filter name=^newname_); do
+     docker ps -q --filter volume="$v"
+   done | sort -u | xargs -r docker stop
    ```
 4. **Copy each volume** from old to new:
    ```bash
@@ -522,7 +527,7 @@ Deploying with a new `stack_name` creates a fresh set of empty volumes (`newname
 
 ### Headscale namespace
 
-If using `access_gateway: headscale`, changing `stack_name` also changes the Headscale user namespace. After renaming, run `bay gateway migrate-namespace` to rename the Headscale user and update node hostnames in the tailnet. Without this, enrolled devices lose connectivity to VPN-protected services.
+If using `access_gateway: headscale`, changing `stack_name` also changes the default Headscale user that owns the server nodes. A fleet that sets `headscale_server_user` keeps that user. After renaming, run `bay gateway migrate-namespace` to rename the Headscale user and update node hostnames in the tailnet. Without this, enrolled devices lose connectivity to VPN-protected services.
 
 For the default migration from the legacy `server` user (pre-v0.40.0):
 

@@ -533,8 +533,8 @@ steps 3 and 4 runs on the fleet, and none of them reads the fleet directory you 
    run `bay --fleet $F vault encrypt staging`, and later change it with `bay --fleet $F vault edit staging`.
    Add every name that `bay --fleet $F secret missing staging` lists. Staging has its own values: nothing is shared with
    production unless the project uses `fleet_secrets`.
-4. Commit and push the fleet. Provision the box: `bay --fleet $F provision staging` (add
-   `-- -u root` the first time when the fleet's admin user is not on the box yet). Then install the
+4. Commit and push the fleet. Provision the box: `bay --fleet $F provision staging` (the
+   first time, when the fleet's admin user is not on the box yet, it falls back to `root` on its own). Then install the
    rig on it: `bay --fleet $F deploy --rig staging` (Traefik, the cron jobs, the monitor and the rest;
    scenario 11 says which verb installs what).
 5. In the app repo add the `[deploy.staging]` table above and commit it on the `develop` branch.
@@ -1001,8 +1001,9 @@ bay --fleet ~/.config/bay/fleets/acme doctor production    # does the box answer
 Which verb puts what on the new box:
 
 - `bay provision` hardens SSH and installs Docker, the firewall and CrowdSec. When the box has only
-  `root` and the fleet's `ansible_user` does not exist on it yet, the first run needs
-  `-- -u root` (`bay provision eu2 -- -u root`), as in the [README](../README.md).
+  `root` and the fleet's `ansible_user` does not exist on it yet, the first run tests the
+  connection as `ansible_user`, finds the host unreachable and falls back to `root` for that run,
+  as in the [README](../README.md). It needs no `-- -u root`.
 - `bay deploy --rig` runs every rig role once: Traefik, Watchtower, the access gateway, the cron jobs
   (the image prune among them), the container monitor, backups and the CrowdSec allowlist.
 - `bay up` runs only the `deploy_stack` tag. That tag also refreshes Traefik, Watchtower and the

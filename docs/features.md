@@ -12,7 +12,7 @@ Two kinds of file are the source of truth for the stack: a `bay.toml` per app an
 - Per-service environment files (clear + vault-encrypted secrets)
 - Access control policy (public, VPN-only, admin-only)
 - DNS records for VPN split-DNS
-- Backup configuration (auto-detected dump strategy per database engine)
+- Backup configuration (the dump `method` per shared resource, set in `bay.fleet.toml`)
 - Container update policy (monitor-only or auto-update via Watchtower)
 
 Services and accessories are distinct concepts:

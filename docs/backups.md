@@ -72,7 +72,11 @@ The backup role reads `secrets.backup_s3_*` variables, which fall back to the sh
 
 ### 4. Enable backup on an accessory
 
-In `services.yml`, add `backup: true` or an explicit config:
+A fleet built from `bay.toml` files sets the backup in `bay.fleet.toml` on the shared resource,
+and `method` is required there (see the [README](../README.md#backups)). `bay compile` writes
+the `backup:` block into `services.yml`, always with its `method`. The image-name detection below
+only applies to a hand-written `backup: true` in a `services.yml` that `bay compile` does not own.
+In such a `services.yml`, add `backup: true` or an explicit config:
 
 ```yaml
 accessories:
@@ -117,7 +121,7 @@ This installs restic, initializes per-accessory repos, generates backup scripts,
 
 ## Auto-detection
 
-When `backup: true`, the method is detected from the image name:
+When a hand-written `services.yml` has `backup: true`, the role detects the method from the image name. A `bay.fleet.toml` resource has no such detection: it must set `method`.
 
 | Image contains | Method | Dump command |
 |---------------|--------|-------------|

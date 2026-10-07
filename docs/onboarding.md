@@ -57,15 +57,17 @@ them.
 Before your first deploy, run `bay doctor` to validate your environment (DNS, vault password, SSH connectivity, gateway config — `bay doctor --help` lists the checks). Then run `bay validate` to check your config files (YAML syntax, the services schema, inventory, vault keys) — this also runs automatically before every deploy, so running it here just lets you fix issues before the provision step. Fix any reported issues before running `bay provision` and `bay deploy`.
 
 For the very first provision, the target server usually only has a `root`
-account — `ansible_user` in `group_vars/all/main.yml` defaults to
-`bay-admin`, an account provisioning itself creates. Override the SSH user
-for that one run:
+account. `ansible_user` in `group_vars/all/main.yml` defaults to
+`bay-admin`, an account provisioning itself creates. You do not need to
+override the SSH user. `bay provision` first tests the connection as
+`ansible_user`. When the host is unreachable as that user, the playbook
+falls back to `root` for that run:
 
 ```bash
-bay provision production -- -u root
+bay provision production
 ```
 
-Subsequent provisions/deploys use `bay-admin` as normal.
+Later provisions and deploys use `bay-admin` as normal.
 
 ## Gateway Paths
 
