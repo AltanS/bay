@@ -492,9 +492,11 @@ Watchtower is complementary to webhook auto-deploy. For `registry` strategy serv
 
 There are two distinct paths for creating/restarting containers:
 
-1. **`bay deploy`** (Ansible) -- Uses the `container_lifecycle` role with `community.docker.docker_container`. Supports zero-downtime canary deploys for services with `zero_downtime: true`. This is the authoritative path.
+1. **`bay deploy`** and **`bay up`** (the `bay_reconcile` reconciler) -- Creates containers with the Docker API `run` call, the same as `docker run`. Supports zero-downtime canary deploys for services with `zero_downtime: true`. This is the authoritative path.
 
-2. **Webhook auto-build** (`rebuild.sh`) -- Uses `docker stop/rm/run` directly with all labels, volumes, and env baked in at deploy time. Brief downtime during restart. No canary logic.
+2. **Webhook auto-build** (`rebuild.sh`) -- Uses `docker stop/rm/run` directly with all labels, volumes, and env baked in at deploy time. The build path and the pull path (`docker pull`, then `docker stop/rm/run`) work the same way. Brief downtime during restart. No canary logic.
+
+Neither path runs `docker compose` for a service. The compose file that the deploy role renders (`docker-compose.yml`) is a description only. The one compose use is `docker-compose.infra.yml` for boot-time recovery of the infrastructure containers.
 
 Both paths derive container specs from the same `services.yml` source, producing identical containers. See [ADR-001](adr/001-docker-run-over-compose.md) for why `docker run` is used instead of Docker Compose.
 

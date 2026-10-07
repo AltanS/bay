@@ -10,8 +10,10 @@ For the high-level "which strategy do I want" question, see
 ## Trigger File Format
 
 Trigger files live at `/opt/<stack>/triggers/<service>.trigger`. Their format
-defines the correlation contract between webhook, fan-out, and rebuild.sh
-(v0.82.6+):
+defines the correlation contract between the webhook receiver, the alias
+fan-out, and rebuild.sh (v0.82.6+). Two writers make triggers: the receiver
+and `rebuild.sh` (for alias fan-out only). See the ownership rule at the end
+of this section.
 
 - **Webhook-written triggers (primary path, format v2):**
   ```
@@ -28,7 +30,8 @@ defines the correlation contract between webhook, fan-out, and rebuild.sh
 - **Alias fan-out triggers (dedup path):** line 1 only (CORR_ID, no pull
   signal). Alias rebuilds retag from the primary's local image rather than
   pulling from registry, so no pull signal is needed. `rebuild.sh` writes them
-  atomically through a temp file and `mv -f`.
+  when a primary service finishes a build, atomically through a temp file and
+  `mv -f`. It is the only case where `rebuild.sh` writes a trigger.
 
 - **Legacy one-line form (v1):** a file whose only line is `pull` is still a
   pull trigger, and an empty file is still a build trigger. `rebuild.sh`
@@ -40,20 +43,27 @@ defines the correlation contract between webhook, fan-out, and rebuild.sh
   (pre-fix operator habit) or by an external script that hasn't been
   updated.
 
-- **`manual-<epoch>` in logs** — trigger was recreated by rebuild.sh after
-  being consumed (clean-failure reboot case). Sequence: (1) rebuild.sh
-  consumed the trigger, (2) build failed cleanly and rebuild.sh exited,
-  (3) host rebooted before a new push arrived. On reboot, the path unit has
-  no trigger to re-fire; a later operator or health-check creates a bare
-  trigger. This is a **known limitation** — the original CORR_ID is
-  irrecoverably gone once the trigger is deleted. Documented for journalctl
-  triage. Compare to reboot-after-hang, where the trigger survives and the
-  original CORR_ID is preserved.
+- **`manual-<epoch>` in logs**: `rebuild.sh` ran with no trigger file, so
+  it made its own correlation id, `manual-<epoch>`. It does not write a
+  trigger file for this. This happens when an operator starts
+  `bay-build@<service>.service` by hand, or when the unit starts and no
+  trigger is there. A common case is a reboot after a clean failure:
+  (1) `rebuild.sh` consumed the trigger, (2) the build failed cleanly and
+  `rebuild.sh` exited, (3) the host rebooted before a new push arrived.
+  The original CORR_ID is gone once `rebuild.sh` consumes the trigger. This
+  is a **known limitation**, noted here for journalctl triage. Compare to
+  reboot-after-hang, where the trigger survives and the original CORR_ID is
+  preserved.
 
-- **Ownership rule:** trigger files are a one-way signal — webhook writes,
-  rebuild.sh reads+deletes, nobody else rewrites. rebuild.sh must never
-  write content back to the trigger file; any build state belongs in
-  `/opt/<stack>/state/<service>.json`.
+- **Ownership rule:** the receiver writes the trigger of a service, one
+  per push or pull signal. `rebuild.sh` consumes the trigger it processes
+  (it moves it to `<service>.trigger.running` and deletes that on exit). The
+  only trigger `rebuild.sh` writes is the alias fan-out trigger above, for
+  other services. It never writes content back to its own trigger file. Any
+  build state belongs in `/opt/<stack>/state/<service>.json`. An operator may
+  write a trigger by hand with `printf` (see
+  [build-strategies.md](build-strategies.md)); a bare `touch` logs as
+  `[unknown]`.
 
 ## Track, hold and freeze
 
@@ -414,7 +424,7 @@ rollback poll down can never make the probe stricter than baseline. See
   in the same call unless the push is held; a held push stops here) →
   `X-Bay-Pull-Signal` HTTP call to each region's webhook → deployment
   server writes `pull` trigger → `bay-build@.path` fires `rebuild.sh` →
-  `docker pull` + `docker compose up -d` + health check. See "Webhook
+  `docker pull` + `docker stop`/`docker rm` + `docker run` + health check. There is no compose project on the box for this container. See "Webhook
   Auto-Build Troubleshooting" above.
 - **Remote builds push from BuildKit, not from the local daemon** — the
   build uses `--push`, so the image is exported once, straight to the

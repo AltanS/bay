@@ -19,7 +19,7 @@ Two files are the source of truth. An app says what it is and where it deploys i
 ## What it does
 
 - **Provisions** a bare Ubuntu server into a hardened Docker host (users, SSH lockdown, nftables firewall, CrowdSec IDS)
-- **Deploys** a Docker Compose stack with Traefik reverse proxy, automatic SSL, and per-service VPN access control
+- **Deploys** a container stack with Traefik reverse proxy, automatic SSL, and per-service VPN access control. Bay renders a compose file as a description of the stack. The reconciler (`bay_reconcile`) and `rebuild.sh` create the containers with `docker run`, not with `docker compose`.
 - **Backs up** application data with [restic](https://restic.net/) — deduplicated, encrypted backups to S3-compatible storage with per-accessory repos, systemd timers, and one-command restore
 - **Monitors** container images for updates with [Watchtower](https://github.com/nicholas-fedor/watchtower) — notify-by-default with opt-in auto-update per service
 - **Alerts** on crashes, build failures, deploy outcomes, disk pressure and backup failures — to Telegram and/or any webhook sink (Campfire, Slack, plain text)

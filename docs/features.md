@@ -7,7 +7,7 @@ Bay is an Ansible framework for provisioning hardened Docker servers with VPN-aw
 
 Two kinds of file are the source of truth for the stack: a `bay.toml` per app and one `bay.fleet.toml` for the fleet (boxes, domains, shared resources). `bay compile` writes `group_vars/all/services.yml` from them. Nobody hand-edits that file, and the next compile refuses a hand edit. From the compiled file, Bay generates:
 
-- Docker Compose definitions (images, volumes, networks, healthchecks)
+- A rendered compose file that describes the stack (images, volumes, networks, healthchecks). The reconciler and `rebuild.sh` create the containers with `docker run`, not with `docker compose`.
 - Traefik routing rules and SSL certificates
 - Per-service environment files (clear + vault-encrypted secrets)
 - Access control policy (public, VPN-only, admin-only)

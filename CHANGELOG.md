@@ -8,6 +8,13 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.1.12] - 2026-10-07
+
+Docs only. Reader round 12: two places where two docs stated different facts.
+
+- Container creation: the reconciler (`bay up`, `bay deploy`) and `rebuild.sh` create containers with `docker run`, on the build path and on the pull path. `docker compose` is not used for a service. The rendered compose file only describes the stack. README, features.md, build-pipeline.md and build-strategies.md say the same.
+- Trigger files: the webhook receiver writes the trigger of a service. `rebuild.sh` consumes the trigger it processes and writes a trigger only for the aliases of an alias fan-out. A `manual-<epoch>` correlation id means `rebuild.sh` ran with no trigger file. build-pipeline.md says this in the format section and in the ownership rule.
+
 ## [2.1.11] - 2026-10-07
 
 Docs only. Reader round 11: one place where two docs stated different facts.
