@@ -86,9 +86,9 @@ of that fleet. Bay never writes it and no repo holds it. The operator gives it t
 band. `bay fleet init` does not add `.vault_pass` to the `.gitignore` of the fleet: add the
 line yourself, and keep the file out of git.
 
-Without the file, `bay doctor` fails its Vault check, `bay vault edit`, `bay plan` with a
-secret check and every deploy cannot open the secrets, and `bay secret missing` and
-`bay validate` skip the check with a warning. The deploy hands the file to Ansible. If you
+Without the file, `bay doctor` fails its Vault check, `bay vault edit` and every deploy
+cannot open the secrets, and the secret checks (`bay secret missing`, `bay validate`, the
+missing-secret check of `bay plan`) skip with a warning. The deploy hands the file to Ansible. If you
 set `ANSIBLE_VAULT_PASSWORD_FILE` yourself, Bay replaces it with `.vault_pass` when that file
 exists.
 
