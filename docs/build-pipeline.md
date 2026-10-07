@@ -136,20 +136,44 @@ the files its mounts read (`build.bay_toml_files`: every `from =` path,
 relative to the repo root, without the `fleet:` ones; a directory counts for
 every file under it) carries no code. `rebuild.sh` checks this first, right
 after it reads the pushed commit and before the build and the hold guard, on
-the box (local builds) and on the build server (remote builds). The previous
-commit is the `com.bay.commit` label of the running container. On a build
-server with no such container, it is the commit that the checkout built last,
-but only when `<image>:<commit12>` of it is in the registry
-(`docker manifest inspect`). A build that failed pushed nothing, so a
-config-only push right after it is not config only: it builds.
-The changed files are `git diff --name-only <previous> <pushed>`. A
-config-only push logs `config-only push <commit12>: run bay up` and ends the
+the box (local builds) and on the build server (remote builds).
+
+The previous commit is the `com.bay.commit` label of the running container.
+A container created before 2.1.0 has no such label (and on a build server
+there may be no container). Then the previous commit is the commit that the
+checkout was at before this run's pull or fetch: the last commit the box
+built or deployed. The changed files are
+`git diff --name-only <previous> <pushed>`.
+
+The push also needs an image of the previous commit:
+
+1. `<image>:<commit12>` of the previous commit (`docker image inspect` on the
+   box, `docker manifest inspect` in the registry for a remote build).
+2. Else `<image>:latest`, but only when it holds the previous commit's code.
+   The checkout also moves on a build that failed, and then `:latest` is
+   older than the previous commit. `:latest` counts when its
+   `com.bay.commit` (else `org.opencontainers.image.revision`) label names the
+   previous commit. A local build from before 2.1.0 has no label. Then
+   `:latest` counts only when the circuit breaker shows no failure, neither
+   the commit nor the image is in the failed-commits record, and the running
+   container (if any) runs that image. A remote build always needs the label
+   (`docker buildx imagetools inspect`).
+3. Else the push is not config only: the script logs
+   `config-only push <commit12>: no image known to hold <previous>, building`
+   and the normal path runs.
+
+A config-only push logs `config-only push <commit12>: run bay up` and ends the
 run. It builds no image, does not move `:latest`, recreates nothing, and sends
 no `build.held` or other alert. The circuit breaker is not touched, and the
 trigger was consumed at the start. The image of the previous commit also gets
-the tag `<image>:<commit12>` (a tag, not a build), so `bay up` finds the code
-for the pushed commit. When no previous commit is known, the commit is not in
-the checkout, or nothing changed, the normal path runs.
+the tag `<image>:<commit12>` of the pushed commit (a tag, not a build), so
+`bay up` finds the code for the pushed commit. When the image came from
+`:latest`, it also gets the tag of the previous commit, so the next push finds
+it by its tag. Nothing is recreated, so a container from before 2.1.0 still
+has no label after a config-only push. The fallback to the checkout keeps
+working, and the next build that deploys gives the container its label.
+When no previous commit is known, the commit is not in the checkout, nothing
+changed, or no image of the previous commit is found, the normal path runs.
 
 A change of what the image is built from is never config only. `bay compile`
 writes `build.bay_build_hash` next to `bay_toml_hash`: the canonical hash of
@@ -190,7 +214,9 @@ In `rebuild.sh`, for a trigger that got through:
    exit 0. A pull-only service exits 0 here as well.
 5. Fetch or pull, and read the commit.
 6. Config-only check (see "Config-only push" above): only `bay.toml` and its mounted files
-   changed and the `[build]` hash is the same. Retag the running image with the commit, exit 0.
+   changed since the previous commit (the container's label, else the checkout's HEAD before
+   the pull) and the `[build]` hash is the same. Tag the previous commit's image (its commit
+   tag, else a `:latest` that holds it) with the commit, exit 0.
    A project in the fleet never gets the keys for this, so every push of it builds.
 7. Build `<image>:<commit12>`, unless that image already exists.
 8. Hold guard `_hold_reason`, in this order: `track = "pin"`, frozen, `bay.toml` missing at

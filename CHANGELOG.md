@@ -8,6 +8,26 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [Unreleased]
+
+### Fixed
+
+- A `bay.toml`-only push (for example the `bay adopt` commit) is now config only also
+  for a container built before 2.1.0. Such a container has no `com.bay.commit` label and
+  its image has only `:latest`, so `rebuild.sh` found no previous commit, built the app
+  and recreated the container. Now the previous commit falls back to the commit that the
+  box's checkout was at before the pull or fetch. The previous image falls back to
+  `<image>:latest` when it holds that commit: its commit or revision label names it, or
+  (a local build with no label) the circuit breaker shows no failure, the failed-commits
+  record does not list it, and the running container runs that image. `:latest` then
+  also gets the previous commit's tag. When no such image is found, the push builds as
+  before. See `docs/build-pipeline.md`, "Config-only push".
+
+### Upgrade notes
+
+- Deploy once (`bay up`) so the new rebuild.sh reaches the boxes before the first
+  config-only push.
+
 ## [2.1.1] - 2026-10-07
 
 ### Changed

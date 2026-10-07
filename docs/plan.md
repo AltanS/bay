@@ -720,8 +720,11 @@ adopt commit is not in the fleet's repo cache yet. Then push. The adopt
 commit changes only the `bay.toml` and the files beside it, so the new script
 sees a config-only push (see [build-pipeline.md](build-pipeline.md),
 "Config-only push"): it tags the running image with the adopt commit and ends
-with exit 0. The next `bay plan` shows zero steps. Any other unpushed commit
-is still refused.
+with exit 0. This also holds for a container built before 2.1.0, which has no
+`com.bay.commit` label and whose image has only `:latest`: the script then
+takes the commit that the box's checkout was at before the pull, and tags
+`:latest` when that image holds it. The next `bay plan` shows zero steps. Any
+other unpushed commit is still refused.
 
 Bay refuses, before it changes anything, when:
 
