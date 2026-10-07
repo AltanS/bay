@@ -610,8 +610,9 @@ bay --fleet ~/fleets/prod up production --plan-id 3f2a9c0d1e2b
 environment of it) and compares the result with the services file. Each
 container of the project that the fleet compiled or the box runs becomes one
 step: `kind: container`, `action: remove`, risk `destructive`. The reason of
-each step names the volumes and the database that stay. So the verdict is
-`approve`. The plan record has a `remove` block (see [The plan JSON](#the-plan-json)):
+each step names the volumes and the database that stay (`volume a stays`,
+`volumes a, b stay`, and the same for databases). So the verdict is `approve`.
+The plan record has a `remove` block (see [The plan JSON](#the-plan-json)):
 the containers per environment, every named volume by its name on the box
 (`<stack_name>_<volume>`), and the database and its role (the adopted names
 from the lock, else the derived ones). `bay plan --plan-id <id>` checks a saved

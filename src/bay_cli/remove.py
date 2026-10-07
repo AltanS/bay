@@ -240,6 +240,21 @@ def _needers(
     return out
 
 
+def _stays(volumes: list[str], databases: list[dict[str, Any]]) -> str:
+    """``volume a stays`` / ``volumes a, b stay``: the data that outlives a remove."""
+    parts: list[str] = []
+    if volumes:
+        parts.append(f"{'volume' if len(volumes) == 1 else 'volumes'} {', '.join(volumes)}")
+    if databases:
+        label = "database" if len(databases) == 1 else "databases"
+        listed = ", ".join(f"{d['name']} (role {d['role']}) in {d['resource']}" for d in databases)
+        parts.append(f"{label} {listed}")
+    if not parts:
+        return ""
+    one = len(volumes) + len(databases) == 1
+    return " and ".join(parts) + (" stays" if one else " stay")
+
+
 def make_remove_plan(
     cx: Context,
     name: str,
@@ -378,15 +393,12 @@ def make_remove_plan(
         e = row["env"]
         left = [v["name"] for v in volumes if v["env"] == e]
         dbs = [d for d in databases if d["env"] == e]
-        stays = []
-        if left:
-            stays.append(f"volume {', '.join(left)}")
-        stays += [f"database {d['name']} (role {d['role']}) in {d['resource']}" for d in dbs]
+        stays = _stays(left, dbs)
         for n in row["containers"]:
             if n not in current_entries and n not in active:
                 continue
             reason = f"{name} leaves {e}: the container on box {row['box']} is removed"
-            reason += "; " + " and ".join(stays) + " stay" if stays else "; it has no data"
+            reason += f"; {stays}" if stays else "; it has no data"
             steps.append(
                 planmod._step(
                     "container", "remove", "destructive", reason, container=n, project=name

@@ -3901,7 +3901,10 @@ def test_remove_plan_names_containers_volumes_database(
     ]
     reason = plan["steps"][0]["reason"]
     # The step names the container, the volume (as the box names it) and the database.
-    assert "testfleet_webapp-data" in reason and "database webapp" in reason
+    assert reason == (
+        "webapp leaves production: the container on box box-1 is removed; "
+        "volume testfleet_webapp-data and database webapp (role webapp) in postgres stay"
+    )
     rm = plan["remove"]
     assert rm["scope"] == "project"
     assert rm["envs"] == [
@@ -3919,6 +3922,20 @@ def test_remove_plan_names_containers_volumes_database(
     text = cli(world, "remove", "webapp").output
     assert "stays: volume testfleet_webapp-data on box box-1" in text
     assert f"bay up production --plan-id {plan['plan_id']}" in text
+
+
+def test_remove_step_reason_grammar_singular_and_plural() -> None:
+    from bay_cli import remove as removemod
+
+    db = {"name": "shop", "role": "shop", "resource": "postgres"}
+    assert removemod._stays(["a"], []) == "volume a stays"
+    assert removemod._stays(["a", "b"], []) == "volumes a, b stay"
+    assert removemod._stays([], [db]) == "database shop (role shop) in postgres stays"
+    assert removemod._stays([], [db, {**db, "name": "x", "role": "x"}]) == (
+        "databases shop (role shop) in postgres, x (role x) in postgres stay"
+    )
+    assert removemod._stays(["a"], [db]) == "volume a and database shop (role shop) in postgres stay"
+    assert removemod._stays([], []) == ""
 
 
 def test_remove_deletes_lock_after_receipt(

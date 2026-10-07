@@ -22,6 +22,8 @@ needing manual action is called out under **Upgrade notes**. Entries for
 - **`bay route import --json`.** The verb now takes `--json` like the other route
   verbs and prints one document: `fleet_commit`, `routes` (name, domain, upstream),
   `deleted` (the old file) and `cert_domain`.
+- **The remove step reason has the right verb.** It read `volume <name> stay`. It now reads
+  `volume <name> stays`, `volumes <a>, <b> stay`, and the same for databases.
 
 ## [2.1.0] - 2026-10-07
 
