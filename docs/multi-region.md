@@ -41,6 +41,8 @@ The CLI argument is just an Ansible host pattern passed as `target_host`:
 
 This works because the framework playbooks use `hosts: "{{ target_host }}"` -- whatever you pass as the environment argument becomes the Ansible host pattern. There is nothing region-specific in the framework.
 
+The same name also names the deploy receipt: the box writes `/var/lib/bay/receipts/<name>.json`. So `bay deploy eu` writes `eu.json`, which `bay status --env production`, `bay plan` and `bay rollback` do not read, and it leaves `production.json` as it was. To deploy one region, keep the box env and limit the hosts: `bay deploy production -- --limit eu`. That writes `production.json` on the EU box only.
+
 ## group_vars Layering
 
 Ansible merges variables from all matching groups in the inventory hierarchy. The merge order (least to most specific) is:
@@ -203,7 +205,7 @@ If regions should use different S3 buckets or endpoints (e.g., for data residenc
 ### Deploy one region
 
 ```bash
-bay deploy eu
+bay deploy production -- --limit eu
 ```
 
 Targets only the EU server. Useful for canary deployments or region-specific maintenance.
@@ -222,12 +224,12 @@ Deploy to one region first, verify it works, then deploy to the rest:
 
 ```bash
 # Step 1: Deploy to EU
-bay deploy eu
+bay deploy production -- --limit eu
 
 # Step 2: Verify (check health endpoints, logs, monitoring)
 
 # Step 3: Deploy to NA
-bay deploy na
+bay deploy production -- --limit na
 ```
 
 This is the safest approach for production changes. There is no special canary feature -- you simply deploy to groups one at a time.

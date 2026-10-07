@@ -77,6 +77,14 @@ bay fleet init prod --from git@example.com:me/fleet.git   # or clone one you alr
 bay fleet ls                                              # list the fleets on this machine
 ```
 
+A new fleet holds only `bay.fleet.toml` and a `.gitignore`. The file names the fleet, sets
+`default_box = "main"` and `default_domain = "example.com"`, and has one box, `[boxes.main]`
+with `env = "production"`. Change the box and the domain to yours, and keep `default_box`
+equal to the name of a box. `bay fleet init` runs
+`git init` but makes no commit, and `bay init` refuses a fleet with no commit: commit the file
+before you run `bay init`. The fleet has no `hosts/` and no `group_vars/` yet. Add them before
+the first deploy (see [onboarding.md](onboarding.md#fleet-files)).
+
 ### The vault password
 
 The secret values of a fleet are in `group_vars/<env>/secrets.yml`, encrypted with
@@ -121,8 +129,12 @@ A command that works on a fleet finds it in this order. The first rule that appl
    `doctor` and `show <name>` (not `show --routes`). This is the one list; the other docs repeat it.
    Every other verb (`init`, `adopt`, `deploy`, `provision`, `vault`, `secret`, `status`, `route`,
    `compile` and the rest) skips rule 5: from inside a fleet directory, pass `--fleet <path>` or
-   set `BAY_FLEET`. The verbs that edit the fleet by hand (`service add|edit|remove|prune-webhooks`,
-   `server add|remove`) take the working directory as the fleet when rules 1 to 4 find none.
+   set `BAY_FLEET`. A few older verbs take the working directory as the fleet when rules 1 to 4
+   find none: `service add|edit|remove` (they write `group_vars/all/services.yml` directly),
+   `service prune-webhooks` (it deletes GitHub hooks), and `server add|remove` (they write the
+   hosts files and `group_vars/`). `services.yml` is generated: after a `bay service` edit, the
+   next `bay compile` refuses the file as edited by hand. In a fleet with `bay.toml` files, edit
+   `bay.toml` or `bay.fleet.toml` instead.
 
 With none of these, the command stops and lists the ways to pick one.
 

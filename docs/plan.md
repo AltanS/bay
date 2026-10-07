@@ -5,7 +5,7 @@ These are the daily verbs of Bay v2. They work on one project of one fleet.
 Bay keeps three truths apart:
 
 - **WANTED**: `bay.toml` at the latest commit of the place the project lives. Two cases:
-  for a project with an app repo, the HEAD of the checkout you stand in, else the head of the
+  for a project with an app repo, the HEAD of the checkout you stand in, else the tip of the
   `[deploy.<env>].branch` branch in the fleet's repo cache; for a project in the fleet,
   `projects/<name>/` at the fleet's HEAD. The rest of this page says "WANTED" for either case.
 - **PINNED**: the fleet lockfile `projects/<name>/bay.lock`, and the services
@@ -156,17 +156,22 @@ leave it out.
 
 ### bay plan
 
-1. **WANTED** (defined at the top of this page): for a project with an app repo, the
-   checkout you stand in gives its HEAD, whatever the branch (run `git switch <branch>` first).
-   With no checkout, Bay reads the fleet's repo cache. A cache has no work tree, so Bay needs a
-   branch name, and it takes `[deploy.<env>].branch` (the branch the webhook builds) from
-   `bay.toml` at the pinned commit, else from `bay.toml` at the cache's HEAD. The result is
-   `refs/heads/<branch>` in the cache. With no `branch` declared there, WANTED is the cache's
-   HEAD: the remote's default branch. So the first plan of a new env that is declared only on a
-   non-default branch (`[deploy.staging]` on `develop`) finds no branch, reads the default
-   branch, and blocks with "no `[deploy.staging]`". For that first plan, plan from a checkout of
-   the branch, or pass `--project <name> --at <commit of the branch>` (`--at` needs `--project` in the
-   fleet directory). `--at` picks another commit.
+1. **WANTED** (defined at the top of this page). A project with an app repo has two cases:
+   - You stand in a checkout of the repo (its `origin` is the lock's `repo`). WANTED is the
+     HEAD of that checkout, whatever the branch (run `git switch <branch>` first).
+   - You do not stand in one. WANTED is the tip of `[deploy.<env>].branch` in the fleet's repo
+     cache. A cache has no work tree, so Bay needs a branch name. It reads
+     `[deploy.<env>].branch` (the branch the webhook builds) from `bay.toml` at the pinned
+     commit, else from `bay.toml` at the cache's HEAD, and takes `refs/heads/<branch>` in the
+     cache. With no `branch` declared there, WANTED is the cache's HEAD: the remote's default
+     branch. So the first plan of a new env that is declared only on a non-default branch
+     (`[deploy.staging]` on `develop`) finds no branch, reads the default branch, and blocks
+     with "no `[deploy.staging]`". For that first plan, plan from a checkout of the branch, or
+     pass `--project <name> --at <commit of the branch>` (`--at` needs `--project` in the
+     fleet directory).
+
+   A project in the fleet reads `projects/<name>/` at the fleet's HEAD. In every case `--at`
+   picks another commit.
    Uncommitted edits are not part of the plan. The plan
    records them as `wanted.dirty`. When the WANTED commit is on no branch of
    the remote, the plan says so in a note: `bay up` will refuse it. For the `bay adopt`
@@ -447,7 +452,8 @@ empty on the new box. The new box gets new, empty volumes with the same names
 and a fresh database in its own postgres resource. The old box's containers of
 the project are removed (a `remove` step, so `bay approve` is still needed).
 The old volumes and the old database stay untouched on the old box. Bay never
-removes them. The plan lists them by name in `moves` and in `notes`, with the
+removes them, and the weekly `docker system prune -af --volumes` does not either: on Docker
+Engine 23 and later it removes only anonymous volumes, and Bay names every volume. The plan lists them by name in `moves` and in `notes`, with the
 `docker volume rm <name>` and `DROP DATABASE <name>;` lines to run by hand
 later, when you no longer need the data. The notes name a volume as Docker
 knows it on the old box, `<stack_name>_<volume>`: `stack_name` from
@@ -542,7 +548,7 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    the access gateway, Watchtower, and Zot and the identity sidecar where they are on. The rest of
    the rig (for example the cron jobs, the container monitor, backups, the CrowdSec allowlist, the
    webhook receiver image, its list of build containers and the build triggers) comes only from a
-   full `bay deploy`, so a new box needs one (see
+   `bay deploy <env>` with no `--tags`, so a new box needs one (see
    [layout-scenarios.md](layout-scenarios.md#11-adding-a-box)). When the plan has a `route` step, Bay
    runs `--tags deploy_stack,headscale,traefik`: Headscale renders the
    split-DNS records and Traefik the route file. The `headscale` tag runs every task of the
@@ -577,7 +583,7 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
   recreates the container and the image is not there.
 - **An app that builds from source**: the first image comes from a build that `bay up` does
   not run. A push to the deploy branch builds it, once `bay up` has rendered the webhook
-  script on the box. A full `bay deploy <env>` with no `--tags` also clones and builds it
+  script on the box. A `bay deploy <env>` with no `--tags` also clones and builds it
   (`git_deploy`). There is no `bay build` verb that builds: `bay build` has `status` and
   `reset` only. Until an image exists, the container cannot be created: the receipt has a
   failed action and `bay show` says `HALF` (the last `bay up` failed, see the status table of
@@ -675,8 +681,8 @@ it. The two pins swap, so a second rollback undoes the first. Bay refuses when t
   `bay.toml`. `previous` changes only when a `bay up` changes the pin.
 - Code: the box points `:latest` of every build container of the project at
   the image that the previous receipt (`<env>.prev.json` of the box env) names, then the
-  deploy runs. This is a second source. The receipt file is rotated by every full deploy of
-  the box env, a `bay up` that changes nothing included (see the warning below). The result lists this in `code_targets`. When the box cannot
+  deploy runs. This is a second source. The receipt file is rotated by every deploy that
+  reaches the container pass (`bay up` included, even one that changes nothing; see the warning below). The result lists this in `code_targets`. When the box cannot
   do it, the container keeps its image and the result says so: `code_kept`
   in the JSON, and `code: kept <container> (<reason>)` in the output. The
   usual reasons are a previous receipt from before 2.1, which names no commit
@@ -693,7 +699,7 @@ it. The two pins swap, so a second rollback undoes the first. Bay refuses when t
 
 **Plain rollback is safe only straight after the bad `bay up`.** The config target (`previous` in
 the lock) and the code target (`<env>.prev.json` on the box) are two records, and only the lock's
-one waits. Any full deploy of the box env after the bad `bay up` rotates `<env>.prev.json` to the
+one waits. Any deploy of the box env that reaches the container pass after the bad `bay up` rotates `<env>.prev.json` to the
 bad state: a second `bay up` that changes nothing, or a `bay up` for another project of the same
 box env. A plain rollback then moves the pin back, and its code target is the image that already
 runs, so the code stays and only the config rolls back. After any later deploy of that box env,
@@ -727,18 +733,22 @@ depends on where the `bay.toml` lives:
 
 **How far back `--to` reaches.** Only to a commit whose tag is still on the box. Bay keeps no count
 of commit tags on a box. What removes them is the cron job `docker system prune -af --volumes`
-that the `cronjobs` role installs (with a full `bay deploy`): it deletes every image that no
-container uses, with all of its tags. It runs weekly by default (`docker_prune_schedule`, Sunday
+that the `cronjobs` role installs. That role is a rig role: a `bay deploy <env>` with no `--tags`
+runs it when the rig is due (see the README, "Deploy modes"), and `--rig` forces it. The prune
+deletes every image that no container uses, with all of its tags. It runs weekly by default (`docker_prune_schedule`, Sunday
 03:00 on the box clock) and daily on the build server (`docker_prune_build_server_schedule`). Set
 those, or `docker_prune_enabled: false`, in the fleet's group_vars. So after a prune, the box holds
 the commit tags of the images its containers use and the tags made since. A config-only push tags
-the running image, so its tag stays as long as that image runs.
+the running image, so its tag stays as long as that image runs. The prune deletes no named
+volume: on Docker Engine 23 and later, `--volumes` removes only anonymous volumes that no
+container uses, and every volume that Bay makes has a name (`<stack_name>_<volume>`).
 
 #### Undo a bad push in branch mode
 
 In `branch` mode a push to the deploy branch can put bad code on the box after your last
 `bay up`. A push stamps the current receipt (`<env>.json`) for that container. It never
-touches `<env>.prev.json` or the lock's `previous`. Only `bay up` writes those. So plain
+touches `<env>.prev.json` or the lock's `previous`. Only a deploy that reaches the container
+pass rotates `<env>.prev.json`, and only `bay up` and `bay rollback` move `previous`. So plain
 `bay rollback` goes to the state before your last `bay up`. That skips the last `bay up`'s
 code too, and it can restore older code than the last good push. To undo only the bad push:
 
@@ -956,7 +966,8 @@ rests on the receipt alone. Any other change the box predicts becomes a
 --plan-id` repeat the check when the saved plan has it.
 
 **Bay never deletes data.** The containers stop and leave. The volumes and the
-database stay where they are. The plan and `bay up` print the lines to delete
+database stay where they are. The weekly `docker system prune -af --volumes` keeps them too:
+on Docker Engine 23 and later it removes only anonymous volumes, and Bay names every volume. The plan and `bay up` print the lines to delete
 them, marked "run by hand when you are sure":
 
 ```text

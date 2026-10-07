@@ -116,7 +116,7 @@ bare container names. Its default is `production`.
 |---|---|---|
 | `bay plan`, `bay up`, `bay rollback` (`[env]`, default `primary_env`), `bay remove --env` | deploy env | the `[deploy.<env>]` table of each `bay.toml` |
 | `bay approve <plan-id>`, `bay show [name]` | none | `show` prints the status of every deploy env of the project |
-| `bay deploy <env>`, `bay provision <env>` | box env (or a group name inside the hosts file) | the Ansible host pattern: the hosts of that group. With two boxes in one box env, `bay provision production` runs on both. `bay provision eu2` (a group) or `bay provision production -- --limit eu-2` (a host) runs on one |
+| `bay deploy <env>`, `bay provision <env>` | box env (or a group name inside the hosts file) | the Ansible host pattern: the hosts of that group. With two boxes in one box env, `bay provision production` runs on both. `bay provision eu2` (a group) or `bay provision production -- --limit eu-2` (a host) runs on one. For a deploy, use the `--limit` form: `bay deploy eu2` writes the receipt as `eu2.json`, which `bay status` and `bay plan` do not read |
 | `bay validate --env <env>` | box env | `hosts/<env>` and its vault |
 | `bay vault <verb> <env>`, `bay secret missing <env>` | box env | `group_vars/<env>/secrets.yml`, else `group_vars/all/secrets.yml` |
 | `bay doctor [env]` | box env | the vault file and the box receipts. The default is `primary_env`, read as a box env name: pass the box env when the two differ. |
@@ -128,9 +128,11 @@ bare container names. Its default is `production`.
 Inside the fleet directory, every other verb (`deploy`, `provision`, `vault`, `secret`, `validate`,
 `status`, `route`, `compile`, `adopt`, `init`) stops with "no fleet selected" unless you name the fleet
 with `--fleet <path>` or `BAY_FLEET`. The commands below that start with `bay --fleet $F` do that.
-One exception: the verbs that edit the fleet by hand, `bay service add|edit|remove|prune-webhooks`
-and `bay server add|remove`, take the working directory as the fleet when nothing else names one
-(rule 5 of [install.md](install.md#pick-a-fleet)).
+One exception: a few older verbs take the working directory as the fleet when nothing else names
+one: `bay service add|edit|remove` (they write `group_vars/all/services.yml` directly, and the next
+`bay compile` then refuses that generated file as edited by hand), `bay service prune-webhooks`, and
+`bay server add|remove` (they write the hosts files and `group_vars/`). See rule 5 of
+[install.md](install.md#pick-a-fleet).
 
 **Secret values are per box env.** They live in `group_vars/<box env>/secrets.yml`, one
 encrypted file for the whole box env. Two deploy envs on one box env share that file: one key
@@ -365,13 +367,19 @@ log (`--log`) or the receipt on the box: the failed action is the container that
 way out is steps 3 and 4: push code, wait for the build, run `bay up` again.
 
 The push of step 1 builds nothing, because the box has no webhook script for `shop` yet. The
-first image comes from a push made after `bay up` (step 3), or from a full `bay deploy production`
+first image comes from a push made after `bay up` (step 3), or from a `bay deploy production`
 with no `--tags`, which clones and builds. Followed in this order, `bay show` says `HALF` until the
 build has finished and a `bay up` has run again ([plan.md](plan.md#the-first-image)). The push
 reaches the box through the webhook receiver: you register the GitHub hook by hand, in the repo
 settings, with the payload URL `https://<webhook domain>/webhook/<container name>` (`shop` here). The
 webhook domain is `[webhook] domain` of `bay.fleet.toml`, or `webhook_domain` of the box that runs
 the container. Bay has no verb that creates the hook; `bay validate --check-webhook-health` probes it.
+Before the first push, run `bay --fleet <path> deploy production` (no `--tags`) once for the box env:
+it installs the receiver and the build trigger, and on the box it makes the SSH deploy key
+`/opt/<stack>/builds/shop/.deploy_key.pub` (only when the repo has no token). Bay does not register
+that key: add it to the GitHub repo yourself, under Settings > Deploy keys (read-only). With an SSH
+repo URL, the first such deploy stops at the clone until the key is on GitHub. Add it, then run the
+deploy again.
 
 Where Bay reads the app code, in this order:
 
@@ -542,10 +550,13 @@ steps 3 and 4 runs on the fleet, and none of them reads the fleet directory you 
 7. `bay plan staging`, then `bay up staging`. This pins the commit and puts the webhook script on
    `eu-2`. Expect it to fail, as step 2 of scenario 2 does: `shop-staging` has no image yet.
 8. Build the first image. On this new box a push alone builds nothing yet: the webhook receiver
-   image and the build trigger of `shop-staging` come only from a full deploy of a box that runs a
+   image and the build trigger of `shop-staging` come only from a `bay deploy <env>` with no `--tags`
+   on a box that runs a
    build app, and step 4 ran before `eu-2` had one. Run `bay --fleet $F deploy staging` (no `--tags`)
-   once: it installs both, and it clones and builds the first image (see
-   [plan.md](plan.md#the-first-image)). Then run `bay up staging` again. From then on, a push to
+   once: it installs both, makes the SSH deploy key `/opt/<stack>/builds/shop-staging/.deploy_key.pub`
+   on `eu-2` (when the repo has no token), and clones and builds the first image (see
+   [plan.md](plan.md#the-first-image)). Bay does not register the key: add it to the GitHub repo
+   yourself, under Settings > Deploy keys (read-only). Then run `bay up staging` again. From then on, a push to
    `develop` builds: it reaches `eu-2` through the webhook receiver of that box. `eu-2` uses
    `[webhook] domain`, or its own `webhook_domain` (scenario 5 sets one on `infra`). Register the
    GitHub hook for `shop-staging` at `https://<that domain>/webhook/shop-staging`. Staging owns its
@@ -871,8 +882,8 @@ bay show shop
 - It asks the box to point `:latest` at the image of the previous receipt (`<env>.prev.json`, a second
   record, on the box). When the box cannot, the output says `code: kept <container> (<reason>)`. The
   usual reason is a previous receipt from before 2.1: then only the config rolls back.
-- Plain rollback is safe only straight after the bad `bay up`. Every full deploy of the box env
-  rotates `<env>.prev.json`, so after a later deploy (even a `bay up` that changes nothing, or one for
+- Plain rollback is safe only straight after the bad `bay up`. Every deploy of the box env that
+  reaches the container pass rotates `<env>.prev.json`, so after a later deploy (even a `bay up` that changes nothing, or one for
   another project of the same box env) the plain rollback moves the pin back and keeps the code that
   runs. Use `--to <commit>` then.
 - It plans like `bay up`. A verdict `approve` stops it unless you pass `--force --reason "<why>"`
@@ -905,7 +916,7 @@ bay rollback production --project shop --to 0123456789ab
 for an app whose `bay.toml` is in its repo it moves the pin to that commit too: config and code.
 It works when the image of that commit still exists on the box. Otherwise it refuses before
 anything moves and lists the commit tags the box has. A second plain rollback undoes the first.
-How far back that reaches: nothing counts commit tags, but the `docker system prune -af` cron job
+How far back that reaches: nothing counts commit tags, but the `docker system prune -af --volumes` cron job
 of the box (weekly by default) removes every image that no container uses, tags and all
 ([plan.md](plan.md#bay-rollback), "How far back `--to` reaches").
 
@@ -996,15 +1007,17 @@ Which verb puts what on the new box:
   (the image prune among them), the container monitor, backups and the CrowdSec allowlist.
 - `bay up` runs only the `deploy_stack` tag. That tag also refreshes Traefik, Watchtower and the
   access gateway, but not the cron jobs, the monitor, backups or the allowlist.
-- The webhook receiver image and the build trigger of a container come only from a full
-  `bay deploy` of a box that runs a build app. A box with no build app yet gets neither from
+- The webhook receiver image and the build trigger of a container come only from a
+  `bay deploy <env>` with no `--tags` on a box that runs a build app. A box with no build app yet gets neither from
   `--rig` (see scenario 4, step 8).
 
 `bay provision production` would run on every host of the box env, `eu-1` included. The code has no
 guard against that, and no doc states that each provision role is safe to repeat on a live box (the
 playbook says it "works on fresh servers and reprovisioning", and the docs tell you to re-run it after a
 config change), so aim it at the new box. A group name works (`eu2`). A host works too, with an extra
-argument for Ansible: `bay provision production -- --limit eu-2`.
+argument for Ansible: `bay provision production -- --limit eu-2`. For a deploy, use the `--limit`
+form, as above: a deploy aimed at the group `eu2` writes its receipt as `eu2.json`, not
+`production.json`.
 
 SSH access to the box, and its tailnet enrolment, come from you, out of band. An empty box
 runs nothing until an app names it: `box = "eu-2"` in a `[deploy.<env>]` table, or
@@ -1043,7 +1056,9 @@ container stays.
 `--data keep` means:
 
 - The container stops on `eu-1`.
-- The volumes and the database stay on `eu-1`. Bay never deletes them.
+- The volumes and the database stay on `eu-1`. Bay never deletes them. The weekly cron job
+  `docker system prune -af --volumes` does not delete them either: on Docker Engine 23 and later
+  it removes only anonymous volumes, and Bay gives every volume a name (`<stack_name>_<volume>`).
 - The app starts on `eu-2` with empty volumes and a new database.
 
 The plan lists the old volumes and the old database by name. It prints the
@@ -1090,6 +1105,11 @@ track = "pin"                             # scenario 10: roll out one tenant at 
 ```
 
 Register each one with `bay init --toml-path tenants/globex/bay.toml`.
+
+None of the three sets `[build]`, so each builds `Dockerfile` at the repo root: `dockerfile` and
+`context` are relative to the repo root, not to the `bay.toml` (the mount `from` is the one key
+read beside the toml). `bay init` looks for a Dockerfile only beside the `bay.toml`, so here it
+warns "no Dockerfile" and does not read the port from it. Set `port` yourself.
 
 Why not one project with three envs (`[deploy.acme]`, `[deploy.globex]` ...)?
 
@@ -1279,7 +1299,9 @@ runs once for each distinct box env of the removed envs (a project in staging an
 box env is deployed once).
 
 Only a receipt that confirms the containers are gone deletes the env from the lock. With no
-env left, `projects/shop/` leaves the fleet. The volumes and the database stay. See
+env left, `projects/shop/` leaves the fleet. The volumes and the database stay. The weekly
+`docker system prune -af --volumes` keeps them too, because it removes only anonymous volumes on
+Docker Engine 23 and later. See
 [plan.md](plan.md#bay-remove).
 
 **The app side.** `bay remove` changes the fleet and the boxes only. It never touches the app

@@ -80,7 +80,8 @@ bay import --fleet ./fleet --check --diff      # also prints the diff of each co
 4. All top-level keys come before the first table. TOML puts a key written below a
    `[table]` header into that table, so a misplaced key fails as an unknown key.
 5. The top level sets `image` or `[build]`, never both. If it sets neither, Bay builds
-   `./Dockerfile`. A service (`[services.<name>]`) sets `image` or an inline `build`, never
+   `./Dockerfile` with the context `.`, both relative to the repo root, also when the
+   `bay.toml` is in a subfolder. A service (`[services.<name>]`) sets `image` or an inline `build`, never
    both, and with neither it takes the image of the top level. An environment may
    override `image` or `build.args`, never both (see `[deploy.<env>]`).
 6. `needs` is a list or `[needs.<name>]` tables. One file uses one form everywhere,
@@ -416,7 +417,7 @@ lockfile (see Behavior).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `dockerfile` | string | `Dockerfile` | Path to the Dockerfile. |
+| `dockerfile` | string | `Dockerfile` | Path to the Dockerfile, relative to the repo root (not to this `bay.toml`). |
 | `context` | string | `.` | Build context, relative to the repo root. |
 | `strategy` | `local`, `remote`, `registry` | fleet setting | Where the image is built. |
 | `memory` | size | fleet setting | Build memory cap. (validated, not deployed yet) when it differs from the fleet's build memory. |
@@ -475,10 +476,9 @@ backup and is not affected.
 Two mounts in one container may not use the same `path`. A volume name is shared by the
 whole project. Two services that mount the same volume name share one volume.
 
-**Move mounted files beside the `bay.toml` now.** 2.1 still reads the old place,
-`files/<name>/<from>` in the fleet, as a fallback and prints a note. A later release reads
-only the place beside the toml. The code and the changelog name no release for that yet,
-so do not wait for one: run `git mv` as soon as you see the note.
+**Move mounted files beside the `bay.toml` now.** Bay still reads the old place,
+`files/<name>/<from>` in the fleet, as a fallback and prints a note. Move the files now, with
+`git mv`. The fallback stays until a release removes it, and the changelog will say so.
 
 Where `from` is read:
 
@@ -493,10 +493,10 @@ Where `from` is read:
 - **A shared fleet file.** `from = "fleet:crowdsec/whitelist.yaml"` reads
   `files/crowdsec/whitelist.yaml` in the fleet. The prefix is explicit; Bay never
   guesses. On the box the file is `config/crowdsec/whitelist.yaml`.
-- **The old place, for one release.** When the file is not beside the toml, Bay still
+- **The old place, as a fallback.** When the file is not beside the toml, Bay still
   reads `files/<name>/<from>` in the fleet, and prints a note that names the file. Move
-  it beside the `bay.toml` with `git mv`. 2.1 reads both places; a later release reads
-  only the new one. A path that the lock adopts is read first, without a note.
+  it beside the `bay.toml` now, with `git mv`. The fallback stays until a release removes
+  it, and the changelog will say so. A path that the lock adopts is read first, without a note.
 - On the box the file is `config/<name>/<from>`, or `config/<adopted path>` when the
   lock adopts one. Moving a file beside the toml does not change that path, so no
   container is recreated.
@@ -593,7 +593,7 @@ deploy envs on one box env share them (see
 | `aliases` | list of domains | `[]` | Extra domains that redirect to `domain` with HTTP 308. The path and the query are kept. Bay issues a certificate for every alias. The redirect is (validated, not deployed yet): with `redirect` left at `true`, `bay plan` blocks, and with `--allow-unsupported` the aliases are served instead. Set `redirect = false` to deploy them. |
 | `redirect` | bool | `true` | `false` serves the aliases instead of redirecting them. |
 | `branch` | git branch | `main` | Webhook builds follow this branch. |
-| `track` | `"branch"` or `"pin"` | `"branch"` | What a push does. `branch`: a push builds and deploys new code under the pinned config. `pin`: a push only builds; `bay up` deploys. |
+| `track` | `"branch"` or `"pin"` | `"branch"` | What a push does. `branch`: a push builds and deploys new code under the pinned config. `pin`: a push only builds; `bay up` deploys. Every push that builds is held with a `build.held` alert until `bay up` deploys it (see [build-pipeline.md](build-pipeline.md#track-hold-and-freeze)). |
 
 #### `track`: what a push deploys
 
@@ -611,7 +611,9 @@ container starts, only when the push may deploy. The pinned config (the
   "config changed, run bay up". Bay compares the parsed file, so a comment or a
   key order change is not a config change. `bay up` deploys the held commit
   with its new config.
-- `track = "pin"`. Every push that builds is held (the last guard, the hold guard). Only `bay up` deploys, and it deploys
+- `track = "pin"`. Every push that builds is held (the last guard, the hold guard), and the
+  alert `build.held` says "track = pin, run bay up to deploy it" (see
+  [build-pipeline.md](build-pipeline.md#track-hold-and-freeze)). Only `bay up` deploys, and it deploys
   the image of the pinned commit. The image must be on the box, so push first
   and let the build finish. `track = "pin"` needs the `bay.toml` in the app
   repo; a project in the fleet cannot use it.

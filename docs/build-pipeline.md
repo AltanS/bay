@@ -260,8 +260,9 @@ In `rebuild.sh`, for a trigger that got through:
   will continue to show `triggered N services` on every push (webhook
   correctly wrote the trigger); the CB guard in rebuild.sh exits early.
   This is the incident pattern: webhook looks healthy, service is stuck.
-- **Recovery:** `bay build reset <svc>` from the fleet directory
-  (see `--help` for flags). See "Webhook Auto-Build Troubleshooting" below
+- **Recovery:** `bay --fleet <path> build reset <svc>` on your machine
+  (see `--help` for flags). `build` does not take the fleet from the
+  directory you stand in, so name it with `--fleet` or `BAY_FLEET`. See "Webhook Auto-Build Troubleshooting" below
   for the manual JSON fallback.
 - **Incident (2026-04-16)** — `blog` on the `demo` NA region. Build failed,
   rollback succeeded, but CB counter reached 3 (old threshold). 2+ hours
@@ -272,8 +273,11 @@ In `rebuild.sh`, for a trigger that got through:
 
 **Build server webhook not receiving pushes:**
 - Check `docker logs bay-webhook` on the build server (203.0.113.14)
-- Verify GitHub webhook URL points to `https://deploy.example.com/webhook`
-- Test HMAC: `curl -X POST https://deploy.example.com/health` should return service list
+- Verify the GitHub hook URL is `https://<webhook domain>/webhook/<container name>`, for example
+  `https://deploy.example.com/webhook/shop`. The receiver answers a POST only on
+  `/webhook/<container name>` (and `/webhook/pull-image` for the build server's pull signal).
+- Probe the receiver: `curl https://deploy.example.com/health` (a GET, no HMAC) returns
+  `{"status": "ok", "services": <count>}`
 - If CrowdSec blocked the GH IP: `ssh debugbot@203.0.113.14 "sudo cscli decisions list"`
 
 **Build failures (no container restart):**
@@ -282,8 +286,9 @@ In `rebuild.sh`, for a trigger that got through:
 ssh debugbot@203.0.113.14 "journalctl -u bay-build@<svc>.service --since '1h ago' --no-pager"
 # Check state file for CB status:
 ssh debugbot@203.0.113.14 "cat /opt/demo/state/<svc>.json"
-# If CB is open (consecutive_failures >= git_deploy_cb_max_failures=5):
-ssh debugbot@203.0.113.11 "bay build reset <svc>"  # from the demo fleet
+# If CB is open (consecutive_failures >= git_deploy_cb_max_failures=5), reset it from
+# your machine, not on the box. Bay writes the state file on the box over SSH:
+bay --fleet <path to the demo fleet> build reset <svc>
 ```
 
 **Pull signal not reaching deployment servers:**
@@ -302,13 +307,20 @@ ssh debugbot@203.0.113.12 "systemctl status bay-build@<svc>.path"
 ```
 
 **Circuit breaker (CB) recovery workflow:**
+
+`bay build` runs on your machine and reaches the box over SSH. Name the fleet with
+`--fleet <path>` or `BAY_FLEET`: `build` does not take it from the directory you stand
+in. The `ssh` lines below run one command on the box. `bay-admin` is the `admin_user`
+of the example fleet (`example/group_vars/all/main.yml`), and `debugbot` is the default
+`debug_agent_user` (`roles/debug_agent`). Use the accounts of your own fleet.
+
 ```bash
 # Check CB state (or: ssh debugbot@<host> "cat /opt/<stack>/state/<svc>.json"):
-bay build status
+bay --fleet <path> build status
 # Reset CB (writes clean state + sends Telegram audit; see --help for flags):
-bay build reset <svc>
+bay --fleet <path> build reset <svc>
 # Manual reset (if CLI unavailable):
-ssh argo-admin@<host> "sudo -u bay printf '{\"version\":1,\"consecutive_failures\":0,\"opened_at\":null,\"last_failure\":null,\"alerts\":{\"opened_sent\":false,\"last_blocked_alert_at\":null}}\n' > /opt/<stack>/state/<svc>.json"  # kept-argo: live host account value
+ssh bay-admin@<host> "sudo -u bay printf '{\"version\":1,\"consecutive_failures\":0,\"opened_at\":null,\"last_failure\":null,\"alerts\":{\"opened_sent\":false,\"last_blocked_alert_at\":null}}\n' > /opt/<stack>/state/<svc>.json"
 # After reset, push again or touch trigger to re-fire:
 ssh debugbot@<host> "touch /opt/<stack>/triggers/<svc>.trigger"
 ```

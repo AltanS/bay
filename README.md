@@ -73,8 +73,13 @@ Install Bay once per machine. Make a fleet. Then set up an app repo.
 git clone https://github.com/AltanS/bay ~/.local/share/bay/framework
 ~/.local/share/bay/framework/bootstrap.sh
 bay fleet init prod
+# edit ~/.config/bay/fleets/prod/bay.fleet.toml: the box name and default_domain
+git -C ~/.config/bay/fleets/prod add -A
+git -C ~/.config/bay/fleets/prod commit -m "fleet: first bay.fleet.toml"
 cd my-app && bay init --fleet prod
 ```
+
+`bay fleet init` writes a `bay.fleet.toml` with one box, `main` (`env = "production"`), `default_box = "main"` and `default_domain = "example.com"`, and runs `git init`. It makes no commit, and `bay init` refuses a fleet with no commit, so commit the file first. `bay init` also needs an `origin` remote in the app repo.
 
 Here `--fleet prod` after `init` is the fleet name, the folder `~/.config/bay/fleets/prod`. It is not the global `--fleet <path>` option, which goes before the verb. `bay init` writes `fleet = "prod"` into the `bay.toml` it drafts, and later commands in this repo find the fleet from that line.
 
@@ -184,7 +189,7 @@ roles/
 |---|---|---|
 | `provision.yml` | One-time server hardening: users, SSH, firewall, CrowdSec, Docker | `bay provision production` |
 | `deploy.yml` | Repeatable deployment: build/pull images, deploy containers, write rig state | `bay deploy production` |
-| `webhook.yml` | Webhook setup: deploy keys, receiver container, systemd triggers | `bay webhook production` |
+| `webhook.yml` | Webhook setup: deploy keys, receiver container, systemd triggers | `bay webhook production` (v1 form; use `bay deploy production`, see [Build from source](#build-from-source-github-deploy)) |
 | `restore.yml` | Restore an accessory from backup | `bay restore production` |
 
 All playbooks require a target environment as the first argument.
@@ -193,9 +198,9 @@ All playbooks require a target environment as the first argument.
 
 Deploy separates **infrastructure roles** (nftables, traefik, watchtower, access_gateway, backup, docker_monitor, cronjobs) from **app roles** (build_image, git_deploy, deploy_stack). A rig state file on the server (`{{ stack_dir }}/.rig-state`) tracks when infrastructure was last configured:
 
-- `bay deploy production` — checks rig state. If the framework version or fleet config changed since the last rig, runs a full deploy. Otherwise skips infra roles for a fast app-only deploy.
-- `bay deploy --rig production` — forces all roles to run, including infrastructure. Writes updated rig state on success.
-- `bay deploy production --tags deploy_stack` — manual tag override, bypasses rig logic.
+- `bay deploy production`: it checks rig state. If the framework version or fleet config changed since the last rig (or the box has no rig state yet), it runs every role, the infrastructure roles included. Otherwise skips infra roles for a fast app-only deploy.
+- `bay deploy --rig production`: it forces all roles to run, including infrastructure. Writes updated rig state on success.
+- `bay deploy production --tags deploy_stack`: manual tag override, bypasses rig logic.
 
 The rig state file contains:
 ```json
@@ -374,10 +379,12 @@ watchtower_cleanup: true              # Remove old images after update (default:
 Bay supports deploying the same stack to multiple regional servers from a single fleet with zero framework changes. Define regions as Ansible inventory groups, override per-region configuration (domains, secrets, VPN peers) via `group_vars/<region>/`, and target individual regions or all at once with the standard CLI commands.
 
 ```bash
-bay deploy eu                 # Deploy to EU region only
-bay deploy na                 # Deploy to NA region only
-bay deploy production         # Deploy to all regions
+bay deploy production -- --limit eu   # Deploy to the EU region only
+bay deploy production -- --limit na   # Deploy to the NA region only
+bay deploy production                 # Deploy to all regions
 ```
+
+`bay deploy eu` (the group name as the env) also runs, but the box then writes its receipt as `eu.json`, not `production.json`, and `bay status`, `bay plan` and `bay rollback` read only `production.json`. Keep the box env and add `-- --limit <group>`.
 
 See **[docs/multi-region.md](docs/multi-region.md)** for the full setup guide — inventory structure, group_vars layering, domain parameterization, per-region secrets, and operational workflows.
 
@@ -421,13 +428,16 @@ webhook:
 ```
 
 ```bash
-bay webhook production        # Deploy webhook infra + show GitHub setup instructions
-bay webhook production --keys-only  # Just show deploy keys
+bay --fleet <path> deploy production   # no --tags: receiver, build triggers, deploy keys, first clone and build
 ```
+
+Run that once per box env that runs a build app (`bay up` does not install the receiver). On the box it makes one SSH deploy key per build container whose repo has no token: `/opt/<stack>/builds/<container>/.deploy_key.pub`. Bay does not register the key. Add it to the GitHub repo yourself (Settings > Deploy keys, read-only). With an SSH repo URL, the first run stops at the clone until the key is on GitHub: add it and run the deploy again. Then add the hook in the repo settings: payload URL `https://<webhook domain>/webhook/<container name>`, the value of the `[webhook] secret`, content type `application/json`, push events only.
+
+`bay webhook production` is the v1 form of this step. It does not hand the fleet's inventory to Ansible, and it reads deploy keys from `/opt/bay/` only. Use `bay deploy` until a release fixes it.
 
 See **[docs/services.md](docs/services.md#build-from-source)** for the full `build:` schema, image tagging, and webhook configuration.
 
-Auto-builds include a circuit breaker (stops after 3 failures), health checks with rollback, build timeouts, and notification dedup. See **[docs/build-strategies.md](docs/build-strategies.md#circuit-breaker)** for details. Reset with `bay build reset <service>`.
+Auto-builds include a circuit breaker (stops after 5 consecutive failures by default, set by `git_deploy_cb_max_failures`), health checks with rollback, build timeouts, and notification dedup. See **[docs/build-strategies.md](docs/build-strategies.md#circuit-breaker)** for details. Reset with `bay --fleet <path> build reset <service>`.
 
 ## Architecture notes
 

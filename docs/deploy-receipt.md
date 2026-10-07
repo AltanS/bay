@@ -35,8 +35,11 @@ receipt is its `$defs/receipt`.
 ### Where it is
 
 `/var/lib/bay/receipts/<env>.json` on every box of the environment. `<env>` is
-the box environment: the name that `bay deploy <env>` got (the inventory file `hosts/<env>`),
-for example `production`. `bay up` deploys against the box env of the project's box, not the
+the name that the deploy got as its target (`target_host`), for example `production`, the box
+environment of the inventory file `hosts/<env>`. A group name works as a target too, and then it
+names the file: `bay deploy eu` writes `eu.json`, which `bay status --env production` and
+`bay plan` do not read. To deploy one group or host, keep the box env and limit it:
+`bay deploy production -- --limit eu`. `bay up` deploys against the box env of the project's box, not the
 deploy env (see [layout-scenarios.md](layout-scenarios.md#which-env-does-a-verb-take)).
 There is one file per environment, so one box can hold several.
 
@@ -48,8 +51,8 @@ user that SSH logs in as can read it.
 
 ### When it is written
 
-The box writes the receipt at the end of the container pass of every full
-deploy:
+The box writes the receipt at the end of the container pass of every deploy
+that reaches it:
 
 - It is written when the pass succeeds (`"result": "ok"`).
 - It is written when the pass fails (`"result": "failed"`). The deploy still
@@ -80,7 +83,9 @@ the box together with the container engine. The steps are:
 A rename in one directory is atomic. A reader sees the old receipt or the new
 one, never half of a file.
 
-Every full deploy of the box env rotates the file, so `<env>.prev.json` is the state just before
+Every deploy that reaches the container pass rotates the file: `bay up`, `bay rollback`, the
+apply of a `bay remove` plan, and a `bay deploy <env>` with no `--tags` or with a tag that runs
+the container pass (`deploy_stack`). So `<env>.prev.json` is the state just before
 the last deploy of that env, whichever project or verb ran it. A `bay up` that changes nothing, and
 a `bay up` for another project on the same box env, both overwrite it with the state you had
 before. `bay rollback` reads its code target from this file (see
