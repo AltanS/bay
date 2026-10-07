@@ -582,6 +582,7 @@ def apply_remove(
     say = echo or (lambda _msg: None)
     if force and not (reason and reason.strip()):
         raise BayError("--force needs --reason", hint='Pass --reason "<why>".')
+    moved = applymod._migrate_layout(cx, say)
     saved = planmod.load_saved(cx, plan_id)
     rm0 = saved.get("remove")
     if not isinstance(rm0, Mapping):
@@ -648,9 +649,15 @@ def apply_remove(
                     cx, target, config_files_root=comp.files_root
                 )
             except (BayError, OSError) as exc:
-                failure = failure or str(exc) or type(exc).__name__
+                failure = str(exc) or type(exc).__name__
             except SystemExit as exc:
-                failure = failure or f"deploy exited with {exc.code}"
+                failure = f"deploy exited with {exc.code}"
+            if failure is not None:
+                # Stop at the first failure, as bay up does.
+                skipped = box_envs[box_envs.index(target) + 1 :]
+                if skipped:
+                    say(f"not deployed after the failure: {', '.join(skipped)}")
+                break
 
     # 6. the receipt decides.
     reader = read_receipts or planmod.default_receipt_reader
@@ -717,7 +724,7 @@ def apply_remove(
     pruned: list[str] = []
     try:
         pruned = applymod.prune_plans(cx)
-    except gitrepo.GitError as exc:
+    except (gitrepo.GitError, applymod.PruneRefused) as exc:
         say(f"warning: plans/ was not pruned: {exc}")
     applied: list[dict[str, Any]] = []
     for entries in by_env.values():
@@ -759,7 +766,7 @@ def apply_remove(
     }
     if push:
         applymod.push_fleet(cx, result, say)
-    return result
+    return applymod._with_layout_notes(moved, result)
 
 
 # ── Human output ────────────────────────────────────────────────────────────
