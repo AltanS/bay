@@ -833,6 +833,267 @@ def test_messages_use_no_banned_words(fleet: Path) -> None:
     assert hits == []
 
 
+# ── tailnet routes (M117/07) ─────────────────────────────────────────────────
+
+TAILNET_KEYS = '[tailnet]\ningress_box = "eu-1"\ncert_domain = "*.ts.example.com"\n'
+ROUTES = """
+[tailnet.routes.notes]
+domain = "notes.ts.example.com"
+upstream = "http://laptop.acme.tailnet.internal:8080"
+host = "upstream"
+identity = true
+aliases = ["memo.ts.example.com"]
+
+[tailnet.routes.nas]
+domain = "nas.ts.example.com"
+upstream = "http://100.64.0.9:5000"
+"""
+
+
+def with_routes(root: Path, routes_text: str = ROUTES, keys: str = TAILNET_KEYS) -> None:
+    edit(root, FLEET, "[tailnet]\n", keys)
+    path = root / FLEET
+    path.write_text(path.read_text() + routes_text)
+
+
+def test_compile_emits_tailnet_proxies_from_fleet_table(
+    fleet: Path, data: dict[str, Any]
+) -> None:
+    assert "tailnet_proxies" not in data, "no routes, no key: the file keeps its bytes"
+    with_routes(fleet)
+    out = yaml.safe_load(compiled(fleet).body())
+    assert out["tailnet_proxies"] == {
+        "nas": {"domains": ["nas.ts.example.com"], "upstream": "http://100.64.0.9:5000"},
+        "notes": {
+            "domains": ["notes.ts.example.com", "memo.ts.example.com"],
+            "upstream": "http://laptop.acme.tailnet.internal:8080",
+            "pass_host_header": False,
+            "identity_inject": True,
+        },
+    }
+    # The compiled file still passes today's services schema.
+    from bay_cli.commands import validate as v
+
+    result = v.ValidationResult()
+    assert v._validate_services_schema(ROOT, {"group_vars/all/services.yml": out}, result)
+    assert result.failed == [], result.failed
+
+
+def test_route_domain_must_be_under_cert_domain(fleet: Path) -> None:
+    with_routes(
+        fleet,
+        """
+[tailnet.routes.a]
+domain = "a.example.com"
+upstream = "http://laptop:8080"
+
+[tailnet.routes.b]
+domain = "deep.b.ts.example.com"
+upstream = "http://laptop:8081"
+
+[tailnet.routes.c]
+domain = "c.ts.example.com"
+upstream = "http://laptop:8082"
+aliases = ["c.example.org"]
+""",
+    )
+    lines = problems(fleet)
+    for d in ("a.example.com", "deep.b.ts.example.com", "c.example.org"):
+        assert any(f"domain {d} is not under cert_domain *.ts.example.com" in x for x in lines), lines
+    assert not any("c.ts.example.com is not under" in x for x in lines)
+
+
+def test_route_box_must_be_ingress_box(fleet: Path) -> None:
+    # A route has no box of its own: the ingress box serves every route, so
+    # that box must exist, and routes need it and the certificate domain set.
+    with_routes(fleet, keys='[tailnet]\ningress_box = "nope-1"\ncert_domain = "*.ts.example.com"\n')
+    assert "tailnet.ingress_box: there is no [boxes.nope-1]" in problems(fleet)
+
+    fleet2 = fleet.parent / "fleet2"
+    shutil.copytree(FIXTURE, fleet2)
+    with_routes(fleet2, keys="[tailnet]\n")
+    lines = problems(fleet2)
+    assert any(x.startswith("tailnet.ingress_box: routes need the box") for x in lines), lines
+    assert any(x.startswith("tailnet.cert_domain: routes need") for x in lines), lines
+
+
+@pytest.mark.parametrize(
+    ("upstream", "ok"),
+    [
+        ("http://100.64.0.9:5000", True),
+        ("http://laptop:8080", True),
+        ("http://laptop.acme.tailnet.internal:8787", True),
+        ("https://nas.acme.ts.net:443", True),
+        ("http://example.com:8080", False),
+        ("http://192.0.2.5:8080", False),
+        ("http://laptop", False),
+        ("http://laptop:8080/app", False),
+    ],
+)
+def test_route_upstream_must_be_tailnet(fleet: Path, upstream: str, ok: bool) -> None:
+    with_routes(fleet, f'\n[tailnet.routes.x]\ndomain = "x.ts.example.com"\nupstream = "{upstream}"\n')
+    if ok:
+        assert compiled(fleet).tailnet_proxies["x"]["upstream"] == upstream
+    else:
+        assert any(x.startswith("tailnet.routes.x.upstream: ") for x in problems(fleet))
+
+
+def test_route_upstream_scheme_is_refused_by_the_schema(fleet: Path) -> None:
+    with_routes(fleet, '\n[tailnet.routes.x]\ndomain = "x.ts.example.com"\nupstream = "ftp://laptop:21"\n')
+    assert any("tailnet.routes.x.upstream" in x and "URL" in x for x in problems(fleet))
+
+
+def test_route_duplicate_domain_refused(fleet: Path) -> None:
+    with_routes(
+        fleet,
+        """
+[tailnet.routes.a]
+domain = "a.ts.example.com"
+upstream = "http://laptop:8080"
+
+[tailnet.routes.b]
+domain = "b.ts.example.com"
+upstream = "http://laptop:8081"
+aliases = ["a.ts.example.com"]
+
+[tailnet.routes.c]
+domain = "c.ts.example.com"
+upstream = "http://laptop:8082"
+aliases = ["c.ts.example.com"]
+""",
+    )
+    lines = problems(fleet)
+    assert "domain a.ts.example.com is used by both route a and route b" in lines
+    assert "tailnet.routes.c: domain c.ts.example.com is listed twice" in lines
+
+
+def test_route_domain_clashes_with_a_project_and_the_webhook(fleet: Path) -> None:
+    with_routes(
+        fleet,
+        """
+[tailnet.routes.shopx]
+domain = "shop.example.com"
+upstream = "http://laptop:8080"
+
+[tailnet.routes.hook]
+domain = "deploy.example.com"
+upstream = "http://laptop:8081"
+""",
+        keys='[tailnet]\ningress_box = "eu-1"\ncert_domain = "*.example.com"\n',
+    )
+    lines = problems(fleet)
+    assert any(x.startswith("domain shop.example.com is used by both shop") for x in lines), lines
+    assert "domain deploy.example.com is used by both route hook and the webhook" in lines
+
+
+def test_route_both_places_refused(fleet: Path) -> None:
+    old = fleet / "group_vars" / "all" / "tailnet_proxies.yml"
+    old.write_text(
+        "---\ntailnet_proxies:\n  notes:\n    domains: [notes.ts.example.com]\n"
+        "    upstream: http://laptop:8080\n"
+    )
+    # Without routes in the fleet file the old file is still the one source.
+    assert compiled(fleet).tailnet_proxies == {}
+    with_routes(fleet)
+    lines = problems(fleet)
+    assert any(
+        "both bay.fleet.toml [tailnet.routes] and group_vars/all/tailnet_proxies.yml" in x
+        and "bay route import" in x
+        for x in lines
+    ), lines
+
+
+@pytest.mark.parametrize(
+    ("route", "message"),
+    [
+        ('domain = "x.ts.example.com"\nupstream = "http://laptop:1"\nport = 1\n', "port"),
+        ('domain = "x.ts.example.com"\nupstream = "http://laptop:1"\nhost = "server"\n', "host"),
+        ('domain = "x.ts.example.com"\nupstream = "http://laptop:1"\nidentity = "yes"\n', "identity"),
+        ('domain = "x.ts.example.com"\n', "upstream"),
+        ('domain = "X.ts.example.com"\nupstream = "http://laptop:1"\n', "domain"),
+        ('domain = "x.ts.example.com"\nupstream = "http://laptop:1"\naliases = ["a b"]\n', "aliases"),
+    ],
+)
+def test_fleet_schema_rejects_a_bad_route(fleet: Path, route: str, message: str) -> None:
+    with_routes(fleet, "\n[tailnet.routes.x]\n" + route)
+    lines = problems(fleet)
+    assert any(x.startswith("bay.fleet.toml: tailnet.routes.x") and message in x for x in lines), lines
+
+
+def test_fleet_schema_rejects_a_bad_cert_domain(fleet: Path) -> None:
+    with_routes(fleet, keys='[tailnet]\ningress_box = "eu-1"\ncert_domain = "**.example"\n')
+    assert any("tailnet.cert_domain" in x for x in problems(fleet))
+
+
+ACL_FLEET = {
+    "boxes": {"eu-1": {"env": "production", "tailnet_ip": "100.64.0.50"}},
+    "tailnet": {
+        "ingress_box": "eu-1",
+        "cert_domain": "*.ts.example.com",
+        "routes": {
+            "notes": {
+                "domain": "notes.ts.example.com",
+                "upstream": "http://laptop.acme.tailnet.internal:8080",
+            }
+        },
+    },
+}
+
+
+def _acl(*rules: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "hosts": {"ingress": "100.64.0.50/32", "laptop": "100.64.0.30/32", "phone": "100.64.0.40/32"},
+        "acls": list(rules),
+    }
+
+
+def test_validate_warns_route_port_without_acl_rule(fleet: Path) -> None:
+    from bay_cli import routes
+    from bay_cli.commands import validate as v
+
+    # No policy: allow-all is legal, no warning.
+    assert routes.acl_warnings(ACL_FLEET, None) == []
+    # A rule with the ingress box (by alias or by box name) as its only src: no warning.
+    for src in (["ingress"], ["eu-1"], ["100.64.0.50"]):
+        rule = {"action": "accept", "src": src, "dst": ["laptop:8080"]}
+        assert routes.acl_warnings(ACL_FLEET, _acl(rule)) == [], src
+    assert routes.acl_warnings(
+        ACL_FLEET, _acl({"action": "accept", "src": ["ingress"], "dst": ["laptop:8000-8100"]})
+    ) == []
+    # A shared rule reaches the port, but not with the ingress box alone.
+    shared = routes.acl_warnings(
+        ACL_FLEET, _acl({"action": "accept", "src": ["ingress", "phone"], "dst": ["laptop:8080"]})
+    )
+    assert len(shared) == 1 and "as its only src" in shared[0] and "phone" in shared[0]
+    # Nothing lets the ingress box reach it: the route answers 502.
+    none = routes.acl_warnings(
+        ACL_FLEET, _acl({"action": "accept", "src": ["ingress"], "dst": ["laptop:22"]})
+    )
+    assert len(none) == 1 and "502" in none[0]
+
+    # Through bay validate: a warning, never a failure.
+    with_routes(fleet, '\n[tailnet.routes.notes]\ndomain = "notes.ts.example.com"\n'
+                       'upstream = "http://laptop.acme.tailnet.internal:8080"\n')
+    for policy, warned in ((None, False), (_acl(), True)):
+        parsed = {"group_vars/all/main.yml": {"stack_name": "x"}}
+        if policy is not None:
+            parsed["group_vars/all/headscale_acl.yml"] = {"headscale_acl_policy": policy}
+        result = v.ValidationResult()
+        v._validate_tailnet_routes(fleet, parsed, result)
+        assert result.failed == []
+        assert bool(result.warnings) is warned, result.warnings
+
+
+def test_validate_fails_on_routes_in_both_places(fleet: Path) -> None:
+    from bay_cli.commands import validate as v
+
+    with_routes(fleet)
+    (fleet / "group_vars" / "all" / "tailnet_proxies.yml").write_text("---\ntailnet_proxies: {}\n")
+    result = v.ValidationResult()
+    v._validate_tailnet_routes(fleet, {}, result)
+    assert any("bay route import" in f for f in result.failed), result.failed
+
+
 # ── THE GATE: today's validation and the reconciler's spec builder ───────────
 
 

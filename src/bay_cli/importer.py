@@ -6,7 +6,8 @@ never a file that holds ``$ANSIBLE_VAULT``), plus ``hosts/``. It writes only
 into the output directory:
 
 * ``bay.fleet.toml``: boxes, shared resources (today's ``accessories:``), the
-  webhook and the repo tokens.
+  webhook, the repo tokens and the tailnet routes (today's
+  ``tailnet_proxies``, names kept; :func:`bay_cli.routes.from_proxies`).
 * ``projects/<name>/bay.toml`` for every project, with the config files it
   mounts beside it (``files/<name>/<path>`` today becomes
   ``projects/<name>/<path>``, and ``from = "<path>"``).
@@ -505,11 +506,6 @@ class _Importer:
         resources = {k: self._resource(k, a) for k, a in sorted(self.lg.accessories.items())}
         fleet_doc = self._fleet_doc(resources)
         files["bay.fleet.toml"] = to_toml(fleet_doc)
-        if self.lg.tailnet_proxies:
-            self.notes.append(
-                f"{len(self.lg.tailnet_proxies)} tailnet proxies stay in their own YAML file in "
-                "the fleet; bay.toml does not carry them"
-            )
         return ImportResult(
             fleet_name=self.name,
             boxes=self.boxes,
@@ -1388,6 +1384,9 @@ class _Importer:
         doc["boxes"] = boxes
         if resources:
             doc["resources"] = resources
+        tailnet = self._tailnet(boxes)
+        if tailnet:
+            doc["tailnet"] = tailnet
         if self.lg.webhook:
             secret_raw = self.lg.webhook.get("secret")
             secret = _secret_name(secret_raw)
@@ -1409,6 +1408,47 @@ class _Importer:
         if tokens:
             doc["repo_tokens"] = tokens
         return doc
+
+    def _tailnet(self, boxes: dict[str, Any]) -> dict[str, Any] | None:
+        """``[tailnet]`` with today's ``tailnet_proxies`` as routes, or None.
+
+        The routes need the ingress box and the certificate domain. When the
+        group variables do not tell them, the proxies stay in their YAML file
+        with a note, and ``bay route import`` moves them later.
+        """
+        from bay_cli import routes
+
+        proxies = self.lg.tailnet_proxies
+        if not proxies:
+            return None
+        count = len(proxies)
+        table, problems = routes.from_proxies(proxies)
+        shapes = {
+            name: {"group": box.group, "groups": box.groups} for name, box in self.boxes.items()
+        }
+        ingress, cert, why = routes.guess_ingress(self.lg.group_vars, shapes)
+        keep = f"{count} tailnet proxies stay in their own YAML file"
+        if problems:
+            self.flags.extend(problems)
+            self.notes.append(f"{keep}: they cannot be carried over as they are")
+            return None
+        if ingress is None or cert is None:
+            self.notes.append(
+                f"{keep}: {why}; move them later with "
+                "`bay route import --ingress-box <box> --cert-domain <domain>`"
+            )
+            return None
+        tailnet = {"ingress_box": ingress, "cert_domain": cert, "routes": table}
+        _, errors = routes.compile_routes({"boxes": boxes, "tailnet": tailnet})
+        if errors:
+            self.flags.extend(errors)
+            self.notes.append(f"{keep}: the routes do not check out")
+            return None
+        self.notes.append(
+            f"{count} tailnet proxies became [tailnet.routes] (ingress box {ingress}, "
+            f"{why}); leave their old YAML file out of the new fleet"
+        )
+        return tailnet
 
     def _repo_tokens(self) -> dict[str, str]:
         wanted: dict[str, str | None] = {}

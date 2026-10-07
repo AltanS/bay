@@ -17,7 +17,8 @@ A fleet repo holds:
 
 This module only reads. It never opens anything under ``group_vars/<env>/``
 (the encrypted secrets), and it reads ``group_vars/all/*.yml`` only to learn
-which ``services:``/``accessories:`` keys an operator maintains by hand.
+which ``services:``/``accessories:`` keys an operator maintains by hand, and
+whether a hand file still defines ``tailnet_proxies``.
 """
 
 from __future__ import annotations
@@ -245,6 +246,9 @@ class FleetInputs:
     projects: dict[str, Project]
     #: ``services``/``accessories`` key -> the hand-maintained file that defines it.
     hand_keys: dict[str, str]
+    #: The hand-maintained ``group_vars/all`` file that still defines
+    #: ``tailnet_proxies`` (the form ``[tailnet.routes]`` replaces), or None.
+    hand_tailnet: str | None = None
 
 
 def load_inputs(
@@ -314,10 +318,16 @@ def load_inputs(
         if project is not None:
             projects[name] = project
 
-    hand_keys = _hand_keys(fleet_root, output, errors)
+    hand_keys, hand_tailnet = _hand_keys(fleet_root, output, errors)
     if errors:
         raise FleetError(errors)
-    return FleetInputs(root=fleet_root, fleet=fleet, projects=projects, hand_keys=hand_keys)
+    return FleetInputs(
+        root=fleet_root,
+        fleet=fleet,
+        projects=projects,
+        hand_keys=hand_keys,
+        hand_tailnet=hand_tailnet,
+    )
 
 
 def _load_project(
@@ -354,7 +364,10 @@ def _load_project(
     return Project(name=name, doc=doc, toml_file=toml_file, repo_root=repo_root, lock=lock)
 
 
-def _hand_keys(fleet_root: Path, output: Path | None, errors: list[str]) -> dict[str, str]:
+def _hand_keys(
+    fleet_root: Path, output: Path | None, errors: list[str]
+) -> tuple[dict[str, str], str | None]:
+    """Hand-maintained ``services``/``accessories`` keys, and the file with ``tailnet_proxies``."""
     import yaml
 
     class Loader(yaml.SafeLoader):
@@ -366,6 +379,7 @@ def _hand_keys(fleet_root: Path, output: Path | None, errors: list[str]) -> dict
     Loader.add_multi_constructor("!", _ignore)
 
     keys: dict[str, str] = {}
+    tailnet: str | None = None
     all_dir = fleet_root / "group_vars" / "all"
     skip = {(fleet_root / GENERATED_SERVICES).resolve()}
     if output is not None:
@@ -386,7 +400,9 @@ def _hand_keys(fleet_root: Path, output: Path | None, errors: list[str]) -> dict
             if isinstance(block, dict):
                 for key in block:
                     keys.setdefault(str(key), _rel(path, fleet_root))
-    return keys
+        if data.get("tailnet_proxies") and tailnet is None:
+            tailnet = _rel(path, fleet_root)
+    return keys, tailnet
 
 
 def _rel(path: Path, root: Path) -> str:

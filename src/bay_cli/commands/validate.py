@@ -2154,6 +2154,52 @@ def _validate_headscale_oidc(
         )
 
 
+def _validate_tailnet_routes(
+    root: Path,
+    parsed_files: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """``[tailnet.routes]`` in bay.fleet.toml: the compile checks, plus the ACL.
+
+    Fails on what the compile refuses (domain outside cert_domain, a duplicate
+    domain, an upstream that is not on the tailnet, no ingress box). Warns
+    when ``headscale_acl_policy`` has no rule with the ingress box as its only
+    ``src`` for a route's upstream port. No policy means allow-all, which is
+    legal, so there is no warning then.
+    """
+    import tomllib
+
+    from bay_cli import routes
+    from bay_cli.fleet import FLEET_FILE
+
+    path = root / FLEET_FILE
+    if not path.is_file():
+        return
+    try:
+        fleet = tomllib.loads(path.read_text())
+    except (OSError, tomllib.TOMLDecodeError):
+        return  # the compile reports an unreadable fleet file
+    table = routes.table(fleet)
+    if not table:
+        return
+    console.header("Tailnet Routes")
+    _, errors = routes.compile_routes(fleet)
+    for line in errors:
+        result.fail(f"Tailnet routes      {line}")
+    if (root / routes.OLD_FILE).is_file():
+        result.fail(
+            f"Tailnet routes      {routes.OLD_FILE} still defines tailnet_proxies; "
+            "bay compile refuses both. Run `bay route import`."
+        )
+    policy = routes.acl_policy_of(_to_plain(parsed_files))
+    warnings = routes.acl_warnings(fleet, policy)
+    for line in warnings:
+        result.warn(f"Tailnet routes      {line}")
+    if not errors and not warnings:
+        mode = "ACL checked" if policy is not None else "no ACL policy (allow-all)"
+        result.ok(f"Tailnet routes      {len(table)} route(s), {mode}")
+
+
 # ── Core validation logic ────────────────────────────────────────────────
 
 def _probe_token_scope(
@@ -2931,6 +2977,9 @@ def run_validation(
 
     # 8b. Headscale OIDC enrolment allowlist
     _validate_headscale_oidc(parsed, result)
+
+    # 8c. Tailnet routes in bay.fleet.toml, and the ACL that guards their upstreams
+    _validate_tailnet_routes(root, parsed, result)
 
     # 9. Token scope probe (opt-in, never runs automatically)
     if check_token_scope and services_data is not None:

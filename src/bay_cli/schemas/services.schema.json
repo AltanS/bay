@@ -32,6 +32,26 @@
     "webhook": {
       "$ref": "#/$defs/webhook_block",
       "description": "Deployment webhook configuration."
+    },
+    "tailnet_proxies": {
+      "type": "object",
+      "description": "Tailnet routes, compiled from [tailnet.routes] in bay.fleet.toml. Read by the traefik, headscale and crowdsec templates on the ingress box.",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["domains", "upstream"],
+        "properties": {
+          "domains": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+          "upstream": { "type": "string", "pattern": "^https?://" },
+          "pass_host_header": { "type": "boolean" },
+          "identity_inject": { "type": "boolean" },
+          "entrypoint": { "type": "string" }
+        }
+      }
     }
   },
   "patternProperties": {

@@ -405,6 +405,102 @@ def test_import_check_prints_the_diff_summary(legacy: Path) -> None:
     assert _state(legacy) == before, "--check writes nothing into the fleet"
 
 
+# ── tailnet proxies become [tailnet.routes] (M117/07) ──────────────────────
+
+OLD_PROXIES = {
+    "notes": {
+        "domains": ["notes.ts.example.com", "memo.ts.example.com"],
+        "upstream": "http://laptop.fleet-a.tailnet.internal:8080",
+        "pass_host_header": False,
+        "identity_inject": True,
+    },
+    "notes-next": {
+        "domains": ["notes-next.ts.example.com"],
+        "upstream": "http://laptop.fleet-a.tailnet.internal:8081",
+        "pass_host_header": True,
+        "identity_inject": True,
+    },
+    "nas": {
+        "domains": ["nas.ts.example.com"],
+        "upstream": "http://100.64.0.9:5000",
+        "entrypoint": "websecure_tailnet",
+    },
+}
+
+
+def _with_ingress(legacy: Path) -> None:
+    (legacy / "group_vars" / "all" / "tailnet_proxies.yml").write_text(
+        yaml.safe_dump({"tailnet_proxies": OLD_PROXIES}, explicit_start=True)
+    )
+    main = legacy / "group_vars" / "eu" / "main.yml"
+    main.write_text(main.read_text() + 'tailnet_ingress_cert_domain: "*.ts.example.com"\n')
+
+
+def test_import_tailnet_proxies_to_fleet_table(legacy: Path, tmp_path: Path) -> None:
+    from bay_cli import routes
+
+    _with_ingress(legacy)
+    result = importer.import_fleet(legacy, "fleet-a")
+    out = tmp_path / "fleet"
+    result.write(out)
+    tailnet = toml(out, "bay.fleet.toml")["tailnet"]
+    assert tailnet["ingress_box"] == "eu"
+    assert tailnet["cert_domain"] == "*.ts.example.com"
+    assert tailnet["routes"] == {
+        # names kept; a multi-domain entry is domain + aliases
+        "notes": {
+            "domain": "notes.ts.example.com",
+            "aliases": ["memo.ts.example.com"],
+            "upstream": "http://laptop.fleet-a.tailnet.internal:8080",
+            "host": "upstream",
+            "identity": True,
+        },
+        "notes-next": {
+            "domain": "notes-next.ts.example.com",
+            "upstream": "http://laptop.fleet-a.tailnet.internal:8081",
+            "identity": True,
+        },
+        "nas": {
+            "domain": "nas.ts.example.com",
+            "upstream": "http://100.64.0.9:5000",
+            "entrypoint": "websecure_tailnet",
+        },
+    }
+    assert any("3 tailnet proxies became [tailnet.routes]" in n for n in result.notes)
+    assert not (out / "group_vars" / "all" / "tailnet_proxies.yml").exists()
+
+    # Golden: old map -> import -> compile -> the same map (defaults spelled
+    # out, so an explicit `pass_host_header: true` equals an absent one).
+    compiled_map = compiler.compile_fleet(load_inputs(out)).tailnet_proxies
+    norm = routes._norm
+    assert {k: norm(v) for k, v in compiled_map.items()} == {
+        k: norm(v) for k, v in OLD_PROXIES.items()
+    }
+    # And byte for byte where the old entry spelled no default.
+    assert compiled_map["notes"] == OLD_PROXIES["notes"]
+    assert compiled_map["nas"] == OLD_PROXIES["nas"]
+
+
+def test_import_keeps_the_proxies_file_without_an_ingress_box(
+    imported: tuple[importer.ImportResult, Path],
+) -> None:
+    result, out = imported
+    # The fixture sets no tailnet_ingress_cert_domain: the proxies stay in YAML.
+    assert "tailnet" not in toml(out, "bay.fleet.toml")
+    assert any(
+        "1 tailnet proxies stay in their own YAML file" in n and "bay route import" in n
+        for n in result.notes
+    ), result.notes
+
+
+def test_roundtrip_gate_passes_with_imported_routes(legacy: Path, tmp_path: Path) -> None:
+    _with_ingress(legacy)
+    gate = roundtrip.run_gate(legacy, name="fleet-a", workdir=tmp_path / "gate")
+    assert {d.container for d in gate.diffs} <= {
+        "mailer", "shop", "shop-staging", "cache", "blog-prod"
+    }
+
+
 # ── environment names follow the box group ──────────────────────────────────
 
 

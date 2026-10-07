@@ -24,6 +24,11 @@ Mapping, one bay.toml environment at a time:
 
 Collisions (container, router, volume, domain, database, database user and
 variable names) are errors that name both sides. Nothing is last-wins.
+
+Fleet-wide: ``[webhook]`` becomes ``webhook:`` and ``[tailnet.routes.*]``
+becomes ``tailnet_proxies:`` (see :mod:`bay_cli.routes`). The compile refuses
+when a hand file in ``group_vars/all`` still defines ``tailnet_proxies`` and
+the fleet file has routes: both would set the same variable.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from bay_cli import routes
 from bay_cli.bay_toml import sibling_var
 from bay_cli.fleet import FILES_DIR, FLEET_PREFIX, PROJECTS_DIR, FleetInputs, LockEnv, Project
 
@@ -91,25 +97,43 @@ class CompileResult:
     unsupported: list[Unsupported] = field(default_factory=list)
     #: Lines for the reader (a mounted file found in its old place). Never in the file.
     notes: list[str] = field(default_factory=list)
+    #: ``[tailnet.routes]`` as the map the traefik and headscale templates read.
+    tailnet_proxies: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def data(self) -> dict[str, Any]:
         out: dict[str, Any] = {"accessories": self.accessories, "services": self.services}
         if self.webhook is not None:
             out["webhook"] = self.webhook
+        if self.tailnet_proxies:
+            # Only when routes exist, so a fleet without them compiles to the same bytes.
+            out["tailnet_proxies"] = self.tailnet_proxies
         return out
 
     def body(self) -> str:
         """The file without its header line. Deterministic."""
         import yaml
 
+        data = self.data()
+        proxies = data.pop("tailnet_proxies", None)
         dumped: str = yaml.safe_dump(
-            self.data(),
+            data,
             sort_keys=True,
             default_flow_style=False,
             allow_unicode=True,
             width=4096,
             explicit_start=True,
         )
+        if proxies:
+            # Routes keep the order of bay.fleet.toml: the traefik and headscale
+            # templates render them in that order, so an imported fleet renders
+            # the same bytes as its old tailnet_proxies.yml did.
+            dumped += yaml.safe_dump(
+                {"tailnet_proxies": proxies},
+                sort_keys=False,
+                default_flow_style=False,
+                allow_unicode=True,
+                width=4096,
+            )
         if not self.unsupported:
             return dumped
         head, rest = dumped.split("\n", 1)
@@ -218,6 +242,7 @@ class _Compiler:
         for name in sorted(self.tailnet_exposed):
             if name in self.services:
                 self.services[name]["ports"]["expose"] = "tailnet"
+        proxies = self._tailnet_proxies()
         webhook = self._webhook()
         if self.errors:
             raise CompileError(sorted(set(self.errors)))
@@ -227,6 +252,7 @@ class _Compiler:
             webhook=webhook,
             unsupported=sorted(self.unsupported),
             notes=sorted(self.notes),
+            tailnet_proxies=proxies,
         )
 
     def _err(self, msg: str) -> None:
@@ -1021,6 +1047,18 @@ class _Compiler:
         return mw
 
     # ── fleet-wide ──────────────────────────────────────────────────────
+    def _tailnet_proxies(self) -> dict[str, dict[str, Any]]:
+        proxies, errors = routes.compile_routes(self.fleet, self.domains)
+        self.errors.extend(errors)
+        hand = self.inputs.hand_tailnet
+        if proxies and hand is not None:
+            self._err(
+                f"tailnet routes are defined in both bay.fleet.toml [tailnet.routes] and "
+                f"{hand} (tailnet_proxies); run `bay route import` to move them, or "
+                "delete the old file"
+            )
+        return proxies
+
     def _webhook(self) -> dict[str, str] | None:
         hook = self.fleet.get("webhook")
         if hook is None:

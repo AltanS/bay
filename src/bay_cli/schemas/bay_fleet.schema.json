@@ -80,6 +80,22 @@
             "pattern": "^[0-9a-fA-F:.]+(/[0-9]{1,3})?$",
             "x-messages": { "pattern": "must be an IP address or a CIDR range such as 100.64.0.0/10" }
           }
+        },
+        "ingress_box": {
+          "$ref": "#/$defs/name",
+          "description": "The box whose Traefik serves the tailnet routes. Routes need it."
+        },
+        "cert_domain": {
+          "type": "string",
+          "pattern": "^(\\*\\.)?([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$",
+          "description": "The certificate every route sits under, such as *.ts.example.com. Routes need it.",
+          "x-messages": { "pattern": "must be a domain or a wildcard such as *.ts.example.com" }
+        },
+        "routes": {
+          "type": "object",
+          "description": "Tailnet routes: a name with a trusted certificate for a machine on the tailnet that Bay does not run. Compiled into tailnet_proxies in services.yml.",
+          "propertyNames": { "$ref": "#/$defs/name" },
+          "additionalProperties": { "$ref": "#/$defs/route" }
         }
       }
     },
@@ -153,6 +169,40 @@
         "webhook_domain": {
           "$ref": "#/$defs/domain",
           "description": "The deploy webhook domain of this box. It replaces [webhook] domain. The box needs a group."
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["domain", "upstream"],
+      "properties": {
+        "domain": { "$ref": "#/$defs/domain" },
+        "upstream": {
+          "type": "string",
+          "pattern": "^https?://\\S+$",
+          "description": "A tailnet MagicDNS name or tailnet address, with the port: http://laptop.example.tailnet.internal:8080.",
+          "x-messages": { "pattern": "must be a URL such as http://laptop:8080" }
+        },
+        "host": {
+          "type": "string",
+          "enum": ["client", "upstream"],
+          "description": "The Host the upstream receives: the client's name (default) or the upstream's own name (for a backend behind tailscale serve)."
+        },
+        "identity": {
+          "type": "boolean",
+          "description": "Inject X-Tailnet-Device, the caller's device name."
+        },
+        "aliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/domain" },
+          "description": "More names for the same route. They are served like domain."
+        },
+        "entrypoint": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "x-messages": { "pattern": "must be a Traefik entrypoint name such as websecure_tailnet" }
         }
       }
     },
