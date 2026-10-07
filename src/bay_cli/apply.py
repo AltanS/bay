@@ -56,9 +56,12 @@ from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
 from bay_cli.fleet import GENERATED_SERVICES
 
-#: ``(cx, box_env, config_files_root=<dir>) -> None``. Raises on a failed
-#: deploy. Tests swap in a fake.
+#: ``(cx, box_env, config_files_root=<dir>[, code_targets=...]) -> None``.
+#: Raises on a failed deploy. Tests swap in a fake. ``code_targets`` is passed
+#: only when there are any.
 Deployer = Callable[..., None]
+#: ``(cx, box_env, repo) -> {box: [commit tags]}``, as receipts.list_commit_tags.
+TagLister = Callable[[Context, str, str], dict[str, list[str]]]
 Echo = Callable[[str], None]
 
 
@@ -78,12 +81,22 @@ class Refused(Exception):
 UP_DEPLOY_TAGS = "deploy_stack"
 
 
-def default_deploy(cx: Context, box_env: str, *, config_files_root: Path | None = None) -> None:
+def default_deploy(
+    cx: Context,
+    box_env: str,
+    *,
+    config_files_root: Path | None = None,
+    code_targets: Mapping[str, Any] | None = None,
+) -> None:
     """Today's ``bay deploy <env> --tags deploy_stack``, without the prompts and the banner.
 
     ``config_files_root`` is the ``files/`` of the scratch fleet ``bay up``
     compiled; the deploy copies config files from there
     (``bay_config_files_root``), so it ships the committed files the plan read.
+
+    ``code_targets`` (``{container: {"commit"|"source", "strict"}}``) becomes
+    the ``bay_code_targets`` extra var: the box points ``:latest`` at those
+    commit images before the reconciler pass (``bay_reconcile.codepin``).
     """
     from bay_cli.commands import ops
     from bay_cli.commands.validate import run_validation
@@ -106,6 +119,8 @@ def default_deploy(cx: Context, box_env: str, *, config_files_root: Path | None 
             *report_dir_vars(report_dir),
             *planmod.config_files_vars(config_files_root),
         ]
+        if code_targets:
+            extra += ["-e", json.dumps({"bay_code_targets": dict(code_targets)})]
         ops._run_playbook(cx, "deploy", box_env, UP_DEPLOY_TAGS, extra)
         ops._invalidate_rig_cache(cx.cache_dir)
         ops._run_post_deploy_healthcheck(
@@ -179,12 +194,19 @@ def up(
     deploy: Deployer | None = None,
     echo: Echo | None = None,
     push: bool = True,
+    code: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply a plan. Returns a result document; raises :class:`Refused` or BayError.
 
     With ``push`` (the default) the fleet repo is pushed after the last lock
     commit when it has a remote. A failed push is a warning, never a failed
     deploy; the result says ``pushed: false`` and ``push_error``.
+
+    ``code`` is what the box does with this project's build images
+    (:func:`_code_targets`): ``None`` lets ``up`` decide; ``bay rollback``
+    passes ``{"source": "prev"}`` or ``{"commit": <sha>, "strict": True}``.
+    A rollback also freezes the env; a later ``up`` to a newer commit thaws
+    it (:func:`_freeze`).
     """
     say = echo or (lambda _msg: None)
     cx = proj.cx
@@ -213,6 +235,7 @@ def up(
         deploy=deploy,
         say=say,
         push=push,
+        code=code,
     )
 
 
@@ -284,8 +307,12 @@ def _apply_plan(
     deploy: Deployer | None,
     say: Echo,
     push: bool,
+    code: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Steps 2 to 8 of ``bay up`` for the projects of an accepted plan."""
+    """Steps 2 to 8 of ``bay up`` for the projects of an accepted plan.
+
+    ``code`` goes to :func:`_code_targets` for every project (``bay rollback``).
+    """
     env = str(plan["env"])
     box_env = str(plan["box_env"])
     for proj, commit in members:
@@ -327,6 +354,9 @@ def _apply_plan(
         record.update({"commit": commit, "result": "pending", "plan_id": plan["plan_id"]})
         if previous is not None:
             record["previous"] = previous
+        freeze_note = _freeze(proj, record, commit, rollback=action == "rollback")
+        if freeze_note:
+            say(f"note: {freeze_note}")
         envs[env] = record
         lockfile.write(proj.lock_file, lock)
         locks[proj.name] = lock
@@ -344,6 +374,10 @@ def _apply_plan(
         services = _write_services(cx, comp.result.text())
         compiled_commits = dict(comp.commits)
         left_out = list(comp.unpinned)
+        code_targets: dict[str, dict[str, Any]] = {}
+        for proj, commit in members:
+            built = _build_containers(comp.result.data(), proj, locks[proj.name], env, commit)
+            code_targets.update(_code_targets(proj, env, commit, built, code))
 
         # 4. commit
         paths = [p.lock_file for p, _ in members]
@@ -359,16 +393,22 @@ def _apply_plan(
 
         # 5. deploy. A move to a box of another box environment also deploys
         # the old one, so its reconciler removes the moved containers there.
-        targets = [box_env] + sorted(
+        deploy_envs = [box_env] + sorted(
             {
                 str(m["from_box_env"])
                 for m in moves.values()
                 if m.get("from_box_env") and m["from_box_env"] != box_env
             }
         )
-        for target in targets:
+        for target in deploy_envs:
+            # Code targets name containers of the plan's box environment.
+            extra: dict[str, Any] = (
+                {"code_targets": code_targets} if code_targets and target == box_env else {}
+            )
             try:
-                (deploy or default_deploy)(cx, target, config_files_root=comp.files_root)
+                (deploy or default_deploy)(
+                    cx, target, config_files_root=comp.files_root, **extra
+                )
             except (BayError, OSError) as exc:
                 failure = failure or str(exc) or type(exc).__name__
             except SystemExit as exc:
@@ -475,6 +515,8 @@ def _apply_plan(
         "pinned": pinned,
         "pruned": pruned,
         "notes": notes,
+        "code_targets": code_targets,
+        "frozen": any(bool(locks[p.name]["envs"][env].get("frozen")) for p, _ in members),
     }
     if push and not gitrepo.is_toplevel(cx.fleet_root):
         # A fleet that is a directory inside a bigger repo (a workspace with
@@ -683,29 +725,216 @@ class DeployFailed(Exception):
         self.result = result
 
 
+# ── Code and config: track, freeze, code targets ──────────────────────────
+
+
+def _freeze(
+    proj: planmod.ProjectRef, record: dict[str, Any], commit: str, *, rollback: bool
+) -> str | None:
+    """Set or clear ``frozen`` on the env record. Returns a note, or None.
+
+    ``bay rollback`` freezes the env at the commit it restores: from then on a
+    push builds and tags its image but never deploys (``rebuild.sh`` reads
+    ``build.frozen`` from the compiled services file). The next ``bay up`` to
+    a commit newer than ``frozen_commit`` (a descendant of it, per git in the
+    project's checkout) clears the freeze. An ``up`` to the same or an older
+    commit keeps it.
+    """
+    if rollback:
+        record["frozen"] = True
+        record["frozen_commit"] = commit
+        return (
+            f"frozen at {commit[:12]}: a push builds but does not deploy until a bay up "
+            "to a newer commit"
+        )
+    if not record.get("frozen"):
+        return None
+    at = str(record.get("frozen_commit") or "")
+    newer = bool(at) and at != commit and gitrepo.is_ancestor(proj.checkout, at, commit) is True
+    if not newer:
+        return (
+            f"still frozen at {at[:12] or 'unknown'}: {commit[:12]} is not newer, so a push "
+            "still builds without deploying"
+        )
+    record.pop("frozen", None)
+    record.pop("frozen_commit", None)
+    return f"the freeze from bay rollback ({at[:12]}) is cleared: {commit[:12]} is newer"
+
+
+def _build_containers(
+    data: Mapping[str, Any],
+    proj: planmod.ProjectRef,
+    lock: Mapping[str, Any],
+    env: str,
+    commit: str,
+) -> list[str]:
+    """This project's containers in ``env`` that build from source, sorted."""
+    doc = planmod.doc_at(proj, commit) or {}
+    by_env = planmod.project_containers(proj.name, doc, lock, proj.primary_env)
+    names = set(by_env.get(env, {}).values())
+    entries = {**(data.get("accessories") or {}), **(data.get("services") or {})}
+    return sorted(
+        n for n in names if isinstance(entries.get(n), Mapping) and "build" in entries[n]
+    )
+
+
+def _code_targets(
+    proj: planmod.ProjectRef,
+    env: str,
+    commit: str,
+    built: list[str],
+    code: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """``{container: {"commit"|"source", "strict"}}``: where ``:latest`` must point.
+
+    * ``code`` given (``bay rollback``): that, for every build container.
+    * ``bay up`` of a project whose bay.toml lives in the app repo: the pinned
+      commit, which is also the code commit. Strict in ``track = "pin"`` (the
+      image must be on the box, built by a push). Not strict in ``branch``
+      mode: a missing image leaves ``:latest`` where the last push put it.
+      This is how ``bay up`` releases a held build.
+    * An in-fleet project: nothing. Its pin is a fleet commit, not a code
+      commit, so ``:latest`` stays where the last push put it.
+    """
+    from bay_cli import bay_toml
+
+    if not built:
+        return {}
+    if code is not None:
+        return {name: dict(code) for name in built}
+    if proj.in_fleet:
+        return {}
+    doc = planmod.doc_at(proj, commit) or {}
+    strict = bay_toml.track(doc, env) == "pin"
+    return {name: {"commit": commit, "strict": strict} for name in built}
+
+
 def rollback(
     proj: planmod.ProjectRef,
     opts: planmod.PlanOptions,
+    *,
+    to: str | None = None,
+    list_tags: TagLister | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    """Restore config and code: the previous pin, and the image the box ran before.
+
+    Moves the pin back (as ``bay up --at <previous>``), asks the box to point
+    ``:latest`` at the image the previous receipt names (``<env>.prev.json``),
+    and freezes the env (``frozen = true`` in the lock).
+
+    ``to``: roll the code back to that commit's image instead, which must
+    already be on the box (``<image>:<commit12>``); the CLI asks the box first
+    and refuses with the commit tags it has. For a project whose bay.toml lives
+    in the app repo the pin moves to ``to`` as well; an in-fleet project keeps
+    its pin (its pin is a fleet commit) and only the code moves.
+    """
     env = opts.env or proj.primary_env
     record = (proj.lock.get("envs") or {}).get(env, {})
-    previous = record.get("previous")
-    if not previous or not previous.get("commit"):
-        raise BayError(
-            f"{proj.name} has no previous pin for {env}",
-            code=ErrorCode.NOT_FOUND,
-            hint="A rollback needs one earlier bay up for this environment.",
-        )
+    if to:
+        reader = kwargs.get("read_receipts")
+        at, code = _rollback_to(proj, env, to, list_tags=list_tags, reader=reader)
+    else:
+        previous = record.get("previous")
+        if not previous or not previous.get("commit"):
+            raise BayError(
+                f"{proj.name} has no previous pin for {env}",
+                code=ErrorCode.NOT_FOUND,
+                hint="A rollback needs one earlier bay up for this environment.",
+            )
+        at, code = str(previous["commit"]), {"source": "prev", "strict": False}
     restored = planmod.PlanOptions(
         env=env,
-        at=str(previous["commit"]),
+        at=at,
         read_running=True,
         box_check=opts.box_check,
         allow_unsupported=opts.allow_unsupported,
         cwd_repo=opts.cwd_repo,
     )
-    return up(proj, restored, action="rollback", **kwargs)
+    return up(proj, restored, action="rollback", code=code, **kwargs)
+
+
+def _rollback_to(
+    proj: planmod.ProjectRef,
+    env: str,
+    to: str,
+    *,
+    list_tags: TagLister | None,
+    reader: planmod.ReceiptReader | None,
+) -> tuple[str, dict[str, Any]]:
+    """``(commit to pin, code target)`` for ``bay rollback --to``.
+
+    Asks the box which commit tags it has for every build container of the
+    project, and refuses (listing them) when ``to`` is not one of them.
+    """
+    from bay_reconcile.images import is_commit, short, split_ref
+
+    if proj.in_fleet:
+        if not is_commit(to.lower()):
+            raise BayError(f"--to {to}: give the app commit as hex (7 to 40 characters)")
+        code_commit = to.lower()
+        at = lockfile.env_pin(proj.lock, env)
+        if not at:
+            raise BayError(f"{proj.name} has no pin for {env}", code=ErrorCode.NOT_FOUND)
+    else:
+        full = gitrepo.resolve_commit(proj.checkout, to)
+        if full is None:
+            raise BayError(
+                f"--to {to}: no such commit in {proj.checkout}", code=ErrorCode.NOT_FOUND
+            )
+        code_commit = at = full
+    tag = short(code_commit)
+
+    pin = lockfile.env_pin(proj.lock, env)
+    doc = planmod.doc_at(proj, pin) or {}
+    box, box_env = planmod.resolve_box(proj, env, doc)
+    if box_env is None:
+        raise BayError(f"box {box} is not in bay.fleet.toml [boxes]")
+    current, _ = planmod.current_services(proj.cx)
+    built = set(_build_containers(current, proj, proj.lock, env, pin or ""))
+    entries = (reader or planmod.default_receipt_reader)(proj.cx, box_env)
+    refs = {
+        str(c.get("image_ref") or c.get("image") or "")
+        for e in entries
+        if isinstance(e.get("receipt"), Mapping)
+        for c in e["receipt"].get("containers") or []
+        if isinstance(c, Mapping) and c.get("name") in built
+    }
+    repos = sorted({split_ref(ref)[0] for ref in refs if ref})
+    if not built:
+        raise BayError(
+            f"{proj.name} builds no image in {env}, so there is no code to roll back to {tag}",
+            hint="Run bay rollback without --to to return to the previous pin.",
+        )
+    if not repos:
+        raise BayError(
+            f"cannot roll {proj.name} {env} back to {tag}: the box receipt lists no image "
+            "for it",
+            hint="Run `bay status` to read the box, or `bay up` once first.",
+        )
+    lister = list_tags or default_tag_lister
+    for repo in repos:
+        try:
+            found = lister(proj.cx, box_env, repo)
+        except OSError as exc:
+            raise BayError(f"cannot check the box for {repo}:{tag}: {exc}") from None
+        # Every box of the env must have it: the tags common to all of them.
+        common = set.intersection(*(set(tags) for tags in found.values())) if found else set()
+        have = sorted(common)
+        if tag not in have:
+            raise BayError(
+                f"{repo}:{tag} is not on the box, so bay rollback --to {to} cannot run it. "
+                "Commit tags on the box: " + (", ".join(have) or "none"),
+                code=ErrorCode.NOT_FOUND,
+                hint="Pick one of those commits, or push the commit so a build tags it.",
+            )
+    return at, {"commit": code_commit, "strict": True}
+
+
+def default_tag_lister(cx: Context, box_env: str, repo: str) -> dict[str, list[str]]:
+    from bay_cli.receipts import list_commit_tags
+
+    return list_commit_tags(cx, box_env, repo)
 
 
 # ── show ────────────────────────────────────────────────────────────────────

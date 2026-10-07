@@ -2817,3 +2817,167 @@ def test_plans_prune_takes_the_approval_with_its_record(
     assert f"plans/{ids[0]}.approved" not in tracked
     assert git(world["fleet"], "log", "-1", "--format=%s") == "bay: prune plans (8 files)"
     assert git(world["fleet"], "status", "--porcelain") == ""
+
+
+# ── M117/05: track mode, hold release, code against config ─────────────────
+
+
+def _build_app(world: dict[str, Path], *, track: str | None = None) -> str:
+    """Turn webapp into a project that builds from source. Returns the app commit."""
+    text = (world["app"] / "bay.toml").read_text()
+    text = text.replace('image = "ghcr.io/acme/webapp:1"\n', "")
+    text += '\n[build]\ndockerfile = "Dockerfile"\n'
+    if track:
+        text = text.replace("[deploy.production]\n", f'[deploy.production]\ntrack = "{track}"\n')
+    (world["app"] / "bay.toml").write_text(text)
+    sha = commit_all(world["app"], "build from source")
+    git(world["app"], "push", "-q", "origin", "main")
+    return sha
+
+
+def _code_deploys(monkeypatch: pytest.MonkeyPatch, box: FakeBox) -> list[Any]:
+    """Swap in a deploy that records the code targets bay up passes to the box."""
+    seen: list[Any] = []
+
+    def deploy(
+        cx: Context,
+        box_env: str,
+        *,
+        config_files_root: Path | None = None,
+        code_targets: Any = None,
+    ) -> None:
+        seen.append(code_targets)
+        box.deploy(cx, box_env, config_files_root=config_files_root)
+
+    monkeypatch.setattr(applymod, "default_deploy", deploy)
+    return seen
+
+
+def _stamp(box: FakeBox, name: str, commit: str) -> None:
+    """What a webhook build does on the box: the receipt names the code it runs."""
+    row = box.container(name)
+    row["commit"] = commit[:12]
+    row["image_ref"] = row["image"]
+
+
+class _Images:
+    """A box's local images for bay_reconcile.codepin: ref -> image id."""
+
+    def __init__(self, ids: dict[str, str]) -> None:
+        self.ids = dict(ids)
+
+    def image_id(self, ref: str) -> str | None:
+        return self.ids.get(ref)
+
+    def pull(self, ref: str) -> bool:
+        return False
+
+    def tag(self, source: str, target: str) -> None:
+        self.ids[target] = self.ids[source]
+
+    def commit_tags(self, repo: str) -> list[str]:
+        tags = (r.rsplit(":", 1)[1] for r in self.ids if r.startswith(repo + ":"))
+        return sorted(t for t in tags if t not in ("latest", "previous"))
+
+
+def test_up_releases_hold_and_retags_latest(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bay_reconcile import codepin, tomlhash
+
+    seen = _code_deploys(monkeypatch, box)
+    first = _build_app(world)
+    assert do_up(world)["result"] == "ok"
+    assert seen[-1] == {"webapp": {"commit": first, "strict": False}}
+
+    def compiled_hash() -> str:
+        text = (world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1]
+        return yaml.safe_load(text)["services"]["webapp"]["build"]["bay_toml_hash"]
+
+    assert compiled_hash() == tomlhash.canonical_hash((world["app"] / "bay.toml").read_bytes())
+
+    # A push that changes config: the build side sees another hash and holds.
+    held = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    pushed = tomlhash.canonical_hash(git(world["app"], "show", f"{held}:bay.toml").encode())
+    assert pushed != compiled_hash()
+
+    # bay up releases it: pins the commit, compiles its config, asks the box to
+    # point :latest at that commit's image.
+    up = do_up(world)
+    assert up["result"] == "ok" and up["commit"] == held
+    assert lock_of(world)["envs"]["production"]["commit"] == held
+    assert compiled_hash() == pushed
+    assert seen[-1] == {"webapp": {"commit": held, "strict": False}}
+    assert up["code_targets"] == seen[-1]
+
+    # The box side of that target: :latest moves to <repo>:<commit12>.
+    images = _Images(
+        {
+            "app/webapp:latest": "sha256:old",
+            f"app/webapp:{first[:12]}": "sha256:old",
+            f"app/webapp:{held[:12]}": "sha256:new",
+        }
+    )
+    targets = json.dumps(seen[-1])
+    spec = json.dumps({"webapp": "app/webapp:latest"})
+    assert codepin.main(["--targets", targets, "--images", spec], images=images) == 0
+    assert images.ids["app/webapp:latest"] == "sha256:new"
+    assert images.ids["app/webapp:previous"] == "sha256:old"
+
+    # track = "pin": the image must be on the box (strict).
+    edit_app(world, "[deploy.production]\n", '[deploy.production]\ntrack = "pin"\n')
+    pinned = git(world["app"], "rev-parse", "HEAD")
+    assert do_up(world)["result"] == "ok"
+    assert seen[-1] == {"webapp": {"commit": pinned, "strict": True}}
+    services = yaml.safe_load(
+        (world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1]
+    )["services"]
+    assert services["webapp"]["build"]["track"] == "pin"
+    (missing,) = codepin.plan_moves(
+        [{"name": "webapp", "image": "app/webapp:latest", "commit": pinned, "strict": True}],
+        images,
+    )
+    assert missing.status == "missing"
+    assert missing.available == sorted([first[:12], held[:12]])
+
+
+def test_plan_prints_code_and_config_commits(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _code_deploys(monkeypatch, box)
+    config = _build_app(world)
+    do_up(world)
+
+    # Branch mode: a push deployed new code under the pinned config. Information, not a step.
+    _stamp(box, "webapp", "abcdef0123456789")
+    plan = make(world)
+    assert plan["steps"] == [] and plan["verdict"] == "auto"
+    line = f"code at abcdef012345, config pinned at {config[:12]}"
+    assert line in plan["notes"]
+    assert f"note: {line}" in planmod.render(plan)
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    # The info line is not part of the plan body: the id ignores it.
+    _stamp(box, "webapp", config)
+    again = make(world)
+    assert again["plan_id"] == plan["plan_id"]
+    assert not any(n.startswith("code at") for n in again["notes"])
+
+    # Pin mode: code that is not the pin is a step, kind image, risk safe.
+    edit_app(world, "[deploy.production]\n", '[deploy.production]\ntrack = "pin"\n')
+    do_up(world)
+    pin = lock_of(world)["envs"]["production"]["commit"]
+    _stamp(box, "webapp", pin)
+    assert make(world)["steps"] == []
+    _stamp(box, "webapp", "abcdef0123456789")
+    plan = make(world)
+    (step,) = plan["steps"]
+    assert (step["kind"], step["action"], step["risk"], step["container"]) == (
+        "image",
+        "update",
+        "safe",
+        "webapp",
+    )
+    assert "abcdef012345" in step["reason"] and pin[:12] in step["reason"]
+    assert plan["verdict"] == "auto"
+    assert not any(n.startswith("code at") for n in plan["notes"])
+    jsonschema.validate(plan, PLAN_SCHEMA)

@@ -329,3 +329,178 @@ def test_handle_rollback_no_restore_when_no_previous_image():
         "the capture hasn't happened yet at that point. "
         f"Branch content:\n{branch_text}"
     )
+
+
+# ── M117/05: bay rollback restores config and code, and freezes ─────────────
+#
+# These run the CLI against the throwaway fleet and app repo of
+# tests/test_plan_up.py (its fixtures are imported below), with a fake deploy
+# that records the code targets `bay rollback` hands to the box.
+
+import json  # noqa: E402
+import sys  # noqa: E402
+from typing import Any  # noqa: E402
+
+import pytest  # noqa: E402
+import yaml  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from test_plan_up import (  # noqa: E402,F401  (fixtures are used by name)
+    FakeBox,
+    _build_app,
+    _code_deploys,
+    _git_identity,
+    _Images,
+    _stamp,
+    box,
+    cli,
+    do_up,
+    edit_app,
+    git,
+    lock_of,
+    world,
+)
+
+from bay_cli import apply as applymod  # noqa: E402
+from bay_cli.fleet import GENERATED_SERVICES  # noqa: E402
+from bay_reconcile import codepin  # noqa: E402
+
+
+def _compiled_build(world: dict[str, Path]) -> dict[str, Any]:
+    text = (world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1]
+    return yaml.safe_load(text)["services"]["webapp"]["build"]
+
+
+def _two_ups(world: dict[str, Path], box: FakeBox) -> tuple[str, str, dict[str, Any]]:
+    """Deploy a first and a second commit; the box ran each one's image.
+
+    Returns both commits and the receipt the box kept as ``<env>.prev.json``.
+    """
+    first = _build_app(world)
+    do_up(world)
+    _stamp(box, "webapp", first)
+    box.container("webapp")["image"] = f"app/webapp:{first[:12]}"
+    prev = json.loads(json.dumps(box.receipts["production"]))
+    second = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    do_up(world)
+    _stamp(box, "webapp", second)
+    box.container("webapp")["image"] = f"app/webapp:{second[:12]}"
+    return first, second, prev
+
+
+def test_rollback_restores_config_and_code(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    seen = _code_deploys(monkeypatch, box)
+    first, second, prev = _two_ups(world, box)
+
+    result = cli(world, "rollback", "--json")
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    # Config: the pin moves back and the first commit's bay.toml is compiled.
+    assert (doc["commit"], doc["previous_commit"]) == (first, second)
+    assert "LOG_LEVEL: info" in (world["fleet"] / GENERATED_SERVICES).read_text()
+    # Code: the box points :latest at the image the previous receipt names.
+    assert seen[-1] == {"webapp": {"source": "prev", "strict": False}}
+    assert doc["code_targets"] == seen[-1] and doc["frozen"] is True
+
+    images = _Images(
+        {
+            "app/webapp:latest": "sha256:second",
+            f"app/webapp:{first[:12]}": "sha256:first",
+            f"app/webapp:{second[:12]}": "sha256:second",
+        }
+    )
+    prev_file = tmp_path / "production.prev.json"
+    prev_file.write_text(json.dumps(prev))
+    spec = json.dumps({"webapp": "app/webapp:latest"})
+    args = ["--targets", json.dumps(seen[-1]), "--images", spec, "--prev", str(prev_file)]
+    assert codepin.main(args, images=images) == 0
+    assert images.ids["app/webapp:latest"] == "sha256:first"
+    assert images.ids["app/webapp:previous"] == "sha256:second"
+
+
+def test_rollback_freeze_blocks_deploy_until_newer_up(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import test_track_mode as harness
+
+    _code_deploys(monkeypatch, box)
+    first, _, _ = _two_ups(world, box)
+    assert cli(world, "rollback", "--json").exit_code == 0
+
+    record = lock_of(world)["envs"]["production"]
+    assert record["frozen"] is True and record["frozen_commit"] == first
+    build = _compiled_build(world)
+    assert build["frozen"] is True
+
+    # The webhook side: the compiled freeze renders FROZEN, and FROZEN holds a push.
+    rendered = harness._render_rebuild_sh(
+        {
+            "webapp": {
+                "build": build,
+                "access": "public",
+                "domains": ["webapp.example.com"],
+                "ports": {"internal": 3000},
+            }
+        },
+        ["webapp"],
+        git_deploy_services=["webapp"],
+    )
+    assert 'FROZEN="true"' in rendered
+    proc, calls, alerts = harness._harness(
+        rendered,
+        'FROZEN="true"; TRACK="branch"\n'
+        '_hold_build "$(_hold_reason /nonexistent)" "app/webapp:0123456789ab"',
+        tmp_path,
+    )
+    assert proc.returncode == 0 and calls == [], proc.stderr
+    assert "frozen by bay rollback, run bay up to deploy it" in alerts[0]
+
+    # An up to the same commit keeps the freeze.
+    up = do_up(world, at=first)
+    assert up["frozen"] is True and lock_of(world)["envs"]["production"]["frozen"] is True
+
+    # An up to a newer commit clears it.
+    edit_app(world, 'LOG_LEVEL = "debug"', 'LOG_LEVEL = "warn"')
+    up = do_up(world)
+    assert up["frozen"] is False
+    record = lock_of(world)["envs"]["production"]
+    assert "frozen" not in record and "frozen_commit" not in record
+    assert "frozen" not in _compiled_build(world)
+
+
+def test_rollback_to_commit_requires_image_on_box(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = _code_deploys(monkeypatch, box)
+    first, second, _ = _two_ups(world, box)
+    on_box = sorted([first[:12], second[:12]])
+    asked: list[tuple[str, str]] = []
+
+    def tags(cx: Any, box_env: str, repo: str) -> dict[str, list[str]]:
+        asked.append((box_env, repo))
+        return {"box-1": on_box}
+
+    monkeypatch.setattr(applymod, "default_tag_lister", tags)
+
+    # A commit the box has no image for is refused before anything moves.
+    git(world["app"], "commit", "-q", "--allow-empty", "-m", "never built")
+    gone = git(world["app"], "rev-parse", "HEAD")
+    deploys = len(box.deploys)
+    refused = cli(world, "rollback", "--to", gone[:12])
+    assert refused.exit_code != 0
+    message = str(refused.exception)
+    assert f"app/webapp:{gone[:12]} is not on the box" in message
+    assert f"Commit tags on the box: {', '.join(on_box)}" in message
+    assert len(box.deploys) == deploys
+    assert lock_of(world)["envs"]["production"]["commit"] == second
+    assert asked == [("production", "app/webapp")]
+
+    # A commit whose image is there: pin and code move to it, strictly.
+    ok = cli(world, "rollback", "--to", first[:12], "--json")
+    assert ok.exit_code == 0, ok.output
+    assert json.loads(ok.stdout)["commit"] == first
+    assert seen[-1] == {"webapp": {"commit": first, "strict": True}}
+    assert lock_of(world)["envs"]["production"]["frozen"] is True

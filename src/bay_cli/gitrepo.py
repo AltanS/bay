@@ -116,6 +116,17 @@ def _specs(rel: str | Sequence[str]) -> list[str]:
     return [rel] if isinstance(rel, str) else list(rel)
 
 
+def is_ancestor(repo: Path, older: str, newer: str) -> bool | None:
+    """True when ``older`` is an ancestor of ``newer`` (or the same commit).
+
+    None when git cannot tell (a commit is not in ``repo``).
+    """
+    proc = _run(repo, "merge-base", "--is-ancestor", older, newer)
+    if proc is None or proc.returncode not in (0, 1):
+        return None
+    return proc.returncode == 0
+
+
 def last_change(repo: Path, rel: str | Sequence[str], ref: str = "HEAD") -> str | None:
     """The newest commit at or before ``ref`` that touched ``rel``, or None.
 

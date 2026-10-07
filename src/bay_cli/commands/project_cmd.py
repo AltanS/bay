@@ -457,7 +457,8 @@ def _apply(
                     data=data,
                 )
                 if which == "rollback":
-                    result = applymod.rollback(proj, opts, **common)
+                    # For a rollback, `at` is --to: the code commit to roll back to.
+                    result = applymod.rollback(proj, opts, to=at, **common)
                 else:
                     result = applymod.up(proj, opts, plan_id=plan_id, **common)
     except BayError as exc:
@@ -576,6 +577,12 @@ def rollback(
         str | None, typer.Argument(help="Environment. Default: the primary one.")
     ] = None,
     project: _ProjectOpt = None,
+    to: Annotated[
+        str | None,
+        typer.Option(
+            "--to", help="Roll the code back to this commit; its image must be on the box."
+        ),
+    ] = None,
     force: Annotated[
         bool, typer.Option("--force", help="Roll back an approve plan without approval.")
     ] = False,
@@ -586,18 +593,28 @@ def rollback(
     no_push: _NoPushOpt = False,
     log: _LogOpt = None,
 ) -> None:
-    """Return an environment to its previous pin and deploy it.
+    """Return an environment to its previous pin and its previous code, and freeze it.
 
     Runs bay up with the commit the lock records as previous; the two pins
-    swap, so a second rollback undoes the first. Refuses when there is no
-    previous pin.
+    swap, so a second rollback undoes the first. The box points the image
+    back at what it ran before the last bay up. The environment is frozen:
+    a push builds and tags its image but does not deploy, until a bay up to
+    a newer commit. Refuses when there is no previous pin.
+
+    With --to <commit>, the code goes back to that commit's image, which must
+    be on the box (the refusal lists the commit tags it has).
+
+    Examples:
+
+        bay rollback
+        bay rollback --to 1a2b3c4d5e6f
     """
     _apply(
         ctx,
         "rollback",
         env,
         project,
-        None,
+        to,
         None,
         force,
         reason,
