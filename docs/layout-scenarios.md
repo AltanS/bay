@@ -38,6 +38,20 @@ on the same box environment as the plan. What gets pinned depends on where you r
 (scenario 6). The first image of an app that builds from source is not made by `bay up`
 (see [plan.md](plan.md#the-first-image)).
 
+## Words used in the scenarios
+
+One line each. The full table is in [Words](#words-deploy-env-box-env-and-group) below.
+
+- **Fleet**: the repo that holds the boxes, secrets, shared resources and one folder per project.
+- **Project**: one app. Its `bay.toml` is in its own repo or in the fleet. The fleet keeps its lock.
+- **Lock**: `projects/<name>/bay.lock`. The CLI writes it. It pins the commit that was deployed.
+- **Box**: one server, named in `[boxes.<name>]` of `bay.fleet.toml` (`eu-1`).
+- **Box env**: the `env` of a box (`production`). It names `hosts/<env>`, `group_vars/<env>/` and the receipt file.
+- **Deploy env**: the `[deploy.<env>]` table of a `bay.toml`. `bay plan <env>` and `bay up <env>` take this name.
+- **Group**: the `group` of a box, the `[eu]` heading in the hosts file. It separates boxes of one box env.
+- **Primary env**: `primary_env` of `bay.fleet.toml`, default `production`. It is the deploy env with bare container names (`shop`, not `shop-staging`).
+- **WANTED, PINNED, RUNNING**: the `bay.toml` at the latest commit, the commit in the lock, and what the box receipt says runs. See [plan.md](plan.md).
+
 ## Sample `bay plan` output
 
 `bay plan production --json` prints one document. This is the real shape, trimmed.
@@ -80,7 +94,7 @@ that project in `project` and keeps its own risk, so two safe changes give `auto
 
 ## Words: deploy env, box env and group
 
-Four words name four different things. The docs use each one in one sense only.
+The one-line list is near the top of this page. This is the full table. Four words name four different things. The docs use each one in one sense only.
 
 | Word | Where it is set | What it is |
 |---|---|---|
@@ -120,12 +134,13 @@ only reads (`show`, `status`) does not print it. The folder `acme`, the `name` i
 `bay.fleet.toml` and the `fleet =` line must be the same word
 ([install.md](install.md#the-three-names-of-a-fleet)).
 
-**Fleet layout migration.** A fleet made before 2.1 keeps its locks in
+**Fleet layout migration.** Pull the fleet first, before any `bay up` on a fleet made before
+2.1: a writer checks that the fleet is not behind its remote, and refuses when it is. A fleet made before 2.1 keeps its locks in
 `projects/<name>.lock`. Readers (`bay show`, `bay plan`) never move them. They read both
 forms and print `layout: migration to project folders pending (bay up or bay compile does
 it)`. A writer (`bay up`, `bay rollback`, `bay compile`, `bay adopt`, `bay init`) moves
-them once, after it checks that the fleet is not behind its remote. It makes one commit,
-`bay: move locks into project folders`. Pull the fleet first. A machine with Bay 2.0 cannot
+them once, after that check. It makes one commit,
+`bay: move locks into project folders`. A machine with Bay 2.0 cannot
 read the result, so run `bay self update` everywhere.
 
 ## 1. Smallest fleet: one box, one image-only app

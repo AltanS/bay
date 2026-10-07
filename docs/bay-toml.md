@@ -50,7 +50,9 @@ bay import --fleet ./fleet --check --diff      # also prints the diff of each co
   [layout-scenarios.md](layout-scenarios.md#words-deploy-env-box-env-and-group)). A box
   with `env = "testing"` gives `[deploy.testing]`. `-staging` and `-dev` keep their names.
   When every box has one `env`, that name is also `primary_env` in `bay.fleet.toml`, so
-  container names stay as they are.
+  container names stay as they are. `primary_env` is the deploy env that gets bare
+  container names (`shop`, not `shop-production`). Its default is `production`. Rule 8
+  below has the naming rules.
 - A value `http://<container>:<port>` that reaches another project becomes a need with
   `env` set to today's variable name, and the other project gets `publish = true`.
 - The report lists each secret to add (for example a password that is plain text
@@ -66,7 +68,7 @@ bay import --fleet ./fleet --check --diff      # also prints the diff of each co
 3. Unknown keys fail, in every table.
 4. All top-level keys come before the first table. TOML puts a key written below a
    `[table]` header into that table, so a misplaced key fails as an unknown key.
-5. The top level sets `image` or `[build]`, never both. With neither, it builds
+5. The top level sets `image` or `[build]`, never both. If it sets neither, Bay builds
    `./Dockerfile`. A service (`[services.<name>]`) sets `image` or an inline `build`, never
    both, and with neither it takes the image of the top level. An environment may
    override `image` or `build.args`, never both (see `[deploy.<env>]`).

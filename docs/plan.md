@@ -4,9 +4,10 @@ These are the daily verbs of Bay v2. They work on one project of one fleet.
 
 Bay keeps three truths apart:
 
-- **WANTED**: `bay.toml` at the project's current commit: the HEAD of the checkout you stand
-  in, else the head of the `[deploy.<env>].branch` branch in the fleet's repo cache; for a
-  project in the fleet, `projects/<name>/` at the fleet's HEAD (see [bay plan](#bay-plan)).
+- **WANTED**: `bay.toml` at the latest commit of the place the project lives. Two cases:
+  for a project with an app repo, the HEAD of the checkout you stand in, else the head of the
+  `[deploy.<env>].branch` branch in the fleet's repo cache; for a project in the fleet,
+  `projects/<name>/` at the fleet's HEAD. The rest of this page says "WANTED" for either case.
 - **PINNED**: the fleet lockfile `projects/<name>/bay.lock`, and the services
   file that the fleet last compiled from it.
 - **RUNNING**: the receipt that the box wrote after its last deploy
@@ -69,7 +70,7 @@ one for a project in the fleet: keep a project that builds in its own repo (`bay
 
 plan, up, show and rollback work as for any project, with these differences:
 
-- WANTED is `projects/<name>/` at the fleet's HEAD, without
+- WANTED is the in-fleet case (see the top of this page), without
   `projects/<name>/bay.lock`. Commit an edit in the fleet repo before you plan
   it. `bay up` commits the lock, and that commit does not change WANTED.
 - Its `commit` is the fleet commit that last changed `projects/<name>/`,
@@ -148,11 +149,11 @@ leave it out.
 
 ### bay plan
 
-1. **WANTED**: Bay reads `bay.toml` at HEAD of the checkout you stand in, or
-   in the repo cache at the head of the branch that `[deploy.<env>].branch`
-   names (the branch the webhook builds; read from the pinned `bay.toml`,
-   else the cache's HEAD). With no `branch` declared, the cache's HEAD: the
-   remote's default branch. `--at` picks another commit. Uncommitted edits are not part of the plan. The plan
+1. **WANTED** (defined at the top of this page): for a project with an app repo, the
+   branch that `[deploy.<env>].branch` names is the branch the webhook builds. Bay reads
+   it from the pinned `bay.toml`, else the cache's HEAD. With no `branch` declared, it is
+   the cache's HEAD: the remote's default branch. `--at` picks another commit.
+   Uncommitted edits are not part of the plan. The plan
    records them as `wanted.dirty`. When the WANTED commit is on no branch of
    the remote, the plan says so in a note: `bay up` will refuse it. For the `bay adopt`
    commit (`adopted.app_commit` in the lock) the note says instead that it is the adopt
@@ -520,6 +521,19 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
   `:latest` stays. In `pin` mode it stops the deploy before any container changes (see
   [Code and config](#code-and-config)).
 
+**After the first build, in order.**
+
+1. Push to the deploy branch. The webhook starts the build on the box.
+2. The build script creates the container and stamps the receipt: it sets the container's
+   `commit` and `image`, and nothing else. The failed action in the receipt and the
+   lock's `result: failed` stay as they were, so `bay show` still says `HALF`. The
+   webhook never reports a deploy.
+3. Run `bay plan <env>`. It shows what Bay still sees. The container that the build made
+   has no config hash from a deploy, so the plan can list one step for it.
+4. Run `bay up <env>`. It applies that step, or none, and writes a new receipt. When it
+   succeeds the lock says `result: ok` and `bay show` says `ok`. If nothing else changed,
+   the second `bay up` recreates nothing. You do not run `bay up` again after that.
+
 When the deploy fails, the lock keeps the new pin and records
 `result: failed`. Bay still commits and pushes that record. `bay show` then
 says `HALF` until a deploy succeeds.
@@ -661,6 +675,12 @@ app repo. Run it inside a checkout of the app repo. The `bay.toml` is not
 there yet, so it cannot name the fleet: pick the fleet with `--fleet`,
 `BAY_FLEET` or `BAY_FLEET_NAME`.
 
+**The order is adopt, `bay up`, then `git push`. Do not push first.** Before the adopt
+the project lived in the fleet, so the box's `rebuild.sh` has no `bay.toml` path and no
+pinned hashes, and treats any push as code. If you push the adopt commit before `bay up`,
+the box builds the app and recreates its containers. `bay up` first gives the box the new
+`rebuild.sh`, and then the push is a config-only push that changes nothing that runs.
+
 ```bash
 cd ~/code/shop
 bay --fleet ~/fleets/prod adopt shop --check   # the files and the lock change; changes nothing
@@ -670,10 +690,7 @@ bay up production                              # takes the unpushed adopt commit
 git push                                       # config only: the box does nothing
 ```
 
-The order is adopt, `bay up`, then `git push`. Before the adopt the project
-lived in the fleet, so the box's `rebuild.sh` has no `bay.toml` path and no
-pinned hashes, and treats any push as code: pushed first, the adopt commit
-would build the app and recreate its containers. So `bay up` comes first. It
+`bay up` comes before the push because of the reason above. It
 accepts the adopt commit before it is pushed (the one exception to "push
 first": the lock records it as `adopted.app_commit`), and it moves no code
 for it: no code target, the running image stays. The box only gets the new
