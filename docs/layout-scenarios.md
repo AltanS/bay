@@ -358,7 +358,9 @@ Expect step 2 to fail. The first `bay up` of an app that builds from source fail
 ([plan.md, The first image](plan.md#the-first-image)). Bay knows this case. `bay up` exits 40, not 1.
 It prints `deploy failed: ... bay show says HALF until a deploy succeeds.` and a note that names the
 way out: `first deploy of shop: the box has no image for <commit12> yet. Push to <branch> so the
-webhook builds it, wait for the build, then run bay up again.` The JSON has `"result": "failed"`, an
+webhook builds it, wait for the build, then run bay up again. If the box builds this app itself and
+has no clone of its repo yet, run bay deploy production once with no --tags: it clones the repo,
+builds the first image and deploys.` The JSON has `"result": "failed"`, an
 `error` text, the same line in `notes`, and `first_image`, the list of the containers with no image.
 Any other failed deploy still exits 1. The lock records `result: failed`, and Bay still commits that
 record and pushes the fleet.

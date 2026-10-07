@@ -4637,7 +4637,10 @@ def test_first_image_failure_exit_40(
     assert doc["result"] == "failed" and doc["first_image"] == ["webapp"]
     message = (
         f"first deploy of webapp: the box has no image for {commit[:12]} yet. Push to main "
-        "so the webhook builds it, wait for the build, then run bay up again."
+        "so the webhook builds it, wait for the build, then run bay up again. "
+        "If the box builds this app itself and has no clone of its repo yet, run "
+        "bay deploy production once with no --tags: it clones the repo, builds the first "
+        "image and deploys."
     )
     assert message in doc["notes"]
     # The receipt names no image for a build container here: the box's build tag.

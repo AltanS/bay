@@ -617,7 +617,8 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
   then exits 40, not 1. It prints `deploy failed: ... the fleet pins <commit12>; bay show says HALF
   until a deploy succeeds.` and the way out: `first deploy of <project>: the box has no image for
   <commit12> yet. Push to <branch> so the webhook builds it, wait for the build, then run bay up
-  again.` The JSON result has `"result": "failed"`, an `error` text, the same line in `notes`, and
+  again. If the box builds this app itself and has no clone of its repo yet, run bay deploy <env>
+  once with no --tags: it clones the repo, builds the first image and deploys.` The JSON result has `"result": "failed"`, an `error` text, the same line in `notes`, and
   `first_image`: the list of those containers. The lock keeps the new pin with `result: failed`,
   and Bay commits and pushes that record.
   Exit 40 needs all of these. A build container of a project that this `bay up` pins has no

@@ -1077,7 +1077,10 @@ def first_image(
         branch = str((build or {}).get("branch") or "main")
         notes.append(
             f"first deploy of {proj.name}: the box has no image for {what} yet. Push to "
-            f"{branch} so the webhook builds it, wait for the build, then run bay up again."
+            f"{branch} so the webhook builds it, wait for the build, then run bay up again. "
+            "If the box builds this app itself and has no clone of its repo yet, run "
+            f"bay deploy {box_env} once with no --tags: it clones the repo, builds the first "
+            "image and deploys."
         )
     return first, bool(first) and failed <= set(first), notes
 
