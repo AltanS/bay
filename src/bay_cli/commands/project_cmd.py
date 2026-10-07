@@ -296,6 +296,13 @@ def init(
     """
     from bay_cli.project_init import init_project
 
+    here = fleet_dir_above(Path.cwd())
+    if here is not None:
+        raise BayError(
+            f"this is a fleet folder ({here}); bay init drafts a bay.toml in an app repo",
+            hint="For an app that lives in the fleet, write projects/<name>/bay.toml "
+            "(see docs/layout-scenarios.md).",
+        )
     cx = fleet_context(ctx, fleet)
     result = init_project(
         cx, Path.cwd(), name=name, box=box, domain=domain, toml_path=toml_path

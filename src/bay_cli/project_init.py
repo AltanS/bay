@@ -161,7 +161,8 @@ def init_project(
         )
     env = str(fleet_doc.get("primary_env", "production"))
     chosen_domain = domain or f"{project}.{fleet_doc['default_domain']}"
-    hints = detect(toml_file.parent)
+    # The Dockerfile sits at the repo root, the default build context.
+    hints = detect(root)
     text = draft(
         name=project,
         fleet_name=str(fleet_doc["name"]),
