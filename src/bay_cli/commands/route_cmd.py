@@ -14,6 +14,7 @@ Then run ``bay plan <env>`` for a project on the ingress box env.
 
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 from typing import Annotated, Any
@@ -294,13 +295,15 @@ def import_routes(
     ingress_box: _IngressOpt = None,
     cert_domain: _CertOpt = None,
     no_commit: _NoCommitOpt = False,
+    as_json: Annotated[bool, typer.Option("--json", help="Print one JSON document.")] = False,
 ) -> None:
     """Move tailnet_proxies from the old YAML file into bay.fleet.toml, names kept.
 
     The first name of each entry's domains becomes domain, the rest aliases.
     The old file is deleted. Run it once per fleet, then plan and up: the plan
     shows one route_added step per route, and the Traefik file on the box does
-    not change. The ingress box and the certificate domain come from the
+    not change. With --json, stdout holds one document: fleet_commit, routes
+    (name, domain, upstream), deleted (the old file) and cert_domain. The ingress box and the certificate domain come from the
     options, else from [tailnet], else from tailnet_ingress_cert_domain in the
     group variables.
 
@@ -375,12 +378,21 @@ def import_routes(
         cx, path, text, commit=not no_commit,
         message=f"bay: import {len(table)} tailnet route(s)", extra=extra,
     )
-    if console.is_json_mode():
-        console.emit_result(
-            {"routes": sorted(table), "ingress_box": box, "cert_domain": cert,
-             "removed": str(source), "commit": commit},
-            command="route import",
-        )
+    if as_json or console.is_json_mode():
+        result = {
+            "fleet_commit": commit,
+            "routes": [
+                {"name": n, "domain": table[n]["domain"], "upstream": table[n]["upstream"]}
+                for n in sorted(table)
+            ],
+            "deleted": str(source),
+            "ingress_box": box,
+            "cert_domain": cert,
+        }
+        if as_json:
+            typer.echo(json.dumps(result, indent=2))
+        else:
+            console.emit_result(result, command="route import")
         return
     for name in sorted(table):
         r = table[name]

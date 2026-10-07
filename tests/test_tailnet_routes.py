@@ -668,3 +668,18 @@ def test_tailnet_host_refuses_localhost_and_loopback() -> None:
     for host in ("laptop", "nas.tailnet.internal", "box.example.ts.net", "100.64.0.9",
                  "fd7a:115c:a1e0::9"):
         assert routes.is_tailnet_host(host), host
+
+
+def test_route_import_json(world: dict[str, Path], box: FakeBox) -> None:
+    old = world["fleet"] / routes.OLD_FILE
+    old.write_text(yaml.safe_dump({"tailnet_proxies": OLD_MAP}, explicit_start=True))
+    commit_all(world["fleet"], "old proxies")
+    result = cli(world, "route", "import", "--json")
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert doc["fleet_commit"] == git(world["fleet"], "rev-parse", "HEAD")
+    assert [r["name"] for r in doc["routes"]] == ["nas", "notes", "notes-next"]
+    assert set(doc["routes"][0]) == {"name", "domain", "upstream"}
+    assert doc["deleted"] == str(old.resolve())
+    assert doc["cert_domain"] == tomllib.loads(fleet_text(world))["tailnet"]["cert_domain"]
+    assert not old.exists()
