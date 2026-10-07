@@ -403,19 +403,108 @@ _running_commit() {
   printf '%s' "${c}"
 }
 
+# The previous commit of the config-only check: the commit the running container
+# was built from (its com.bay.commit label), else the commit the checkout was at
+# before this run's pull or fetch moved it, else nothing. A container created
+# before 2.1.0 has no label, so the checkout says what was built last. That is
+# only a candidate: _config_only_source still needs the image of that commit.
+# A config-only push recreates nothing, so such a container keeps having no
+# label; this fallback stays in use until a build deploys (and labels it).
+#   $1  container   $2  the checkout's HEAD before this run's pull or fetch (may be empty)
+_previous_commit() {
+  local c
+  c=$(_running_commit "$1")
+  printf '%s' "${c:-$2}"
+}
+
+# True when both name the same commit: hex, one a prefix of the other, the
+# shorter at least 7 characters.
+_same_commit() {
+  [[ "$1" =~ ^[0-9a-f]{7,40}$ && "$2" =~ ^[0-9a-f]{7,40}$ ]] || return 1
+  [[ "$1" == "$2"* || "$2" == "$1"* ]]
+}
+
+# The image a config-only push names with the pushed commit, printed as a ref,
+# or return 1: then the push is not config only and the normal path builds it.
+# First <repo>:<prev12>, the previous commit's own tag. A build from before
+# 2.1.0 has no such tag, so else <repo>:latest, but only when it holds the
+# previous commit's code. The checkout also moves on a build that failed, and
+# naming the older :latest image with the pushed commit would make `bay up`
+# deploy old code as new. So :latest counts when:
+#   - its com.bay.commit (else org.opencontainers.image.revision) label names
+#     the previous commit (a label that names another commit refuses), or
+#   - local builds only, it has no label (built before 2.1.0): the circuit
+#     breaker shows no failure since the last good build, neither the commit
+#     nor the image is in the failed-commits record, and the running container
+#     (when there is one) runs this very image.
+# The build server always needs the label: remote builds set it since 0.9.
+# Local builds look in docker; remote builds look in the registry.
+#   $1  image repo (no tag)   $2  the previous commit   $3  container
+_config_only_source() {
+  local repo="$1" prev="$2" svc="$3" info id label run fails
+  if [[ "${BUILD_STRATEGY:-local}" == "remote" ]]; then
+    if docker manifest inspect "${repo}:${prev:0:12}" >/dev/null 2>&1; then
+      printf '%s' "${repo}:${prev:0:12}"
+      return 0
+    fi
+    info=$(docker buildx imagetools inspect --format '{% raw %}{{json .Image}}{% endraw %}' "${repo}:latest" 2>/dev/null) || return 1
+    label=$(printf '%s' "${info}" | jq -r '[.. | objects | select(has("Labels")) | .Labels | objects | (.["com.bay.commit"] // .["org.opencontainers.image.revision"])] | map(select(. != null and . != "")) | .[0] // ""' 2>/dev/null) || return 1
+    _same_commit "${label}" "${prev}" || return 1
+    printf '%s' "${repo}:latest"
+    return 0
+  fi
+  if docker image inspect "${repo}:${prev:0:12}" >/dev/null 2>&1; then
+    printf '%s' "${repo}:${prev:0:12}"
+    return 0
+  fi
+  # The whole JSON, not --format: a Go template that names .Config.Labels fails
+  # on an image built without any label.
+  info=$(docker image inspect "${repo}:latest" 2>/dev/null) || return 1
+  id=$(printf '%s' "${info}" | jq -r '.[0].Id // ""' 2>/dev/null) || return 1
+  label=$(printf '%s' "${info}" | jq -r '.[0].Config.Labels // {} | (.["com.bay.commit"] // .["org.opencontainers.image.revision"] // "")' 2>/dev/null) || return 1
+  [[ -n "${id}" ]] || return 1
+  if [[ -f "${FAILED_COMMITS_DIR}/${svc}" ]] \
+     && awk -v c="${prev:0:12}" -v i="${id}" '$1 == c || $2 == i { f = 1 } END { exit !f }' "${FAILED_COMMITS_DIR}/${svc}" 2>/dev/null; then
+    return 1
+  fi
+  if [[ -n "${label}" ]]; then
+    _same_commit "${label}" "${prev}" || return 1
+  else
+    fails=$(_read_state | jq -r '.consecutive_failures // 0' 2>/dev/null) || return 1
+    [[ "${fails}" == "0" ]] || return 1
+    run=$(docker inspect --format '{% raw %}{{.Image}}{% endraw %}' "${svc}" 2>/dev/null || true)
+    [[ -z "${run}" || "${run}" == "${id}" ]] || return 1
+  fi
+  printf '%s' "${id}"
+}
+
 # End a config-only push: no build, no :latest move, no recreate, no alert, the
 # circuit breaker untouched; the trigger was consumed at the start of the run.
 # The code is the previous commit's, so its image also gets this commit's tag
 # (a tag, never a build): `bay up` (and track = "pin") then finds <image>:<commit12>.
+# When the image came from :latest (_config_only_source), it also gets
+# <image>:<prev12>, so the next push finds the previous commit by its tag.
+# Returns 1, before it changes anything, when there is no image of the previous
+# commit: the caller then runs the normal path.
 #   $1  image repo (no tag; may be empty)   $2  the previous commit
 _config_only_push() {
-  local repo="$1" prev="$2"
-  trap - ERR
+  local repo="$1" prev="$2" src=""
   if [[ -n "${repo}" && -n "${prev}" ]]; then
+    src=$(_config_only_source "${repo}" "${prev}" "${SERVICE}") || return 1
+  fi
+  trap - ERR
+  if [[ -n "${src}" ]]; then
     if [[ "${BUILD_STRATEGY:-local}" == "remote" ]]; then
-      docker buildx imagetools create -t "${repo}:${SHA}" "${repo}:${prev:0:12}" >/dev/null 2>&1 || true
+      if [[ "${src}" == "${repo}:${prev:0:12}" ]]; then
+        docker buildx imagetools create -t "${repo}:${SHA}" "${src}" >/dev/null 2>&1 || true
+      else
+        docker buildx imagetools create -t "${repo}:${SHA}" -t "${repo}:${prev:0:12}" "${src}" >/dev/null 2>&1 || true
+      fi
     else
-      docker tag "${repo}:${prev:0:12}" "${repo}:${SHA}" 2>/dev/null || true
+      docker tag "${src}" "${repo}:${SHA}" 2>/dev/null || true
+      if [[ "${src}" != "${repo}:${prev:0:12}" ]]; then
+        docker tag "${src}" "${repo}:${prev:0:12}" 2>/dev/null || true
+      fi
     fi
   fi
   echo "[rebuild] [${CORR_ID:-no-corr}] config-only push ${SHA}: run bay up"
@@ -486,20 +575,6 @@ _clear_failed_commit() {
   [[ "$2" =~ ^[0-9a-f]{7,40}$ && -f "${file}" ]] || return 0
   sed -i "/^${2:0:12}\( \|\$\)/d" "${file}" 2>/dev/null || true
   return 0
-}
-
-# The previous commit on the build server (remote strategy): the running
-# container's, else the commit this checkout built last, but only when its
-# image is in the registry. A failed build of it pushed nothing, and a
-# config-only push on top of it would leave that code unbuilt.
-#   $1  container   $2  image repo (no tag)   $3  the commit the checkout built last
-_prev_commit_remote() {
-  local c
-  c=$(_running_commit "$1")
-  if [[ -z "${c}" && -n "$2" && -n "$3" ]] && docker manifest inspect "$2:${3:0:12}" >/dev/null 2>&1; then
-    c="$3"
-  fi
-  printf '%s' "${c}"
 }
 
 # The config hash the last deploy stamped on the running container, or nothing.
@@ -1304,10 +1379,12 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
 
   # Config-only push: checked before the hold guard and the build. The previous
   # commit is the running container's (a build server that also runs it), else
-  # the commit this checkout built last when its image is in the registry.
-  PREV_COMMIT=$(_prev_commit_remote "${SERVICE}" "${IMAGE_REPO}" "${_PREV_HEAD}")
+  # the commit this checkout was at before the fetch. Its image must be in the
+  # registry (_config_only_source): a failed build of it pushed nothing.
+  PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")
   if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then
-    _config_only_push "${IMAGE_REPO}" "${PREV_COMMIT}"
+    _config_only_push "${IMAGE_REPO}" "${PREV_COMMIT}" \
+      || _log "config-only push ${SHA}: no image of ${PREV_COMMIT:0:12} in the registry, building"
   fi
 
   # Hold guard, on the checkout of the pushed commit. A held build pushes only
@@ -1520,16 +1597,21 @@ _log "Acquired repo lock for ${SERVICE}"
 
 # ── Pull latest code ──
 cd "${REPO_DIR}"
+# The commit the checkout is at before the pull: the previous commit of the
+# config-only check when the running container has no com.bay.commit label.
+_PREV_HEAD=$(git rev-parse --short=12 HEAD 2>/dev/null || true)
 eval "${PULL_CMD}"
 
 # ── Get new commit SHA (12 characters: the image's commit tag) ──
 SHA=$(git rev-parse --short=12 HEAD)
 
 # ── Config-only push: before the build and the hold guard ──
-# The previous commit is the one the running container was built from.
-PREV_COMMIT=$(_running_commit "${SERVICE}")
+# The previous commit is the one the running container was built from, else
+# the one the checkout was at before the pull (a container from before 2.1.0).
+PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")
 if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then
-  _config_only_push "${IMAGE_NAME}" "${PREV_COMMIT}"
+  _config_only_push "${IMAGE_NAME}" "${PREV_COMMIT}" \
+    || _log "config-only push ${SHA}: no image known to hold ${PREV_COMMIT:0:12}, building"
 fi
 
 # ── Check if image already exists for this SHA ──

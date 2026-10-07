@@ -206,10 +206,12 @@ format_timestamp() {{ echo "Jan 01, 00:00 UTC"; }}
             _extract_helper(rendered, "_config_hash_of"),
             _extract_helper(rendered, "_config_only"),
             _extract_helper(rendered, "_running_commit"),
+            _extract_helper(rendered, "_previous_commit"),
+            _extract_helper(rendered, "_same_commit"),
+            _extract_helper(rendered, "_config_only_source"),
             _extract_helper(rendered, "_config_only_push"),
             _extract_helper(rendered, "_forget_failed_build"),
             _extract_helper(rendered, "_clear_failed_commit"),
-            _extract_helper(rendered, "_prev_commit_remote"),
         ]
     )
     proc = subprocess.run(
@@ -442,24 +444,88 @@ def _pinned_env(text: str = TOML) -> dict[str, str]:
     }
 
 
-def _decide(repo: Path, label: str, *, strategy: str = "local") -> str:
-    """The decision site as rebuild.sh runs it, with a fake docker that knows ``label``."""
+def _decide(
+    repo: Path,
+    label: str,
+    *,
+    strategy: str = "local",
+    pre_head: str = "",
+    fake: str | None = None,
+) -> str:
+    """The decision site as rebuild.sh runs it, with a fake docker that knows ``label``.
+
+    ``pre_head`` is the checkout's HEAD before the pull (``_PREV_HEAD``). The
+    default fake docker has every image; ``fake`` replaces it (see ``_docker``).
+    """
     log = repo.parent / "docker.log"
-    return f"""
+    docker = fake or f"""
 docker() {{
   printf '%s\\n' "$*" >> {str(log)!r}
   [[ "$1" == "inspect" ]] && printf '%s' {label!r}
   return 0
-}}
+}}"""
+    return docker + f"""
 BUILD_STRATEGY={strategy!r}
 BAY_TOML_FILES=("conf/site.yaml")
 SHA=$(git -C {str(repo)!r} rev-parse --short=12 HEAD)
-PREV_COMMIT=$(_running_commit svc)
+PREV_COMMIT=$(_previous_commit svc {pre_head!r})
 if _config_only {str(repo)!r} "${{PREV_COMMIT}}"; then
-  _config_only_push "bay-app/svc" "${{PREV_COMMIT}}"
+  _config_only_push "bay-app/svc" "${{PREV_COMMIT}}" \\
+    || _log "config-only push ${{SHA}}: no image known to hold ${{PREV_COMMIT:0:12}}, building"
 fi
 printf 'BUILD [%s]\\n' "$(_hold_reason {str(repo)!r})"
 """
+
+
+def _docker(
+    log: Path,
+    *,
+    label: str = "",
+    running: str = "",
+    local: tuple[str, ...] = (),
+    latest: dict | None = None,
+    registry: tuple[str, ...] = (),
+    registry_latest: str | None = None,
+) -> str:
+    """A fake docker for the previous-image checks.
+
+    ``label`` is the running container's com.bay.commit, ``running`` its image
+    ID (empty: no container). ``local`` and ``registry`` are the refs that
+    exist. ``latest`` is the ``docker image inspect`` entry of
+    ``bay-app/svc:latest`` (see ``_image``; None: no such image),
+    ``registry_latest`` the ``imagetools inspect`` JSON of it.
+    """
+    def words(refs: tuple[str, ...]) -> str:
+        return " ".join(refs) or "-"
+
+    latest_json = json.dumps([latest]) if latest else ""
+    return f"""
+docker() {{
+  printf '%s\\n' "$*" >> {str(log)!r}
+  local ref="${{@: -1}}"
+  case "$1 $2" in
+    "inspect --format")
+      case "$3" in
+        *com.bay.commit*) printf '%s' {label!r}; return 0 ;;
+        *) [[ -n {running!r} ]] || return 1; printf '%s' {running!r}; return 0 ;;
+      esac ;;
+    "image inspect")
+      if [[ "${{ref}}" == "bay-app/svc:latest" ]]; then
+        [[ -n {latest_json!r} ]] || return 1
+        printf '%s' {latest_json!r}; return 0
+      fi
+      [[ " {words(local)} " == *" ${{ref}} "* ]]; return ;;
+    "manifest inspect")
+      [[ " {words(registry)} " == *" ${{ref}} "* ]]; return ;;
+    "buildx imagetools")
+      if [[ "$3" == "inspect" ]]; then
+        [[ "${{ref}}" == "bay-app/svc:latest" && -n {(registry_latest or "")!r} ]] || return 1
+        printf '%s' {(registry_latest or "")!r}; return 0
+      fi
+      return 0 ;;
+  esac
+  return 0
+}}"""
 
 
 def test_config_only_push_does_not_build(
@@ -488,7 +554,10 @@ cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
     calls = (tmp_path / "docker.log").read_text().splitlines()
     assert calls[0].startswith("inspect --format")
     # No build and no :latest move: only the commit tag of the code it already runs.
-    assert calls[1:] == [f"tag bay-app/svc:{first} bay-app/svc:{pushed}"]
+    assert calls[1:] == [
+        f"image inspect bay-app/svc:{first}",
+        f"tag bay-app/svc:{first} bay-app/svc:{pushed}",
+    ]
     assert not any("build" in c or ":latest" in c for c in calls)
 
     # The build server path: the same rule, the tag is made in the registry.
@@ -498,7 +567,8 @@ cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
     assert f"config-only push {pushed}: run bay up" in proc.stdout and alerts == []
     calls = (tmp_path / "docker.log").read_text().splitlines()
     assert calls[1:] == [
-        f"buildx imagetools create -t bay-app/svc:{pushed} bay-app/svc:{first}"
+        f"manifest inspect bay-app/svc:{first}",
+        f"buildx imagetools create -t bay-app/svc:{pushed} bay-app/svc:{first}",
     ]
 
     # Both rendered paths decide before the build and before the hold guard.
@@ -510,13 +580,16 @@ cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
     remote = remote_sh.index(site)
     assert remote < remote_sh.index('HOLD_REASON=$(_hold_reason "${REPO_DIR}")', remote)
     assert remote < remote_sh.index("_remote_buildx() {", remote)
-    assert (
-        'PREV_COMMIT=$(_prev_commit_remote "${SERVICE}" "${IMAGE_REPO}" "${_PREV_HEAD}")'
-        in remote_sh
-    )
-    assert remote_sh.index("_PREV_HEAD=$(git rev-parse --short=12 HEAD") < remote_sh.index(
-        "git reset --hard FETCH_HEAD"
-    )
+    # Both paths take the previous commit from the label, else from the
+    # checkout's HEAD read before the fetch (remote) or the pull (local).
+    prev = 'PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")'
+    head = "_PREV_HEAD=$(git rev-parse --short=12 HEAD 2>/dev/null || true)"
+    fetch = remote_sh.index("git reset --hard FETCH_HEAD")
+    assert remote_sh.index(head) < fetch < remote_sh.index(prev, fetch)
+    start = local_sh.index("# ── Local strategy")
+    pull = local_sh.index('eval "${PULL_CMD}"', start)
+    assert local_sh.count(prev) == 2, "the remote path and the local path"
+    assert start < local_sh.index(head, start) < pull < local_sh.index(prev, start)
 
     # A directory mount counts for every file under it.
     (repo / "conf" / "extra").mkdir()
@@ -608,7 +681,8 @@ def test_config_only_rule_needs_a_previous_commit(local_sh: str, tmp_path: Path)
 
     # The previous commit is known: config only.
     assert "config-only push" in runs(_decide(repo, first))
-    # No label on the running container (or no container): the normal path.
+    # No label on the running container (or no container) and no checkout
+    # HEAD from before the pull: the normal path.
     assert runs(_decide(repo, "")) == "BUILD []\n"
     assert runs(_decide(repo, "<no value>")) == "BUILD []\n"
     # A previous commit the checkout does not know: the normal path.
@@ -850,24 +924,25 @@ def test_codepin_never_promotes_a_failed_build(tmp_path: Path, capsys) -> None:
     assert code == 0 and report["moves"][0]["status"] == "retag"
 
 
-def test_build_server_previous_commit_needs_its_image(remote_sh: str, tmp_path: Path) -> None:
-    """S2: the checkout's last commit counts only when its image is in the registry."""
-    say = 'printf "[%s]" "$(_prev_commit_remote svc bay-app/svc 0123456789abcdef)"'
-    # No running container, image in the registry: that commit.
-    have = 'docker() { [[ "$1" == manifest ]] && return 0; printf ""; return 0; }\n'
-    proc, _, _ = _harness(remote_sh, have + say, tmp_path)
-    assert proc.stdout == "[0123456789abcdef]", proc.stderr
-    # Its build failed (no image pushed): no previous commit, so not config only.
-    missing = 'docker() { [[ "$1" == manifest ]] && return 1; printf ""; return 0; }\n'
-    proc, _, _ = _harness(remote_sh, missing + say, tmp_path)
-    assert proc.stdout == "[]"
-    # A running container wins, without asking the registry.
-    running = (
-        'docker() { [[ "$1" == manifest ]] && exit 9; '
-        '[[ "$1" == inspect ]] && printf "fedcba987654"; return 0; }\n'
-    )
-    proc, _, _ = _harness(remote_sh, running + say, tmp_path)
-    assert proc.stdout == "[fedcba987654]"
+def test_previous_commit_is_the_label_else_the_pre_pull_head(
+    local_sh: str, remote_sh: str, tmp_path: Path
+) -> None:
+    """S2: the label wins; without one the checkout's HEAD before the pull; else nothing."""
+    say = 'printf "[%s]" "$(_previous_commit svc 0123456789ab)"'
+    no_label = 'docker() { [[ "$1" == inspect ]] && printf "<no value>"; return 0; }\n'
+    labelled = 'docker() { [[ "$1" == inspect ]] && printf "fedcba987654"; return 0; }\n'
+    no_container = 'docker() { return 1; }\n'
+    for rendered in (local_sh, remote_sh):
+        proc, _, _ = _harness(rendered, labelled + say, tmp_path)
+        assert proc.stdout == "[fedcba987654]", proc.stderr
+        proc, _, _ = _harness(rendered, no_label + say, tmp_path)
+        assert proc.stdout == "[0123456789ab]"
+        proc, _, _ = _harness(rendered, no_container + say, tmp_path)
+        assert proc.stdout == "[0123456789ab]"
+        proc, _, _ = _harness(
+            rendered, no_label + 'printf "[%s]" "$(_previous_commit svc "")"', tmp_path
+        )
+        assert proc.stdout == "[]"
 
 
 def test_adopt_push_against_new_script_is_config_only(local_sh: str, tmp_path: Path) -> None:
@@ -892,10 +967,215 @@ def test_adopt_push_against_new_script_is_config_only(local_sh: str, tmp_path: P
     assert f"config-only push {adopt}: run bay up" in proc.stdout
     assert "BUILD" not in proc.stdout and alerts == []
     calls = (tmp_path / "docker.log").read_text().splitlines()
-    assert calls[1:] == [f"tag bay-app/svc:{running} bay-app/svc:{adopt}"]
+    assert calls[1:] == [
+        f"image inspect bay-app/svc:{running}",
+        f"tag bay-app/svc:{running} bay-app/svc:{adopt}",
+    ]
 
     # The script from before the adopt (no BAY_TOML_PATH) would build it.
     old = {"BAY_TOML_PATH": "", "PINNED_TOML_HASH": "", "PINNED_BUILD_HASH": "",
            "TRACK": "branch", "FROZEN": ""}
     proc, _, _ = _harness(local_sh, _decide(repo, running), tmp_path, env=old)
     assert "config-only push" not in proc.stdout and "BUILD []" in proc.stdout
+
+
+# ── containers from before 2.1.0: no label, no commit tag ──────────────
+
+#: The config-only exit, and the log line of a config-only check that found no image.
+DONE = ": run bay up"
+REFUSED = "no image known to hold"
+
+
+def _calls(tmp_path: Path) -> list[str]:
+    log = tmp_path / "docker.log"
+    calls = log.read_text().splitlines() if log.exists() else []
+    log.unlink(missing_ok=True)
+    return calls
+
+
+def _image(image_id: str, commit: str = "", revision: str = "") -> dict:
+    """A ``docker image inspect`` entry. No label at all: no ``Labels`` key."""
+    labels = {}
+    if commit:
+        labels["com.bay.commit"] = commit
+    if revision:
+        labels["org.opencontainers.image.revision"] = revision
+    config: dict = {"Env": ["PATH=/usr/bin"]}
+    if labels:
+        config["Labels"] = labels
+    return {"Id": image_id, "Config": config}
+
+
+def test_config_only_push_falls_back_to_pre_pull_head_without_label(
+    local_sh: str, remote_sh: str, tmp_path: Path
+) -> None:
+    """A container built before 2.1.0 has no com.bay.commit label. The checkout's
+    HEAD before the pull is the previous commit, so the adopt push is config only."""
+    repo, first = _app_repo(tmp_path)
+    pushed = _commit(repo, {"bay.toml": TOML_CHANGED, "conf/site.yaml": "site: 2\n"})
+    log = tmp_path / "docker.log"
+    env = _pinned_env()
+
+    fake = _docker(log, label="<no value>", running="sha256:old", local=(f"bay-app/svc:{first}",))
+    proc, _, alerts = _harness(
+        local_sh, _decide(repo, "", pre_head=first, fake=fake), tmp_path, env=env
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert f"config-only push {pushed}{DONE}" in proc.stdout and alerts == []
+    assert "BUILD" not in proc.stdout
+    assert _calls(tmp_path)[1:] == [
+        f"image inspect bay-app/svc:{first}",
+        f"tag bay-app/svc:{first} bay-app/svc:{pushed}",
+    ]
+
+    # The build server: the same fallback, the image found in the registry.
+    fake = _docker(log, label="", registry=(f"bay-app/svc:{first}",))
+    proc, _, _ = _harness(
+        remote_sh, _decide(repo, "", strategy="remote", pre_head=first, fake=fake),
+        tmp_path, env=env,
+    )
+    assert f"config-only push {pushed}{DONE}" in proc.stdout
+    assert _calls(tmp_path)[1:] == [
+        f"manifest inspect bay-app/svc:{first}",
+        f"buildx imagetools create -t bay-app/svc:{pushed} bay-app/svc:{first}",
+    ]
+
+    # The label still wins over the checkout: the running commit differs from
+    # the pushed one in code, so it builds, though the checkout HEAD alone
+    # would make the push config only.
+    code = _commit(repo, {"app.js": "console.log(2)\n"})
+    _commit(repo, {"bay.toml": TOML})
+    tags = (f"bay-app/svc:{first}", f"bay-app/svc:{code}")
+    fake = _docker(log, label=first, running="sha256:old", local=tags)
+    proc, _, _ = _harness(local_sh, _decide(repo, "", pre_head=code, fake=fake), tmp_path, env=env)
+    assert DONE not in proc.stdout and "BUILD [" in proc.stdout
+    fake = _docker(log, label="", running="sha256:old", local=tags)
+    proc, _, _ = _harness(local_sh, _decide(repo, "", pre_head=code, fake=fake), tmp_path, env=env)
+    assert DONE in proc.stdout
+    # A checkout HEAD before the code commit: the diff has code, so it builds.
+    proc, _, _ = _harness(
+        local_sh, _decide(repo, "", pre_head=pushed, fake=fake), tmp_path, env=env
+    )
+    assert DONE not in proc.stdout and "BUILD [" in proc.stdout
+
+
+def test_config_only_push_tags_from_latest_when_no_commit_tag(
+    local_sh: str, remote_sh: str, tmp_path: Path
+) -> None:
+    """A build from before 2.1.0 has only :latest. It names the pushed commit and gets
+    <image>:<prev12> too, but only when :latest provably holds the previous commit."""
+    repo, first = _app_repo(tmp_path)
+    pushed = _commit(repo, {"bay.toml": TOML_CHANGED})
+    log = tmp_path / "docker.log"
+    env = _pinned_env()
+
+    def local(**kw: object) -> str:
+        args: dict = {"label": "", "running": "sha256:old", "latest": _image("sha256:old")}
+        args.update(kw)
+        proc, _, _ = _harness(
+            local_sh, _decide(repo, "", pre_head=first, fake=_docker(log, **args)),
+            tmp_path, env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout
+
+    # No label anywhere, the breaker clean, the container runs :latest: config only.
+    out = local()
+    assert f"config-only push {pushed}{DONE}" in out and REFUSED not in out
+    calls = _calls(tmp_path)
+    assert [c for c in calls if c.startswith("tag ")] == [
+        f"tag sha256:old bay-app/svc:{pushed}",
+        f"tag sha256:old bay-app/svc:{first}",
+    ]
+    assert not any("build" in c for c in calls)
+
+    # :latest labelled with the previous commit (a 2.1 build whose commit tag is
+    # gone, or the revision label of an older build): config only, even with a
+    # failure on the breaker or another image running.
+    _harness(local_sh, '_record_failure "aaaaaaaaaaaa" "Build" "x" >/dev/null', tmp_path)
+    assert DONE in local(latest=_image("sha256:old", first), running="sha256:other")
+    assert DONE in local(latest=_image("sha256:old", revision=first[:7]), running="sha256:other")
+    _calls(tmp_path)
+
+    # A failure since the last good build: the checkout may be past :latest.
+    out = local()
+    assert REFUSED in out and DONE not in out and "BUILD [" in out
+    assert not [c for c in _calls(tmp_path) if c.startswith("tag ")]
+    (tmp_path / "state" / "svc.json").unlink()
+    # :latest labelled with another commit.
+    assert REFUSED in local(latest=_image("sha256:old", "bbbbbbbbbbbb"))
+    # The container runs another image than :latest.
+    assert REFUSED in local(running="sha256:other")
+    # The commit, or the :latest image, failed its health check on this box.
+    record = tmp_path / "failed-commits" / "svc"
+    record.parent.mkdir(exist_ok=True)
+    record.write_text(f"{first} sha256:bad\n")
+    assert REFUSED in local()
+    record.write_text("cccccccccccc sha256:old\n")
+    assert REFUSED in local()
+    record.unlink()
+    assert not [c for c in _calls(tmp_path) if c.startswith("tag ")]
+    # No container at all: :latest is all there is.
+    assert DONE in local(running="")
+    _calls(tmp_path)
+
+    # The build server: :latest in the registry, checked by its revision label.
+    def remote(image: dict) -> str:
+        fake = _docker(log, registry_latest=json.dumps(image))
+        proc, _, _ = _harness(
+            remote_sh, _decide(repo, "", strategy="remote", pre_head=first, fake=fake),
+            tmp_path, env=env,
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout
+
+    rev = {"config": {"Labels": {"org.opencontainers.image.revision": first}}}
+    assert f"config-only push {pushed}{DONE}" in remote(rev)
+    assert _calls(tmp_path)[-1] == (
+        f"buildx imagetools create -t bay-app/svc:{pushed} -t bay-app/svc:{first} "
+        "bay-app/svc:latest"
+    )
+    # A multi-platform index (provenance attestations) nests it by platform.
+    assert DONE in remote({"linux/amd64": rev})
+    _calls(tmp_path)
+    # Another commit's image (the build of the previous commit failed), or no label.
+    assert REFUSED in remote({"config": {"Labels": {"com.bay.commit": "bbbbbbbbbbbb"}}})
+    assert REFUSED in remote({"config": {"Env": []}})
+    assert not [c for c in _calls(tmp_path) if "create" in c]
+
+
+def test_no_previous_commit_and_no_latest_is_a_normal_build(
+    local_sh: str, remote_sh: str, tmp_path: Path
+) -> None:
+    repo, first = _app_repo(tmp_path)
+    _commit(repo, {"bay.toml": TOML_CHANGED})
+    log = tmp_path / "docker.log"
+    env = _pinned_env()
+    hold = "BUILD [config changed: bay.toml differs from the pinned one]"
+
+    # A previous commit, but neither its tag nor :latest exists.
+    fake = _docker(log, label="", running="sha256:old")
+    proc, _, alerts = _harness(
+        local_sh, _decide(repo, "", pre_head=first, fake=fake), tmp_path, env=env
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert REFUSED in proc.stdout and DONE not in proc.stdout and hold in proc.stdout
+    assert not [c for c in _calls(tmp_path) if c.startswith("tag ")]
+    proc, _, _ = _harness(
+        remote_sh, _decide(repo, "", strategy="remote", pre_head=first, fake=_docker(log)),
+        tmp_path, env=env,
+    )
+    assert REFUSED in proc.stdout and DONE not in proc.stdout and hold in proc.stdout
+    assert not [c for c in _calls(tmp_path) if "create" in c]
+
+    # No label and no checkout HEAD from before the pull: no previous commit.
+    fake = _docker(log, label="", latest=_image("sha256:old"), local=(f"bay-app/svc:{first}",))
+    proc, _, _ = _harness(local_sh, _decide(repo, "", fake=fake), tmp_path, env=env)
+    assert "config-only" not in proc.stdout and hold in proc.stdout
+    assert all(c.startswith("inspect --format") for c in _calls(tmp_path))
+
+    # A checkout HEAD the clone does not know (a force push): not config only.
+    proc, _, _ = _harness(
+        local_sh, _decide(repo, "", pre_head="deadbeef0000", fake=fake), tmp_path, env=env
+    )
+    assert "config-only" not in proc.stdout and hold in proc.stdout
