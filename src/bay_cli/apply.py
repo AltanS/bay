@@ -500,6 +500,8 @@ def _apply_plan(
         for name in sorted(keep)
         if name not in code_targets
     ]
+    code_kept = kept_code(entries, fleet_commit, code_targets)
+    notes += [f"code: kept {k['container']} ({k['reason']})" for k in code_kept]
     applied, stale_boxes = applied_from(entries, fleet_commit)
     notes += [
         f"box {b}: the receipt is not from this deploy, so `applied` leaves it out"
@@ -555,6 +557,7 @@ def _apply_plan(
         "pruned": pruned,
         "notes": notes,
         "code_targets": code_targets,
+        "code_kept": code_kept,
         "frozen": any(bool(locks[p.name]["envs"][env].get("frozen")) for p, _ in members),
     }
     if push:
@@ -694,6 +697,36 @@ def applied_from(
             )
     rows.sort(key=lambda r: (r["box"], str(r["container"])))
     return rows, sorted(stale)
+
+
+def kept_code(
+    entries: list[dict[str, Any]], fleet_commit: str, code_targets: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Code targets the box did not move: ``{box, container, reason}`` per container.
+
+    Read from ``code_moves`` of this deploy's receipts (the codepin report):
+    a ``skipped`` or ``missing`` move kept the container on the image it ran.
+    ``bay rollback`` without ``--to`` hits this when the previous receipt names
+    no commit (a receipt from before 2.1): the config rolls back, the code stays.
+    """
+    rows: list[dict[str, Any]] = []
+    for entry in entries:
+        receipt = entry.get("receipt")
+        if not isinstance(receipt, Mapping) or receipt.get("fleet_commit") != fleet_commit:
+            continue
+        for move in receipt.get("code_moves") or []:
+            if not isinstance(move, Mapping) or move.get("name") not in code_targets:
+                continue
+            if move.get("status") in ("skipped", "missing"):
+                rows.append(
+                    {
+                        "box": str(entry.get("box") or receipt.get("box")),
+                        "container": str(move["name"]),
+                        "reason": str(move.get("detail") or "no reason given"),
+                    }
+                )
+    rows.sort(key=lambda r: (r["container"], r["box"]))
+    return rows
 
 
 def _pin_deployed(

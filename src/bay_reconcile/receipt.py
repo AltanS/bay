@@ -9,7 +9,10 @@ over SSH. The format is documented in ``docs/deploy-receipt.md``; bump
 Inputs:
 
 * ``--meta`` (JSON argument): env, box, framework and fleet versions and the
-  reconciler's exit code. No secret is in it.
+  reconciler's exit code. No secret is in it. ``code_moves`` (optional): the
+  moves ``bay_reconcile.codepin`` reported before the pass; each becomes a row
+  of the receipt's ``code_moves`` (``name``, ``status``, ``detail``), so the
+  CLI can say which code move was skipped and why.
 * ``--bundle``: the reconcile bundle. It holds resolved env (secrets), so only
   ``name``, ``image`` and ``config_hash`` are ever read out of it.
 * stdin: the reconciler's JSON report, or nothing when it crashed. Its
@@ -159,7 +162,7 @@ def build_receipt(
         )
 
     fleet_dirty = meta.get("fleet_dirty")
-    return {
+    out = {
         "receipt_version": RECEIPT_VERSION,
         "env": str(meta["env"]),
         "box": str(meta["box"]),
@@ -172,6 +175,27 @@ def build_receipt(
         "containers": containers,
         "projects": {},
     }
+    moves = _code_moves(meta.get("code_moves"))
+    if moves is not None:
+        out["code_moves"] = moves
+    return out
+
+
+def _code_moves(value: object) -> list[dict[str, Any]] | None:
+    """The codepin moves of this deploy, reduced to ``name``, ``status`` and ``detail``."""
+    if not isinstance(value, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for move in value:
+        if isinstance(move, Mapping) and move.get("name"):
+            out.append(
+                {
+                    "name": str(move["name"]),
+                    "status": str(move.get("status") or ""),
+                    "detail": str(move.get("detail") or ""),
+                }
+            )
+    return out
 
 
 def _commit_or_none(value: object) -> str | None:

@@ -424,6 +424,85 @@ def test_rollback_restores_previous_pin(world: dict[str, Path], box: FakeBox) ->
     )
 
 
+def test_rollback_lists_code_it_kept(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S5: a rollback whose code move the box skipped says so: `code: kept <c> (<why>)`."""
+    from bay_reconcile import codepin
+    from bay_reconcile import receipt as box_receipt
+
+    # The box: codepin runs on the code targets with a previous receipt from
+    # before 2.1 (no commit), then the receipt records its report.
+    class Images:
+        def image_id(self, ref: str) -> str | None:
+            return "id-now" if ref.endswith(":latest") else None
+
+        def pull(self, ref: str) -> bool:
+            return False
+
+        def tag(self, source: str, target: str) -> None:
+            raise AssertionError("nothing may move")
+
+        def commit_tags(self, repo: str) -> list[str]:
+            return []
+
+    old_prev = {"containers": [{"name": "webapp", "image": "bay-testfleet-webapp:latest"}]}
+
+    def deploy(cx: Context, box_env: str, *, config_files_root: Path | None = None,
+               code_targets: Any = None) -> None:
+        box.deploy(cx, box_env, config_files_root=config_files_root)
+        rows = [
+            {**dict(t), "name": n, "image": "bay-testfleet-webapp:latest"}
+            for n, t in (code_targets or {}).items()
+        ]
+        moves = codepin.plan_moves(rows, Images(), prev=old_prev)
+        meta = {"code_moves": [m.to_dict() for m in moves]}
+        box.receipts[box_env]["code_moves"] = box_receipt._code_moves(meta["code_moves"])
+
+    monkeypatch.setattr(applymod, "default_deploy", deploy)
+    _build_app(world)
+    assert do_up(world)["result"] == "ok"
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    assert do_up(world)["result"] == "ok"
+
+    result = cli(world, "rollback", "--json")
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert doc["code_targets"] == {"webapp": {"source": "prev", "strict": False}}
+    assert doc["code_kept"] == [
+        {
+            "box": "box-1",
+            "container": "webapp",
+            "reason": "the previous receipt names no commit for this container",
+        }
+    ]
+    assert (
+        "code: kept webapp (the previous receipt names no commit for this container)"
+        in doc["notes"]
+    )
+    # The text output prints it too.
+    edit_app(world, 'LOG_LEVEL = "debug"', 'LOG_LEVEL = "warn"')
+    assert do_up(world)["result"] == "ok"
+    said = cli(world, "rollback")
+    assert said.exit_code == 0, said.output
+    assert "code: kept webapp (the previous receipt names no commit" in said.output
+
+
+def test_receipt_records_code_moves() -> None:
+    from bay_reconcile import receipt as box_receipt
+
+    meta = {"env": "production", "box": "box-1", "reconcile_rc": 0}
+    plain = box_receipt.build_receipt(meta=meta, bundle={}, report={"ok": True})
+    assert "code_moves" not in plain
+    moves = [{"name": "web", "status": "skipped", "detail": "why", "source": None}]
+    rec = box_receipt.build_receipt(
+        meta={**meta, "code_moves": moves}, bundle={}, report={"ok": True}
+    )
+    assert rec["code_moves"] == [{"name": "web", "status": "skipped", "detail": "why"}]
+    text = (ROOT / "roles/container_lifecycle/tasks/reconcile.yml").read_text()
+    assert "'code_moves': ((_codepin_result.stdout | from_json).moves" in text
+
+
 def test_rollback_refuses_without_previous(world: dict[str, Path], box: FakeBox) -> None:
     result = cli(world, "rollback")
     assert result.exit_code != 0

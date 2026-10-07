@@ -117,6 +117,7 @@ checks that the two match.
 | `result` | `"ok"` or `"failed"` | `ok` only when the container pass exited 0 and every action succeeded. |
 | `containers` | array | One entry per container in the deploy, then one per container it removed. |
 | `projects` | object | Empty in version 1. |
+| `code_moves` | array | Only when the deploy passed code targets (`bay up`, `bay rollback`): one `{name, status, detail}` per target, the report of `bay_reconcile.codepin`. `status` is `retag`, `noop`, `skipped` (the container keeps its image) or `missing` (a strict target; the deploy stopped). Absent in receipts written before 2.1. |
 
 Each container entry:
 
@@ -147,7 +148,9 @@ must treat a missing `commit` or `image_ref` as null.
 
 `bay up` reads `action` back: every container that is not `noop` goes into
 the `applied` list of its JSON result, when the receipt's `fleet_commit` is
-the commit of that `bay up` (see [plan.md](plan.md)).
+the commit of that `bay up` (see [plan.md](plan.md)). It reads `code_moves`
+the same way: every `skipped` or `missing` move goes into `code_kept` and
+prints as `code: kept <container> (<detail>)`.
 
 The fleet and framework commits come from the CLI. `bay deploy` passes them
 to the deploy as one JSON extra var:

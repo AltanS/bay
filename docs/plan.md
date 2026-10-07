@@ -476,7 +476,12 @@ A rollback restores config **and** code:
 - Config: the pin moves back, and Bay compiles that commit's `bay.toml`.
 - Code: the box points `:latest` of every build container of the project at
   the image that the previous receipt (`<env>.prev.json`) names, then the
-  deploy runs. The result lists this in `code_targets`.
+  deploy runs. The result lists this in `code_targets`. When the box cannot
+  do it, the container keeps its image and the result says so: `code_kept`
+  in the JSON, and `code: kept <container> (<reason>)` in the output. The
+  usual reason is a previous receipt from before 2.1, which names no commit
+  ("the previous receipt names no commit for this container"); then only the
+  config rolled back. Use `bay rollback --to <commit>` to move the code.
 - Freeze: Bay sets `frozen = true` (and `frozen_commit`) on the environment in
   the lock. While the environment is frozen, a push builds and tags its image,
   but does not deploy it, whatever `track` says. The alert `build.held` says

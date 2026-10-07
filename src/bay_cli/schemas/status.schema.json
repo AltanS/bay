@@ -98,7 +98,20 @@
             }
           }
         },
-        "projects": {"type": "object"}
+        "projects": {"type": "object"},
+        "code_moves": {
+          "description": "What bay_reconcile.codepin did before the pass of this deploy, one row per code target. Absent when the deploy passed no code target.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "status", "detail"],
+            "properties": {
+              "name": {"type": "string"},
+              "status": {"enum": ["retag", "noop", "skipped", "missing"]},
+              "detail": {"type": "string"}
+            }
+          }
+        }
       }
     }
   }

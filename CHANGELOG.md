@@ -170,7 +170,11 @@ needing manual action is called out under **Upgrade notes**. Entries for
   `bay up`) moves the code anyway, as a destructive `image` step. Pin mode and
   `bay rollback` still move code backwards.
 - `bay rollback` restores code as well as config: the box points `:latest` at
-  the image of the previous receipt. It also freezes the environment
+  the image of the previous receipt. A code move the box skipped is reported:
+  `code_kept` in the JSON and `code: kept <container> (<reason>)` in the output
+  (from the new receipt field `code_moves`). A previous receipt from before 2.1
+  names no commit, so the first rollback after the upgrade rolls back config
+  only and says so. It also freezes the environment
   (`frozen = true` in the lock): a push builds but does not deploy until a
   `bay up` to a newer commit. `bay rollback --to <commit>` rolls back to a
   commit whose image is on the box, and lists the commit tags when it is not.

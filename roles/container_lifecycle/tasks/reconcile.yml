@@ -596,7 +596,11 @@
                   'framework_commit': bay_receipt_framework_commit | default(none),
                   'fleet_commit': bay_receipt_fleet_commit | default(none),
                   'fleet_dirty': bay_receipt_fleet_dirty | default(none),
-                  'reconcile_rc': _reconcile_result.rc | int
+                  'reconcile_rc': _reconcile_result.rc | int,
+                  'code_moves': ((_codepin_result.stdout | from_json).moves | default([]))
+                    if (_codepin_result is defined and _codepin_result is not skipped
+                        and (_codepin_result.stdout | default('') | trim | length > 0))
+                    else none
                 } | to_json }}
             stdin: "{{ _reconcile_result.stdout | default('') }}"
           environment:
