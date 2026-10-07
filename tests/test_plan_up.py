@@ -843,7 +843,15 @@ def test_project_flag_works_from_anywhere(
     elsewhere.mkdir()
     result = cli(world, "plan", "--project", "webapp", "--json", cwd=elsewhere)
     assert result.exit_code == 0, result.output
-    outside = cli(world, "plan", "--json", cwd=elsewhere)
+    # No bay.toml, no --project and no fleet: refused. (With a fleet, a
+    # project-less plan covers the whole environment, see
+    # test_projectless_plan_covers_whole_env.)
+    old = Path.cwd()
+    os.chdir(elsewhere)
+    try:
+        outside = runner.invoke(app, ["plan", "--json"])
+    finally:
+        os.chdir(old)
     assert outside.exit_code != 0
     assert "no bay.toml" in json.loads(outside.stdout)["error"]  # still one JSON document
 
@@ -1140,7 +1148,10 @@ def test_in_fleet_project_with_no_lock_is_read_at_fleet_head(
     with planmod.compiled_fleet(cx_of(world)) as comp:
         assert comp.result is not None, comp.errors
         assert comp.result.services["status"]["env"]["clear"]["MODE"] == "one"
-    assert ("status", "shared") in {(s["container"], s["risk"]) for s in plan["steps"]}
+    # Another project's new container keeps its own risk and names its project.
+    assert ("status", "safe", "status") in {
+        (s["container"], s["risk"], s["project"]) for s in plan["steps"]
+    }
 
 
 def _noisy_deploy(box: FakeBox) -> Any:
@@ -2521,3 +2532,288 @@ def test_doctor_lists_v1_leftovers(tmp_path: Path) -> None:
     (tmp_path / "bin").mkdir()
     (tmp_path / ".bay-version").write_text("v0.10.0\n")
     assert v1_leftovers(tmp_path) == ["bin", ".bay-version"]
+
+
+# ── 2.1: box move, whole-environment plan, cross-project risk, plans prune ──
+
+TWO_BOXES = FLEET_TOML.replace(
+    '[boxes.box-1]\nenv = "production"\n',
+    '[boxes.box-1]\nenv = "production"\ngroup = "one"\n\n'
+    '[boxes.box-2]\nenv = "production"\ngroup = "two"\n',
+).replace('box = "box-1"\nimage = "postgres:16"', 'box = ["box-1", "box-2"]\nimage = "postgres:16"')
+
+VOLUME_MOUNT = '[[mounts]]\npath = "/data"\nvolume = "data"\nbackup = false\n\n'
+
+
+def _recompile(world: dict[str, Path], message: str) -> None:
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        (world["fleet"] / GENERATED_SERVICES).write_text(comp.result.text())
+    commit_all(world["fleet"], message)
+
+
+def _moving_app(world: dict[str, Path], *, volumes: bool = True, database: bool = True) -> None:
+    """The webapp runs on box-1 (pinned by a bay up), then bay.toml asks for box-2."""
+    (world["fleet"] / "bay.fleet.toml").write_text(TWO_BOXES)
+    commit_all(world["fleet"], "two boxes")
+    _recompile(world, "compile two boxes")
+    if not database:
+        edit_app(world, 'needs = ["postgres"]\n', "")
+    if not volumes:
+        edit_app(world, VOLUME_MOUNT, "")
+    do_up(world)
+    assert lock_of(world)["envs"]["production"]["box"] == "box-1"
+    edit_app(world, "[deploy.production]\n", '[deploy.production]\nbox = "box-2"\n')
+
+
+def _kinds(plan: dict[str, Any]) -> set[tuple[str, str, str, str | None]]:
+    return {(s["kind"], s["action"], s["risk"], s["project"]) for s in plan["steps"]}
+
+
+def test_box_change_is_a_move_step(world: dict[str, Path], box: FakeBox) -> None:
+    _moving_app(world)
+    plan = make(world)
+    moves = [s for s in plan["steps"] if s["kind"] == "move"]
+    assert len(moves) == 1
+    assert (moves[0]["action"], moves[0]["project"]) == ("move", "webapp")
+    assert moves[0]["resource"] == "box-1 -> box-2"
+    assert plan["steps"][0] is moves[0]  # the move leads the plan
+    assert (plan["box"], plan["box_env"]) == ("box-2", "production")
+    move = plan["moves"][0]
+    assert (move["from"], move["to"], move["env"]) == ("box-1", "box-2", "production")
+    # The old box loses the container, the new box gets it.
+    assert ("container", "remove", "destructive", "webapp") in _kinds(plan)
+    assert ("container", "create", "safe", "webapp") in _kinds(plan)
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    # The compiler alone keeps the pinned box: a stray edit moves nothing.
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        assert comp.result.services["webapp"]["regions"] == ["one"]
+
+
+def test_move_with_volumes_is_destructive_and_blocked(world: dict[str, Path], box: FakeBox) -> None:
+    _moving_app(world, database=False)
+    plan = make(world)
+    move = plan["moves"][0]
+    assert move["risk"] == "destructive"
+    assert (move["volumes"], move["databases"]) == (["webapp-data"], [])
+    assert ("move", "move", "destructive", "webapp") in _kinds(plan)
+    assert plan["verdict"] == "blocked"
+    blocker = next(b for b in plan["blockers"] if "moves from box box-1" in b)
+    assert "volumes webapp-data" in blocker and "--data keep" in blocker
+    result = cli(world, "plan", "--json")
+    assert result.exit_code == 20
+
+
+def test_move_with_database_is_destructive_and_blocked(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    _moving_app(world, volumes=False)
+    plan = make(world)
+    move = plan["moves"][0]
+    assert move["risk"] == "destructive" and move["volumes"] == []
+    assert move["databases"] == [{"name": "webapp", "resource": "postgres"}]
+    assert plan["verdict"] == "blocked"
+    blocker = next(b for b in plan["blockers"] if "moves from box box-1" in b)
+    assert "database webapp" in blocker and "--data keep" in blocker
+
+
+def test_move_without_data_is_shared(world: dict[str, Path], box: FakeBox) -> None:
+    _moving_app(world, volumes=False, database=False)
+    plan = make(world)
+    assert plan["moves"][0]["risk"] == "shared"
+    assert ("move", "move", "shared", "webapp") in _kinds(plan)
+    assert not plan["blockers"]
+    assert (plan["verdict"], plan["exit_code"]) == ("approve", 10)
+
+
+def test_data_keep_unblocks_move_and_data_move_refused(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    from bay_cli.errors import BayError
+
+    _moving_app(world)
+    plan = make(world, data="keep")
+    assert not plan["blockers"]
+    # The old containers are still removed: approve stays required.
+    assert (plan["verdict"], plan["exit_code"]) == ("approve", 10)
+    assert plan["moves"][0]["data"] == "keep"
+    notes = " ".join(plan["notes"])
+    assert "docker volume rm webapp-data" in notes and "DROP DATABASE webapp" in notes
+
+    with pytest.raises(BayError, match="deferred"):
+        make(world, data="move")
+    for verb in ("plan", "up"):
+        refused = cli(world, verb, "--data", "move", "--json")
+        assert refused.exit_code != 0
+        assert "deferred" in json.loads(refused.stdout)["error"]
+    assert box.deploys == ["production"]  # only the first up deployed
+
+
+def test_up_applies_move_and_writes_lock_box(world: dict[str, Path], box: FakeBox) -> None:
+    _moving_app(world)
+    first = lock_of(world)["envs"]["production"]["plan_id"]
+    planned = json.loads(cli(world, "plan", "--data", "keep", "--json").stdout)
+    assert planned["verdict"] == "approve"
+    assert cli(world, "approve", planned["plan_id"], "--reason", "test data").exit_code == 0
+    done = cli(world, "up", "--data", "keep", "--json")
+    assert done.exit_code == 0, done.output
+    record = lock_of(world)["envs"]["production"]
+    assert record["box"] == "box-2"
+    assert record["previous"]["plan_id"] == first
+    services = yaml.safe_load(
+        (world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1]
+    )
+    assert services["services"]["webapp"]["regions"] == ["two"]
+    # One box env holds both boxes: one deploy, and its reconciler removes
+    # the container that left box-1.
+    assert box.deploys == ["production", "production"]
+    again = make(world)
+    assert "moves" not in again and not any(s["kind"] == "move" for s in again["steps"])
+
+
+def _two_in_fleet(world: dict[str, Path]) -> None:
+    for name in ("alpha", "beta"):
+        path = world["fleet"] / "projects" / name / "bay.toml"
+        path.parent.mkdir()
+        path.write_text(STATUS_TOML.replace("status", name))
+    commit_all(world["fleet"], "add alpha and beta")
+    _recompile(world, "compile")
+
+
+def _edit_both(world: dict[str, Path], old: str, new: str) -> None:
+    for name in ("alpha", "beta"):
+        path = world["fleet"] / "projects" / name / "bay.toml"
+        path.write_text(path.read_text().replace(old, new))
+    commit_all(world["fleet"], f"alpha and beta: {new.strip()}")
+
+
+def test_cross_project_step_keeps_own_risk_and_verdict_auto(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    _two_in_fleet(world)
+    _edit_both(world, 'health = "none"\n', 'health = "none"\nmemory = "256m"\n')
+    anywhere = tmp_path / "anywhere"
+    anywhere.mkdir()
+    result = cli(world, "plan", "--project", "alpha", "--json", cwd=anywhere)
+    plan = json.loads(result.stdout)
+    by_container = {s["container"]: s for s in plan["steps"] if s["kind"] == "container"}
+    assert (by_container["alpha"]["risk"], by_container["alpha"]["project"]) == ("safe", "alpha")
+    assert (by_container["beta"]["risk"], by_container["beta"]["project"]) == ("safe", "beta")
+    assert "mem_limit" in by_container["beta"]["reason"]
+    assert (plan["verdict"], result.exit_code) == ("auto", 0)
+
+
+def test_projectless_plan_covers_whole_env(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    _two_in_fleet(world)
+    anywhere = tmp_path / "anywhere"
+    anywhere.mkdir()
+    assert cli(world, "up", "--project", "alpha", "--json", cwd=anywhere).exit_code == 0
+    _edit_both(world, 'MODE = "one"', 'MODE = "two"')
+
+    result = cli(world, "plan", "--json", cwd=world["fleet"])
+    plan = json.loads(result.stdout)
+    assert result.exit_code in (0, 10) and result.exit_code == plan["exit_code"]
+    assert plan["project"] is None
+    assert [p["name"] for p in plan["projects"]] == ["alpha", "beta", "webapp"]
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    updates = {
+        s["project"]: s
+        for s in plan["steps"]
+        if (s["kind"], s["action"]) == ("container", "update")
+    }
+    assert set(updates) == {"alpha", "beta"}
+    assert all(s["project"] for s in plan["steps"] if s["kind"] != "tailnet")
+    # alpha and beta change safely, webapp is new: nothing needs approval.
+    assert (plan["verdict"], result.exit_code) == ("auto", 0)
+
+    # Standing in the fleet directory, with no --fleet at all, is the same plan.
+    old = Path.cwd()
+    os.chdir(world["fleet"])
+    try:
+        here = runner.invoke(app, ["plan", "--json"])
+    finally:
+        os.chdir(old)
+    assert json.loads(here.stdout)["plan_id"] == plan["plan_id"]
+
+    # bay up <env> with no --project applies that plan id.
+    done = cli(world, "up", "--plan-id", plan["plan_id"], "--json", cwd=world["fleet"])
+    assert done.exit_code == 0, done.output
+    doc = json.loads(done.stdout)
+    assert doc["project"] is None and doc["projects"] == ["alpha", "beta", "webapp"]
+    assert git(world["fleet"], "log", "--format=%s", "-2").splitlines()[1] == (
+        "bay: up production (3 projects)"
+    )
+    for name in ("alpha", "beta"):
+        raw = lockfile.read(lockfile.lock_path(world["fleet"], name))
+        assert raw is not None and raw["envs"]["production"]["plan_id"] == plan["plan_id"]
+    assert lock_of(world)["commit"] == git(world["app"], "rev-parse", "HEAD")
+    after = json.loads(cli(world, "plan", "--json", cwd=world["fleet"]).stdout)
+    assert [s for s in after["steps"] if s["kind"] != "tailnet"] == []
+
+    # In an app repo, a project-less plan keeps its one-project meaning.
+    assert json.loads(cli(world, "plan", "--json").stdout)["project"] == "webapp"
+
+
+def _fake_records(world: dict[str, Path], count: int) -> list[str]:
+    plans = world["fleet"] / "plans"
+    plans.mkdir(exist_ok=True)
+    ids = [f"{i:012x}" for i in range(1, count + 1)]
+    for i, pid in enumerate(ids):
+        stamp = f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}Z"
+        (plans / f"{pid}.json").write_text(json.dumps({"plan_id": pid, "created_at": stamp}))
+    return ids
+
+
+def test_plans_prune_keeps_last_50_and_lock_referenced(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    do_up(world)
+    ids = _fake_records(world, 60)
+    commit_all(world["fleet"], "old plans")
+    raw = lock_of(world)
+    record = raw["envs"]["production"]
+    real = record["plan_id"]
+    record["plan_id"] = ids[1]
+    record["previous"] = {"commit": raw["commit"], "plan_id": ids[0]}
+    lockfile.write(lockfile.lock_path(world["fleet"], "webapp"), raw)
+    commit_all(world["fleet"], "a lock names two old plans")
+    untracked = world["fleet"] / "plans" / "0000000000ff.json"
+    untracked.write_text(json.dumps({"plan_id": "0000000000ff", "created_at": "2000-01-01"}))
+
+    gone = applymod.prune_plans(cx_of(world))
+    # 61 records: the newest 50 are the real one and ids[11:]; the lock keeps ids[0:2].
+    assert gone == [f"plans/{pid}.json" for pid in ids[2:11]]
+    kept = git(world["fleet"], "ls-files", "plans").splitlines()
+    assert f"plans/{real}.json" in kept
+    assert {f"plans/{pid}.json" for pid in ids[:2] + ids[11:]} <= set(kept)
+    assert len([k for k in kept if k.endswith(".json")]) == 52
+    assert git(world["fleet"], "log", "-1", "--format=%s") == "bay: prune plans (9 files)"
+    assert untracked.is_file()  # never touched
+    status = git(world["fleet"], "status", "--porcelain", "--", "plans")
+    assert status == "?? plans/0000000000ff.json"
+    assert applymod.prune_plans(cx_of(world)) == []
+
+
+def test_plans_prune_takes_the_approval_with_its_record(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    do_up(world)
+    ids = _fake_records(world, 55)
+    plans = world["fleet"] / "plans"
+    for pid in (ids[0], ids[-1]):
+        (plans / f"{pid}.approved").write_text(json.dumps({"plan_id": pid}))
+    commit_all(world["fleet"], "old plans")
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    result = do_up(world)
+    # 57 records: the two real ones and ids[7:] are the newest 50.
+    assert result["pruned"] == sorted(
+        [f"plans/{pid}.json" for pid in ids[:7]] + [f"plans/{ids[0]}.approved"]
+    )
+    tracked = set(git(world["fleet"], "ls-files", "plans").splitlines())
+    assert f"plans/{ids[-1]}.approved" in tracked
+    assert f"plans/{ids[0]}.approved" not in tracked
+    assert git(world["fleet"], "log", "-1", "--format=%s") == "bay: prune plans (8 files)"
+    assert git(world["fleet"], "status", "--porcelain") == ""
