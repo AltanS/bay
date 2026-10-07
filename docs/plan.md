@@ -492,7 +492,7 @@ the image of every container (see [deploy-receipt.md](deploy-receipt.md)).
 - `branch` (the default): a push deploys new code under the pinned config. The
   code commit and the config commit can then differ, and that is expected.
   `bay plan` prints one information line, `code at <commit>, config pinned at
-  <commit>`. It is not a step and does not change the plan id.
+  <commit>`. It is not a step.
 - `pin`: only `bay up` deploys code. When a container runs another commit than
   the one `bay up` would pin, `bay plan` shows a step of kind `image`, action
   `update`, risk `safe`.
@@ -505,9 +505,30 @@ the deploy stops before any container changes, with the commit tags that the
 box has. In `branch` mode a missing image is skipped, and `:latest` stays
 where the last push put it. A project in the fleet passes no code targets.
 
-Note: in `branch` mode `bay up` deploys the commit of the checkout it reads.
-When that checkout is older than the code that a push already deployed, the
-box goes back to the older image. Pull the app checkout before `bay up`.
+In `branch` mode `bay up` applies the config at the pin and moves the code
+only forward. For each build container, Bay compares the commit in the
+receipt with the commit that `bay up` pins. It reads the app checkout first,
+then the fleet's repo cache (fetched when the checkout does not know a
+commit), with `git merge-base --is-ancestor`:
+
+| The running commit is | `bay up` does |
+|---|---|
+| newer than the pin (a push deployed it after the pin) | keeps the code: no code target, `:latest` stays. The plan prints `code at <running>, config pinned at <pin>` and lists the container in `code.keep`. Only the config changes. |
+| the same as the pin, or older (a held build, the first deploy) | points `:latest` at the pin's image, as above |
+| unknown (a commit in neither the checkout nor the cache, or on another branch) | refuses: `cannot order <pin> and <running>; fetch the repo or pass --force-code` |
+
+`bay plan --force-code` and `bay up --force-code` turn the refusal into a step
+of kind `image`, action `update`, risk `destructive`: the code moves to the pin
+even when it may be older than what runs. Like any destructive step it needs
+`bay approve` or `--force --reason`. So a `bay up` from a stale checkout never
+moves the running code to an older image.
+
+In `pin` mode the code follows the pin exactly, backwards included: that is
+what `pin` means. `bay rollback` also skips the order check, because it moves
+the code back on purpose.
+
+The plan field `code` (`{"keep": [<container>, ...]}`) is part of the plan
+body, so it changes the plan id. It is absent when `bay up` keeps no code.
 
 ### bay show
 

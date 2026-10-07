@@ -99,6 +99,14 @@ needing manual action is called out under **Upgrade notes**. Entries for
 - `bay plan` prints `code at <commit>, config pinned at <commit>` in branch
   mode. In pin mode, code that is not the pin is a step of kind `image`, risk
   safe.
+- In branch mode `bay up` applies config at the pin and moves code only
+  forward. When the box runs a commit newer than the pin, `:latest` stays and
+  only the config changes (plan field `code.keep`). So a `bay up` from a stale
+  checkout never moves the running code to an older image. When Bay cannot
+  order the two commits, `bay up` refuses: "cannot order <pin> and <running>;
+  fetch the repo or pass --force-code". `--force-code` (on `bay plan` and
+  `bay up`) moves the code anyway, as a destructive `image` step. Pin mode and
+  `bay rollback` still move code backwards.
 - `bay rollback` restores code as well as config: the box points `:latest` at
   the image of the previous receipt. It also freezes the environment
   (`frozen = true` in the lock): a push builds but does not deploy until a
