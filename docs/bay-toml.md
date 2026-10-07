@@ -562,3 +562,27 @@ recipients, CrowdSec, Traefik and Headscale settings, the framework version, the
 policy, log rotation caps, the default domain and the default box.
 
 Apps with no repo of their own live as `projects/<name>/bay.toml` in the fleet repo.
+
+### Tailnet routes (`[tailnet.routes.<name>]` in bay.fleet.toml)
+
+A tailnet route gives a machine that Bay does not run (a laptop, a NAS) a name with a
+trusted certificate, served by the ingress box. It is a table of the fleet file, not a
+project, so a machine name never lands in an app repo.
+
+```toml
+[tailnet]
+ingress_box = "infra"
+cert_domain = "*.ts.example.com"
+
+[tailnet.routes.notes]
+domain = "notes.ts.example.com"
+upstream = "http://laptop.acme.tailnet.internal:8080"
+host = "upstream"     # upstream | client (default client)
+identity = true       # inject X-Tailnet-Device
+aliases = []
+```
+
+`bay compile` writes the table into `services.yml` as `tailnet_proxies:`. Edit it with
+`bay route add`, `bay route ls` and `bay route rm`, and move an old
+`group_vars/all/tailnet_proxies.yml` in with `bay route import`. The keys, the checks and
+the plan steps are in [tailnet-ingress.md](tailnet-ingress.md#routes-in-bayfleettoml-21).

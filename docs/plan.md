@@ -245,6 +245,7 @@ Risk is set by the data that a step touches.
 | Any change to a `[resources.*]` entry (shared postgres, redis and so on) | shared |
 | Shared resource removed | destructive |
 | Tailnet allowlist in `bay.fleet.toml` changed since the last fleet commit | shared |
+| Tailnet route added, changed or removed (`kind: route`, see [tailnet-ingress.md](tailnet-ingress.md#routes-in-bayfleettoml-21)) | shared |
 | Deploy webhook changed | shared |
 | Container of another project changed or removed | that project's own risk, by the rows above |
 | Container that no project owns changed | shared |
@@ -388,7 +389,10 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    and the same tag the box check of `bay plan` runs). The `git_deploy` role
    renders the webhook rebuild script under that tag, so a later webhook build
    uses the deployed config, not the config from before this `up`. The tag does
-   not clone, build or pull anything.
+   not clone, build or pull anything. When the plan has a `route` step, Bay
+   runs `--tags deploy_stack,headscale,traefik`: Headscale renders the
+   split-DNS records and Traefik the route file. A route change is blocked in
+   a plan for a box env other than the ingress box's.
 7. Bay reads the receipt back and pins every project that the deploy
    covered (see below). Bay commits all those locks once:
    `bay: receipt <box env> (<n> projects)`.
@@ -544,6 +548,12 @@ box receipt), and one status word per environment:
 | `unknown` | The box was not read, has no receipt, or `bay up` never ran here. |
 | `HALF` | The last `bay up` failed or never reported back. |
 
+`bay show --routes` prints the fleet's tailnet routes instead, each with
+WANTED (`bay.fleet.toml`), PINNED (the compiled `tailnet_proxies`) and RUNNING
+(the routes the ingress box receipt lists) and one status: `ok`, `pending`
+(the fleet file differs from the compiled file), `drift` (the box serves
+something else) or `unknown` (no receipt lists routes).
+
 ## bay compile
 
 `bay compile` reads every project at the commit its lock pins, through the
@@ -669,10 +679,11 @@ know.
   The image is the reference the deploy asked for (`image_ref`), so a webhook
   build that stamps a new commit into the receipt is not drift either.
 - `kind` is one of `container`, `volume`, `database`, `database_user`,
-  `secret`, `resource`, `tailnet`, `fleet`, `image` (`track = "pin"` only,
-  see "Code and config"). `action` is one of `create`,
+  `secret`, `resource`, `tailnet`, `route`, `fleet`, `image` (`track = "pin"`
+  only, see "Code and config"). `action` is one of `create`,
   `update`, `remove`, `rename`, `move`, and for a box step also `recreate`
-  and `start`.
+  and `start`. A `route` step has `route_added`, `route_changed` or
+  `route_removed`, and names the route in `resource`.
 - `source` is `compile` for a step from the compiled diff, `box` for a step
   from the box prediction.
 - `box_prediction` is empty without `--remote`.

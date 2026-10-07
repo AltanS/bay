@@ -112,6 +112,27 @@ needing manual action is called out under **Upgrade notes**. Entries for
   (`frozen = true` in the lock): a push builds but does not deploy until a
   `bay up` to a newer commit. `bay rollback --to <commit>` rolls back to a
   commit whose image is on the box, and lists the commit tags when it is not.
+- **Tailnet routes are a table in `bay.fleet.toml`.** `[tailnet] ingress_box` and
+  `cert_domain`, and one `[tailnet.routes.<name>]` per route: `domain`, `upstream`,
+  `host` (`client` or `upstream`), `identity`, `aliases`, `entrypoint`. `bay compile`
+  writes them as `tailnet_proxies:` into `services.yml`, in their order and with
+  defaults left out, so the box renders the same bytes as before. The compile refuses
+  a domain outside `cert_domain`, a domain used twice on the fleet, an upstream that
+  is not a tailnet name or address with a port, and routes in both
+  `[tailnet.routes]` and a hand file. `bay validate` warns when no ACL rule has the
+  ingress box as the only `src` for a route's upstream port. See
+  `docs/tailnet-ingress.md`, "Routes in bay.fleet.toml (2.1)".
+- `bay route add`, `bay route ls`, `bay route rm` and `bay route import`. They edit
+  `bay.fleet.toml` with a small text edit (comments stay), refuse what the compile
+  would refuse, and commit the fleet repo (`--no-commit` only edits).
+- A route change is a plan step of kind `route` (`route_added`, `route_changed`,
+  `route_removed`) at risk `shared`. A domain change says "Headscale restarts". `bay
+  up` then runs the tags `deploy_stack,headscale,traefik`. A plan for another box env
+  than the ingress box's is blocked while a route change is pending.
+- `bay show --routes`: WANTED, PINNED and RUNNING per route. RUNNING needs a receipt
+  that lists routes; until the receipt writes them, it says `unknown`.
+- `bay import --out` converts `tailnet_proxies` into `[tailnet.routes]` when one
+  group sets `tailnet_ingress_cert_domain`.
 
 ### Fixed
 
@@ -120,6 +141,17 @@ needing manual action is called out under **Upgrade notes**. Entries for
   label` (M116/03).
 
 ### Upgrade notes
+
+- **Move the tailnet routes once per fleet** that has
+  `group_vars/all/tailnet_proxies.yml`: run `bay route import` (it reads the file,
+  writes the routes into `bay.fleet.toml` with their names, deletes the file and makes
+  one fleet commit), then `bay plan <env>` for a project on the ingress box's env,
+  `bay approve`, and `bay up <env>`. The first `up` shows one `route_added` step per
+  route; the route file and the split-DNS records on the box keep their bytes, so no
+  container is recreated. Until you move them, the old file keeps working; a fleet
+  with routes in both places does not compile.
+- `bay validate` may warn about the ACL of each route's upstream port. A warning does
+  not stop a deploy.
 
 - **The first 2.1 run moves the locks.** The first `bay plan`, `bay up`, `bay show`,
   `bay compile` or `bay init` on a fleet moves each `projects/<name>.lock` to
