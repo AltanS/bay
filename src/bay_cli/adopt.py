@@ -38,7 +38,9 @@ from __future__ import annotations
 import copy
 import difflib
 import json
+import re
 import shutil
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -62,6 +64,11 @@ class _Copy:
 
     source: str
     dest: str
+    #: The text to write instead of the file's bytes (a bay.toml without ``[build] repo``).
+    text: str | None = None
+
+    def content(self, fleet_root: Path) -> bytes:
+        return self.text.encode() if self.text is not None else (fleet_root / self.source).read_bytes()
 
 
 @dataclass
@@ -202,16 +209,26 @@ def _prepare(cx: Context, cwd: Path, name: str, toml_path: str | None) -> AdoptP
 
     if raw is None:
         raw = lockfile.new_lock(name, repo=None)
-    if raw.get("repo") and not reposource.same_repo(str(raw["repo"]), origin):
+    # The compile builds from [build] repo, then from the lock repo. Either
+    # must be the repo of this checkout.
+    toml_repo = _build_repo(doc)
+    if toml_repo and not reposource.same_repo(toml_repo, origin):
+        raise BayError(
+            f"{toml_rel_fleet} names [build] repo {toml_repo}, but this checkout's origin is "
+            f"{origin}",
+            code=ErrorCode.CONFLICT,
+            hint="Run bay adopt in a checkout of the repo that [build] names.",
+        )
+    if not toml_repo and raw.get("repo") and not reposource.same_repo(str(raw["repo"]), origin):
         raise BayError(
             f"{folder}/{LOCK_FILE} names repo {raw['repo']}, but this checkout's origin is "
             f"{origin}",
             code=ErrorCode.CONFLICT,
             hint="Run bay adopt in a checkout of the repo the lock names.",
         )
-    # The lock's repo string is what the box clones from; keep it when it is
-    # the same repo, so the compiled build entry does not change.
-    repo = str(raw.get("repo") or origin)
+    # The repo string is what the box clones from; keep the one the compile
+    # used ([build] repo, then the lock), so the compiled build entry does not change.
+    repo = str(toml_repo or raw.get("repo") or origin)
 
     frozen = sorted(e for e, r in (raw.get("envs") or {}).items() if (r or {}).get("frozen"))
     if frozen:
@@ -318,13 +335,19 @@ def _prepare(cx: Context, cwd: Path, name: str, toml_path: str | None) -> AdoptP
 
     for item in plan.copies:
         there = root / item.dest
-        if there.exists() and there.read_bytes() != (fleet_root / item.source).read_bytes():
+        if there.exists() and there.read_bytes() != item.content(fleet_root):
             raise BayError(
                 f"{there} already exists in the app repo and differs from {item.source}",
                 code=ErrorCode.CONFLICT,
                 hint="Remove or rename the file in the app repo, commit, then adopt.",
             )
     plan.removals = sorted(dict.fromkeys(plan.removals))
+    if toml_repo:
+        # The repo moves into the lock, so the app repo's bay.toml does not name it.
+        stripped = strip_build_repo((fleet_root / toml_rel_fleet).read_text())
+        for item in plan.copies:
+            if item.source == toml_rel_fleet:
+                item.text = stripped
 
     plan.lock_before = copy.deepcopy(raw)
     plan.lock_after = _new_lock(raw, repo, rel, fleet_head, plan.envs)
@@ -332,6 +355,46 @@ def _prepare(cx: Context, cwd: Path, name: str, toml_path: str | None) -> AdoptP
     if found:
         raise BayError("the adopted lock would not be valid: " + "; ".join(found))
     return plan
+
+
+def _build_repo(doc: dict[str, Any]) -> str | None:
+    """``[build] repo`` of a bay.toml; None when unset. Refuses several different repos."""
+    repos = bay_toml.build_repos(doc)
+    if len(repos) > 1:
+        raise BayError(
+            f"the builds of this bay.toml name {len(repos)} repos: {', '.join(repos)}",
+            hint="An app repo builds from one repo. Keep one [build] repo.",
+        )
+    return repos[0] if repos else None
+
+
+_TABLE_RE = re.compile(r"^\s*\[\s*([^\[\]]+?)\s*\]\s*(?:#.*)?$")
+_REPO_RE = re.compile(r"^\s*repo\s*=")
+
+
+def strip_build_repo(text: str) -> str:
+    """``text`` without the ``repo`` line of every ``[build]`` table (a line edit, so comments stay)."""
+    out: list[str] = []
+    in_build = False
+    for line in text.splitlines(keepends=True):
+        header = _TABLE_RE.match(line)
+        if header:
+            parts = [p.strip() for p in header.group(1).split(".")]
+            in_build = parts[-1] == "build"
+        elif in_build and _REPO_RE.match(line):
+            continue
+        out.append(line)
+    stripped = "".join(out)
+    try:
+        doc = tomllib.loads(stripped)
+    except tomllib.TOMLDecodeError as exc:
+        raise BayError(f"cannot remove [build] repo from bay.toml: {exc}") from None
+    if bay_toml.build_repos(doc):
+        raise BayError(
+            "[build] repo is written in a form bay adopt cannot remove",
+            hint="Write it as a `repo = \"...\"` line under [build], commit, then adopt.",
+        )
+    return stripped
 
 
 def _targets(raw: dict[str, Any]) -> dict[str, set[str]]:
@@ -458,7 +521,10 @@ def _apply(cx: Context, plan: AdoptPlan) -> dict[str, Any]:
     for item in plan.copies:
         dest = root / item.dest
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(fleet_root / item.source, dest)
+        if item.text is not None:
+            dest.write_text(item.text)
+        else:
+            shutil.copy2(fleet_root / item.source, dest)
         written.append(dest)
     try:
         app_commit = gitrepo.commit_paths(

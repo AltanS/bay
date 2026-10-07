@@ -617,12 +617,8 @@ class _Compiler:
         self, unit: _Unit, service: str, table: dict[str, Any], base: str, name: str
     ) -> tuple[str | None, dict[str, Any] | None]:
         where = _p(base, "build")
-        repo = unit.project.repo
+        repo = self._build_repo(unit, table, where)
         if repo is None:
-            self._err(
-                f"{unit.label}: {where}: builds from source, but "
-                f"projects/{unit.project.name}/bay.lock names no repo"
-            )
             return None, None
         out: dict[str, Any] = {"repo": repo, "branch": unit.deploy.get("branch", "main")}
         strategy = table.get("strategy", self.defaults.get("build_strategy"))
@@ -660,6 +656,35 @@ class _Compiler:
             else:
                 image = f"{registry}/{name}:latest"
         return image, out
+
+    def _build_repo(self, unit: _Unit, table: dict[str, Any], where: str) -> str | None:
+        """The repo a build clones: ``[build] repo``, then the lock ``repo``.
+
+        ``[build] repo`` is for a project in the fleet (no app repo to ask). A
+        project in its app repo builds from the lock ``repo``; a ``[build] repo``
+        there must be the same repo, or the compile refuses.
+        """
+        from bay_cli import reposource
+
+        declared = table.get("repo") or (unit.build or {}).get("repo")
+        locked = unit.project.repo
+        if declared is None:
+            if locked is None:
+                self._err(
+                    f"{unit.label}: {where}: builds from source, but neither [build] repo in "
+                    f"bay.toml nor projects/{unit.project.name}/bay.lock names a repo"
+                )
+            return locked
+        if self._in_fleet(unit.project):
+            return str(declared)
+        if locked is not None and not reposource.same_repo(str(declared), locked):
+            self._err(
+                f"{unit.label}: {where}: [build] repo {declared} is not the repo of "
+                f"projects/{unit.project.name}/bay.lock ({locked}); an app repo builds from "
+                "its own repo, so remove [build] repo"
+            )
+            return None
+        return locked if locked is not None else str(declared)
 
     def _in_fleet(self, project: Project) -> bool:
         """True when the project's bay.toml is ``projects/<name>/bay.toml`` in the fleet."""

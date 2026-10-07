@@ -2211,7 +2211,7 @@ def test_init_toml_path_monorepo(world: dict[str, Path], tmp_path: Path, box: Fa
     git(tmp_path, "init", "-q", str(repo))
     git(repo, "remote", "add", "origin", "git@example.com:acme/mono.git")
     (repo / "services" / "api").mkdir(parents=True)
-    (repo / "services" / "api" / "Dockerfile").write_text("FROM x\nEXPOSE 7000\n")
+    (repo / "Dockerfile").write_text("FROM x\nEXPOSE 7000\n")
     commit_all(repo, "mono")
     result = cli(
         world, "init", "--name", "api", "--toml-path", "services/api/bay.toml", "--json", cwd=repo
@@ -2225,6 +2225,41 @@ def test_init_toml_path_monorepo(world: dict[str, Path], tmp_path: Path, box: Fa
     assert "port = 7000" in (repo / "services" / "api" / "bay.toml").read_text()
     bad = cli(world, "init", "--name", "bad", "--toml-path", "../x/bay.toml", cwd=repo)
     assert bad.exit_code != 0
+
+
+def test_init_toml_path_finds_root_dockerfile(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    """The Dockerfile sits at the repo root, the default build context, not beside the toml."""
+    repo = tmp_path / "mono"
+    git(tmp_path, "init", "-q", str(repo))
+    git(repo, "remote", "add", "origin", "git@example.com:acme/mono.git")
+    (repo / "services" / "api").mkdir(parents=True)
+    (repo / "Dockerfile").write_text("FROM x\nEXPOSE 7000\n")
+    commit_all(repo, "mono")
+    result = cli(
+        world, "init", "--name", "api", "--toml-path", "services/api/bay.toml", "--json", cwd=repo
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["warnings"] == []
+    text = (repo / "services" / "api" / "bay.toml").read_text()
+    assert "No Dockerfile found" not in text and "port = 7000" in text
+
+
+def test_init_refuses_in_fleet_folder(world: dict[str, Path], box: FakeBox) -> None:
+    """bay init in a fleet folder (or below it) stops before it writes anything."""
+    fleet = world["fleet"]
+    before = git(fleet, "rev-parse", "HEAD")
+    for where in (fleet, fleet / "projects"):
+        result = cli(world, "init", "--name", "inside", cwd=where)
+        assert result.exit_code != 0
+        assert f"this is a fleet folder ({fleet}); bay init drafts a bay.toml in an app repo" in str(
+            result.exception
+        )
+        assert "projects/<name>/bay.toml" in (result.exception.hint or "")
+    assert not (fleet / "bay.toml").exists() and not (fleet / "projects" / "bay.toml").exists()
+    assert not lockfile.lock_path(fleet, "inside").exists()
+    assert git(fleet, "rev-parse", "HEAD") == before and git(fleet, "status", "--porcelain") == ""
 
 
 def test_init_refuses_a_repo_without_origin(
@@ -3527,6 +3562,9 @@ def _shop(world: dict[str, Path], tmp_path: Path, *, toml: str = SHOP_TOML) -> d
     commit_all(app_repo, "app")
     git(app_repo, "push", "-q", "-u", "origin", "main")
 
+    #: ``@REMOTE@`` in the toml is the app repo's URL (``[build] repo``); the lock then names none.
+    declared = "@REMOTE@" in toml
+    toml = toml.replace("@REMOTE@", str(remote))
     folder = fleet / "projects" / "shop"
     (folder / "deploy").mkdir(parents=True)
     (folder / "bay.toml").write_text(toml)
@@ -3536,13 +3574,18 @@ def _shop(world: dict[str, Path], tmp_path: Path, *, toml: str = SHOP_TOML) -> d
     (fleet / "files" / "shop" / "legacy.conf").write_text("legacy: 1\n")
     (fleet / "files" / "shared").mkdir(parents=True)
     (fleet / "files" / "shared" / "rules.yaml").write_text("rules: 1\n")
-    lock = lockfile.new_lock("shop", repo=str(remote) if "[build]" in toml else None)
+    lock = lockfile.new_lock("shop", repo=str(remote) if "[build]" in toml and not declared else None)
     lock["envs"] = {"production": {"adopted": {"containers": {"web": "old-shop"}}}}
     lockfile.write(folder / "bay.lock", lock)
     commit_all(fleet, "add shop")
     up = applymod.up(planmod.load_project(cx_of(world), "shop"), planmod.PlanOptions())
     assert up["result"] == "ok", up
     return {"app": app_repo, "remote": remote, "folder": folder}
+
+
+BUILD_REPO_SHOP_TOML = BUILD_SHOP_TOML.replace(
+    'dockerfile = "Dockerfile"\n', '# Where the code lives.\nrepo = "@REMOTE@"\ndockerfile = "Dockerfile"\n'
+)
 
 
 def _adopt(world: dict[str, Path], shop: dict[str, Path], *args: str) -> Any:
@@ -3838,6 +3881,37 @@ def test_adopt_build_project_plans_zero_steps(
     assert after == before
     plan = planmod.make_plan(proj, planmod.PlanOptions())
     assert plan["steps"] == [] and plan["verdict"] == "auto", plan
+
+
+def test_in_fleet_build_project_repo_from_toml_adopt(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    """Adopt takes ``[build] repo`` as the lock repo and drops the key from the app repo's toml."""
+    shop = _shop(world, tmp_path, toml=BUILD_REPO_SHOP_TOML)
+    assert _shop_lock(world)["repo"] is None
+    before = yaml.safe_load(_body((world["fleet"] / GENERATED_SERVICES).read_text()))
+    assert before["services"]["old-shop"]["build"]["repo"] == str(shop["remote"])
+    assert _adopt(world, shop).exit_code == 0, "adopt failed"
+    assert _shop_lock(world)["repo"] == str(shop["remote"])
+    written = (shop["app"] / "bay.toml").read_text()
+    assert "repo =" not in written and "# Where the code lives." in written
+    assert 'dockerfile = "Dockerfile"' in written
+    git(shop["app"], "push", "-q", "origin", "main")
+    with planmod.compiled_fleet(cx_of(world), cwd=shop["app"]) as comp:
+        assert comp.result is not None, comp.errors
+        after = yaml.safe_load(_body(comp.result.text()))
+    # The compiled build repo string does not change.
+    assert after["services"]["old-shop"]["build"]["repo"] == str(shop["remote"])
+
+
+def test_in_fleet_build_project_repo_from_toml_adopt_refuses_other_origin(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    shop = _shop(world, tmp_path, toml=BUILD_REPO_SHOP_TOML)
+    git(shop["app"], "remote", "set-url", "origin", "https://example.com/acme/else.git")
+    result = _adopt(world, shop)
+    assert result.exit_code != 0 and "names [build] repo" in _said(result) + str(result.exception)
+    assert _shop_lock(world)["repo"] is None and (shop["folder"] / "bay.toml").is_file()
 
 
 def test_up_accepts_unpushed_adopt_commit_without_code_move(

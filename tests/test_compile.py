@@ -269,6 +269,87 @@ def test_image_and_build(data: dict[str, Any]) -> None:
     assert "image" not in s["shop-api"], "a local build needs no registry image"
 
 
+def _gatus_builds_from_source(fleet: Path, repo: str | None) -> None:
+    """Make the in-fleet project gatus build from source, with ``[build] repo`` when given."""
+    edit(fleet, GATUS, 'image = "twinproduction/gatus:latest"\n', "")
+    table = "\n[build]\n" + (f'repo = "{repo}"\n' if repo else 'dockerfile = "Dockerfile"\n')
+    path = fleet / GATUS
+    path.write_text(path.read_text() + table)
+
+
+def _gatus_lock(fleet: Path, repo: str | None) -> None:
+    from bay_cli import lockfile
+
+    lockfile.write(fleet / "projects" / "gatus" / "bay.lock", lockfile.new_lock("gatus", repo=repo))
+
+
+def _gatus_repo(fleet: Path) -> str:
+    return yaml.safe_load(compiled(fleet).body())["services"]["gatus"]["build"]["repo"]
+
+
+def test_in_fleet_build_project_repo_from_toml(fleet: Path) -> None:
+    """An in-fleet build takes ``[build] repo``, then the lock repo; with neither it is an error."""
+    # [build] repo alone
+    _gatus_builds_from_source(fleet, "https://github.com/acme/gatus.git")
+    assert _gatus_repo(fleet) == "https://github.com/acme/gatus.git"
+
+    # [build] repo wins over the lock repo
+    _gatus_lock(fleet, "https://github.com/acme/other.git")
+    assert _gatus_repo(fleet) == "https://github.com/acme/gatus.git"
+
+    # no [build] repo: the lock repo is the fallback
+    edit(fleet, GATUS, 'repo = "https://github.com/acme/gatus.git"\n', 'dockerfile = "Dockerfile"\n')
+    assert _gatus_repo(fleet) == "https://github.com/acme/other.git"
+
+    # neither: the error names both places
+    _gatus_lock(fleet, None)
+    found = problems(fleet)
+    assert any(
+        "builds from source, but neither [build] repo in bay.toml nor "
+        "projects/gatus/bay.lock names a repo" in line
+        for line in found
+    ), found
+
+
+def test_in_fleet_build_project_repo_from_toml_app_repo_must_match(fleet: Path) -> None:
+    """A project in its app repo builds from the lock repo; a different ``[build] repo`` is an error."""
+    # the same repo spelled another way is fine, and the compiled string stays the lock's
+    edit(fleet, SHOP, 'dockerfile = "Dockerfile"\nstrategy', 'repo = "https://github.com/acme/shop"\n'
+         'dockerfile = "Dockerfile"\nstrategy')
+    first = yaml.safe_load(compiled(fleet).body())["services"]["shop"]["build"]["repo"]
+    assert first == "git@github.com:acme/shop.git"
+
+    edit(fleet, SHOP, "github.com/acme/shop", "github.com/acme/elsewhere")
+    found = problems(fleet)
+    assert any("[build] repo https://github.com/acme/elsewhere is not the repo" in x for x in found), found
+
+
+def test_validate_reports_an_in_fleet_build_with_no_repo(fleet: Path) -> None:
+    """`bay validate` says what the compile says, before a deploy."""
+    from bay_cli.commands.validate import ValidationResult, _validate_build_repos
+
+    ok = ValidationResult()
+    _validate_build_repos(fleet, ok)  # gatus pulls an image: nothing to check
+    assert ok.failed == []
+
+    _gatus_builds_from_source(fleet, None)
+    bad = ValidationResult()
+    _validate_build_repos(fleet, bad)
+    assert len(bad.failed) == 1
+    assert "neither [build] repo in projects/gatus/bay.toml nor projects/gatus/bay.lock" in bad.failed[0]
+
+    _gatus_lock(fleet, "https://github.com/acme/gatus.git")  # the lock is the fallback
+    fallback = ValidationResult()
+    _validate_build_repos(fleet, fallback)
+    assert fallback.failed == []
+
+    _gatus_lock(fleet, None)
+    edit(fleet, GATUS, 'dockerfile = "Dockerfile"\n', 'repo = "https://github.com/acme/gatus.git"\n')
+    declared = ValidationResult()
+    _validate_build_repos(fleet, declared)
+    assert declared.failed == []
+
+
 def test_bay_toml_hash_written_to_services_yml(fleet: Path) -> None:
     """Spec M117/05: the hold guard's pinned hash, per build container, app-repo projects only."""
     from bay_reconcile.tomlhash import canonical_hash
@@ -862,7 +943,7 @@ def test_lockfile_env_must_exist_in_bay_toml(fleet: Path) -> None:
 
 def test_build_needs_a_repo(fleet: Path) -> None:
     edit_lock(fleet, lambda d: d.update(repo=None))
-    assert any("names no repo" in m for m in problems(fleet))
+    assert any("neither [build] repo in bay.toml nor projects/shop/bay.lock names a repo" in m for m in problems(fleet))
 
 
 def test_box_without_group_is_ambiguous(fleet: Path) -> None:

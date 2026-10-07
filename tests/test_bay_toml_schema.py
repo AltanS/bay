@@ -170,6 +170,15 @@ def test_base_document_is_valid():
     assert bay_toml.validate(_doc()) == []
 
 
+def test_build_repo_is_a_non_empty_string():
+    doc = _doc()
+    doc.pop("image", None)
+    assert bay_toml.validate({**doc, "build": {"repo": "https://github.com/acme/app.git"}}) == []
+    for bad in ("", 3):
+        found = bay_toml.validate({**doc, "build": {"repo": bad}})
+        assert {v.path for v in found} == {"build.repo"}, found
+
+
 @pytest.mark.parametrize(
     ("doc", "expected"),
     [

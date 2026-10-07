@@ -1489,7 +1489,7 @@ def _validate_build_tokens(
             errors.append(
                 f"services.{name}.build.token: unrecognised format — "
                 f"expected '{{{{ secrets.KEY }}}}' "
-                f"(hint: use bay service add --build-token to set this correctly)"
+                f"(hint: the token comes from repo_tokens in bay.fleet.toml, a repo URL prefix mapped to a secret name; fix it there and run bay compile)"
             )
             continue
 
@@ -2198,6 +2198,59 @@ def _validate_tailnet_routes(
     if not errors and not warnings:
         mode = "ACL checked" if policy is not None else "no ACL policy (allow-all)"
         result.ok(f"Tailnet routes      {len(table)} route(s), {mode}")
+
+
+def _has_key(node: Any, key: str) -> bool:
+    if isinstance(node, dict):
+        return key in node or any(_has_key(v, key) for v in node.values())
+    if isinstance(node, list):
+        return any(_has_key(v, key) for v in node)
+    return False
+
+
+def _validate_build_repos(root: Path, result: ValidationResult) -> None:
+    """A project in the fleet that builds from source names its repo.
+
+    The compile takes ``[build] repo`` from the bay.toml, then ``repo`` from
+    the lock. It refuses a build that has neither. This says so before a deploy.
+    """
+    import tomllib
+
+    from bay_cli import bay_toml, lockfile
+    from bay_cli.fleet import PROJECTS_DIR
+
+    projects = root / PROJECTS_DIR
+    if not projects.is_dir():
+        return
+    missing: list[str] = []
+    checked = 0
+    for toml in sorted(projects.glob("*/bay.toml")):
+        try:
+            doc = tomllib.loads(toml.read_text())
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            continue  # the compile reports an unreadable bay.toml
+        tables = bay_toml.build_tables(doc)
+        builds = bool(tables) or not _has_key(doc, "image")
+        if not builds:
+            continue
+        checked += 1
+        name = toml.parent.name
+        try:
+            raw = lockfile.read(lockfile.lock_path(root, name)) or {}
+        except (OSError, ValueError):
+            raw = {}
+        if not raw.get("repo") and not any(t.get("repo") for t in tables):
+            missing.append(name)
+    if not checked:
+        return
+    console.header("Build Repos")
+    for name in missing:
+        result.fail(
+            f"Build repo          {name}: builds from source, but neither [build] repo in "
+            f"projects/{name}/bay.toml nor projects/{name}/bay.lock names a repo"
+        )
+    if not missing:
+        result.ok(f"Build repo          {checked} project(s) in the fleet name their repo")
 
 
 # ── Core validation logic ────────────────────────────────────────────────
@@ -3021,6 +3074,9 @@ def run_validation(
 
     # 8c. Tailnet routes in bay.fleet.toml, and the ACL that guards their upstreams
     _validate_tailnet_routes(root, parsed, result)
+
+    # 8d. A project in the fleet that builds from source names its repo
+    _validate_build_repos(root, result)
 
     # 9. Token scope probe (opt-in, never runs automatically)
     if check_token_scope and services_data is not None:

@@ -96,6 +96,20 @@ TRACK_MODES = ("branch", "pin")
 DEFAULT_TRACK = "branch"
 
 
+def build_tables(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every ``build`` table of a bay.toml: the project one and the inline service ones."""
+    found = [doc["build"]] if isinstance(doc.get("build"), dict) else []
+    for svc in (doc.get("services") or {}).values():
+        if isinstance(svc, dict) and isinstance(svc.get("build"), dict):
+            found.append(svc["build"])
+    return found
+
+
+def build_repos(doc: dict[str, Any]) -> list[str]:
+    """The distinct ``repo`` values of the build tables, sorted. One entry when the file is sane."""
+    return sorted({str(t["repo"]) for t in build_tables(doc) if t.get("repo")})
+
+
 def track(doc: dict[str, Any], env: str) -> str:
     """The ``track`` mode of one environment, with the default filled in.
 
