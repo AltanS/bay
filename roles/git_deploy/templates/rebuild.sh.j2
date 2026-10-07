@@ -58,6 +58,11 @@ RECONCILE_PYTHONPATH="${STACK_DIR}/.reconcile"
 # The env whose receipt (/var/lib/bay/receipts/<env>.json) this box writes.
 # Same expression as the receipt task in container_lifecycle reconcile.yml.
 RECEIPT_ENV={{ (target_host | default(group_names | default([]) | reject('equalto', 'all') | first | default('default'))) | string | quote }}
+# One file per container: "<commit12> <image id>" for every build whose health
+# check failed here. bay_reconcile.codepin refuses those (FAILED_COMMITS_DIR
+# there), so `bay up` never promotes a failed image. Created by the deploy
+# (container_lifecycle reconcile.yml), group docker, group-writable.
+FAILED_COMMITS_DIR="/var/lib/bay/failed-commits"
 
 BAY_ALERT_HEADER={{ docker_monitor_alert_header | to_json }}
 
@@ -439,11 +444,62 @@ _hold_build() {
 
 # Move `:latest` to this commit's image and keep the old one as `:previous` for
 # the health-check rollback. Only called once the hold guard let the push deploy.
+# When `:latest` already is that image (a rebuild of the running commit),
+# `:previous` stays: moving it would make the rollback target the image under
+# test.
 #   $1  image repo (no tag)   $2  commit tag
 _promote_latest() {
-  local repo="$1" sha="$2"
-  docker tag "${repo}:latest" "${repo}:previous" 2>/dev/null || true
+  local repo="$1" sha="$2" have want
+  have=$(docker image inspect --format '{% raw %}{{.Id}}{% endraw %}' "${repo}:latest" 2>/dev/null || true)
+  want=$(docker image inspect --format '{% raw %}{{.Id}}{% endraw %}' "${repo}:${sha}" 2>/dev/null || true)
+  if [[ -z "${have}" || "${have}" != "${want}" ]]; then
+    docker tag "${repo}:latest" "${repo}:previous" 2>/dev/null || true
+  fi
   docker tag "${repo}:${sha}" "${repo}:latest"
+}
+
+# ── Failed builds (docs/build-pipeline.md, "Health check and rollback") ──
+# A build whose health check failed must never run again by its commit tag:
+# `bay up` and `bay rollback --to` find code by `<image>:<commit12>`. Untag it
+# (the image itself may stay under other tags) and record "<commit12> <image
+# id>" in FAILED_COMMITS_DIR/<container>. The record matters for a registry
+# image, whose commit tag codepin could pull again, and for a later tag of the
+# same image (a config-only push names the previous image with its own commit).
+#   $1  container   $2  the failed build's commit tag ref (may be empty)
+_forget_failed_build() {
+  local svc="$1" failed_tag="$2" commit id
+  [[ -n "${failed_tag}" ]] || return 0
+  commit="${failed_tag##*:}"
+  id=$(docker image inspect --format '{% raw %}{{.Id}}{% endraw %}' "${failed_tag}" 2>/dev/null || true)
+  docker rmi "${failed_tag}" >/dev/null 2>&1 || true
+  if ! { mkdir -p "${FAILED_COMMITS_DIR}" && printf '%s %s\n' "${commit:0:12}" "${id:--}" >> "${FAILED_COMMITS_DIR}/${svc}"; } 2>/dev/null; then
+    _log "could not record failed commit ${commit:0:12} in ${FAILED_COMMITS_DIR}/${svc}; its tag is removed"
+  fi
+  return 0
+}
+
+# A commit that deployed and passed its health check is no longer failed (a
+# manual rebuild of a commit whose first failure was not its code).
+#   $1  container   $2  commit
+_clear_failed_commit() {
+  local file="${FAILED_COMMITS_DIR}/$1"
+  [[ "$2" =~ ^[0-9a-f]{7,40}$ && -f "${file}" ]] || return 0
+  sed -i "/^${2:0:12}\( \|\$\)/d" "${file}" 2>/dev/null || true
+  return 0
+}
+
+# The previous commit on the build server (remote strategy): the running
+# container's, else the commit this checkout built last, but only when its
+# image is in the registry. A failed build of it pushed nothing, and a
+# config-only push on top of it would leave that code unbuilt.
+#   $1  container   $2  image repo (no tag)   $3  the commit the checkout built last
+_prev_commit_remote() {
+  local c
+  c=$(_running_commit "$1")
+  if [[ -z "${c}" && -n "$2" && -n "$3" ]] && docker manifest inspect "$2:${3:0:12}" >/dev/null 2>&1; then
+    c="$3"
+  fi
+  printf '%s' "${c}"
 }
 
 # The config hash the last deploy stamped on the running container, or nothing.
@@ -546,8 +602,10 @@ _wait_healthy() {
 #   $1 — container/service name
 #   $2 — previous image tag (e.g., IMAGE_NAME:previous or IMAGE_REPO:previous)
 #   $3 — current image tag (e.g., IMAGE_NAME:latest or IMAGE_REF)
+#   $4 — the failed build's commit tag (IMAGE_NAME:SHA, IMAGE_REPO:<revision>);
+#        untagged and recorded so `bay up` never promotes it (may be empty)
 _handle_rollback() {
-  local svc="$1" prev_tag="$2" current_tag="$3"
+  local svc="$1" prev_tag="$2" current_tag="$3" failed_tag="${4:-}"
 
   # Disable ERR trap — we're handling the failure ourselves
   trap - ERR
@@ -555,6 +613,7 @@ _handle_rollback() {
   _log "Health check failed for ${svc} — attempting rollback"
   docker stop "${svc}" 2>/dev/null || true
   docker rm "${svc}" 2>/dev/null || true
+  _forget_failed_build "${svc}" "${failed_tag}"
 
   # Check if previous image exists locally
   if ! docker image inspect "${prev_tag}" &>/dev/null; then
@@ -612,8 +671,13 @@ _handle_rollback() {
     _rb_cb_line="$(printf '\n\n\u26a0\ufe0f Circuit breaker at %d/%d — next failure will block pushes.\nReset: <code>bay build reset %s</code>' \
       "${_rb_count}" "${CB_MAX_FAILURES}" "${svc}")"
   fi
-  notify_build build.rolled_back "$(printf '\u23ea <b>Rolled back to previous</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Reason:     health check failed after %ds\n\u25b8 Time:       %s\n\nService is running on previous image.\nInvestigate: <code>docker logs %s --tail 50</code>%s' \
-    "${HOSTNAME}" "${svc}" "${HEALTH_CHECK_TIMEOUT}" "$(format_timestamp)" "${svc}" "${_rb_cb_line}")"
+  _rb_failed_line=""
+  if [[ -n "${failed_tag}" ]]; then
+    _rb_failed_line="$(printf '\nCommit <code>%s</code> is marked failed on this host: bay up will not deploy its image.' \
+      "$(bay_html_escape "${failed_tag##*:}")")"
+  fi
+  notify_build build.rolled_back "$(printf '\u23ea <b>Rolled back to previous</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Reason:     health check failed after %ds\n\u25b8 Time:       %s\n\nService is running on previous image.%s\nInvestigate: <code>docker logs %s --tail 50</code>%s' \
+    "${HOSTNAME}" "${svc}" "${HEALTH_CHECK_TIMEOUT}" "$(format_timestamp)" "${_rb_failed_line}" "${svc}" "${_rb_cb_line}")"
   exit 1
 }
 
@@ -957,9 +1021,11 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
   [[ -z "${EXPECTED_REVISION}" ]] \
     || docker tag "${IMAGE_REF}" "${IMAGE_REPO}:${EXPECTED_REVISION}" 2>/dev/null || true
 
-  # Tag running container's image as :previous for rollback
+  # Tag running container's image as :previous for rollback, unless it is the
+  # image just pulled (a re-pull of the running commit): then :previous stays.
   _PREV_DIGEST=$(docker inspect --format '{% raw %}{{.Image}}{% endraw %}' "${SERVICE}" 2>/dev/null || true)
-  if [[ -n "${_PREV_DIGEST}" ]]; then
+  _PULLED_ID=$(docker image inspect --format '{% raw %}{{.Id}}{% endraw %}' "${IMAGE_REF}" 2>/dev/null || true)
+  if [[ -n "${_PREV_DIGEST}" && "${_PREV_DIGEST}" != "${_PULLED_ID}" ]]; then
     docker tag "${_PREV_DIGEST}" "${IMAGE_REPO}:previous" 2>/dev/null || true
     _log "Tagged running image as ${IMAGE_REPO}:previous for rollback"
   fi
@@ -1043,7 +1109,8 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
   _run_container
 
   if ! _wait_healthy "${SERVICE}" "${HEALTH_CHECK_TIMEOUT}"; then
-    _handle_rollback "${SERVICE}" "${IMAGE_REPO}:previous" "${IMAGE_REF}"
+    _handle_rollback "${SERVICE}" "${IMAGE_REPO}:previous" "${IMAGE_REF}" \
+      "${EXPECTED_REVISION:+${IMAGE_REPO}:${EXPECTED_REVISION}}"
   fi
 
   # Revision check: the running container must be the commit the build server
@@ -1085,6 +1152,7 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
   else
     _stamp_receipt "${SERVICE}" "${EXPECTED_REVISION}" "${IMAGE_REPO}:${EXPECTED_REVISION}"
   fi
+  _clear_failed_commit "${SERVICE}" "${EXPECTED_REVISION}"
   _reset_cb
 
   _log "Pull deploy complete for ${SERVICE} at $(date -Iseconds)"
@@ -1236,9 +1304,8 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
 
   # Config-only push: checked before the hold guard and the build. The previous
   # commit is the running container's (a build server that also runs it), else
-  # the commit this checkout built last.
-  PREV_COMMIT=$(_running_commit "${SERVICE}")
-  PREV_COMMIT="${PREV_COMMIT:-${_PREV_HEAD}}"
+  # the commit this checkout built last when its image is in the registry.
+  PREV_COMMIT=$(_prev_commit_remote "${SERVICE}" "${IMAGE_REPO}" "${_PREV_HEAD}")
   if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then
     _config_only_push "${IMAGE_REPO}" "${PREV_COMMIT}"
   fi
@@ -1602,10 +1669,11 @@ fi
 _run_container
 
 if ! _wait_healthy "${SERVICE}" "${HEALTH_CHECK_TIMEOUT}"; then
-  _handle_rollback "${SERVICE}" "${IMAGE_NAME}:previous" "${IMAGE_NAME}:latest"
+  _handle_rollback "${SERVICE}" "${IMAGE_NAME}:previous" "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${SHA}"
 fi
 
 _stamp_receipt "${SERVICE}" "${SHA}" "${IMAGE_NAME}:${SHA}"
+_clear_failed_commit "${SERVICE}" "${SHA}"
 _reset_cb
 
 # ── Fan-out: trigger alias rebuilds for dedup groups ──

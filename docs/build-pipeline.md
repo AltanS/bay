@@ -82,7 +82,11 @@ the push may deploy. The rules for each webhook build:
    circuit breaker is neither counted nor reset. A remote build that is held
    sends no pull signal.
 4. **Deploy.** When the push may deploy, `_promote_latest` tags the old
-   `:latest` as `:previous` and moves `:latest` to `:<commit12>`. The container
+   `:latest` as `:previous` and moves `:latest` to `:<commit12>`. When
+   `:latest` already is that image (a rebuild of the running commit),
+   `:previous` stays where it was, so the health-check rollback still has the
+   last good image. The pull path does the same: the running image becomes
+   `:previous` only when it is not the image just pulled. The container
    is recreated with the `com.bay.config-hash` label of the container it
    replaces, so the next `bay up` plans a noop for it (M116/03). Then
    `rebuild.sh` stamps the container's `commit` and `image` into the receipt
@@ -100,6 +104,21 @@ box to point `:latest` at that commit's image before the container pass
 receipt's image and freezes the env. Both are in [plan.md](plan.md), "Code and
 config".
 
+**A failed health check marks the commit.** When the container of a webhook
+deploy fails its health check, `_handle_rollback` removes the tag
+`<image>:<commit12>` of the failed build (`docker rmi` of the tag; the image
+may stay under other tags) and appends `<commit12> <image id>` to
+`/var/lib/bay/failed-commits/<container>` (the deploy creates the directory,
+group `docker`, mode 0775). `bay_reconcile.codepin` refuses a target whose
+commit or image is listed there: in `branch` mode the code move is skipped and
+`:latest` stays, in `pin` mode the deploy stops. So a later `bay up` whose
+WANTED is that commit never promotes the failed image, also not from the
+registry and not under the commit tag a config-only push gave it. The
+`build.rolled_back` alert names the commit. A deploy of the same commit that
+passes its health check (a manual rebuild after a failure that was not the
+code) clears its line. Each box keeps its own list: a box that never ran the
+failed image does not know it failed elsewhere.
+
 Troubleshooting a hold: `journalctl -u bay-build@<svc>` shows the `HOLD` line
 and its reason. `docker image ls <image>` on the box lists the commit tags
 that `bay rollback --to` can use.
@@ -113,7 +132,10 @@ every file under it) carries no code. `rebuild.sh` checks this first, right
 after it reads the pushed commit and before the build and the hold guard, on
 the box (local builds) and on the build server (remote builds). The previous
 commit is the `com.bay.commit` label of the running container. On a build
-server with no such container, it is the commit that the checkout built last.
+server with no such container, it is the commit that the checkout built last,
+but only when `<image>:<commit12>` of it is in the registry
+(`docker manifest inspect`). A build that failed pushed nothing, so a
+config-only push right after it is not config only: it builds.
 The changed files are `git diff --name-only <previous> <pushed>`. A
 config-only push logs `config-only push <commit12>: run bay up` and ends the
 run. It builds no image, does not move `:latest`, recreates nothing, and sends

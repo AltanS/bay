@@ -191,6 +191,7 @@ SERVICE="svc"
 HOSTNAME="testhost"
 SHA="0123456789ab"
 RECONCILE_PYTHONPATH={str(shipped)!r}
+FAILED_COMMITS_DIR={str(tmp_path / "failed-commits")!r}
 docker() {{ printf '%s\\n' "$*" >> {str(docker_log)!r}; }}
 notify_build() {{ printf '%s %s\\n---END---\\n' "$1" "$2" >> {str(alerts)!r}; }}
 format_timestamp() {{ echo "Jan 01, 00:00 UTC"; }}
@@ -206,6 +207,9 @@ format_timestamp() {{ echo "Jan 01, 00:00 UTC"; }}
             _extract_helper(rendered, "_config_only"),
             _extract_helper(rendered, "_running_commit"),
             _extract_helper(rendered, "_config_only_push"),
+            _extract_helper(rendered, "_forget_failed_build"),
+            _extract_helper(rendered, "_clear_failed_commit"),
+            _extract_helper(rendered, "_prev_commit_remote"),
         ]
     )
     proc = subprocess.run(
@@ -326,7 +330,7 @@ def test_latest_moves_only_when_deploy_proceeds(
 ) -> None:
     proc, calls, _ = _harness(local_sh, '_promote_latest "bay-app/svc" "0123456789ab"', tmp_path)
     assert proc.returncode == 0, proc.stderr
-    assert calls == [
+    assert [c for c in calls if c.startswith("tag ")] == [
         "tag bay-app/svc:latest bay-app/svc:previous",
         "tag bay-app/svc:0123456789ab bay-app/svc:latest",
     ]
@@ -506,7 +510,10 @@ cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
     remote = remote_sh.index(site)
     assert remote < remote_sh.index('HOLD_REASON=$(_hold_reason "${REPO_DIR}")', remote)
     assert remote < remote_sh.index("_remote_buildx() {", remote)
-    assert 'PREV_COMMIT="${PREV_COMMIT:-${_PREV_HEAD}}"' in remote_sh
+    assert (
+        'PREV_COMMIT=$(_prev_commit_remote "${SERVICE}" "${IMAGE_REPO}" "${_PREV_HEAD}")'
+        in remote_sh
+    )
     assert remote_sh.index("_PREV_HEAD=$(git rev-parse --short=12 HEAD") < remote_sh.index(
         "git reset --hard FETCH_HEAD"
     )
@@ -718,3 +725,146 @@ def test_codepin_runs_before_the_pass_only_on_a_full_real_deploy() -> None:
     mkdir = next(t for t in receipt if t.get("name") == "Ensure the receipts directory exists")
     assert mkdir["ansible.builtin.file"]["group"] == "docker"
     assert mkdir["ansible.builtin.file"]["mode"] == "0775"
+
+
+# ── review fixes: :previous, failed builds, the build server's previous commit ──
+
+
+def test_same_commit_rebuild_keeps_previous(local_sh: str, tmp_path: Path) -> None:
+    """S6: when :latest already is the candidate image, :previous stays the rollback target."""
+    same = 'docker() { printf "%s\\n" "$*" >> "$DOCKER_LOG"; [[ "$1" == image ]] && printf "sha256:aaa"; return 0; }\n'
+    script = f'DOCKER_LOG={str(tmp_path / "docker.log")!r}\n' + same + (
+        '_promote_latest "bay-app/svc" "0123456789ab"'
+    )
+    proc, calls, _ = _harness(local_sh, script, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    tags = [c for c in calls if c.startswith("tag ")]
+    assert tags == ["tag bay-app/svc:0123456789ab bay-app/svc:latest"], calls
+
+    # Another image: :previous moves as before.
+    (tmp_path / "docker.log").unlink()
+    other = (
+        'docker() { printf "%s\\n" "$*" >> "$DOCKER_LOG"; '
+        '[[ "$1" == image ]] && printf "%s" "${@: -1}"; return 0; }\n'
+    )
+    script = f'DOCKER_LOG={str(tmp_path / "docker.log")!r}\n' + other + (
+        '_promote_latest "bay-app/svc" "0123456789ab"'
+    )
+    proc, calls, _ = _harness(local_sh, script, tmp_path)
+    assert [c for c in calls if c.startswith("tag ")] == [
+        "tag bay-app/svc:latest bay-app/svc:previous",
+        "tag bay-app/svc:0123456789ab bay-app/svc:latest",
+    ]
+    # The pull path keeps :previous when the pulled image is the running one.
+    remote = _render_rebuild_sh(
+        _remote_service_with_token(), ["animals"], git_deploy_services=["animals"],
+        git_deploy_build_strategy="remote",
+    )
+    assert '[[ -n "${_PREV_DIGEST}" && "${_PREV_DIGEST}" != "${_PULLED_ID}" ]]' in remote
+
+
+def test_failed_health_check_untags_and_records_the_commit(
+    local_sh: str, remote_sh: str, tmp_path: Path
+) -> None:
+    """B4: a rolled-back build loses its commit tag and is recorded for codepin."""
+    fake = (
+        'docker() { printf "%s\\n" "$*" >> "$DOCKER_LOG"; '
+        '[[ "$1" == image ]] && printf "sha256:bad"; return 0; }\n'
+    )
+    script = f'DOCKER_LOG={str(tmp_path / "docker.log")!r}\n' + fake + (
+        '_forget_failed_build svc "bay-app/svc:0123456789ab"\n'
+        '_forget_failed_build svc ""\n'
+    )
+    proc, calls, _ = _harness(local_sh, script, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "rmi bay-app/svc:0123456789ab" in calls
+    record = tmp_path / "failed-commits" / "svc"
+    assert record.read_text() == "0123456789ab sha256:bad\n"
+
+    # A later deploy of that commit that passes its health check clears it.
+    record.write_text("0123456789ab sha256:bad\nfedcba987654 sha256:old\n")
+    proc, _, _ = _harness(
+        local_sh, '_clear_failed_commit svc 0123456789ab\n_clear_failed_commit svc "x; rm -rf /"',
+        tmp_path,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert record.read_text() == "fedcba987654 sha256:old\n"
+
+    # Both health-check rollbacks pass the failed build's commit tag, and a
+    # deploy that passes clears the record of its commit.
+    assert '_handle_rollback "${SERVICE}" "${IMAGE_NAME}:previous" "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${SHA}"' in local_sh
+    assert '"${EXPECTED_REVISION:+${IMAGE_REPO}:${EXPECTED_REVISION}}"' in remote_sh
+    assert '_forget_failed_build "${svc}" "${failed_tag}"' in local_sh
+    assert local_sh.index('_clear_failed_commit "${SERVICE}" "${SHA}"') > local_sh.index(
+        '_handle_rollback "${SERVICE}" "${IMAGE_NAME}:previous"'
+    )
+    assert '_clear_failed_commit "${SERVICE}" "${EXPECTED_REVISION}"' in remote_sh
+    assert 'FAILED_COMMITS_DIR="/var/lib/bay/failed-commits"' in local_sh
+
+
+def test_codepin_never_promotes_a_failed_build(tmp_path: Path, capsys) -> None:
+    """B4: bay up whose WANTED is a commit that failed its health check moves nothing."""
+    from bay_reconcile import codepin
+
+    bad, good = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+    failed = tmp_path / "failed"
+    failed.mkdir()
+    (failed / "web").write_text(f"{bad} sha256:id-bad\n")
+    spec = {"web": "app/web:latest"}
+
+    def pin(images: _Images, targets: dict) -> tuple[int, dict]:
+        code = codepin.main(
+            ["--targets", json.dumps(targets), "--images", json.dumps(spec),
+             "--failed-dir", str(failed)],
+            images=images,
+        )
+        return code, json.loads(capsys.readouterr().out)
+
+    # The local tag is gone (rebuild.sh removed it) and the registry would serve it.
+    ref = "registry.example.com/app/web"
+    reg = _Images({f"{ref}:latest": "id-good"}, {f"{ref}:{bad}": "sha256:id-bad"})
+    code = codepin.main(
+        ["--targets", json.dumps({"web": {"commit": bad}}),
+         "--images", json.dumps({"web": f"{ref}:latest"}), "--failed-dir", str(failed)],
+        images=reg,
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert code == 0 and report["moves"][0]["status"] == "skipped"
+    assert "failed its health check" in report["moves"][0]["detail"]
+    assert reg.pulled == [] and reg.ids[f"{ref}:latest"] == "id-good"
+
+    # Strict (track = "pin"): the deploy stops.
+    images = _Images({"app/web:latest": "sha256:id-good", f"app/web:{good}": "sha256:id-good"})
+    code, report = pin(images, {"web": {"commit": bad, "strict": True}})
+    assert code == 1 and "failed its health check" in report["error"]
+
+    # Another commit tag on the same image (a config-only push named it): refused too.
+    images = _Images({"app/web:latest": "sha256:id-good", "app/web:cccccccccccc": "sha256:id-bad"})
+    code, report = pin(images, {"web": {"commit": "cccccccccccc"}})
+    assert report["moves"][0]["status"] == "skipped"
+    assert images.ids["app/web:latest"] == "sha256:id-good"
+
+    # A healthy commit still moves.
+    images = _Images({"app/web:latest": "sha256:id-x", f"app/web:{good}": "sha256:id-good"})
+    code, report = pin(images, {"web": {"commit": good}})
+    assert code == 0 and report["moves"][0]["status"] == "retag"
+
+
+def test_build_server_previous_commit_needs_its_image(remote_sh: str, tmp_path: Path) -> None:
+    """S2: the checkout's last commit counts only when its image is in the registry."""
+    say = 'printf "[%s]" "$(_prev_commit_remote svc bay-app/svc 0123456789abcdef)"'
+    # No running container, image in the registry: that commit.
+    have = 'docker() { [[ "$1" == manifest ]] && return 0; printf ""; return 0; }\n'
+    proc, _, _ = _harness(remote_sh, have + say, tmp_path)
+    assert proc.stdout == "[0123456789abcdef]", proc.stderr
+    # Its build failed (no image pushed): no previous commit, so not config only.
+    missing = 'docker() { [[ "$1" == manifest ]] && return 1; printf ""; return 0; }\n'
+    proc, _, _ = _harness(remote_sh, missing + say, tmp_path)
+    assert proc.stdout == "[]"
+    # A running container wins, without asking the registry.
+    running = (
+        'docker() { [[ "$1" == manifest ]] && exit 9; '
+        '[[ "$1" == inspect ]] && printf "fedcba987654"; return 0; }\n'
+    )
+    proc, _, _ = _harness(remote_sh, running + say, tmp_path)
+    assert proc.stdout == "[fedcba987654]"

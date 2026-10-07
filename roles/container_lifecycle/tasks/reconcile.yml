@@ -606,6 +606,18 @@
           # keeps a recap with changed=0.
           changed_when: false
 
+        - name: Ensure the failed-commits directory exists
+          ansible.builtin.file:
+            # rebuild.sh (app_user) records a build whose health check failed
+            # here, one file per container; bay_reconcile.codepin refuses
+            # those commits, so bay up never promotes a failed image. Same
+            # literal as FAILED_COMMITS_DIR in rebuild.sh.j2 and codepin.py.
+            path: /var/lib/bay/failed-commits
+            state: directory
+            owner: root
+            group: docker
+            mode: "0775"
+
       rescue:
         - name: Warn that the deploy receipt was not written
           ansible.builtin.debug:

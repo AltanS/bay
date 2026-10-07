@@ -18,8 +18,15 @@ A target names its commit in one of two ways:
 cannot be pulled, and the report lists the commit tags that are there. A
 non-strict target is skipped with a note, and the container keeps its image.
 
-``python -m bay_reconcile.codepin --targets <json> [--prev <path>]``. Prints
-one JSON report. Pure planning in :func:`plan_moves`; the docker calls are in
+A commit whose webhook build failed its health check on this box is refused
+the same way: ``rebuild.sh`` records ``<commit12> <image id>`` per container in
+``/var/lib/bay/failed-commits/<container>`` (:data:`FAILED_COMMITS_DIR`) and
+untags it. A target whose commit, or whose image, is recorded there never
+moves ``:latest`` (unless ``:latest`` already is that image: then nothing
+moves anyway).
+
+``python -m bay_reconcile.codepin --targets <json> [--prev <path>]
+[--failed-dir <dir>]``. Prints one JSON report. Pure planning in :func:`plan_moves`; the docker calls are in
 :class:`SdkImages`.
 """
 
@@ -33,6 +40,9 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from .images import is_commit, short, split_ref
+
+#: Written by rebuild.sh (FAILED_COMMITS_DIR there): one file per container.
+FAILED_COMMITS_DIR = "/var/lib/bay/failed-commits"
 
 
 class Images(Protocol):
@@ -87,11 +97,39 @@ def _registry_ref(repo: str) -> bool:
     return "/" in repo and ("." in first or ":" in first or first == "localhost")
 
 
+@dataclass
+class Failed:
+    """What failed its health check on this box, for one container."""
+
+    commits: set[str] = field(default_factory=set)
+    images: set[str] = field(default_factory=set)
+
+
+def load_failed(directory: str | None, name: str) -> Failed:
+    """The failed builds recorded for container ``name``: ``<commit12> <image id>`` lines."""
+    out = Failed()
+    if not directory or not name or "/" in name or name.startswith("."):
+        return out
+    try:
+        with open(f"{directory}/{name}", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        parts = line.split()
+        if parts and is_commit(parts[0]):
+            out.commits.add(short(parts[0]))
+        if len(parts) > 1 and parts[1] != "-":
+            out.images.add(parts[1])
+    return out
+
+
 def plan_moves(
     targets: Sequence[Mapping[str, Any]],
     images: Images,
     *,
     prev: Mapping[str, Any] | None = None,
+    failed: Mapping[str, Failed] | None = None,
 ) -> list[Move]:
     """Decide and apply each move. Returns one Move per target."""
     out: list[Move] = []
@@ -123,7 +161,10 @@ def plan_moves(
             out.append(Move(name, "skipped", detail="the target names no commit"))
             continue
         source = f"{repo}:{commit}"
+        bad = (failed or {}).get(name) or Failed()
         have = images.image_id(source)
+        if have is None and commit in bad.commits:
+            have = ""  # untagged after its failure: never pulled back
         if have is None and _registry_ref(repo) and images.pull(source):
             have = images.image_id(source)
         if have is None:
@@ -139,8 +180,22 @@ def plan_moves(
                 )
             )
             continue
-        if images.image_id(image) == have:
+        if have and images.image_id(image) == have:
             out.append(Move(name, "noop", source=source, target=image, strict=strict))
+            continue
+        if commit in bad.commits or have in bad.images:
+            out.append(
+                Move(
+                    name,
+                    "missing" if strict else "skipped",
+                    source=source,
+                    target=image,
+                    detail=f"{source} failed its health check on this box, so it is never "
+                    "deployed again; push a fix",
+                    strict=strict,
+                    available=images.commit_tags(repo),
+                )
+            )
             continue
         if images.image_id(image) is not None:
             images.tag(image, f"{repo}:previous")
@@ -208,6 +263,11 @@ def main(argv: Sequence[str] | None = None, *, images: Images | None = None) -> 
     )
     parser.add_argument("--images", default="{}", help="JSON {container: spec image}")
     parser.add_argument("--prev", default=None, help="the env's .prev.json receipt")
+    parser.add_argument(
+        "--failed-dir",
+        default=FAILED_COMMITS_DIR,
+        help="where rebuild.sh records failed builds, one file per container",
+    )
     args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
         targets = json.loads(args.targets)
@@ -225,24 +285,27 @@ def main(argv: Sequence[str] | None = None, *, images: Images | None = None) -> 
         for name, t in sorted(targets.items())
         if isinstance(t, Mapping) and name in spec_images
     ]
-    moves = plan_moves(rows, images or SdkImages(), prev=_load_prev(args.prev))
-    failed = [m for m in moves if m.status == "missing" and m.strict]
+    failed = {str(r["name"]): load_failed(args.failed_dir, str(r["name"])) for r in rows}
+    moves = plan_moves(
+        rows, images or SdkImages(), prev=_load_prev(args.prev), failed=failed
+    )
+    refused = [m for m in moves if m.status == "missing" and m.strict]
     print(
         json.dumps(
             {
-                "ok": not failed,
+                "ok": not refused,
                 "changed": any(m.status == "retag" for m in moves),
                 "moves": [m.to_dict() for m in moves],
                 "error": "; ".join(
                     f"{m.name}: {m.detail}; commit tags on this box: "
                     + (", ".join(m.available) or "none")
-                    for m in failed
+                    for m in refused
                 )
                 or None,
             }
         )
     )
-    return 1 if failed else 0
+    return 1 if refused else 0
 
 
 if __name__ == "__main__":
