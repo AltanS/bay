@@ -20,12 +20,23 @@ Spec 01: plan, show and rollback tell the truth
 - `bay status --json` schema: `fleet.source` lists only the four sources Bay sets; `cwd` is gone.
 - deploy-receipt.md: a container built from source before 2.1 has `commit: null` until its first build after 2.1.
 
+Spec 02: the webhook follows bay up
+
+- `bay up` registers a new build app with the webhook receiver and enables its build trigger. The `git_deploy` role renders, under the `deploy_stack` tag too: the receiver directories, the HMAC key, `config.json`, the receiver files and the `bay-webhook:latest` image (built when the files changed or the image is missing), the trigger units `bay-build@.path`, `bay-build@.service` and `bay-build-alert@.service`, `select-builder.sh`, `build-alert.sh`, and the enable of `bay-build@<container>.path` for each build container. The work moved from `webhook.yml` and `systemd.yml` into `render_webhook.yml` and `render_trigger_units.yml`.
+- A change of `config.json` restarts the receiver (`Restart bay-webhook`). The receiver reads the file once, at start.
+- `bay up` stops and disables `bay-build@<container>.path` for every container that left the box. After `bay remove`, no trigger of the removed app is left running.
+- The webhook receiver passes a push that changes the project's `bay.toml` or a file its mounts read (a file under a mounted directory too), whatever `watch` and `ignore` say. It logs `config file changed: <files>`. Such a push now always reaches the config-only rule and the hold guard. You no longer add `bay.toml` and the mounted files to `watch`. The receiver config carries `bay_toml_path` and `bay_toml_files` per service for this.
+- `bay webhook` is removed, with the root `webhook.yml` playbook. It ran without the fleet's inventory and read deploy keys from `/opt/bay/` only.
+- Every alert delivery from a shell emitter writes one line to stderr, with no setting: `alert <id> <level> sent <adapter>`, `alert <id> failed <adapter> <reason>` (`http_code=<n>` or `unreachable`), or `alert <id> <level> muted`. The line lands in the journal of the unit that sent it, for example `journalctl -u bay-build@<container>`. `BAY_ALERT_FAILURE_LOG` works as before. See docs/alerting.md, "The delivery log".
+- The first clone and the SSH deploy key of a `local` build app still come only from a `bay deploy <env>` with no `--tags`.
+
 ### Upgrade notes
 
 - New status word `ahead` in `bay show`. A script that matches status words must accept it.
 - New exit code 40 from `bay up` (and `bay up <env>`): the expected first-image failure. A script that treats every non-zero exit as an error still works; one that matches exit 1 for a failed deploy must accept 40 too.
 - New lock field `previous.containers`, written by the next `bay up` that moves a pin. A lock written before 2.2 has none, so a plain `bay rollback` falls back to the box's `<env>.prev.json` and says so in a note, until the next pin move.
 - New receipt field `failed` per container. It ships with the deploy, so it needs no manual step.
+- `bay webhook` is removed. Use `bay deploy <env>` instead, or `bay up`, which now renders the receiver and the build triggers. The first `bay up` on each box with a webhook receiver after 2.2.0 rebuilds `bay-webhook:latest` (the receiver code changed) and recreates the `bay-webhook` container. Expect a `rebuild_script` step on those boxes too: the alert snippet changed, so `rebuild.sh` renders anew. Each emitter gets the delivery line when its script renders next. `bay up` renders `rebuild.sh`, `build-alert.sh` and the log archive scripts. `bay deploy <env>` renders the backup scripts and the trigger watchdog. The disk and outbound checks need `bay --fleet <path> provision <env> --tags outbound_monitor`.
 
 ## [2.1.13] - 2026-10-07
 
