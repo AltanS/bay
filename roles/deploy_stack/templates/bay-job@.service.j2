@@ -1,0 +1,12 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Bay job %i
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User={{ app_user }}
+ExecStart={{ stack_dir }}/jobs/%i.sh
+# A stop (or a timeout) kills the docker client, not the container.
+ExecStopPost=/bin/sh -c 'docker rm -f %i >/dev/null 2>&1 || true'

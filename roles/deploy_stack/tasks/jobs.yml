@@ -1,0 +1,146 @@
+---
+# Scheduled jobs (bay.toml [[jobs]], compiled to the top-level `jobs:` map).
+#
+# Each job whose main container (`of`) runs on this host gets:
+#   {{ stack_dir }}/jobs/<job>.sh          docker run --rm of the main image
+#   /etc/systemd/system/bay-job@<job>.timer OnCalendar from the compiled
+#                                           schedule, in UTC
+# plus the shared template unit bay-job@.service (Type=oneshot, so a run never
+# overlaps itself: systemd does not start an active unit again).
+#
+# A job that is gone (removed from bay.toml, or its container moved to another
+# host) loses its timer and its script here. The units live in /etc, so those
+# tasks run as root: this play's become_user is app_user.
+
+- name: Select the jobs whose container runs on this host
+  ansible.builtin.set_fact:
+    _bay_jobs: >-
+      {{ (jobs | default({})) | dict2items
+         | selectattr('value.of', 'in', (active_services | default({})).keys() | list
+                                        + (active_accessories | default({})).keys() | list)
+         | list | items2dict }}
+
+- name: Ensure the jobs directory exists
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/jobs"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0750"
+  when: _bay_jobs | length > 0
+
+- name: Render the job scripts
+  ansible.builtin.template:
+    src: bay-job.sh.j2
+    dest: "{{ stack_dir }}/jobs/{{ item.key }}.sh"
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0750"
+  loop: "{{ _bay_jobs | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    job_name: "{{ item.key }}"
+    job: "{{ item.value }}"
+    job_main: "{{ ((active_services | default({})) | combine(active_accessories | default({})))[item.value.of] }}"
+    job_memory: "{{ item.value.memory | default(job_main.mem_limit | default('')) }}"
+
+- name: Install the job service unit
+  ansible.builtin.template:
+    src: bay-job@.service.j2
+    dest: /etc/systemd/system/bay-job@.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  become_user: root
+  register: _bay_job_service
+  when: _bay_jobs | length > 0
+
+- name: Install the job timers
+  ansible.builtin.template:
+    src: bay-job@.timer.j2
+    dest: "/etc/systemd/system/bay-job@{{ item.key }}.timer"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _bay_jobs | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    job_name: "{{ item.key }}"
+    job: "{{ item.value }}"
+  become: true
+  become_user: root
+  register: _bay_job_timers
+
+- name: Find the job timers on this host
+  ansible.builtin.find:
+    paths: /etc/systemd/system
+    patterns: "bay-job@*.timer"
+    file_type: file
+  register: _bay_job_timer_files
+
+- name: Find the job scripts on this host
+  ansible.builtin.find:
+    paths: "{{ stack_dir }}/jobs"
+    patterns: "*.sh"
+    file_type: file
+  register: _bay_job_script_files
+
+- name: Name the jobs that are gone
+  ansible.builtin.set_fact:
+    _bay_jobs_gone: >-
+      {{ ((_bay_job_timer_files.files | default([]) | map(attribute='path') | map('basename')
+           | map('regex_replace', '^bay-job@', '') | map('regex_replace', '[.]timer$', '') | list)
+          + (_bay_job_script_files.files | default([]) | map(attribute='path') | map('basename')
+           | map('regex_replace', '[.]sh$', '') | list))
+         | unique | reject('in', _bay_jobs.keys() | list) | sort }}
+
+- name: Stop and disable the timers of jobs that are gone
+  ansible.builtin.systemd:
+    name: "bay-job@{{ item }}.timer"
+    state: stopped
+    enabled: false
+  loop: "{{ _bay_jobs_gone }}"
+  become: true
+  become_user: root
+  failed_when: false
+
+- name: Remove the timers of jobs that are gone
+  ansible.builtin.file:
+    path: "/etc/systemd/system/bay-job@{{ item }}.timer"
+    state: absent
+  loop: "{{ _bay_jobs_gone }}"
+  become: true
+  become_user: root
+  register: _bay_job_removed
+
+- name: Remove the scripts of jobs that are gone
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/jobs/{{ item }}.sh"
+    state: absent
+  loop: "{{ _bay_jobs_gone }}"
+
+- name: Reload systemd for changed job units  # noqa: no-handler
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+  become_user: root
+  when: >-
+    _bay_job_service is changed
+    or _bay_job_timers is changed
+    or _bay_job_removed is changed
+
+# Not in check mode: a timer the dry run did not write cannot be started.
+- name: Enable and start the job timers
+  ansible.builtin.systemd:
+    name: "bay-job@{{ item.key }}.timer"
+    enabled: true
+    state: started
+  loop: "{{ _bay_jobs | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  become: true
+  become_user: root
+  when: not ansible_check_mode

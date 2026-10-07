@@ -99,11 +99,17 @@ class CompileResult:
     notes: list[str] = field(default_factory=list)
     #: ``[tailnet.routes]`` as the map the traefik and headscale templates read.
     tailnet_proxies: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: ``[[jobs]]``, keyed by job container name (see :meth:`_Compiler._emit_jobs`).
+    jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def data(self) -> dict[str, Any]:
         out: dict[str, Any] = {"accessories": self.accessories, "services": self.services}
         if self.webhook is not None:
             out["webhook"] = self.webhook
+        # Each top-level key below only when it has entries, so a fleet that
+        # uses none of them compiles to the same bytes as before 2.3.0.
+        if self.jobs:
+            out["jobs"] = self.jobs
         if self.tailnet_proxies:
             # Only when routes exist, so a fleet without them compiles to the same bytes.
             out["tailnet_proxies"] = self.tailnet_proxies
@@ -223,6 +229,7 @@ class _Compiler:
         self.units: dict[tuple[str, str], _Unit] = {}
         self.tailnet_exposed: set[str] = set()
         self.notes: set[str] = set()
+        self.jobs: dict[str, dict[str, Any]] = {}
 
     # ── driver ──────────────────────────────────────────────────────────
     def run(self) -> CompileResult:
@@ -253,6 +260,7 @@ class _Compiler:
             unsupported=sorted(self.unsupported),
             notes=sorted(self.notes),
             tailnet_proxies=proxies,
+            jobs=self.jobs,
         )
 
     def _err(self, msg: str) -> None:
@@ -453,12 +461,46 @@ class _Compiler:
     # ── projects ────────────────────────────────────────────────────────
     def _emit_unit(self, unit: _Unit) -> None:
         doc = unit.doc
-        for i, _job in enumerate(doc.get("jobs", [])):
-            self._todo(unit, f"jobs[{i}]", "scheduled jobs")
         if "backup" in doc:
             self._todo(unit, "backup", "project backup schedule for volumes")
         for service in ["web", *sorted(doc.get("services", {}))]:
             self._emit_container(unit, service)
+        self._emit_jobs(unit)
+
+    def _emit_jobs(self, unit: _Unit) -> None:
+        """``[[jobs]]`` -> ``jobs:``: one entry per job, keyed by its container name.
+
+        ``{of: <main container>, schedule: <cron>, on_calendar: <timer>,
+        command: <cmd>, memory: <size>}`` (``memory`` only when set). The
+        deploy renders a script and a systemd timer per entry on the box of
+        ``of``; the job runs the main container's image with its env file,
+        network and mounts. ``on_calendar`` is the cron line converted for
+        the timer (:mod:`bay_cli.cron`), so a line a timer cannot express
+        fails here, not on the box.
+        """
+        from bay_cli import cron
+
+        web = unit.containers["web"]
+        if web not in self.services and web not in self.accessories:
+            return  # the main container is not emitted; its own TODO says why
+        for i, job in enumerate(unit.doc.get("jobs", [])):
+            where = f"jobs[{i}]"
+            name = self._container_name(unit.project, unit.env, f"job-{job['name']}", unit.lock)
+            self._claim_container(name, f"{unit.label} job {job['name']}")
+            try:
+                on_calendar = cron.to_on_calendar(job["schedule"])
+            except ValueError as exc:
+                self._err(f"{unit.label}: {where}.schedule: {exc}")
+                continue
+            entry: dict[str, Any] = {
+                "of": web,
+                "schedule": job["schedule"],
+                "on_calendar": on_calendar,
+                "command": job["command"],
+            }
+            if "memory" in job:
+                entry["memory"] = job["memory"]
+            self.jobs[name] = entry
 
     def _emit_container(self, unit: _Unit, service: str) -> None:
         doc = unit.doc

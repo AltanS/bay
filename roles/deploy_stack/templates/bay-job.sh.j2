@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# Bay job {{ job_name }} (bay.toml [[jobs]] of {{ job.of }}). Run by
+# bay-job@{{ job_name }}.service, which bay-job@{{ job_name }}.timer starts.
+# One run at a time: systemd does not start the service while it runs.
+set -euo pipefail
+
+# The image the main container runs now, so a job always runs the deployed code.
+IMAGE=$(docker inspect --format '{% raw %}{{.Config.Image}}{% endraw %}' {{ job.of | quote }})
+
+exec docker run --rm \
+  --name {{ job_name | quote }} \
+  --label {{ ('com.bay.job-of=' ~ job.of) | quote }} \
+{% if job_main.network_mode is defined %}
+  --network {{ job_main.network_mode | quote }} \
+{% else %}
+  --network {{ traefik_docker_network | default('services') | quote }} \
+{% endif %}
+{% if job_main.env is defined or job_main.database is defined %}
+  --env-file {{ (stack_dir ~ '/env/' ~ job.of ~ '.env') | quote }} \
+{% endif %}
+{% for vol in job_main.volumes | default([]) | bay_prefix_volumes(stack_name | default('bay')) %}
+  -v {{ vol | quote }} \
+{% endfor %}
+{% if job_memory %}
+  --memory {{ job_memory | quote }} \
+  --memory-swap {{ job_memory | quote }} \
+{% endif %}
+  "${IMAGE}" sh -c {{ job.command | quote }}

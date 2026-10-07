@@ -33,6 +33,30 @@
       "$ref": "#/$defs/webhook_block",
       "description": "Deployment webhook configuration."
     },
+    "jobs": {
+      "type": "object",
+      "description": "Scheduled one-shot jobs, compiled from bay.toml [[jobs]]. Keyed by the job container name. The deploy renders a script and a systemd timer per job on the box that runs `of`.",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["of", "schedule", "on_calendar", "command"],
+        "properties": {
+          "of": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "description": "The container whose image, env file, network and mounts the job uses."
+          },
+          "schedule": { "type": "string", "description": "The five-field cron line from bay.toml, UTC." },
+          "on_calendar": { "type": "string", "description": "The same schedule as a systemd OnCalendar expression, UTC." },
+          "command": { "type": "string", "minLength": 1 },
+          "memory": { "type": "string", "pattern": "^[0-9]+[bkmgBKMG]?$" }
+        }
+      }
+    },
     "tailnet_proxies": {
       "type": "object",
       "description": "Tailnet routes, compiled from [tailnet.routes] in bay.fleet.toml. Read by the traefik, headscale and crowdsec templates on the ingress box.",

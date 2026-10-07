@@ -1,0 +1,11 @@
+# {{ ansible_managed }}
+# bay.toml schedule "{{ job.schedule }}" (cron, UTC).
+[Unit]
+Description=Bay job timer for {{ job_name }}
+
+[Timer]
+OnCalendar={{ job.on_calendar }}
+Unit=bay-job@{{ job_name }}.service
+
+[Install]
+WantedBy=timers.target

@@ -903,7 +903,6 @@ def test_webhook_domain_collision(fleet: Path) -> None:
 
 
 UNSUPPORTED = [
-    pytest.param(SHOP, "[deploy.production]", '[[jobs]]\nname = "nightly"\nschedule = "0 2 * * *"\ncommand = "x"\n\n[deploy.production]', "scheduled jobs", id="jobs"),
     pytest.param(SHOP, 'volume = "data"\nbackup = false', 'volume = "data"\nbackup = false\nowner = "472:472"', "a volume owner", id="mount-owner"),
     pytest.param(SHOP, "redirect = false\n", "", "alias redirect (HTTP 308); the aliases are served instead", id="alias-redirect"),
     pytest.param(SHOP, "[deploy.production]", '[backup]\nkeep = "7d"\n\n[deploy.production]', "project backup schedule for volumes", id="project-backup"),
@@ -924,17 +923,17 @@ def test_unsupported_feature_is_reported(fleet: Path, rel: Path, old: str, new: 
 
 
 def test_unsupported_refuses_without_the_flag(fleet: Path, tmp_path: Path) -> None:
-    edit(fleet, SHOP, "[deploy.production]", '[[jobs]]\nname = "nightly"\nschedule = "0 2 * * *"\ncommand = "x"\n\n[deploy.production]')
+    edit(fleet, SHOP, 'volume = "data"\nbackup = false', 'volume = "data"\nbackup = false\nowner = "472:472"')
     out = tmp_path / "out"
     refused = cli(fleet, "--out", str(out))
     assert refused.exit_code != 0
-    assert "# TODO(role) shop: jobs[0]: scheduled jobs" in refused.output
+    assert "# TODO(role) shop: mounts[0].owner: a volume owner" in refused.output
     assert not (out / GENERATED_SERVICES).exists()
 
     allowed = cli(fleet, "--out", str(out), "--allow-unsupported")
     assert allowed.exit_code == 0, allowed.output
     text = (out / GENERATED_SERVICES).read_text()
-    assert "# TODO(role) shop: jobs[0]: scheduled jobs\n" in text
+    assert "# TODO(role) shop: mounts[0].owner: a volume owner\n" in text
     digest, body = compiler.split_header(text)
     assert digest == compiler.body_digest(body)
 
@@ -953,6 +952,73 @@ def test_compile_release_command(fleet: Path) -> None:
     assert s["shop-staging"]["release"] == "bin/migrate --staging"
     assert "release" not in s["shop-api"]
     assert "release" not in s["gatus"]
+
+
+def test_compile_jobs_as_cron_containers(fleet: Path) -> None:
+    """``[[jobs]]`` compile to ``jobs:``, named ``<name>-job-<job>`` / ``<name>-<env>-job-<job>``."""
+    edit(fleet, SHOP, "[deploy.production]", (
+        '[[jobs]]\nname = "nightly"\nschedule = "30 2 * * 1-5"\ncommand = "bin/report --all"\n\n'
+        '[[jobs]]\nname = "tick"\nschedule = "*/15 * * * *"\ncommand = "bin/tick"\nmemory = "128m"\n\n'
+        "[deploy.production]"
+    ))
+    result = compiled(fleet)
+    assert not any(u.path.startswith("jobs") for u in result.unsupported)
+    jobs = yaml.safe_load(result.body())["jobs"]
+    assert jobs["shop-job-nightly"] == {
+        "of": "shop",
+        "schedule": "30 2 * * 1-5",
+        "on_calendar": "Mon,Tue,Wed,Thu,Fri *-*-* 02:30:00 UTC",
+        "command": "bin/report --all",
+    }
+    assert jobs["shop-job-tick"]["memory"] == "128m"
+    assert jobs["shop-job-tick"]["on_calendar"] == "*-*-* *:00/15:00 UTC"
+    assert jobs["shop-staging-job-nightly"]["of"] == "shop-staging"
+    assert set(jobs) == {
+        "shop-job-nightly", "shop-job-tick", "shop-staging-job-nightly", "shop-staging-job-tick",
+    }
+
+    # A line a timer cannot express is a compile error that names the job.
+    edit(fleet, SHOP, '[[jobs]]\nname = "tick"', '[[jobs]]\nname = "tock"')
+    edit(fleet, SHOP, 'schedule = "30 2 * * 1-5"', 'schedule = "0 2 1 * 1"')
+    msgs = problems(fleet)
+    assert any("jobs[0].schedule" in m and "day of the week" in m for m in msgs), msgs
+
+
+def test_job_name_collides_with_a_container(fleet: Path) -> None:
+    _second_project(fleet, "shop-job-nightly", '[access]\nmode = "public"\n[deploy.production]\ndomain = "j.example.com"\n')
+    edit(fleet, SHOP, "[deploy.production]", '[[jobs]]\nname = "nightly"\nschedule = "0 2 * * *"\ncommand = "x"\n\n[deploy.production]')
+    assert any("container name shop-job-nightly is used by both" in m for m in problems(fleet))
+
+
+@pytest.mark.parametrize(("line", "want"), [
+    ("0 2 * * *", "*-*-* 02:00:00 UTC"),
+    ("*/5 * * * *", "*-*-* *:00/5:00 UTC"),
+    ("0 */6 * * *", "*-*-* 00/6:00:00 UTC"),
+    ("15,45 8-10 * * *", "*-*-* 08,09,10:15,45:00 UTC"),
+    ("0 0 1 */3 *", "*-01/3-01 00:00:00 UTC"),
+    ("0 4 * * sun", "Sun *-*-* 04:00:00 UTC"),
+    ("0 4 * * 0,7", "Sun *-*-* 04:00:00 UTC"),
+    ("5/20 1 * jan-mar *", "*-01,02,03-* 01:05,25,45:00 UTC"),
+])
+def test_cron_to_on_calendar(line: str, want: str) -> None:
+    from bay_cli import cron
+
+    assert cron.to_on_calendar(line) == want
+
+
+@pytest.mark.parametrize(("line", "said"), [
+    ("61 * * * *", "minute: 61 is outside 0-59"),
+    ("0 2 1 * 1", "both the day of the month and the day of the week"),
+    ("0 2 * *", "a cron line has five"),
+    ("0 2 * * mon-x", "day of week: 'x' is not a number"),
+    ("0 2 5-1 * *", "runs backwards"),
+    ("*/0 * * * *", "step '0'"),
+])
+def test_cron_line_a_timer_cannot_express(line: str, said: str) -> None:
+    from bay_cli import cron
+
+    with pytest.raises(ValueError, match=re.escape(said)):
+        cron.to_on_calendar(line)
 
 
 def test_cross_box_database_is_unsupported(fleet: Path) -> None:

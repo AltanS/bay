@@ -649,6 +649,25 @@ def _with(**changes: Any) -> dict[str, Any]:
             {"webhook": {"domain": "b.example.com"}},
             {("fleet", "update", "shared")},
         ),
+        (
+            "job added",
+            {"services": {"webapp": _WEB}},
+            {"services": {"webapp": _WEB},
+             "jobs": {"webapp-job-x": {"of": "webapp", "schedule": "0 2 * * *", "command": "x"}}},
+            {("job", "create", "safe")},
+        ),
+        (
+            "job changed",
+            {"jobs": {"webapp-job-x": {"of": "webapp", "schedule": "0 2 * * *", "command": "x"}}},
+            {"jobs": {"webapp-job-x": {"of": "webapp", "schedule": "0 3 * * *", "command": "x"}}},
+            {("job", "update", "safe")},
+        ),
+        (
+            "job removed",
+            {"jobs": {"webapp-job-x": {"of": "webapp", "schedule": "0 2 * * *", "command": "x"}}},
+            {},
+            {("job", "remove", "safe")},
+        ),
     ],
 )
 def test_risk_classification(label: str, old: dict, new: dict, expect: set) -> None:

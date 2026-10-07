@@ -258,6 +258,12 @@
       ansible.builtin.include_tasks: database_provision.yml
       tags: [deploy_stack]
 
+    # ── Scheduled jobs (bay.toml [[jobs]]) ───────────────────────────────
+
+    - name: Install the scheduled job timers
+      ansible.builtin.include_tasks: jobs.yml
+      tags: [deploy_stack]
+
     # ── Config Change Restart ─────────────────────────────────────────
 
     - name: Build config file to container mapping  # noqa: no-handler

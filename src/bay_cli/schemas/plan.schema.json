@@ -301,7 +301,7 @@
       "properties": {
         "id": { "type": "string", "pattern": "^s[1-9][0-9]*$" },
         "kind": {
-          "enum": ["container", "volume", "database", "database_user", "secret", "resource", "tailnet", "route", "fleet", "move", "image"]
+          "enum": ["container", "volume", "database", "database_user", "secret", "resource", "tailnet", "route", "fleet", "move", "image", "job", "backup"]
         },
         "container": { "type": ["string", "null"] },
         "resource": {

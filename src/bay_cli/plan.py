@@ -1338,8 +1338,50 @@ def diff_steps(
         steps.append(
             _step("fleet", "update", "shared", "the deploy webhook changes", resource="webhook")
         )
+    steps.extend(_job_steps(current, wanted, project=project, mine=mine, owners=owners))
     for i, step in enumerate(steps, start=1):
         step["id"] = f"s{i}"
+    return steps
+
+
+def _owner_of(
+    container: Any, *, project: str | None, mine: set[str], owners: Mapping[str, str]
+) -> str | None:
+    if container in mine:
+        return project
+    return owners.get(str(container))
+
+
+def _job_steps(
+    current: Mapping[str, Any],
+    wanted: Mapping[str, Any],
+    *,
+    project: str | None,
+    mine: set[str],
+    owners: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """One ``job`` step per scheduled job that is new, changed or gone (all safe).
+
+    A job is not a container the reconciler runs: ``bay up`` installs its
+    script and timer on the box of its main container (``of``).
+    """
+    old_all = current.get("jobs") if isinstance(current.get("jobs"), Mapping) else {}
+    new_all = wanted.get("jobs") if isinstance(wanted.get("jobs"), Mapping) else {}
+    steps: list[dict[str, Any]] = []
+    for name in sorted(set(old_all) | set(new_all)):
+        old, new = old_all.get(name), new_all.get(name)
+        if old == new:
+            continue
+        of = (new or old or {}).get("of")
+        who = _owner_of(of, project=project, mine=mine, owners=owners)
+        if old is None:
+            action, reason = "create", f"new scheduled job of {of}: {new.get('schedule')} UTC"
+        elif new is None:
+            action, reason = "remove", f"scheduled job of {of} removed; bay up stops its timer"
+        else:
+            action = "update"
+            reason = "scheduled job changed: " + ", ".join(_changed_keys(old, new))
+        steps.append(_step("job", action, "safe", reason, container=str(name), project=who))
     return steps
 
 
