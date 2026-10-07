@@ -868,3 +868,34 @@ def test_build_server_previous_commit_needs_its_image(remote_sh: str, tmp_path: 
     )
     proc, _, _ = _harness(remote_sh, running + say, tmp_path)
     assert proc.stdout == "[fedcba987654]"
+
+
+def test_adopt_push_against_new_script_is_config_only(local_sh: str, tmp_path: Path) -> None:
+    """B1: the adopt commit adds only bay.toml and its files; the script bay up wrote sees
+    a config-only push: it tags the running image with the new commit and exits 0."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(tmp_path, "init", "-q", "-b", "main", str(repo))
+    (repo / "app.js").write_text("console.log(1)\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "app")
+    running = _git(repo, "rev-parse", "--short=12", "HEAD")
+    # The adopt commit: bay.toml and the mounted file beside it, nothing else.
+    (repo / "conf").mkdir()
+    adopt = _commit(repo, {"bay.toml": TOML, "conf/site.yaml": "site: 1\n"})
+
+    trigger = tmp_path / "svc.trigger.running"
+    trigger.write_text("corr-1\n")
+    script = f"trap 'rm -f {str(trigger)!r}' EXIT\n" + _decide(repo, running)
+    proc, _, alerts = _harness(local_sh, script, tmp_path, env=_pinned_env())
+    assert proc.returncode == 0, proc.stderr
+    assert f"config-only push {adopt}: run bay up" in proc.stdout
+    assert "BUILD" not in proc.stdout and alerts == []
+    calls = (tmp_path / "docker.log").read_text().splitlines()
+    assert calls[1:] == [f"tag bay-app/svc:{running} bay-app/svc:{adopt}"]
+
+    # The script from before the adopt (no BAY_TOML_PATH) would build it.
+    old = {"BAY_TOML_PATH": "", "PINNED_TOML_HASH": "", "PINNED_BUILD_HASH": "",
+           "TRACK": "branch", "FROZEN": ""}
+    proc, _, _ = _harness(local_sh, _decide(repo, running), tmp_path, env=old)
+    assert "config-only push" not in proc.stdout and "BUILD []" in proc.stdout

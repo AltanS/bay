@@ -7,7 +7,9 @@
    unless ``bay approve`` recorded an approval, or ``--force --reason`` is
    given; the reason is written to the lock's ``previous``. Refuse a repo
    project's commit that is on no branch of its remote ("push first"): the
-   box can only build what the remote has.
+   box can only build what the remote has. The one exception is the
+   ``bay adopt`` commit (``adopted.app_commit``): it is taken unpushed and
+   moves no code, so the push after ``bay up`` is config only.
 2. Write the lock: the project pin moves to the planned commit, the env
    record gets ``result: pending`` and ``previous`` (the pin it replaces).
 3. Compile the fleet into its services file (hash header).
@@ -320,6 +322,12 @@ def _apply_plan(
     env = str(plan["env"])
     box_env = str(plan["box_env"])
     for proj, commit in members:
+        if planmod.adopt_pending(proj, env, commit):
+            # The adopt commit: bay up deploys its config before the push, so
+            # the push meets the new rebuild.sh and is config only.
+            say(f"{proj.name}: {commit[:12]} is the bay adopt commit; no code moves, "
+                "git push it after this bay up")
+            continue
         on_remote = planmod.commit_on_remote(proj, commit)
         if on_remote is not True:
             why = "is not" if on_remote is False else "cannot be checked to be"
@@ -848,6 +856,8 @@ def _code_targets(
       run code newer than the pin. They get no target: code moves only forward.
     * An in-fleet project: nothing. Its pin is a fleet commit, not a code
       commit, so ``:latest`` stays where the last push put it.
+    * The ``bay adopt`` commit: nothing. It adds only the bay.toml, and it is
+      not pushed yet, so no image has its tag; the running image stays.
     """
     from bay_cli import bay_toml
 
@@ -855,7 +865,7 @@ def _code_targets(
         return {}
     if code is not None:
         return {name: dict(code) for name in built}
-    if proj.in_fleet:
+    if proj.in_fleet or planmod.adopt_pending(proj, env, commit):
         return {}
     doc = planmod.doc_at(proj, commit) or {}
     strict = bay_toml.track(doc, env) == "pin"

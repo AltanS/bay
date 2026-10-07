@@ -70,6 +70,11 @@
               "type": "string",
               "pattern": "^[0-9a-f]{7,64}$"
             },
+            "app_commit": {
+              "description": "Set by bay adopt: the app repo commit that added the bay.toml. bay up accepts it before it is pushed and moves no code for it.",
+              "type": "string",
+              "pattern": "^[0-9a-f]{7,64}$"
+            },
             "database": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$" },
             "role": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$" },
             "volumes": {

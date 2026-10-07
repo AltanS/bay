@@ -459,7 +459,9 @@ Where `from` is read:
 the fleet (`projects/<name>/bay.toml`) moves into its app repo with `bay adopt <name>`,
 run in a checkout of that repo. The `bay.toml` and the files it mounts move together,
 so every `from` keeps its meaning beside the toml, and a `fleet:` mount stays in the
-fleet. The lock keeps the adopted names, so the next plan shows 0 steps. See
+fleet. The lock keeps the adopted names, so the next plan shows 0 steps. Then run
+`bay up` in that checkout, and `git push` after it: `bay up` takes the unpushed adopt
+commit and moves no code, so the push is config only on the box. See
 [plan.md, bay adopt](plan.md#bay-adopt).
 
 **Config-only push.** In an app repo, a push that changes only the `bay.toml` and the

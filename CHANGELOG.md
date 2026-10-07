@@ -72,11 +72,15 @@ needing manual action is called out under **Upgrade notes**. Entries for
   project's `bay.toml` and its files (including a mount still read from the old
   place `files/<name>/<from>`) into the repo, at `--toml-path` (default
   `bay.toml`). It makes one local app commit,
-  `chore: add bay.toml (adopted from fleet <fleet>)`, which you push. The lock
+  `chore: add bay.toml (adopted from fleet <fleet>)`. The lock
   takes the repo form (`repo`, `toml_path`, `commit`) with
-  `adopted.from_fleet_commit` per environment. Every other adopted name stays.
-  The fleet loses the folder contents except the lock, in one commit,
-  `bay: adopt <name> into <repo>`. Nothing is pushed. The compiled output stays
+  `adopted.from_fleet_commit` and `adopted.app_commit` per environment. Every
+  other adopted name stays. The fleet loses the folder contents except the
+  lock, in one commit, `bay: adopt <name> into <repo>`. Nothing is pushed. The
+  order is adopt, `bay up`, then `git push`: `bay up` accepts the unpushed
+  adopt commit and moves no code for it, so the box gets the new `rebuild.sh`
+  first, and the push is then config only. Pushed first, the old script would
+  build and recreate the app. The compiled output stays
   the same, so the next `bay plan` shows 0 steps. `--check` prints the files and
   the lock diff and changes nothing. Bay refuses a dirty app repo or project
   folder, an existing `bay.toml`, a name mismatch, a lock that names another
@@ -90,8 +94,9 @@ needing manual action is called out under **Upgrade notes**. Entries for
   `:latest` move, no alert, no circuit-breaker change. The previous commit's
   image gets the new commit tag. `bay compile` writes `build.bay_toml_files`
   (the mounted paths, relative to the repo root) next to `build.bay_toml_hash`.
-  The same rule runs on the build server for remote builds. So the adopt commit
-  is a no-op on the box, and "edit bay.toml, push, bay up" is the clean flow.
+  The same rule runs on the build server for remote builds. So the adopt commit,
+  pushed after its `bay up`, is a no-op on the box, and "edit bay.toml, push,
+  bay up" is the clean flow.
   See `docs/build-pipeline.md`, "Config-only push".
 - `bay plan` shows no step when a container entry differs only in
   `build.bay_toml_hash`, `build.bay_toml_path` or `build.bay_toml_files`. The
@@ -236,10 +241,10 @@ needing manual action is called out under **Upgrade notes**. Entries for
   with `python3 -c 'import tomllib'`.
 - Images built before this release have no commit tag. `bay rollback --to`
   works only for commits built after the upgrade.
-- The config-only rule lives in `rebuild.sh`. Deploy the boxes and the build
-  servers as above (`bay up`, plus `bay deploy <env> --tags git_deploy` on build
-  servers) before you push an adopt commit. A box with the old script builds and
-  deploys that push as a normal one.
+- The config-only rule lives in `rebuild.sh`. Run `bay up` for an adopted
+  project before you push its adopt commit (plus `bay deploy <env> --tags
+  git_deploy` on build servers). A box with the old script builds and deploys
+  that push as a normal one.
 
 ## [2.0.2] - 2026-10-07
 

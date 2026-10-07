@@ -332,10 +332,11 @@ def adopt(
 
     Run it inside a checkout of the app repo, with the fleet named by
     --fleet, BAY_FLEET or BAY_FLEET_NAME. Copies projects/<name>/bay.toml and
-    every file of the folder here, commits them in this repo (local only:
-    you push it), rewrites the lock to repo form, and commits the fleet
-    without the folder contents (the lock stays). Container, volume,
-    database and config names stay, so the next bay plan shows 0 steps.
+    every file of the folder here, commits them in this repo (local only),
+    rewrites the lock to repo form, and commits the fleet without the folder
+    contents (the lock stays). Container, volume, database and config names
+    stay, so the next bay plan shows 0 steps. Then run bay up here, and
+    git push after it: bay up takes the unpushed adopt commit.
 
     Examples:
 
@@ -369,12 +370,18 @@ def adopt(
         return
     console.success(
         f"app commit {result['app_commit'][:12]} in {result['repo_root']} (local: push it "
-        "before bay up)"
+        "after bay up)"
     )
     console.success(f"fleet commit {result['fleet_commit'][:12]}: {name} adopted")
-    push, plan_cmd, up_cmd = result["next"]
-    console.info(f"Next: `{push}` in the app repo (the box does nothing for it).")
-    console.info(f"Then: now run `{plan_cmd}` (it must show 0 steps), then `{up_cmd}`.")
+    plan_cmd, up_cmd, push = result["next"]
+    console.info(
+        f"Next, in this app repo: now run `{plan_cmd}` (it must show 0 steps), then "
+        f"`{up_cmd}` (it takes the unpushed adopt commit and moves no code)."
+    )
+    console.info(
+        f"Then: `{push}`. The box sees a config-only push and builds nothing. "
+        "Pushed before bay up, the box would rebuild and recreate the app."
+    )
 
 
 def plan(

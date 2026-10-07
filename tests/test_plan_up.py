@@ -3370,10 +3370,11 @@ def test_adopt_prints_plan_hint(world: dict[str, Path], tmp_path: Path, box: Fak
     assert result.exit_code == 0, _said(result)
     said = _said(result)
     assert "now run `bay plan production`" in said
-    assert "push it before bay up" in said and "`git push`" in said
+    assert "push it after bay up" in said and "Then: `git push`" in said
+    assert said.index("`bay up production`") < said.index("`git push`")
     second = _second_in_fleet(world, tmp_path)
     doc = json.loads(cli(world, "adopt", "board", "--json", cwd=second).stdout)
-    assert doc["next"] == ["git push", "bay plan production", "bay up production"]
+    assert doc["next"] == ["bay plan production", "bay up production", "git push"]
 
 
 def _second_in_fleet(world: dict[str, Path], tmp_path: Path) -> Path:
@@ -3542,6 +3543,55 @@ def test_adopt_build_project_plans_zero_steps(
     assert after == before
     plan = planmod.make_plan(proj, planmod.PlanOptions())
     assert plan["steps"] == [] and plan["verdict"] == "auto", plan
+
+
+def test_up_accepts_unpushed_adopt_commit_without_code_move(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    """B1: adopt, bay up, then git push. The up takes the unpushed adopt commit."""
+    shop = _shop(world, tmp_path, toml=BUILD_SHOP_TOML)
+    remote_before = git(shop["remote"], "rev-parse", "main")
+    assert _adopt(world, shop).exit_code == 0
+    adopt_commit = git(shop["app"], "rev-parse", "HEAD")
+    record = _shop_lock(world)["envs"]["production"]
+    assert record["adopted"]["app_commit"] == adopt_commit
+
+    proj = planmod.load_project(cx_of(world), "shop", cwd=shop["app"])
+    plan = planmod.make_plan(proj, planmod.PlanOptions())
+    assert plan["steps"] == [] and plan["verdict"] == "auto", plan
+    assert any("is the bay adopt commit and not pushed yet" in n for n in plan["notes"])
+
+    seen: list[dict[str, Any]] = []
+
+    def deploy(cx: Context, box_env: str, **kw: Any) -> None:
+        seen.append(kw)
+        box.deploy(cx, box_env, config_files_root=kw.get("config_files_root"))
+
+    up = applymod.up(proj, planmod.PlanOptions(), deploy=deploy)
+    assert up["result"] == "ok" and up["commit"] == adopt_commit
+    # No code moves: the running image stays; the box only gets the new
+    # rebuild.sh with the hold keys.
+    assert up["code_targets"] == {} and "code_targets" not in seen[0]
+    build = yaml.safe_load(_body((world["fleet"] / GENERATED_SERVICES).read_text()))[
+        "services"
+    ]["old-shop"]["build"]
+    assert build["bay_toml_path"] == "bay.toml" and build["bay_build_hash"].startswith("sha256:")
+    assert git(shop["remote"], "rev-parse", "main") == remote_before, "bay up never pushes it"
+
+    # Another unpushed commit is still refused.
+    (shop["app"] / "README").write_text("later\n")
+    commit_all(shop["app"], "later")
+    later = planmod.load_project(cx_of(world), "shop", cwd=shop["app"])
+    with pytest.raises(applymod.Refused, match="push first"):
+        applymod.up(later, planmod.PlanOptions())
+
+    # After the push, the next plan is zero steps.
+    git(shop["app"], "reset", "-q", "--hard", adopt_commit)
+    git(shop["app"], "push", "-q", "origin", "main")
+    again = planmod.make_plan(
+        planmod.load_project(cx_of(world), "shop", cwd=shop["app"]), planmod.PlanOptions()
+    )
+    assert again["steps"] == [] and again["verdict"] == "auto", again
 
 
 def test_adopt_toml_path_monorepo(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:

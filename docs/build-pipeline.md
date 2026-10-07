@@ -157,7 +157,9 @@ never config only. The webhook's
 `watch`/`ignore` filter runs before this (in the receiver, before the trigger),
 so a push that it filters out never reaches `rebuild.sh`. "Edit `bay.toml`,
 push, `bay up`" is the clean flow: the push does nothing on the box, and
-`bay up` deploys the config. The adopt commit of `bay adopt` is such a push.
+`bay up` deploys the config. The adopt commit of `bay adopt` is such a push,
+once `bay up` has written the new script: run `bay up` before `git push`
+(docs/plan.md, "bay adopt").
 
 ## Circuit Breaker State (rebuild.sh)
 

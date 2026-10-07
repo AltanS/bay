@@ -17,10 +17,16 @@ today (``projects/<name>/bay.toml``). After the adopt:
 * the fleet drops the folder contents except ``bay.lock`` in one commit
   (``bay: adopt <name> into <repo>``).
 
-Nothing is pushed. The operator pushes the app commit; ``bay up`` refuses an
-unpushed commit. The compiled output is the same before and after: the box
-paths are ``config/<target>`` either way (:mod:`bay_cli.compiler`), so the
-next ``bay plan`` shows zero steps.
+Nothing is pushed. The order is adopt, ``bay up``, then ``git push``. The lock
+records the adopt commit as ``adopted.app_commit``; ``bay up`` accepts that
+one commit before it is pushed, and moves no code for it: the box only gets
+the new ``rebuild.sh`` with the hold-guard keys (``bay_toml_hash`` and
+friends). The push that follows then changes only the bay.toml and the files
+beside it, which that script sees as a config-only push: no build, no
+recreate. Pushed first, the old script (no ``BAY_TOML_PATH``) would build and
+recreate the app. The compiled output is the same before and after apart from
+those keys: the box paths are ``config/<target>`` either way
+(:mod:`bay_cli.compiler`), so the next ``bay plan`` shows zero steps.
 
 Bay refuses before it changes anything when a precondition fails, so a
 refusal never leaves half an adopt behind. ``check`` reports the files and
@@ -411,13 +417,29 @@ def _new_lock(
 
 
 def _with_commit(lock: dict[str, Any], commit: str) -> dict[str, Any]:
-    """``lock`` with the project pin, and every environment that had a pin, at ``commit``."""
+    """``lock`` with the project pin, and every environment that had a pin, at ``commit``.
+
+    Every environment also records ``adopted.app_commit``: the adopt commit,
+    which ``bay up`` accepts unpushed (:func:`is_adopt_commit`).
+    """
     out = copy.deepcopy(lock)
     out["commit"] = commit
     for record in (out.get("envs") or {}).values():
         if record.get("commit"):
             record["commit"] = commit
+        record.setdefault("adopted", {})["app_commit"] = commit
     return out
+
+
+def is_adopt_commit(lock: dict[str, Any], env: str, commit: str | None) -> bool:
+    """True when ``commit`` is the app commit ``bay adopt`` made for this project.
+
+    ``bay up`` then takes it before it is pushed and moves no code for it.
+    """
+    record = ((lock.get("envs") or {}).get(env) or {}) if isinstance(lock, dict) else {}
+    adopted = record.get("adopted") or {}
+    app = adopted.get("app_commit")
+    return bool(commit and app and adopted.get("from_fleet_commit") and str(app) == commit)
 
 
 def _lock_diff(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
@@ -500,8 +522,8 @@ def _result(plan: AdoptPlan, *, check: bool) -> dict[str, Any]:
         "app_commit": None,
         "fleet_commit": None,
         "next": [
-            "git push",
             f"bay plan {env}",
             f"bay up {env}",
+            "git push",
         ],
     }

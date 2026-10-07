@@ -381,6 +381,25 @@ def doc_at(proj: ProjectRef, commit: str | None) -> dict[str, Any] | None:
         return None
 
 
+def adopt_pending(proj: ProjectRef, env: str, commit: str | None) -> bool:
+    """True when ``commit`` is the app commit ``bay adopt`` made for ``proj`` (docs/plan.md).
+
+    ``bay up`` takes it before it is pushed, and moves no code for it.
+    """
+    from bay_cli.adopt import is_adopt_commit
+
+    return not proj.in_fleet and is_adopt_commit(proj.lock, env, commit)
+
+
+def _unpushed_note(proj: ProjectRef, commit: str, adopt_commit: bool) -> str:
+    if adopt_commit:
+        return (
+            f"commit {commit[:12]} is the bay adopt commit and not pushed yet; bay up takes "
+            "it and moves no code, then run git push"
+        )
+    return f"commit {commit[:12]} is not on a branch of {proj.repo}; bay up refuses it: push first"
+
+
 def commit_on_remote(proj: ProjectRef, commit: str) -> bool | None:
     """Is ``commit`` of a repo project on a branch of its remote? True for a fleet project.
 
@@ -2146,11 +2165,9 @@ def make_plan(
     # WANTED
     wanted = read_wanted(proj, opts.at)
     blockers.extend(wanted.problems)
+    adopt_commit = adopt_pending(proj, env, wanted.commit)
     if wanted.commit and not wanted.problems and commit_on_remote(proj, wanted.commit) is not True:
-        notes.append(
-            f"commit {wanted.commit[:12]} is not on a branch of {proj.repo}; "
-            "bay up refuses it: push first"
-        )
+        notes.append(_unpushed_note(proj, wanted.commit, adopt_commit))
     if wanted.dirty:
         notes.append(
             f"the project has uncommitted changes; the plan uses commit "
@@ -2230,7 +2247,8 @@ def make_plan(
             pinned_commit=pinned_commit,
             wanted_commit=wanted.commit,
             frozen=(proj.lock.get("envs") or {}).get(env),
-            order=_code_orderer(proj) if opts.code_order else None,
+            # The adopt commit moves no code (bay up passes no code target).
+            order=_code_orderer(proj) if opts.code_order and not adopt_commit else None,
             force_code=opts.force_code,
         )
         explained = {str(s["container"]) for s in diff.steps if s["container"]}
@@ -2390,10 +2408,8 @@ def make_env_plan(
         blockers.extend(f"{name}: {p}" for p in wanted.problems)
         _check_wanted_doc(proj, wanted, env, blockers)
         if wanted.commit and commit_on_remote(proj, wanted.commit) is not True:
-            notes.append(
-                f"{name}: commit {wanted.commit[:12]} is not on a branch of {proj.repo}; "
-                "bay up refuses it: push first"
-            )
+            adopt_commit = adopt_pending(proj, env, wanted.commit)
+            notes.append(f"{name}: {_unpushed_note(proj, wanted.commit, adopt_commit)}")
         if wanted.dirty:
             notes.append(
                 f"{name} has uncommitted changes; the plan uses commit "
