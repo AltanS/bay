@@ -354,6 +354,8 @@ would orphan every existing snapshot.
 
 Generated from `alerts/registry.yml` — do not hand-edit. Run `make docs-alerts`.
 
+A held build (`build.held`) waits for `bay up`, which deploys the whole box environment, not one project.
+
 <!-- BEGIN GENERATED ALERT TABLE -->
 
 | Alert ID | Level | Default | Source | Summary |
@@ -367,7 +369,7 @@ Generated from `alerts/registry.yml` — do not hand-edit. Run `make docs-alerts
 | `build.failed` | `warn` | on | `git_deploy/rebuild.sh.j2` | A build, image pull, or webhook deploy failed; retries remain. |
 | `build.fanout_failed` | `warn` | on | `git_deploy/rebuild.sh.j2` | Notifying a peer to pull the new image failed. |
 | `build.health_check_failed` | `critical` | on | `git_deploy/rebuild.sh.j2` | The new container failed its health check and no rollback was available. |
-| `build.held` | `warn` | on | `git_deploy/rebuild.sh.j2` | A push built its commit image but did not deploy it (config changed, track = pin, or frozen); run bay up (it deploys the whole box environment). |
+| `build.held` | `warn` | on | `git_deploy/rebuild.sh.j2` | A push built its commit image but did not deploy it (config changed, track = pin, or frozen); run bay up. |
 | `build.killed` | `warn` | on | `git_deploy/build-alert.sh.j2` | A build was timed out or killed by systemd (timeout, OOM, signal). |
 | `build.lock_timeout` | `warn` | on | `git_deploy/rebuild.sh.j2` | A concurrent build held the build lock past the timeout. |
 | `build.pipeline_stalled` | `warn` | on | `git_deploy/bay-trigger-watchdog.sh.j2` | Build triggers are older than the stall threshold — the pipeline is stuck. |

@@ -10,6 +10,21 @@ needing manual action is called out under **Upgrade notes**. Entries for
 
 ## [Unreleased]
 
+### Changed
+
+- New `docs/layout-scenarios.md`: fifteen scenarios of where Bay files live, with a
+  sample `bay plan` output, a "Bay does not do" list and "What never goes where". It is
+  linked from the docs index. Features that are not built stay marked `(planned)`.
+- Every current doc that names `bay up` now says it deploys the whole box environment.
+- `--data move` and `bay init --secrets` carry `(planned)` wherever the docs name them.
+- Docs from the Bay 1 consumer model (M116/06): `design-decisions.md` and the two
+  external-tailscale docs carry `Status: historical`. `services.md` and
+  `rollout-playbook.md` use `bay --fleet <path> <verb>`, name no consumer clone and say
+  `bay self update` instead of a pin bump. `services.md` says `services.yml` is compiled.
+- `docs/install.md` has a section "Development mode: the editable install" (M116/08).
+- `docs/plan.md` no longer says a code pin is future work, or that a new box in
+  `bay.toml` gives only a note.
+
 ### Fixed
 
 - **A file moved beside the toml no longer blocks the plan of every other project.** A
