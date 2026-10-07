@@ -8,6 +8,12 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.1.11] - 2026-10-07
+
+Docs only. Reader round 11: one place where two docs stated different facts.
+
+- deploy-receipt.md lists four values for `fleet.source` in `bay status --json`: `--fleet`, `BAY_FLEET`, `bay.toml` and `~/.config/bay/fleets`. `bay status` never takes the fleet from the directory you stand in, so it never reports `cwd`. This agrees with install.md, plan.md and layout-scenarios.md.
+
 ## [2.1.10] - 2026-10-07
 
 Docs only. Reader round 10: four places where two docs stated different facts.

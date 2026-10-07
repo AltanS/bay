@@ -224,7 +224,7 @@ uv run --project <framework> ansible <env> -m ansible.builtin.command \
 | `framework.version` | `bay_version` from `version.yml` in the install, or null when the file is missing. |
 | `framework.path` | The checkout that the `bay` command runs from. |
 | `fleet.root` | The fleet directory. |
-| `fleet.source` | How Bay found the fleet: `--fleet`, `BAY_FLEET`, `bay.toml` (the fleet named in the app repo), `~/.config/bay/fleets` (`BAY_FLEET_NAME`) or `cwd`. |
+| `fleet.source` | How Bay found the fleet: `--fleet`, `BAY_FLEET`, `bay.toml` (the fleet named in the app repo) or `~/.config/bay/fleets` (`BAY_FLEET_NAME`). `bay status` never takes the fleet from the directory you stand in, so it never reports `cwd`. With none of the four, it stops with "no fleet selected". |
 | `fleet.commit` | Full SHA of the fleet repo HEAD, or null outside git. |
 | `fleet.dirty` | True when the fleet directory has uncommitted changes, or null outside git. |
 | `boxes[].env` | The environment. |
