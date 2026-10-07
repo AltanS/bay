@@ -397,7 +397,7 @@ build:
 
 This is the only supported format. The framework renders the resolved token value into `rebuild.sh` at deploy time. `bay validate` checks the vault for the referenced key at deploy-time — a missing or empty key produces a validation error before any deploy proceeds.
 
-Use `bay service add --build-token KEY_NAME` to set this correctly when adding a new service, or set it manually using the form above.
+In a compiled fleet the token comes from `repo_tokens` in `bay.fleet.toml`: a repo URL prefix mapped to a secret name. In a hand-written `services.yml`, set it by hand using the form above.
 
 #### PAT scope requirements
 

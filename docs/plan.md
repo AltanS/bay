@@ -59,7 +59,7 @@ Some projects have no repo of their own, such as an off-the-shelf image. Their `
 (or `bay show <name>`) for them.
 
 **Create one.** No verb creates it. `bay init` is for an app repo: run in a fleet folder
-it would write the `bay.toml` at the fleet root. Write the project by hand:
+it stops with "this is a fleet folder" and writes nothing. Write the project by hand:
 
 1. Write `projects/<name>/bay.toml` and the files it mounts beside it.
 2. `bay toml validate projects/<name>/bay.toml` (it needs no fleet).
@@ -71,9 +71,10 @@ You write no lock. A project with no lock plans as a new project (one `create` s
 container). The first `bay up` writes `projects/<name>/bay.lock` with `repo: null`,
 `toml_path: bay.toml`, `commit` (the fleet commit that last changed
 `projects/<name>/`) and the environment record. A project that builds from source
-needs a lock with a `repo` (the compile stops with "names no repo"). Only `bay import` writes
-that `repo` for a project in the fleet (it does so for an app it brings in from an old YAML fleet).
-No other verb sets one: keep a new project that builds in its own repo (`bay init`).
+names its repo: write `repo` under `[build]` in its `bay.toml`. The compile takes `[build] repo`
+first and the lock `repo` second (`bay import` writes that one for an app it brings in from an old
+YAML fleet). With neither, the compile stops and names both places. `bay validate` reports the same
+error. To keep a new project that builds in its own repo, use `bay init` there.
 
 plan, up, show and rollback work as for any project, with these differences:
 
@@ -123,8 +124,9 @@ really runs.
 
 ### bay init
 
-Run it in an app repo that has no `bay.toml`. Run it only there: for a project with no
-repo see [Projects with no repo](#projects-with-no-repo).
+Run it in an app repo that has no `bay.toml`. Run it only there: in a fleet folder (or below
+one) it stops before it writes anything, with a hint to write `projects/<name>/bay.toml`. For
+a project with no repo see [Projects with no repo](#projects-with-no-repo).
 
 **The fleet.** There is no `bay.toml` yet, so there is no `fleet =` line to read. `bay init`
 takes the fleet from, in this order: the global `--fleet <path>` (before the verb), `BAY_FLEET`,
@@ -133,8 +135,8 @@ does not use the fleet directory you stand in. The rest of the order is in
 [install.md](install.md#pick-a-fleet). The draft gets `fleet = "<name>"` from the `name` key
 of `bay.fleet.toml`.
 
-1. Bay writes a draft `bay.toml`. It reads three hints: `EXPOSE` in the
-   `Dockerfile` gives the port, `package.json` gives port 3000 and a commented
+1. Bay writes a draft `bay.toml`. It reads three hints from the repo root, the default
+   build context (also with `--toml-path`): `EXPOSE` in the `Dockerfile` gives the port, `package.json` gives port 3000 and a commented
    `npm start`, `pyproject.toml` gives port 8000. `access.mode` is `public`.
    There is one `[deploy.<primary env>]` table with the fleet's default box and
    the domain `<name>.<default_domain>`.

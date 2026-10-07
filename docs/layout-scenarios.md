@@ -129,9 +129,8 @@ Inside the fleet directory, every other verb (`deploy`, `provision`, `vault`, `s
 `status`, `route`, `compile`, `adopt`, `init`) stops with "no fleet selected" unless you name the fleet
 with `--fleet <path>` or `BAY_FLEET`. The commands below that start with `bay --fleet $F` do that.
 One exception: a few older verbs take the working directory as the fleet when nothing else names
-one: `bay service add|edit|remove` (they write `group_vars/all/services.yml` directly, and the next
-`bay compile` then refuses that generated file as edited by hand), `bay service prune-webhooks`, and
-`bay server add|remove` (they write the hosts files and `group_vars/`). See rule 5 of
+one: `bay service prune-webhooks` and `bay server add|remove` (they write the hosts files and
+`group_vars/`). See rule 5 of
 [install.md](install.md#pick-a-fleet).
 
 **Secret values are per box env.** They live in `group_vars/<box env>/secrets.yml`, one
@@ -653,10 +652,17 @@ Point at it with `bay --fleet ~/workspace/devfleet ...`. `bay up` reports `push_
 
 Use this when an app has a repo but its `bay.toml` still lives in the fleet. Two cases:
 
-- **An app that builds from source**, which came into the fleet through `bay import` of an old
-  YAML fleet. Its lock already carries the repo URL that the webhook builds (the import wrote it:
-  no verb sets it for a new in-fleet project). The order below is for this case, because the box
-  has a webhook script for it.
+- **An app that builds from source**, which lives in the fleet. It names the repo that the
+  webhook builds in `projects/<name>/bay.toml`, with `repo` under `[build]`. An app that came
+  through `bay import` of an old YAML fleet carries that URL in its lock instead, and the compile
+  falls back to it. The order below is for this case, because the box has a webhook script for it.
+
+  ```toml
+  # projects/shop/bay.toml (an app in the fleet that builds from source)
+  [build]
+  repo = "git@github.com:acme/shop.git"   # only for an app in the fleet
+  dockerfile = "Dockerfile"
+  ```
 - **An image-only app** with `repo: null` that has a repo of its own (for example one that holds
   its config files). It has no webhook script on the box, so a push cannot rebuild it. The adopt
   only moves the files into the repo. The order still holds, because `bay up` must accept the
@@ -672,9 +678,11 @@ fleet projects/shop/bay.lock              fleet projects/shop/bay.lock
   adopted: {...}                            adopted: {...}         (kept, so nothing is renamed)
 ```
 
-The adopt sets `repo` to the `origin` URL of the checkout when it was `null`, and keeps the
-lock's own string when it already named this repo, so the compiled build entry does not change.
-A lock that names another repo stops the adopt.
+The adopt moves `[build] repo` into the lock `repo` and leaves the key out of the `bay.toml` it
+writes into the app repo. Without `[build] repo`, it keeps the lock's own string when it already
+named this repo, and sets `repo` to the `origin` URL of the checkout when it was `null`. The
+compiled build entry does not change. A `[build] repo` or a lock that names another repo stops
+the adopt.
 
 Steps. The order matters: adopt, `bay up`, then `git push`.
 

@@ -419,6 +419,7 @@ lockfile (see Behavior).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
+| `repo` | string | none | The git URL that the box clones to build. Only for an app in the fleet (`projects/<name>/bay.toml`); an app repo uses its own origin, and a different `repo` there is a compile error. Without it, the compile takes `repo` from `bay.lock`. With neither, the compile stops and names both places. `bay adopt` moves it into the lock. |
 | `dockerfile` | string | `Dockerfile` | Path to the Dockerfile, relative to the repo root (not to this `bay.toml`). |
 | `context` | string | `.` | Build context, relative to the repo root. |
 | `strategy` | `local`, `remote`, `registry` | fleet setting | Where the image is built. |

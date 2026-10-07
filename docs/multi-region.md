@@ -5,9 +5,8 @@ Status: historical (Bay v1 consumer model; see docs/bay-toml.md and docs/layout-
 This page began as a v1 guide. The parts below about the inventory, `group_vars`, secrets,
 WireGuard peers, backups and Headscale still hold. The app parts changed in v2:
 
-- `bay compile` writes `group_vars/all/services.yml`. Do not edit it, and do not use
-  `bay service add` or `bay service edit` on it. The next `bay compile` refuses a file
-  edited by hand.
+- `bay compile` writes `group_vars/all/services.yml`. Do not edit it.
+  The next `bay compile` refuses a file edited by hand.
 - An app picks its box and its domain per deploy env, in `[deploy.<env>]` of its `bay.toml`
   (`box`, `domain`). `bay.toml` takes no templating, so `{{ domain_base }}` does not work
   there. See [bay-toml.md](bay-toml.md).
@@ -409,7 +408,7 @@ Containers reach the tailnet via the host's network stack — no special Docker 
 `bay.fleet.toml` has a key for it, so `bay compile` never writes one. In a fleet that
 `bay compile` writes, a cross-region link cannot be declared today. The rest of this
 section describes the compiled form, for fleets that still keep a hand-written
-`services.yml`. Do not use `bay service add` or `bay service edit` in a compiled fleet.
+`services.yml`. Do not edit the compiled `services.yml` by hand in a compiled fleet.
 
 The link target must declare host exposure on its own stanza, otherwise it will not be reachable from the tailnet:
 

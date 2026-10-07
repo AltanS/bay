@@ -9,10 +9,8 @@ Your first project takes three steps.
 git clone https://github.com/AltanS/bay ~/.local/share/bay/framework
 ~/.local/share/bay/framework/bootstrap.sh
 
-# 2. Make a fleet, check bay.fleet.toml, and commit it (bay init needs a fleet commit)
+# 2. Make a fleet (it gets its first commit), then check bay.fleet.toml
 bay fleet init prod
-git -C ~/.config/bay/fleets/prod add -A
-git -C ~/.config/bay/fleets/prod commit -m "fleet: first bay.fleet.toml"
 
 # 3. In your app repo, write bay.toml
 cd my-app
@@ -138,7 +136,7 @@ Bay ships a curated catalog of self-hosted services:
 | Redis | `redis:7-alpine` | In-memory cache |
 | MariaDB | `mariadb:11` | MySQL-compatible database with mysqldump backup |
 
-List the catalog with `bay service catalog`. To run one of these, write a `bay.toml` for it (an app in the fleet lives in `projects/<name>/bay.toml`) and put a shared database in `bay.fleet.toml` as a resource; see **[bay-toml.md](bay-toml.md)**. Do not edit `group_vars/all/services.yml`: `bay compile` writes it, and it refuses a file that was edited by hand. `bay service add` writes that file directly, so do not use it in a fleet that `bay compile` writes. **[services.md](services.md)** describes the compiled form.
+List the catalog with `bay service catalog`. To run one of these, write a `bay.toml` for it (an app in the fleet lives in `projects/<name>/bay.toml`) and put a shared database in `bay.fleet.toml` as a resource; see **[bay-toml.md](bay-toml.md)**. Do not edit `group_vars/all/services.yml`: `bay compile` writes it, and it refuses a file that was edited by hand. The removed service write verbs wrote that file directly; write the `bay.toml` instead. **[services.md](services.md)** describes the compiled form.
 
 ## Fleet Files
 
