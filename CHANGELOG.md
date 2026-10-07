@@ -8,7 +8,7 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
-## [Unreleased]
+## [2.0.2] - 2026-10-07
 
 ### Fixed
 
