@@ -12,7 +12,7 @@
 
 Bay is a command-line tool and an Ansible framework. It provisions hardened Docker servers with a VPN-aware reverse proxy and deploys your apps to them from a declared config.
 
-Two files are the source of truth. An app says what it is and where it deploys in its `bay.toml`. A fleet (the repo that holds your boxes, secrets and shared resources) says what the boxes are in its `bay.fleet.toml`. The daily flow is `bay plan`, `bay approve` and `bay up`. Bay compiles the two files into `group_vars/all/services.yml`. That file is generated and never hand-edited. `bay deploy` and `bay provision` are for rig work (the proxy, the firewall, a new box). Where each file lives: [docs/layout-scenarios.md](docs/layout-scenarios.md).
+Two files are the source of truth. An app says what it is and where it deploys in its `bay.toml`. A fleet (the repo that holds your boxes, secrets and shared resources) says what the boxes are in its `bay.fleet.toml`. The daily flow is `bay plan`, `bay approve` and `bay up`. Bay compiles the two files into `group_vars/all/services.yml`. That file is generated and never hand-edited. `bay deploy` and `bay provision` are for rig work (the proxy, the firewall, the webhook receiver, a new box). Where each file lives: [docs/layout-scenarios.md](docs/layout-scenarios.md).
 
 > **[docs/features.md](docs/features.md)** -- full feature overview and competitive advantages.
 
@@ -20,11 +20,11 @@ Two files are the source of truth. An app says what it is and where it deploys i
 
 - **Provisions** a bare Ubuntu server into a hardened Docker host (users, SSH lockdown, nftables firewall, CrowdSec IDS)
 - **Deploys** a container stack with Traefik reverse proxy, automatic SSL, and per-service VPN access control. Bay renders a compose file as a description of the stack. The reconciler (`bay_reconcile`) and `rebuild.sh` create the containers with `docker run`, not with `docker compose`.
-- **Backs up** application data with [restic](https://restic.net/) — deduplicated, encrypted backups to S3-compatible storage with per-accessory repos, systemd timers, and one-command restore
+- **Backs up** application data with [restic](https://restic.net/): deduplicated, encrypted backups to S3-compatible storage with per-accessory repos, systemd timers, and a one-command restore (`bay backup restore <env> <accessory>`)
 - **Monitors** container images for updates with [Watchtower](https://github.com/nicholas-fedor/watchtower) — notify-by-default with opt-in auto-update per service
-- **Alerts** on crashes, build failures, deploy outcomes, disk pressure and backup failures — to Telegram and/or any webhook sink (Campfire, Slack, plain text)
+- **Alerts** on crashes, build failures, deploy outcomes, disk pressure and backup failures, to a list of recipients, each Telegram or a webhook (Campfire, Slack, plain text)
 
-Everything the boxes run comes from `bay.toml` and `bay.fleet.toml`. `bay up` compiles them, and the roles generate the Traefik labels, the container settings, the env files and the access control from the result.
+Every app and shared resource on the boxes comes from `bay.toml` and `bay.fleet.toml`. `bay up` compiles them, and the deploy builds the container specs (Traefik labels, container settings, env files, access control) from the result. The rig (Traefik, CrowdSec, Watchtower, the access gateway, the webhook receiver) comes from the framework roles and the fleet's `group_vars/`, not from `bay.toml`.
 
 ## Documentation
 
@@ -57,7 +57,7 @@ See the **[full index →](docs/README.md)** for everything, including build obs
 
 - [uv](https://docs.astral.sh/uv/) — Python package manager (installs Python, Ansible, and all dependencies automatically)
 - A target server running Ubuntu (tested on 22.04/24.04)
-- SSH access to the target as `root` (first provision) or as `bay-admin` (every run after). `bay provision` tests the connection as `ansible_user` and falls back to `root` when the host is unreachable as that user, so you need no extra flag
+- SSH access to the target as `root` (first provision) or as the fleet's `ansible_user` (`bay-admin` in `example/`, every run after). `bay provision` tests the connection as `ansible_user` and falls back to `root` when the host is unreachable as that user, so you need no extra flag
 
 Install uv if you don't have it:
 
@@ -89,10 +89,10 @@ Read **[docs/install.md](docs/install.md)** for the install steps, updates and h
 
 #### Pre-flight check, provision and rig deploy
 
-This is the rig side: a new box, the firewall, the proxy. App changes go through `bay plan` and `bay up` ([docs/plan.md](docs/plan.md)).
+This is the rig side: a new box, the firewall, the proxy. App changes go through `bay plan` and `bay up` ([docs/plan.md](docs/plan.md)). The fleet needs `hosts/` and `group_vars/` first ([docs/onboarding.md](docs/onboarding.md#fleet-files)). Run these commands in the app repo, where the `fleet =` line picks the fleet, or pass `--fleet <path>` before the verb.
 
 ```bash
-# Validate DNS, SSH, vault password, gateway config
+# Check the fleet, the CLI, DNS, SSH, the vault password and the boxes
 bay doctor
 
 # Validate config files — YAML/schema, inventory, vault keys
@@ -107,8 +107,8 @@ bay provision production
 bay deploy production
 ```
 
-`bay doctor` checks your **environment** (the fleet it picked, DNS resolution, SSH reachability,
-vault password present). `bay validate` checks your **config** (YAML
+`bay doctor` checks your **environment** (the fleet it picked, the installed CLI, DNS resolution, SSH reachability,
+vault password present, each box's receipt, the app repos). `bay validate` checks your **config** (YAML
 syntax, the compiled services schema, inventory, vault keys) and also runs
 automatically before every deploy, so running it here is optional — useful
 for iterating on config without waiting for a full deploy.
@@ -143,7 +143,7 @@ bay/
   roles/                       # Ansible roles (below)
   docs/                        # Full documentation, see docs/README.md
   example/                     # Example fleet files (reference only)
-  vendor/roles/                # External Galaxy roles (gitignored)
+  vendor/                      # External Galaxy roles and collections (gitignored)
 ```
 
 A fleet (the repo you own, at `~/.config/bay/fleets/<name>`):
@@ -162,25 +162,29 @@ my-fleet/
 
 An app that has its own repo keeps its `bay.toml` there. The fleet holds only its lock.
 
-The roles:
+The main roles (the full set is under `roles/`):
 
 ```
 roles/
-  common/                    # System baseline (apt packages, swap, unattended upgrades)
+  common/                    # System baseline (apt packages, timezone, locale, unattended upgrades)
+  swap/                      # Swap file and swappiness
   users/                     # User and SSH key management
   sshd_hardening/            # SSH drop-in hardening (MaxStartups, LoginGraceTime)
   nftables/                  # Firewall rules
-  traefik/                   # Reverse proxy, SSL, routing labels
-  deploy_stack/              # Stack deployment orchestration (env, config, containers, db)
-  build_image/               # Image build strategies (registry, local, cloud)
-  git_deploy/                # Git clone, Docker build, deploy keys, webhook receiver
+  crowdsec/                  # CrowdSec IDS and the nftables bouncer
+  traefik/                   # Reverse proxy config, ACME, the `services` Docker network
+  deploy_stack/              # Deploy orchestration (lock, env files, config files, databases)
+  container_lifecycle/       # Container specs and the reconciler run, deploy receipt
+  build_image/               # Registry login and image pulls (images not built on the box)
+  git_deploy/                # Clone, build (local, remote, registry), deploy keys, webhook receiver
   backup/                    # Restic backups (pg_dump, mysql, redis, file -> S3)
   watchtower/                # Container image update monitoring and auto-update
-  access_gateway/            # VPN backend orchestration (wireguard or headscale)
+  access_gateway/            # VPN backend orchestration (wireguard, headscale or none)
   headscale/                 # Headscale coordination server (self-hosted Tailscale)
   tailscale_node/            # Tailscale daemon, the VPS joins its own tailnet
+  alert_channel/             # The one alert sender that every role uses
   docker_monitor/            # Container crash monitor (systemd service)
-  cronjobs/                  # Maintenance cron jobs
+  cronjobs/                  # Docker prune cron jobs
 ```
 
 ## Playbooks
@@ -190,32 +194,32 @@ roles/
 | `provision.yml` | One-time server hardening: users, SSH, firewall, CrowdSec, Docker | `bay provision production` |
 | `deploy.yml` | Repeatable deployment: build/pull images, deploy containers, write rig state | `bay deploy production` |
 | `webhook.yml` | Webhook setup: deploy keys, receiver container, systemd triggers | `bay webhook production` (v1 form; use `bay deploy production`, see [Build from source](#build-from-source-github-deploy)) |
-| `restore.yml` | Restore an accessory from backup | `bay restore production` |
+| `restore.yml` | Restore an accessory from backup | `bay backup restore production postgres` (low-level: `bay restore production -- -e accessory=postgres -e confirm=yes`) |
 
 All playbooks require a target environment as the first argument.
 
 ### Deploy modes: rig vs fast
 
-Deploy separates **infrastructure roles** (nftables, traefik, watchtower, access_gateway, backup, docker_monitor, cronjobs) from **app roles** (build_image, git_deploy, deploy_stack). A rig state file on the server (`{{ stack_dir }}/.rig-state`) tracks when infrastructure was last configured:
+Deploy separates **infrastructure roles** (nftables, access_gateway, traefik, zot, tailnet_identity, watchtower, tailscale_register, backup, crowdsec_allowlist, docker_monitor, cronjobs, boot_safety) from **app roles** (build_image, git_deploy, deploy_stack and the alert and log roles). A rig state file on the server (`{{ stack_dir }}/.rig-state`) tracks when infrastructure was last configured:
 
-- `bay deploy production`: it checks rig state. If the framework version or fleet config changed since the last rig (or the box has no rig state yet), it runs every role, the infrastructure roles included. Otherwise skips infra roles for a fast app-only deploy.
+- `bay deploy production`: it checks rig state. If the framework version or the fleet's rig config (the last commit that touched `group_vars/`, `hosts/` or `files/`) changed since the last rig, or the box has no rig state yet, it runs every role, the infrastructure roles included. Otherwise it skips the infra roles for a fast app-only deploy.
 - `bay deploy --rig production`: it forces all roles to run, including infrastructure. Writes updated rig state on success.
-- `bay deploy production --tags deploy_stack`: manual tag override, bypasses rig logic.
+- `bay deploy production --tags deploy_stack`: manual tag override, bypasses rig logic. Every role that carries the tag runs, infra roles included, and the rig state is not written.
 
 The rig state file contains:
 ```json
-{"rigged_at": "2026-03-19T22:24:07Z", "bay_version": "0.49.2", "consumer_ref": "0281637"}
+{"rigged_at": "2026-10-07T12:24:07Z", "bay_version": "2.1.13", "consumer_ref": "0281637"}
 ```
 
 ### Deploy privilege separation
 
 The deploy playbook runs in three phases to minimize root usage:
 
-1. **Root bootstrap** — creates the stack directory under `/opt` (requires root), sets ownership to `<app_user>:docker`, and creates the ACME cert file (`root:root 0600`, required by Traefik)
-2. **App deploy** — everything else runs as the app account via `become_user`. The fleet names that account in `app_user` (`bay` in `example/group_vars/all/main.yml`; no role sets a default). The app account has `docker` group membership, so it can manage containers and images without root.
-3. **System services** — monitoring and cron jobs (requires root for systemd/logrotate)
+1. **Root bootstrap**: creates the stack directory under `/opt` (requires root), sets ownership to `<app_user>:docker`, and creates the ACME cert file (`root:root 0600`, required by Traefik)
+2. **App deploy**: everything else runs as the app account via `become_user`. The fleet names that account in `app_user` (`bay` in `example/group_vars/all/main.yml`; no role sets a default). The app account has `docker` group membership, so it can manage containers and images without root. A task that writes a system file (a systemd unit, a file under `/etc`, the firewall) switches to root for that task only (`become_user: root`).
+3. **System services**: the CrowdSec allowlist, monitoring, cron jobs and boot safety (requires root for systemd/logrotate)
 
-This reduces blast radius if a container is compromised — the deploy pipeline never runs as root except for directory creation and system service setup.
+This reduces blast radius if a container is compromised: the container work runs as the app account, and root is used only for directories and system files.
 
 ## Apps and shared resources
 
@@ -238,13 +242,15 @@ Manage secrets with `bay vault` (edit, view, encrypt, decrypt, set) and generate
 
 ## Using Bay
 
-Bay is a command you install once per machine. It does not live inside your project. Your real config (boxes, secrets, service definitions) lives in a **fleet**, a repo that Bay keeps at `~/.config/bay/fleets/<name>`. Bay provides the roles, playbooks and the CLI. See [Quick start](#quick-start) to set up your first fleet.
+Bay is a command you install once per machine. It does not live inside your project. Your real config (boxes, secrets, app definitions) lives in a **fleet**, a repo that Bay keeps at `~/.config/bay/fleets/<name>` (or any path you pass with `--fleet`). Bay provides the roles, playbooks and the CLI. See [Quick start](#quick-start) to set up your first fleet.
 
 ### Fleet structure
 
 ```
 ~/.config/bay/fleets/prod/
 ├── bay.fleet.toml           # Fleet settings
+├── projects/                # One folder per project: its lock, and bay.toml for an app with no repo
+├── plans/                   # Plan records
 ├── group_vars/              # Real configuration and secrets
 └── hosts/                   # Real inventory
 ```
@@ -255,7 +261,7 @@ Bay picks the fleet in one fixed order: `--fleet <path>`, `BAY_FLEET`, the `flee
 
 ### Versioning
 
-Bay releases are git tags. The installed copy sits at one tag at a time.
+Bay releases are git tags. A fresh install is the default branch. `bay self update` moves the checkout to a tag.
 
 ```bash
 # Show the installed version and where it lives
@@ -269,6 +275,10 @@ bay self update --to v2.1.0
 
 # See the version, the fleet and the feature flags
 bay status
+
+# One JSON document: the version, the fleet and the deploy receipt of every box
+# (see docs/deploy-receipt.md)
+bay status --json
 ```
 
 **Before updating, read [CHANGELOG.md](CHANGELOG.md)** — it lists what changed between releases, with an *Upgrade notes* section for anything needing manual action (a provision run, a renamed variable, a migration). `bay self update` moves you to the latest tag; the changelog is how you find out what that brings.
@@ -291,7 +301,7 @@ The CLI help is the command reference — it is kept accurate against the code a
 ```bash
 bay --help              # all commands, grouped by area
 bay deploy --help       # per-command flags, quirks, and examples
-bay gateway --help      # sub-apps (gateway, vault, backup, build, service, server) list their own commands
+bay gateway --help      # sub-apps (fleet, self, route, toml, gateway, vault, secret, backup, build, alerts, service, server, region) list their own commands
 ```
 
 ### DNS
@@ -302,11 +312,11 @@ Set a wildcard A record for your domain:
 *.example.com  →  <server-ip>
 ```
 
-Every service in `services.yml` picks a subdomain (e.g., `status.example.com`). No DNS changes needed when adding new services.
+An app's domain is `domain` in its `[deploy.<env>]` table, else `<name>.<default_domain>` from `bay.fleet.toml` (e.g., `status.example.com`). With the wildcard record, no DNS change is needed when you add an app.
 
 ### SSL
 
-Traefik uses Let's Encrypt **HTTP-01 challenge** — certs are issued automatically per service on first request. No wildcard certs, no DNS provider API needed.
+Traefik uses Let's Encrypt **HTTP-01 challenge**: certs are issued automatically per domain on first request. No DNS provider API is needed. The optional tailnet ingress is the one exception: it uses a DNS-01 wildcard cert ([docs/tailnet-ingress.md](docs/tailnet-ingress.md)).
 
 Set the ACME email in your fleet's `group_vars/production/domains.yml`:
 
@@ -319,15 +329,16 @@ letsencrypt_email: you@example.com
 ```bash
 make test                # Run all tests
 make test-framework      # Framework unit tests only
+make test-python         # pytest suite only
 make test-bootstrap      # Bootstrap end-to-end test only
-make lint                # ansible-lint with production profile
+make lint                # mypy + ruff, then ansible-lint with production profile
 ```
 
 See [Framework development](#framework-development) for details on each test suite.
 
 ## Backups
 
-Bay uses [restic](https://restic.net/) for deduplicated, encrypted backups to S3-compatible storage. Each backed-up shared resource gets its own restic repository, systemd timer, and retention policy.
+Bay uses [restic](https://restic.net/) for deduplicated, encrypted backups to S3-compatible storage. Each backed-up shared resource gets its own restic repository, systemd timer, and retention policy. Backups are off until the fleet sets `backup_enabled: true` in `group_vars/all/main.yml`.
 
 Write the backup in `bay.fleet.toml`, on the shared resource. `method` is required (`pg_dump`, `mysql`, `redis` or `file`):
 
@@ -341,25 +352,32 @@ schedule = "0 3 * * *"    # optional, five-field cron
 retain = 7                # optional
 ```
 
-`bay compile` writes it into `services.yml` as the accessory's `backup:` block (compiled form, do not edit). Volume backups of an app (`backup` on a `[[mounts]]` volume, and the `[backup]` table of `bay.toml`) are validated, not deployed yet: see [docs/bay-toml.md](docs/bay-toml.md#mounts).
+`bay compile` writes it into `services.yml` as the accessory's `backup:` block (compiled form, do not edit). Volume backups of an app (`backup` on a `[[mounts]]` volume, and the `[backup]` table of `bay.toml`) are validated, not deployed yet. `backup` defaults to `true` on a volume mount, so write `backup = false` on each one, or `bay plan` blocks: see [docs/bay-toml.md](docs/bay-toml.md#mounts).
+
+Restore one accessory with `bay backup restore production postgres`. It takes a `pre-restore` snapshot first.
 
 See **[docs/backups.md](docs/backups.md)** for full setup instructions, S3 provider reference, retention options, restore procedures, and monitoring.
 
 ## Alerting
 
-Bay alerts on container crashes, build failures, deploy outcomes, disk pressure, and backup failures. Telegram is built in; a **generic webhook sink** can fire alongside it so you can route alerts to Campfire, Slack, or anything that accepts an HTTP POST — without patching the framework's templates.
+Bay alerts on container crashes, build failures, deploy outcomes, disk pressure, and backup failures. Every alert has an ID and a severity (`alerts/registry.yml`). Alerts go to a list of **recipients**. Each recipient is an adapter (`telegram` or `webhook`), its config and a severity floor (`min_level`). A webhook recipient can post to Campfire, Slack, or anything that accepts an HTTP POST, without patching the framework's templates.
 
 ```yaml
-# group_vars/production/main.yml
-alert_webhook_url: "{{ secrets.alert_webhook_url }}"
-alert_webhook_format: campfire       # campfire | slack | raw
+# group_vars/all/alerts.yml
+alert_recipients:
+  - name: chat
+    adapter: webhook
+    min_level: info
+    config:
+      url: "{{ secrets.alert_webhook_url }}"
+      format: campfire       # campfire | slack | raw
 ```
 
 The vault key must be **lowercase** — it is an Ansible role var, and Bay's convention is that UPPERCASE `secrets:` keys are container env vars. An UPPERCASE spelling silently resolves undefined.
 
-Both sinks are best-effort: a dead alert endpoint can never fail a deploy, a backup, or a build. The webhook is off by default and inert when off — no outbound calls, and no container recreation for anyone who does not enable it.
+Every recipient is best-effort: a dead alert endpoint can never fail a deploy, a backup, or a build. An empty list (the default) means alerts are made but sent nowhere. The older two-sink variables (`alert_webhook_url`, `docker_monitor_telegram_*`) still work. `bay alerts list` shows every alert and who gets it.
 
-See **[docs/alerting.md](docs/alerting.md)** for the format adapters, the full list of what gets sent, and troubleshooting.
+See **[docs/alerting.md](docs/alerting.md)** for the format adapters, the full list of what gets sent, the legacy migration, and troubleshooting.
 
 ## Container auto-updates
 
@@ -390,7 +408,7 @@ See **[docs/multi-region.md](docs/multi-region.md)** for the full setup guide �
 
 ## Build from source (GitHub deploy)
 
-Services can be built from a Git repository instead of pulling from a registry. A `bay.toml` with no `image` builds from source (`[build]` sets the Dockerfile and the rest), and the framework clones the repo, builds the Docker image locally, and tags it with the commit SHA. A webhook receiver listens for GitHub push events and triggers automatic rebuilds, without exposing the Docker socket.
+Services can be built from a Git repository instead of pulling from a registry. A `bay.toml` with no `image` builds from source (`[build]` sets the Dockerfile and the rest), and the framework clones the repo, builds the Docker image, and tags it with the commit SHA. The build strategy is `local` (the default, build on the box), `remote` (a build server pushes to a registry) or `registry` (your CI builds and pushes). `push` is a deprecated alias of `remote`. Set it per app in `[build] strategy` or for the fleet in `[defaults] build_strategy` ([docs/build-strategies.md](docs/build-strategies.md)). A webhook receiver listens for GitHub push events and triggers automatic rebuilds, without exposing the Docker socket.
 
 You write two things. The app's `bay.toml` says what to build and which branch each env follows. The fleet's `bay.fleet.toml` names the webhook:
 
@@ -431,7 +449,7 @@ webhook:
 bay --fleet <path> deploy production   # no --tags: receiver, build triggers, deploy keys, first clone and build
 ```
 
-Run that once per box env that runs a build app (`bay up` does not install the receiver). On the box it makes one SSH deploy key per build container whose repo has no token: `/opt/<stack>/builds/<container>/.deploy_key.pub`. Bay does not register the key. Add it to the GitHub repo yourself (Settings > Deploy keys, read-only). With an SSH repo URL, the first run stops at the clone until the key is on GitHub: add it and run the deploy again. Then add the hook in the repo settings: payload URL `https://<webhook domain>/webhook/<container name>`, the value of the `[webhook] secret`, content type `application/json`, push events only.
+Run that once per box env that runs a build app, and again after you add a build app. The receiver, its list of build containers and the build triggers come only from `bay deploy <env>` with no `--tags` or with `--tags git_deploy`. Of the webhook files, `bay up` and `bay remove` refresh only `rebuild.sh` and `image-map.json` ([docs/plan.md](docs/plan.md#bay-up)). `bay up` also does not build the first image of a new build app ([docs/plan.md](docs/plan.md#the-first-image)). On the box it makes one SSH deploy key per build container whose repo has no token: `/opt/<stack>/builds/<container>/.deploy_key.pub`. Bay does not register the key. Add it to the GitHub repo yourself (Settings > Deploy keys, read-only). With an SSH repo URL, the first run stops at the clone until the key is on GitHub: add it and run the deploy again. Then add the hook in the repo settings: payload URL `https://<webhook domain>/webhook/<container name>`, the value of the `[webhook] secret`, content type `application/json`, push events only.
 
 `bay webhook production` is the v1 form of this step. It does not hand the fleet's inventory to Ansible, and it reads deploy keys from `/opt/bay/` only. Use `bay deploy` until a release fixes it.
 
@@ -443,7 +461,7 @@ Auto-builds include a circuit breaker (stops after 5 consecutive failures by def
 
 ### Access gateways
 
-Bay supports two VPN gateway backends for services with `access: vpn`: **WireGuard** (manual peer configuration, static IPs) and **Headscale** (self-hosted Tailscale coordination server with automatic tunnel management and OIDC self-service enrollment). Set `access_gateway` in `group_vars/all/access_gateway.yml` to select a backend: `wireguard`, `headscale` or `none` (no gateway, every service public). If the fleet does not set it, the deploy uses `wireguard`, the default in `roles/access_gateway/defaults/main.yml`. Both gateways feed into the same downstream pipeline (nftables, CrowdSec, Traefik IPAllowList), so service definitions work identically with either option.
+Bay supports two VPN gateway backends for apps with `mode = "tailnet"` in `bay.toml` (compiled form: `access: vpn`): **WireGuard** (manual peer configuration, static IPs) and **Headscale** (self-hosted Tailscale coordination server with automatic tunnel management and OIDC self-service enrollment). Set `access_gateway` in `group_vars/all/access_gateway.yml` to select a backend: `wireguard`, `headscale` or `none` (no VPN at all; a deploy with a `tailnet` app then fails). If the fleet does not set it, the deploy uses `wireguard`, the default in `roles/access_gateway/defaults/main.yml`. Both gateways feed into the same downstream pipeline (nftables, CrowdSec, Traefik IPAllowList), so service definitions work identically with either option.
 
 VPN services are seamlessly accessible via their public domain when the client is on the tailnet. Headscale's MagicDNS split-DNS automatically resolves VPN service domains to the server's tailnet IP for enrolled clients, so requests travel through the tunnel and pass the IPAllowList — no `/etc/hosts` hacks or tailnet IP bookmarks needed. Non-tailnet clients still get blocked with 403.
 
@@ -462,7 +480,7 @@ See **[docs/access-gateways.md](docs/access-gateways.md#headscale-quick-start)**
 
 ### Traefik with host networking
 
-Traefik runs with `network_mode: host` to see real client IPs (no Docker NAT). App containers live on a named bridge network (`services`). Traefik discovers them via the Docker socket API and routes to their bridge IPs.
+Traefik runs with `network_mode: host` to see real client IPs (no Docker NAT). App containers live on one named bridge network per box, `services` (`traefik_docker_network`, created by the `traefik` role). Every env on the box shares it. A container of an env other than `primary_env` carries the env in its name (`shop-staging`). So use the `<NAME>_URL` that Bay injects, never a container name: a name without the env reaches the `primary_env` container. Traefik discovers the containers via the Docker socket API and routes to their bridge IPs.
 
 ### CrowdSec integration
 
@@ -566,8 +584,9 @@ make test                    # Framework + bootstrap + Python suites
 |---------|--------|---------------|
 | `make test-framework` | `tests/test_framework.sh` | Playbook syntax, ansible-lint, role structure, YAML validity, Jinja2 templates, Galaxy dependencies, expected files, required variables |
 | `make test-bootstrap` | `tests/test_bootstrap.sh` | End-to-end install: runs `bootstrap.sh` from the local repo into throwaway directories, checks `bay` runs and `bay fleet init` and `bay fleet ls` work, then runs the installer a second time |
-| `make test` | Both | Runs framework + bootstrap tests |
-| `make lint` | — | `ansible-lint` with production profile (see `.ansible-lint`) |
+| `make test-python` | `tests/*.py` | The pytest suite (CLI, compiler, reconciler, docs) |
+| `make test` | All three | Runs framework + bootstrap + Python tests |
+| `make lint` | (none) | `mypy` and `ruff` (`make typecheck`), then `ansible-lint` with production profile (see `.ansible-lint`) |
 
 The bootstrap test uses `BAY_REPO=<local path>` so it clones from the working tree — no GitHub access needed.
 

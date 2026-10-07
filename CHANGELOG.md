@@ -8,6 +8,16 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.1.13] - 2026-10-07
+
+Docs only. README and features.md checked sentence by sentence against the v2 docs and the code.
+
+- Build strategies are `local` (default), `remote` and `registry`; `push` is a deprecated alias of `remote`. `build_image` only logs in and pulls; `git_deploy` builds. Access modes in `bay.toml` are `public`, `tailnet` and `internal`; `tailnet` compiles to `vpn`, `open` to `public_routes`, `locked` to `vpn_routes`.
+- One Docker network per box, `services` (`traefik_docker_network`), shared by every env. A non-primary env carries the env in the container name, so read the injected `<NAME>_URL`. README, features.md, bay-toml.md and layout-scenarios.md say the same (the last two said each env had its own network).
+- Restore is `bay backup restore <env> <accessory>`; `bay restore <env>` is the low-level playbook run. Plain `bay status` shows the version, the fleet and the feature flags; `bay status --json` adds the receipt of every box.
+- The webhook receiver and its list of build containers come from `bay deploy <env>` with no `--tags` or with `--tags git_deploy`; `bay up` and `bay remove` refresh only `rebuild.sh` and `image-map.json`. `access_gateway: none` fails a deploy that has a `tailnet` app.
+- README alerting shows the `alert_recipients` list; the rig role lists, the privilege phases, `make test` (three suites) and `make lint` (mypy and ruff first) match the playbooks and the Makefile.
+
 ## [2.1.12] - 2026-10-07
 
 Docs only. Reader round 12: two places where two docs stated different facts.

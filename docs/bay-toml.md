@@ -168,8 +168,10 @@ Services:
   of the same environment. The name is uppercase and `-` becomes `_`. The main container
   is `WEB_URL`.
 - A service with `inherit = false` receives no such variable.
-- Each environment has its own container network, so a bare service name never crosses
-  environments.
+- All environments on a box share one container network. A container of an environment other
+  than `primary_env` carries the environment in its name (`<name>-<env>`), so read the injected
+  `<SERVICE>_URL`, never a container name: a name without the environment reaches the
+  `primary_env` container.
 - A service with an inline `build` inherits nothing from the project `[build]`: no args,
   no secrets, no watch and no memory.
 - A service that inherits the image shares the one build.

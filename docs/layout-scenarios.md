@@ -770,7 +770,9 @@ is `<NAME>_URL`. To pick another name, use the table form `[needs.api]` with
 
 When `api` runs on another box, the fleet decides the network path and the tailnet ACL.
 The compiler picks it. The docs say no more than that, so do not hard-code a tailnet name.
-Each env has its own container network, so a bare name never crosses envs.
+All envs on a box share one Docker network, `services`. A container of an env other than
+`primary_env` carries the env in its name (`api-staging`), so read `API_URL`, never a container name:
+a name without the env reaches the `primary_env` container.
 
 As written, `api` hits two unsupported cases of 2.1: it is an internal container (no `domain`,
 no `path`) that builds from source (it has neither `image` nor `[build]`, so it builds
