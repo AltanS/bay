@@ -121,11 +121,22 @@ class FakeBox:
         self.receipts: dict[str, dict[str, Any]] = {}
         self.deploys: list[str] = []
         self.fail = False
+        #: Per deploy: the config files the deploy would copy, relative path -> bytes.
+        self.config_files: list[dict[str, bytes] | None] = []
 
-    def deploy(self, cx: Context, box_env: str) -> None:
+    def deploy(self, cx: Context, box_env: str, *, config_files_root: Path | None = None) -> None:
         from bay_cli import gitrepo
 
         self.deploys.append(box_env)
+        self.config_files.append(
+            None
+            if config_files_root is None
+            else {
+                p.relative_to(config_files_root).as_posix(): p.read_bytes()
+                for p in sorted(config_files_root.rglob("*"))
+                if p.is_file()
+            }
+        )
         data = yaml.safe_load((cx.fleet_root / GENERATED_SERVICES).read_text().split("\n", 1)[1])
         entries = {**(data.get("accessories") or {}), **(data.get("services") or {})}
         before = {
@@ -679,7 +690,7 @@ def test_up_json_leaves_out_a_receipt_from_an_earlier_deploy(
     do_up(world)
     edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
 
-    def broken(cx: Context, box_env: str) -> None:
+    def broken(cx: Context, box_env: str, **_: Any) -> None:
         from bay_cli.errors import BayError
 
         raise BayError("the deploy stopped before the box wrote a receipt")
@@ -1133,10 +1144,10 @@ def test_in_fleet_project_with_no_lock_is_read_at_fleet_head(
 
 
 def _noisy_deploy(box: FakeBox) -> Any:
-    def deploy(cx: Context, box_env: str) -> None:
+    def deploy(cx: Context, box_env: str, **kw: Any) -> None:
         print("ANSIBLE-PRINT-NOISE")
         subprocess.run(["echo", "ANSIBLE-CHILD-NOISE"], stdout=sys.stdout, check=True)
-        box.deploy(cx, box_env)
+        box.deploy(cx, box_env, **kw)
 
     return deploy
 
@@ -1144,9 +1155,9 @@ def _noisy_deploy(box: FakeBox) -> Any:
 def test_json_stdout_is_one_document(
     world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def deploy(cx: Context, box_env: str) -> None:
+    def deploy(cx: Context, box_env: str, **kw: Any) -> None:
         print("ANSIBLE-PRINT-NOISE")
-        box.deploy(cx, box_env)
+        box.deploy(cx, box_env, **kw)
 
     monkeypatch.setattr(applymod, "default_deploy", deploy)
     result = cli(world, "up", "--json")
@@ -1364,11 +1375,11 @@ def test_log_file_takes_the_child_stderr(
 ) -> None:
     from bay_cli import runner as runmod
 
-    def deploy(cx: Context, box_env: str) -> None:
+    def deploy(cx: Context, box_env: str, **kw: Any) -> None:
         # The real path: ansible.run_playbook -> runner.run(capture=False),
         # which hands sys.stdout and sys.stderr to the child.
         runmod.run([sys.executable, "-c", _CHILD], capture=False)
-        box.deploy(cx, box_env)
+        box.deploy(cx, box_env, **kw)
 
     monkeypatch.setattr(applymod, "default_deploy", deploy)
     log = tmp_path / "up.log"
@@ -2237,8 +2248,8 @@ def test_materialize_maps_project_files_into_scratch_files(
         board = comp.result.services["board"]
         assert board["config_files"] == ["board/rules/a.yaml", "board/rules/b.yaml", "legacy/site.conf"]
         assert "{{ stack_dir }}/config/legacy/site.conf:/etc/app/site.conf:ro" in board["volumes"]
-        # The deploy copies from the fleet's files/, which has none of these yet.
-        assert any("files/board/rules/a.yaml is not in the fleet" in g for g in comp.file_gaps)
+        # The deploy copies config files from this scratch files/.
+        assert (comp.files_root / "board/rules/a.yaml").read_text() == "a\n"
 
 
 def test_materialize_uses_head_not_working_tree(world: dict[str, Path], box: FakeBox) -> None:
@@ -2263,7 +2274,7 @@ def test_from_fleet_prefix_resolves_to_fleet_files(world: dict[str, Path], box: 
         board = comp.result.services["board"]
         assert board["config_files"] == ["shared/rules.yaml"]
         assert "{{ stack_dir }}/config/shared/rules.yaml:/etc/app/rules.yaml:ro" in board["volumes"]
-        assert comp.file_gaps == []
+        assert (comp.files_root / "shared/rules.yaml").read_text() == "rules: 1\n"
     shared.unlink()
     commit_all(world["fleet"], "drop the shared file")
     with planmod.compiled_fleet(cx_of(world)) as comp:
@@ -2286,28 +2297,117 @@ def test_old_files_place_is_read_with_a_deprecation_note(
             "board: files/board/site.conf is the old place of from = 'site.conf'; "
             "move it beside the bay.toml (projects/board/site.conf)"
         ]
-        assert comp.file_gaps == []
+        assert (comp.files_root / "board/site.conf").read_text() == "old place\n"
     plan = planmod.make_plan(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
     assert any("is the old place" in n for n in plan["notes"])
     assert plan["blockers"] == []
 
 
-def test_deploy_file_gap_blocks_the_plan(world: dict[str, Path], box: FakeBox) -> None:
-    _in_fleet_with_file(world, "board", {"site.conf": "new\n"}, MOUNT.format(leaf="site.conf", src="site.conf"))
+def test_deploy_reads_the_scratch_files_of_the_compile(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    # The file lives only beside the toml; the fleet's own files/ has no copy.
+    _in_fleet_with_file(
+        world, "board", {"site.conf": "new\n"}, MOUNT.format(leaf="site.conf", src="site.conf")
+    )
+    assert not (world["fleet"] / "files" / "board").exists()
     plan = planmod.make_plan(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
-    assert plan["verdict"] == "blocked"
-    assert any("files/board/site.conf is not in the fleet" in b for b in plan["blockers"])
-    # With the copy the deploy reads in place, the plan goes through.
-    live = world["fleet"] / "files" / "board" / "site.conf"
-    live.parent.mkdir(parents=True)
-    live.write_text("new\n")
-    commit_all(world["fleet"], "copy for the deploy")
+    assert plan["blockers"] == [] and plan["verdict"] == "auto"
+    up = applymod.up(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
+    assert up["result"] == "ok"
+    # The deploy got the scratch files/ with files/<name>/<from> at the commit.
+    assert box.config_files[-1] == {"board/site.conf": b"new\n"}
+
+
+def test_uncommitted_file_is_a_note_not_deployed(world: dict[str, Path], box: FakeBox) -> None:
+    folder = _in_fleet_with_file(
+        world, "board", {"site.conf": "committed\n"}, MOUNT.format(leaf="site.conf", src="site.conf")
+    )
+    (folder / "site.conf").write_text("edited\n")
+    (world["fleet"] / "files" / "extra").mkdir(parents=True)
+    (world["fleet"] / "files" / "extra" / "new.yaml").write_text("x\n")
     plan = planmod.make_plan(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
     assert plan["blockers"] == []
-    # An uncommitted edit there would ship something else than the plan shows.
-    live.write_text("edited\n")
-    plan = planmod.make_plan(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
-    assert any("differs from the compiled one" in b for b in plan["blockers"])
+    assert "uncommitted file projects/board/site.conf is not deployed; commit it first" in plan["notes"]
+    assert "uncommitted file files/extra/new.yaml is not deployed; commit it first" in plan["notes"]
+    applymod.up(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
+    assert box.config_files[-1] == {"board/site.conf": b"committed\n"}
+
+
+def _capture_playbook(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    from types import SimpleNamespace
+
+    from bay_cli.commands import ops, validate
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(cx: Context, playbook: str, env: str, tags: Any, extra: list[str], **kw: Any) -> None:
+        root = None
+        for i, arg in enumerate(extra):
+            if arg == "-e" and "bay_config_files_root" in extra[i + 1]:
+                root = Path(json.loads(extra[i + 1])["bay_config_files_root"])
+        calls.append(
+            {
+                "tags": tags,
+                "extra": list(extra),
+                "root": root,
+                "files": None
+                if root is None
+                else sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()),
+            }
+        )
+
+    monkeypatch.setattr(validate, "run_validation", lambda *a, **k: SimpleNamespace(total_issues=0))
+    monkeypatch.setattr(ops, "_run_playbook", fake_run)
+    monkeypatch.setattr(ops, "_invalidate_rig_cache", lambda *_: None)
+    monkeypatch.setattr(ops, "_run_post_deploy_healthcheck", lambda *a, **k: None)
+    return calls
+
+
+def test_up_and_box_check_pass_bay_config_files_root(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _in_fleet_with_file(
+        world, "board", {"site.conf": "new\n"}, MOUNT.format(leaf="site.conf", src="site.conf")
+    )
+    calls = _capture_playbook(monkeypatch)
+    monkeypatch.setattr(applymod, "default_deploy", _REAL_DEFAULT_DEPLOY)
+    monkeypatch.setattr(planmod, "read_box_predictions", lambda _d: [])
+    proj = planmod.load_project(cx_of(world), "board")
+    planmod.make_plan(proj, planmod.PlanOptions(box_check=True))
+    applymod.up(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
+    check, deploy = calls
+    assert "--check" in check["extra"] and "--check" not in deploy["extra"]
+    for call in (check, deploy):
+        # The scratch files/ existed while the playbook ran, with the mapped file.
+        assert call["root"] is not None and call["root"].name == "files"
+        assert call["files"] == ["board/site.conf"]
+        assert not call["root"].is_relative_to(world["fleet"])
+        # It is removed afterwards, as the other scratch dirs are.
+        assert not call["root"].exists()
+
+
+def test_plain_bay_deploy_passes_no_config_files_root(
+    world: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _capture_playbook(monkeypatch)
+    result = runner.invoke(
+        app,
+        ["--fleet", str(world["fleet"]), "deploy", "production", "--skip-validate",
+         "--skip-healthcheck", "--tags", "deploy_stack"],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0]["root"] is None
+    assert not any("bay_config_files_root" in a for a in calls[0]["extra"])
+
+
+def test_config_files_task_reads_the_var_with_the_fleet_default() -> None:
+    tasks = yaml.safe_load((ROOT / "roles/deploy_stack/tasks/config_files.yml").read_text())
+    copy = next(t for t in tasks if t.get("name") == "Deploy config files")
+    assert copy["ansible.builtin.copy"]["src"] == (
+        "{{ bay_config_files_root | default(bay_fleet_root ~ '/files') }}/{{ item }}"
+    )
 
 
 def test_fleet_format_2_written_and_unknown_refused(world: dict[str, Path], box: FakeBox) -> None:
