@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -1893,3 +1894,530 @@ def test_a_pinned_repo_project_keeps_its_commit(world: dict[str, Path], box: Fak
         (r["project"], r["env"], r["commit"]) for r in up["pinned"]
     }
 
+
+# ── 2.1: lock v2, the repo source, one folder per project ───────────────────
+
+
+def _repo_project(
+    world: dict[str, Path],
+    tmp_path: Path,
+    name: str,
+    files: dict[str, str],
+    *,
+    toml_path: str = "bay.toml",
+    remote_name: str | None = None,
+    pin: bool = True,
+) -> tuple[Path, str]:
+    """A repo project: a bare remote with ``files`` pushed, and its lock in the fleet.
+
+    Returns the remote and the pushed commit. Two calls with one
+    ``remote_name`` add a second project to the same repo.
+    """
+    remote = tmp_path / "remotes" / f"{remote_name or name}.git"
+    work = tmp_path / "work" / (remote_name or name)
+    if not remote.exists():
+        git(tmp_path, "init", "-q", "--bare", str(remote))
+        git(tmp_path, "clone", "-q", str(remote), str(work))
+    for rel, text in files.items():
+        (work / rel).parent.mkdir(parents=True, exist_ok=True)
+        (work / rel).write_text(text)
+    commit = commit_all(work, f"add {name}")
+    git(work, "push", "-q", "origin", "HEAD:main")
+    raw = lockfile.new_lock(name, repo=str(remote), toml_path=toml_path)
+    if pin:
+        raw["commit"] = commit
+    lockfile.write(lockfile.lock_path(world["fleet"], name), raw)
+    commit_all(world["fleet"], f"bay: init {name}")
+    return remote, commit
+
+
+def _toml(name: str, extra: str = "") -> str:
+    return (
+        f'name = "{name}"\nfleet = "testfleet"\nimage = "ghcr.io/acme/{name}:1"\nport = 80\n'
+        f'health = "none"\n{extra}\n[access]\nmode = "public"\n\n'
+        f'[deploy.production]\ndomain = "{name}.example.com"\n'
+    )
+
+
+def test_lock_v2_has_no_local_path(world: dict[str, Path], box: FakeBox) -> None:
+    raw = lockfile.new_lock("demo", repo="git@example.com:acme/demo.git")
+    assert set(raw) == {"lock_version", "name", "repo", "toml_path", "commit", "envs"}
+    assert raw["lock_version"] == 2
+    lockfile.write(lockfile.lock_path(world["fleet"], "demo"), raw)
+    assert lockfile.lock_path(world["fleet"], "demo") == world["fleet"] / "projects/demo/bay.lock"
+    # The schema has no local_path any more: a lock that carries one is refused.
+    with pytest.raises(lockfile.LockWriteError, match="local_path"):
+        lockfile.write(lockfile.lock_path(world["fleet"], "demo"), {**raw, "local_path": "/x"})
+    do_up(world)
+    assert "local_path" not in lock_of(world) and lock_of(world)["lock_version"] == 2
+
+
+def test_lock_v1_migrates_to_v2(world: dict[str, Path], box: FakeBox) -> None:
+    path = lockfile.lock_path(world["fleet"], "webapp")
+    v1 = {**json.loads(path.read_text()), "lock_version": 1, "local_path": None}
+    path.write_text(json.dumps(v1, indent=2) + "\n")
+    commit_all(world["fleet"], "a v1 lock")
+    raw = lockfile.read(path)
+    assert raw is not None and raw["lock_version"] == 2 and "local_path" not in raw
+    from bay_cli.fleet import load_lock
+
+    assert load_lock(path, world["fleet"]).name == "webapp"
+    # The next write (bay up) stores version 2.
+    do_up(world)
+    stored = json.loads(path.read_text())
+    assert stored["lock_version"] == 2 and "local_path" not in stored
+
+
+def test_repo_source_prefers_matching_origin_checkout(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    proj = project(world)
+    assert proj.source == "checkout" and proj.checkout == world["app"]
+    # WANTED is the checkout's HEAD, even before the push.
+    local = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "warn"', push=False)
+    assert make(world)["wanted"]["commit"] == local
+    # A checkout of another repo is not used: the cache is.
+    stranger = tmp_path / "stranger"
+    git(tmp_path, "init", "-q", str(stranger))
+    git(stranger, "remote", "add", "origin", "git@example.com:acme/stranger.git")
+    other = project(world, cwd=stranger)
+    assert other.source == "cache"
+
+
+def test_repo_source_falls_back_to_bare_cache(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    from bay_cli import gitrepo, reposource
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    proj = project(world, cwd=elsewhere)
+    expected = world["fleet"] / ".bay-cache" / "repos" / reposource.cache_slug(str(world["remote"]))
+    assert proj.source == "cache" and proj.checkout == expected
+    assert gitrepo.is_bare(expected)
+    # The cache never shows in the fleet's git status.
+    assert git(world["fleet"], "status", "--porcelain") == ""
+    # It is fetched before each plan: a commit pushed after the clone is WANTED.
+    pushed = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "warn"')
+    plan = planmod.make_plan(project(world, cwd=elsewhere), planmod.PlanOptions())
+    assert plan["wanted"]["commit"] == pushed
+    assert plan["blockers"] == []
+
+
+def test_two_projects_one_repo_share_one_cache(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    _repo_project(
+        world, tmp_path, "alpha", {"apps/alpha/bay.toml": _toml("alpha")},
+        toml_path="apps/alpha/bay.toml", remote_name="mono",
+    )
+    _repo_project(
+        world, tmp_path, "beta", {"apps/beta/bay.toml": _toml("beta")},
+        toml_path="apps/beta/bay.toml", remote_name="mono",
+    )
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        assert {"alpha", "beta"} <= set(comp.result.services)
+    from bay_cli import reposource
+
+    # webapp pins no commit yet, so only alpha and beta were read: one cache.
+    caches = sorted(p.name for p in (world["fleet"] / ".bay-cache" / "repos").iterdir())
+    mono = str(tmp_path / "remotes" / "mono.git")
+    assert caches == [reposource.cache_slug(mono)]
+    assert reposource.cache_path(world["fleet"], mono).name == caches[0]
+
+
+def test_plan_missing_commit_is_an_error_not_a_skip(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    _repo_project(world, tmp_path, "ghost", {"bay.toml": _toml("ghost")})
+    path = lockfile.lock_path(world["fleet"], "ghost")
+    raw = json.loads(path.read_text())
+    raw["commit"] = "0123456789ab"  # in neither the checkout nor the cache
+    path.write_text(json.dumps(raw, indent=2) + "\n")
+    commit_all(world["fleet"], "pin a commit nobody pushed")
+    plan = make(world)
+    assert plan["verdict"] == "blocked"
+    assert any(
+        b.startswith("ghost: commit 0123456789ab is in neither") and "push it" in b
+        for b in plan["blockers"]
+    ), plan["blockers"]
+    result = runner.invoke(app, ["compile", "--fleet", str(world["fleet"]), "--check"])
+    assert result.exit_code != 0 and "ghost: commit 0123456789ab" in result.output
+
+
+def test_up_refuses_commit_not_on_remote(world: dict[str, Path], box: FakeBox) -> None:
+    do_up(world)
+    before = lockfile.lock_path(world["fleet"], "webapp").read_text()
+    local = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "warn"', push=False)
+    plan = make(world)
+    assert plan["wanted"]["commit"] == local
+    assert any("push first" in n for n in plan["notes"])  # plan warns
+    with pytest.raises(applymod.Refused, match="push first"):
+        do_up(world)  # up refuses
+    assert lockfile.lock_path(world["fleet"], "webapp").read_text() == before
+    git(world["app"], "push", "-q", "origin", "main")
+    assert do_up(world)["commit"] == local
+
+
+def test_init_toml_path_monorepo(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
+    repo = tmp_path / "mono"
+    git(tmp_path, "init", "-q", str(repo))
+    git(repo, "remote", "add", "origin", "git@example.com:acme/mono.git")
+    (repo / "services" / "api").mkdir(parents=True)
+    (repo / "services" / "api" / "Dockerfile").write_text("FROM x\nEXPOSE 7000\n")
+    commit_all(repo, "mono")
+    result = cli(
+        world, "init", "--name", "api", "--toml-path", "services/api/bay.toml", "--json", cwd=repo
+    )
+    assert result.exit_code == 0, result.output
+    assert (repo / "services" / "api" / "bay.toml").is_file()
+    assert not (repo / "bay.toml").exists()
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "api"))
+    assert raw is not None and raw["toml_path"] == "services/api/bay.toml"
+    assert raw["repo"] == "git@example.com:acme/mono.git"
+    assert "port = 7000" in (repo / "services" / "api" / "bay.toml").read_text()
+    bad = cli(world, "init", "--name", "bad", "--toml-path", "../x/bay.toml", cwd=repo)
+    assert bad.exit_code != 0
+
+
+def test_init_refuses_a_repo_without_origin(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    repo = tmp_path / "lonely"
+    git(tmp_path, "init", "-q", str(repo))
+    (repo / "README").write_text("x\n")
+    commit_all(repo, "lonely")
+    result = cli(world, "init", cwd=repo)
+    assert result.exit_code != 0
+    assert not lockfile.lock_path(world["fleet"], "lonely").exists()
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("git@github.com:Acme/App.git", "github.com/acme/app"),
+        ("ssh://git@github.com/acme/app", "github.com/acme/app"),
+        ("ssh://git@github.com:22/acme/app.git", "github.com/acme/app"),
+        ("https://github.com/acme/app.git/", "github.com/acme/app"),
+        ("https://user:token@github.com/acme/app", "github.com/acme/app"),
+        ("git://example.com/team/tool.git", "example.com/team/tool"),
+    ],
+)
+def test_origin_url_normalization(url: str, expected: str) -> None:
+    from bay_cli import reposource
+
+    assert reposource.normalize_url(url) == expected
+    assert reposource.same_repo(url, f"https://{expected}.git")
+
+
+def test_origin_url_normalization_of_a_local_path(tmp_path: Path) -> None:
+    from bay_cli import reposource
+
+    path = tmp_path / "remotes" / "app.git"
+    assert reposource.normalize_url(str(path)) == str(path.resolve())[: -len(".git")]
+    assert reposource.same_repo(str(path), f"file://{path}")
+    assert not reposource.same_repo(str(path), "git@github.com:acme/app.git")
+
+
+def test_cache_slug_is_stable() -> None:
+    from bay_cli import reposource
+
+    forms = [
+        "git@github.com:acme/app.git",
+        "https://github.com/acme/app",
+        "ssh://git@github.com/Acme/App.git",
+    ]
+    slugs = {reposource.cache_slug(u) for u in forms}
+    assert len(slugs) == 1
+    (slug,) = slugs
+    assert slug.startswith("github.com-acme-app-") and len(slug.rsplit("-", 1)[1]) == 8
+    # A known value: the slug is the cache's name on every machine.
+    assert slug == reposource.cache_slug("git@github.com:acme/app.git")
+    assert reposource.cache_slug("git@github.com:acme/app2.git") != slug
+    # Two URLs that read the same after the character swap still differ.
+    assert reposource.cache_slug("https://x.com/a-b/c") != reposource.cache_slug(
+        "https://x.com/a/b-c"
+    )
+
+
+# ── folder per project ──────────────────────────────────────────────────────
+
+
+def _in_fleet_with_file(world: dict[str, Path], name: str, files: dict[str, str], extra: str) -> Path:
+    folder = world["fleet"] / "projects" / name
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "bay.toml").write_text(_toml(name, extra))
+    for rel, text in files.items():
+        (folder / rel).parent.mkdir(parents=True, exist_ok=True)
+        (folder / rel).write_text(text)
+    commit_all(world["fleet"], f"add {name}")
+    return folder
+
+
+MOUNT = '\n[[mounts]]\npath = "/etc/app/{leaf}"\nfrom = "{src}"\n'
+
+
+def test_from_is_relative_to_toml_dir(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    # A repo project in a monorepo: from = is relative to apps/api/, not the repo root.
+    _repo_project(
+        world, tmp_path, "api",
+        {
+            "apps/api/bay.toml": _toml("api", MOUNT.format(leaf="app.yaml", src="conf/app.yaml")),
+            "apps/api/conf/app.yaml": "api: 1\n",
+            "conf/app.yaml": "the repo root copy: never read\n",
+        },
+        toml_path="apps/api/bay.toml",
+    )
+    # A project in the fleet: from = is relative to projects/<name>/.
+    _in_fleet_with_file(
+        world, "board", {"conf/board.yaml": "board: 1\n"},
+        MOUNT.format(leaf="board.yaml", src="conf/board.yaml"),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        made = planmod._materialize(cx_of(world), Path(tmp), {})
+        assert made.problems == []
+        assert (made.root / "files/api/conf/app.yaml").read_text() == "api: 1\n"
+        assert (made.root / "files/board/conf/board.yaml").read_text() == "board: 1\n"
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        assert comp.result.services["api"]["config_files"] == ["api/conf/app.yaml"]
+        assert comp.result.services["board"]["config_files"] == ["board/conf/board.yaml"]
+        assert (
+            "{{ stack_dir }}/config/api/conf/app.yaml:/etc/app/app.yaml:ro"
+            in comp.result.services["api"]["volumes"]
+        )
+
+
+def test_in_fleet_wanted_scope_excludes_lock(world: dict[str, Path], box: FakeBox) -> None:
+    _in_fleet(world)
+    proj = planmod.load_project(cx_of(world), "status")
+    assert proj.scope_spec == ["projects/status", ":(exclude)projects/status/bay.lock"]
+    first = planmod.read_wanted(proj, None).commit
+    up = applymod.up(proj, planmod.PlanOptions())
+    assert up["result"] == "ok"
+    # bay up committed projects/status/bay.lock twice; WANTED did not move.
+    assert "projects/status/bay.lock" in git(world["fleet"], "log", "-1", "--name-only")
+    after = planmod.load_project(cx_of(world), "status")
+    assert planmod.read_wanted(after, None).commit == first
+    assert planmod.read_wanted(after, None).dirty is False
+    shown = applymod.show(after, remote=True)
+    assert shown["envs"][0]["status"] == "ok"
+    plan = planmod.make_plan(after, planmod.PlanOptions())
+    assert plan["steps"] == [] and plan["verdict"] == "auto"
+
+
+def test_materialize_maps_project_files_into_scratch_files(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    folder = _in_fleet_with_file(
+        world, "board",
+        {"rules/a.yaml": "a\n", "rules/b.yaml": "b\n", "site.conf": "conf\n"},
+        MOUNT.format(leaf="rules", src="rules") + MOUNT.format(leaf="site.conf", src="site.conf"),
+    )
+    lock = lockfile.new_lock("board", repo=None)
+    # An adopted path keeps today's place under config/ and files/.
+    lock["envs"] = {"production": {"adopted": {"files": {"site.conf": "legacy/site.conf"}}}}
+    lockfile.write(folder / "bay.lock", lock)
+    commit_all(world["fleet"], "board lock")
+    with tempfile.TemporaryDirectory() as tmp:
+        made = planmod._materialize(cx_of(world), Path(tmp), {})
+        assert made.problems == []
+        files = made.root / "files"
+        assert (files / "board/rules/a.yaml").read_text() == "a\n"
+        assert (files / "board/rules/b.yaml").read_text() == "b\n"
+        assert (files / "legacy/site.conf").read_text() == "conf\n"
+        assert not (files / "board/site.conf").exists()
+        # The scratch lock is the pin as it is now.
+        assert json.loads((made.root / "projects/board/bay.lock").read_text()) == lock
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        board = comp.result.services["board"]
+        assert board["config_files"] == ["board/rules/a.yaml", "board/rules/b.yaml", "legacy/site.conf"]
+        assert "{{ stack_dir }}/config/legacy/site.conf:/etc/app/site.conf:ro" in board["volumes"]
+        # The deploy copies from the fleet's files/, which has none of these yet.
+        assert any("files/board/rules/a.yaml is not in the fleet" in g for g in comp.file_gaps)
+
+
+def test_materialize_uses_head_not_working_tree(world: dict[str, Path], box: FakeBox) -> None:
+    folder = _in_fleet_with_file(
+        world, "board", {"site.conf": "committed\n"}, MOUNT.format(leaf="site.conf", src="site.conf")
+    )
+    (folder / "site.conf").write_text("uncommitted\n")
+    (folder / "draft.conf").write_text("never committed\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        made = planmod._materialize(cx_of(world), Path(tmp), {})
+        assert (made.root / "files/board/site.conf").read_text() == "committed\n"
+        assert not (made.root / "projects/board/draft.conf").exists()
+
+
+def test_from_fleet_prefix_resolves_to_fleet_files(world: dict[str, Path], box: FakeBox) -> None:
+    shared = world["fleet"] / "files" / "shared" / "rules.yaml"
+    shared.parent.mkdir(parents=True)
+    shared.write_text("rules: 1\n")
+    _in_fleet_with_file(world, "board", {}, MOUNT.format(leaf="rules.yaml", src="fleet:shared/rules.yaml"))
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        board = comp.result.services["board"]
+        assert board["config_files"] == ["shared/rules.yaml"]
+        assert "{{ stack_dir }}/config/shared/rules.yaml:/etc/app/rules.yaml:ro" in board["volumes"]
+        assert comp.file_gaps == []
+    shared.unlink()
+    commit_all(world["fleet"], "drop the shared file")
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is None
+        assert any("from = 'fleet:shared/rules.yaml' cannot be listed" in e for e in comp.errors)
+
+
+def test_old_files_place_is_read_with_a_deprecation_note(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    old = world["fleet"] / "files" / "board" / "site.conf"
+    old.parent.mkdir(parents=True)
+    old.write_text("old place\n")
+    _in_fleet_with_file(world, "board", {}, MOUNT.format(leaf="site.conf", src="site.conf"))
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        assert comp.result.services["board"]["config_files"] == ["board/site.conf"]
+        notes = [n for n in comp.notes if "old place" in n]
+        assert notes == [
+            "board: files/board/site.conf is the old place of from = 'site.conf'; "
+            "move it beside the bay.toml (projects/board/site.conf)"
+        ]
+        assert comp.file_gaps == []
+    plan = planmod.make_plan(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
+    assert any("is the old place" in n for n in plan["notes"])
+    assert plan["blockers"] == []
+
+
+def test_deploy_file_gap_blocks_the_plan(world: dict[str, Path], box: FakeBox) -> None:
+    _in_fleet_with_file(world, "board", {"site.conf": "new\n"}, MOUNT.format(leaf="site.conf", src="site.conf"))
+    plan = planmod.make_plan(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
+    assert plan["verdict"] == "blocked"
+    assert any("files/board/site.conf is not in the fleet" in b for b in plan["blockers"])
+    # With the copy the deploy reads in place, the plan goes through.
+    live = world["fleet"] / "files" / "board" / "site.conf"
+    live.parent.mkdir(parents=True)
+    live.write_text("new\n")
+    commit_all(world["fleet"], "copy for the deploy")
+    plan = planmod.make_plan(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
+    assert plan["blockers"] == []
+    # An uncommitted edit there would ship something else than the plan shows.
+    live.write_text("edited\n")
+    plan = planmod.make_plan(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
+    assert any("differs from the compiled one" in b for b in plan["blockers"])
+
+
+def test_fleet_format_2_written_and_unknown_refused(world: dict[str, Path], box: FakeBox) -> None:
+    from bay_cli import layout
+    from bay_cli.fleet import FleetError, load_fleet_file
+
+    text = (world["fleet"] / "bay.fleet.toml").read_text()
+    assert text.splitlines()[:2] == ['name = "testfleet"', "format = 2"]
+    assert load_fleet_file(world["fleet"])["format"] == 2
+    # A minimal edit: comments and order stay.
+    src = '# head\nname = "x"  # the name\ndefault_box = "b"\n\n[boxes.b]\nformat = "kept"\n'
+    assert layout.with_format(src) == (
+        '# head\nname = "x"  # the name\nformat = 2\ndefault_box = "b"\n\n[boxes.b]\nformat = "kept"\n'
+    )
+    assert layout.with_format('name = "x"\nformat = 1\n') == 'name = "x"\nformat = 2\n'
+    # A format this CLI does not know is refused, before anything is read.
+    (world["fleet"] / "bay.fleet.toml").write_text(text.replace("format = 2", "format = 3"))
+    with pytest.raises(FleetError, match="format: is 3, but this Bay knows formats up to 2"):
+        load_fleet_file(world["fleet"])
+    result = cli(world, "plan", "--json")
+    assert result.exit_code != 0 and "knows formats up to 2" in result.output
+
+
+def _flat_fleet(world: dict[str, Path]) -> Path:
+    """Put webapp's lock back in the old flat place, as a 2.0 fleet has it."""
+    fleet = world["fleet"]
+    lock = lockfile.lock_path(fleet, "webapp")
+    v1 = {**json.loads(lock.read_text()), "lock_version": 1, "local_path": None}
+    git(fleet, "rm", "-q", str(lock.relative_to(fleet)))
+    (fleet / "projects" / "webapp.lock").write_text(json.dumps(v1, indent=2) + "\n")
+    toml = fleet / "bay.fleet.toml"
+    toml.write_text(toml.read_text().replace("format = 2\n", ""))
+    commit_all(fleet, "a 2.0 fleet")
+    return fleet
+
+
+def test_lock_moves_into_project_folder(world: dict[str, Path], box: FakeBox) -> None:
+    fleet = _flat_fleet(world)
+    before = git(fleet, "rev-parse", "HEAD")
+    plan = make(world)  # the first command that reads the locks moves them
+    assert any(n.startswith("fleet layout: moved projects/webapp.lock") for n in plan["notes"])
+    assert not (fleet / "projects" / "webapp.lock").exists()
+    assert (fleet / "projects" / "webapp" / "bay.lock").is_file()
+    assert "format = 2" in (fleet / "bay.fleet.toml").read_text()
+    assert git(fleet, "log", "-1", "--format=%s") == "bay: move locks into project folders"
+    assert git(fleet, "rev-parse", "HEAD~1") == before  # one commit
+    changed = git(fleet, "show", "--name-status", "--format=", "HEAD").splitlines()
+    assert sorted(changed) == sorted(
+        ["M\tbay.fleet.toml", "R100\tprojects/webapp.lock\tprojects/webapp/bay.lock"]
+    )
+    assert git(fleet, "status", "--porcelain") == ""
+    # The content is untouched; the next write stores version 2.
+    assert json.loads((fleet / "projects/webapp/bay.lock").read_text())["lock_version"] == 1
+    do_up(world)
+    assert lock_of(world)["lock_version"] == 2
+    # A second run has nothing to move.
+    assert not any(n.startswith("fleet layout:") for n in make(world)["notes"])
+
+
+def test_layout_migration_dry_run_changes_nothing(world: dict[str, Path], box: FakeBox) -> None:
+    from bay_cli import layout
+
+    fleet = _flat_fleet(world)
+    head = git(fleet, "rev-parse", "HEAD")
+    dry = layout.migrate(fleet, dry_run=True)
+    assert dry.moves == [("projects/webapp.lock", "projects/webapp/bay.lock")]
+    assert dry.set_format and dry.commit is None
+    assert dry.lines() == [
+        "would move projects/webapp.lock to projects/webapp/bay.lock",
+        "would set format = 2 in bay.fleet.toml",
+    ]
+    assert (fleet / "projects" / "webapp.lock").is_file()
+    assert git(fleet, "rev-parse", "HEAD") == head
+    assert git(fleet, "status", "--porcelain") == ""
+    done = layout.migrate(fleet)
+    assert done.commit == git(fleet, "rev-parse", "HEAD") != head
+    assert not layout.migrate(fleet).changed
+
+
+def test_layout_refuses_both_lock_forms(world: dict[str, Path], box: FakeBox) -> None:
+    from bay_cli import layout
+    from bay_cli.errors import BayError
+
+    fleet = world["fleet"]
+    flat = fleet / "projects" / "webapp.lock"
+    flat.write_text(lockfile.lock_path(fleet, "webapp").read_text())
+    commit_all(fleet, "both forms")
+    with pytest.raises(BayError, match="webapp"):
+        layout.migrate(fleet)
+    with pytest.raises(BayError, match="both places"):
+        make(world)
+    assert flat.is_file()
+
+
+def test_layout_refuses_a_dirty_fleet_file(world: dict[str, Path], box: FakeBox) -> None:
+    from bay_cli import layout
+    from bay_cli.errors import BayError
+
+    fleet = _flat_fleet(world)
+    toml = fleet / "bay.fleet.toml"
+    toml.write_text(toml.read_text() + "# an edit in progress\n")
+    with pytest.raises(BayError, match="uncommitted changes"):
+        layout.migrate(fleet)
+    assert (fleet / "projects" / "webapp.lock").is_file()
+
+
+def test_doctor_lists_v1_leftovers(tmp_path: Path) -> None:
+    from bay_cli.commands.doctor import v1_leftovers
+
+    assert v1_leftovers(tmp_path) == []
+    (tmp_path / "bin").mkdir()
+    (tmp_path / ".bay-version").write_text("v0.10.0\n")
+    assert v1_leftovers(tmp_path) == ["bin", ".bay-version"]
