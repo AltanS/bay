@@ -616,6 +616,7 @@ class _Compiler:
             paths["exclude"] = list(table["ignore"])
         if paths:
             out["paths"] = paths
+        self._hold_keys(unit, out)
         token = self._repo_token(repo)
         if token is not None:
             out["token"] = _secret_ref(token)
@@ -633,6 +634,47 @@ class _Compiler:
             else:
                 image = f"{registry}/{name}:latest"
         return image, out
+
+    def _in_fleet(self, project: Project) -> bool:
+        """True when the project's bay.toml is ``projects/<name>/bay.toml`` in the fleet."""
+        projects = (self.inputs.root / PROJECTS_DIR).resolve()
+        return project.toml_file.resolve().is_relative_to(projects)
+
+    def _hold_keys(self, unit: _Unit, out: dict[str, Any]) -> None:
+        """The keys ``rebuild.sh`` reads to decide whether a push deploys.
+
+        * ``track: pin`` when ``[deploy.<env>] track = "pin"`` (absent = branch).
+        * ``frozen: true`` while ``bay rollback`` froze the environment.
+        * ``bay_toml_hash`` and ``bay_toml_path`` when the bay.toml lives in the
+          app repo, so a push can change it: the build side hashes the file at
+          the pushed commit and holds the build when the hash differs. An
+          in-fleet project's bay.toml is not in the app repo, so a push never
+          changes its config and there is nothing to compare.
+
+        Every key is left out at its default, so a fleet that uses none of
+        this compiles byte-identically to before.
+        """
+        from bay_cli import bay_toml
+        from bay_reconcile.tomlhash import canonical_hash
+
+        in_fleet = self._in_fleet(unit.project)
+        if bay_toml.track(unit.doc, unit.env) == "pin":
+            if in_fleet:
+                self._err(
+                    f"{unit.label}: deploy.{unit.env}.track: pin needs the bay.toml in the app "
+                    "repo (the pin is an app repo commit); this project lives in the fleet"
+                )
+            out["track"] = "pin"
+        if unit.lock.frozen:
+            out["frozen"] = True
+        if in_fleet or unit.project.lock is None:
+            return
+        try:
+            out["bay_toml_hash"] = canonical_hash(unit.project.toml_file.read_bytes())
+        except (OSError, ValueError) as exc:
+            self._err(f"{unit.label}: cannot hash {unit.project.toml_file.name}: {exc}")
+            return
+        out["bay_toml_path"] = unit.project.lock.toml_path
 
     def _repo_token(self, repo: str) -> str | None:
         tokens: dict[str, str] = self.fleet.get("repo_tokens", {})

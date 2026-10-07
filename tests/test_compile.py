@@ -242,7 +242,10 @@ def test_image_and_build(data: dict[str, Any]) -> None:
     s = data["services"]
     assert s["gatus"]["image"] == "twinproduction/gatus:latest"
     assert "build" not in s["gatus"]
-    build = s["shop"]["build"]
+    # The hold-guard keys have their own test (test_bay_toml_hash_written_to_services_yml).
+    build = {
+        k: v for k, v in s["shop"]["build"].items() if k not in ("bay_toml_hash", "bay_toml_path")
+    }
     assert build == {
         "repo": "git@github.com:acme/shop.git",
         "branch": "main",
@@ -262,6 +265,36 @@ def test_image_and_build(data: dict[str, Any]) -> None:
     assert api["dockerfile"] == "apps/api/Dockerfile" and api["context"] == "apps/api"
     assert api["strategy"] == "local" and "args" not in api and "secrets" not in api
     assert "image" not in s["shop-api"], "a local build needs no registry image"
+
+
+def test_bay_toml_hash_written_to_services_yml(fleet: Path) -> None:
+    """Spec M117/05: the hold guard's pinned hash, per build container, app-repo projects only."""
+    from bay_reconcile.tomlhash import canonical_hash
+
+    first = yaml.safe_load(compiled(fleet).body())["services"]
+    want = canonical_hash((fleet / SHOP).read_bytes())
+    for name in ("shop", "shop-staging", "shop-api"):
+        assert first[name]["build"]["bay_toml_hash"] == want
+        assert first[name]["build"]["bay_toml_path"] == "bay.toml"
+        # branch mode and no freeze are the defaults, so the keys are left out
+        assert "track" not in first[name]["build"] and "frozen" not in first[name]["build"]
+
+    # A comment edit leaves the hash alone; a value edit moves it.
+    edit(fleet, SHOP, "# The shop app", "# The shop app, reworded comment")
+    assert yaml.safe_load(compiled(fleet).body())["services"]["shop"]["build"]["bay_toml_hash"] == want
+    edit(fleet, SHOP, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    moved = yaml.safe_load(compiled(fleet).body())["services"]["shop"]["build"]["bay_toml_hash"]
+    assert moved != want and moved.startswith("sha256:")
+
+
+def test_track_pin_and_freeze_reach_the_build_block(fleet: Path) -> None:
+    edit(fleet, SHOP, "[deploy.staging]", '[deploy.staging]\ntrack = "pin"')
+    edit_lock(fleet, lambda d: d["envs"]["production"].update(frozen=True))
+    out = yaml.safe_load(compiled(fleet).body())["services"]
+    assert out["shop-staging"]["build"]["track"] == "pin"
+    assert "frozen" not in out["shop-staging"]["build"]
+    assert out["shop"]["build"]["frozen"] is True
+    assert "track" not in out["shop"]["build"]
 
 
 def test_build_args_merge_per_environment(fleet: Path) -> None:

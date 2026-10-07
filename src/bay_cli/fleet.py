@@ -77,6 +77,8 @@ class LockEnv:
     images: dict[str, str] = field(default_factory=dict)
     #: ``from`` path in bay.toml -> today's path under config/ and files/.
     files: dict[str, str] = field(default_factory=dict)
+    #: Set by ``bay rollback``: a push builds but does not deploy (docs/plan.md).
+    frozen: bool = False
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,7 @@ def load_lock(path: Path, fleet_root: Path) -> Lock:
             containers=dict(adopted.get("containers", {})),
             images=dict(adopted.get("images", {})),
             files=dict(adopted.get("files", {})),
+            frozen=body.get("frozen") is True,
         )
     return Lock(
         path=path,

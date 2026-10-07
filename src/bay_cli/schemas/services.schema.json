@@ -354,6 +354,25 @@
         "paths": {
           "$ref": "#/$defs/build_paths_block",
           "description": "Path filtering for webhook-triggered rebuilds."
+        },
+        "track": {
+          "type": "string",
+          "enum": ["pin"],
+          "description": "Written by bay compile from [deploy.<env>] track. Absent means branch: a push builds and deploys. pin: a push builds and tags the image by commit, and only bay up deploys."
+        },
+        "frozen": {
+          "type": "boolean",
+          "description": "Written by bay compile while bay rollback froze the environment: a push builds and tags, never deploys."
+        },
+        "bay_toml_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Canonical hash of the pinned bay.toml (bay_reconcile.tomlhash). Only for a project whose bay.toml lives in the app repo. A push whose bay.toml hashes differently is held until bay up."
+        },
+        "bay_toml_path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where the bay.toml lives in the app repo, for the hold guard."
         }
       },
       "additionalProperties": false

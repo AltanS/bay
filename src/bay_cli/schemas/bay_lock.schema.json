@@ -56,6 +56,11 @@
         "plan_id": { "type": ["string", "null"], "pattern": "^[0-9a-f]{12}$" },
         "last_receipt_sha256": { "$ref": "#/$defs/sha256_or_null" },
         "previous": { "$ref": "#/$defs/previous" },
+        "frozen": {
+          "description": "Set by `bay rollback`. While true, a push builds and tags its image but never deploys it, whatever `track` says. The next `bay up` to a commit newer than frozen_commit clears it.",
+          "type": "boolean"
+        },
+        "frozen_commit": { "$ref": "#/$defs/commit_or_null" },
         "adopted": {
           "type": "object",
           "additionalProperties": false,
