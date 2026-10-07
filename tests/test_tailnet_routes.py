@@ -647,3 +647,24 @@ def test_text_edits_on_a_fleet_with_no_tailnet_table() -> None:
     # An existing key is replaced in place.
     again = routes.set_tailnet_keys(with_keys, {"ingress_box": "b"})
     assert 'ingress_box = "b"' in again and again.count("ingress_box") == 1
+
+
+def test_tailnet_host_refuses_localhost_and_loopback() -> None:
+    """An upstream on the ingress box itself is never a tailnet route."""
+    for host in (
+        "localhost",
+        "LOCALHOST",
+        "localhost.",
+        "localhost.tailnet.internal",
+        "127.0.0.1",
+        "127.1",
+        "2130706433",
+        "0x7f000001",
+        "0x7f.1",
+        "::1",
+        "::ffff:127.0.0.1",
+    ):
+        assert not routes.is_tailnet_host(host), host
+    for host in ("laptop", "nas.tailnet.internal", "box.example.ts.net", "100.64.0.9",
+                 "fd7a:115c:a1e0::9"):
+        assert routes.is_tailnet_host(host), host

@@ -111,17 +111,39 @@ def is_tailnet_host(host: str) -> bool:
 
     A MagicDNS name is a single label (``laptop``) or a name under
     ``.tailnet.internal`` (Headscale's default base domain) or ``.ts.net``.
+
+    Never the ingress box itself: ``localhost`` (or ``localhost.<anything>``)
+    and every loopback literal are refused. An IPv4 address in a short or
+    numeric form (``2130706433``, ``0x7f000001``, ``127.1``) is read the way
+    the resolver reads it, so it is held to the tailnet range like any address.
     """
+    host = host.lower().rstrip(".")
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        ip = None
+        ip = _inet_aton(host)
     if ip is not None:
+        if ip.is_loopback:
+            return False
         return ip in _TAILNET_V4 if ip.version == 4 else ip in _TAILNET_V6
     labels = host.split(".")
+    if labels[0] == "localhost":
+        return False
     if not all(_LABEL_RE.match(label) for label in labels):
         return False
     return len(labels) == 1 or host.endswith(_TAILNET_SUFFIXES)
+
+
+def _inet_aton(host: str) -> ipaddress.IPv4Address | None:
+    """The address ``inet_aton(3)`` makes of ``host`` (``127.1``, ``0x7f.1``), or None."""
+    import socket
+
+    if not host or not all(c in "0123456789abcdefx." for c in host):
+        return None
+    try:
+        return ipaddress.IPv4Address(socket.inet_aton(host))
+    except (OSError, ValueError):
+        return None
 
 
 def parse_upstream(url: str) -> tuple[str, int] | str:
