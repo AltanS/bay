@@ -443,7 +443,10 @@ Where `from` is read:
   repo and in the fleet alike. In a repo with several apps,
   `services/api/bay.toml` with `from = "conf/app.yaml"` reads
   `services/api/conf/app.yaml`. A project that lives in the fleet reads
-  `projects/<name>/<from>`.
+  `projects/<name>/<from>`. The fleet HEAD decides the file, as the deploy copies config
+  files from it: Bay looks first at `projects/<name>/<from>` at the fleet HEAD, then
+  beside the toml at the project's pin, then at the old place below, and it is an error
+  only when none of them exists.
 - **A shared fleet file.** `from = "fleet:crowdsec/whitelist.yaml"` reads
   `files/crowdsec/whitelist.yaml` in the fleet. The prefix is explicit; Bay never
   guesses. On the box the file is `config/crowdsec/whitelist.yaml`.

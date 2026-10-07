@@ -563,7 +563,9 @@ def _materialize(
       is read at the fleet's HEAD.
     * Every file a project mounts from beside its bay.toml is copied to
       ``files/<target>`` in the copy, where ``<target>`` is the adopted path
-      from the lock or ``<name>/<from>``: the place the deploy reads.
+      from the lock or ``<name>/<from>``: the place the deploy reads. For a
+      project in the fleet the file is the fleet HEAD's, then the pin's (a file
+      moved beside the toml after the pin is found); else ``files/<target>`` at HEAD.
 
     Every path the compiler and ``fleet.load_inputs`` read from the fleet root
     is copied here: ``bay.fleet.toml``, ``group_vars/all/*.y*ml``,
@@ -779,7 +781,37 @@ def _copy_in_fleet(
     if lock is not None:
         _write_lock(out, name, lock)
     out.commits[name] = gitrepo.last_change(src, scope_spec(name), full) or full
+    if fleet_head is not None and fleet_head != full:
+        _refresh_mounted_files(src, fleet_head, name, out)
     _map_in_fleet(name, lock, out)
+
+
+def _refresh_mounted_files(src: Path, fleet_head: str, name: str, out: _Copy) -> None:
+    """Replace each file the project mounts from beside its bay.toml by the fleet HEAD's.
+
+    The deploy copies config files from the fleet at HEAD, not at the pin of
+    the project, so HEAD decides the files: a file moved beside the toml
+    after the pin is read from there. A file HEAD does not hold beside the
+    toml stays as the pin has it (or is absent, and the compiler reads the old
+    place ``files/<name>/<from>`` at HEAD).
+    """
+    scope = f"{PROJECTS_DIR}/{name}"
+    try:
+        doc = tomllib.loads((out.root / scope / "bay.toml").read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return  # fleet.load_inputs reports it
+    for rel in dict.fromkeys(_mount_sources(doc)):
+        if ".." in Path(rel).parts or not gitrepo.has_path(src, fleet_head, f"{scope}/{rel}"):
+            continue
+        dest = out.root / scope / rel
+        if dest.is_dir() and not dest.is_symlink():
+            shutil.rmtree(dest)
+        elif dest.exists() or dest.is_symlink():
+            dest.unlink()
+        try:
+            gitrepo.extract(src, fleet_head, [f"{scope}/{rel}"], out.root)
+        except gitrepo.GitError as exc:
+            out.problems.append(f"{name}: cannot read {scope}/{rel} at fleet HEAD: {exc}")
 
 
 def _map_in_fleet(name: str, lock: Mapping[str, Any] | None, out: _Copy) -> None:

@@ -12,6 +12,13 @@ needing manual action is called out under **Upgrade notes**. Entries for
 
 ### Fixed
 
+- **A file moved beside the toml no longer blocks the plan of every other project.** A
+  project in the fleet is read at its pin, but the deploy reads config files from the
+  fleet HEAD. After `git mv files/<name>/<from> projects/<name>/<from>`, the pin still
+  held the old place, so every `bay plan` was `blocked` with `from = '<from>' cannot be
+  listed` while `bay plan --project <name>` was fine. A `from` of a project in the fleet
+  is now read first beside the toml at the fleet HEAD, then beside the toml at the pin,
+  then at the old place `files/<name>/<from>`. The box path does not change.
 - **A plan saved before the lock migration no longer goes stale.** `bay up --plan-id`
   moves the locks into project folders first, and that fleet commit made the recheck
   report `stale` (exit 30, reason `fleet`). When the commits between the saved plan

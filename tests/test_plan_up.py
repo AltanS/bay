@@ -2427,6 +2427,69 @@ def test_old_files_place_is_read_with_a_deprecation_note(
     assert plan["blockers"] == []
 
 
+def _gatus_moved(world: dict[str, Path]) -> tuple[Path, str]:
+    """``gatus`` and ``other`` in the fleet, deployed with the file in the old place, then moved.
+
+    The lock of ``gatus`` pins the fleet commit where ``config.yaml`` lived at
+    ``files/gatus/``. A later commit (the fleet HEAD) moved it beside the toml.
+    """
+    fleet = world["fleet"]
+    old = fleet / "files" / "gatus" / "config.yaml"
+    old.parent.mkdir(parents=True)
+    old.write_text("checks: old\n")
+    _in_fleet_with_file(world, "gatus", {}, MOUNT.format(leaf="config.yaml", src="config.yaml"))
+    _in_fleet_with_file(world, "other", {}, "")
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        (fleet / GENERATED_SERVICES).write_text(comp.result.text())
+    commit_all(fleet, "compile")
+    up = applymod.up(planmod.load_project(cx_of(world), "other"), planmod.PlanOptions())
+    assert up["result"] == "ok", up
+    pinned = lockfile.read(lockfile.lock_path(fleet, "gatus"))
+    assert pinned is not None and pinned["commit"]
+    git(fleet, "mv", "files/gatus/config.yaml", "projects/gatus/config.yaml")
+    (fleet / "projects" / "gatus" / "config.yaml").write_text("checks: new\n")
+    commit_all(fleet, "move the gatus config beside its toml")
+    return fleet, str(pinned["commit"])
+
+
+def test_pinned_in_fleet_project_reads_moved_mount_from_fleet_head(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    fleet, pin = _gatus_moved(world)
+    assert not git(fleet, "ls-tree", "-r", "--name-only", pin, "--", "projects/gatus/config.yaml")
+    # The compile reads gatus at its pin, and its file where the fleet HEAD has it.
+    with planmod.compiled_fleet(cx_of(world)) as comp:
+        assert comp.result is not None, comp.errors
+        assert comp.commits["gatus"] == pin
+        gatus = comp.result.services["gatus"]
+        assert gatus["config_files"] == ["gatus/config.yaml"]
+        assert "{{ stack_dir }}/config/gatus/config.yaml:/etc/app/config.yaml:ro" in gatus["volumes"]
+        assert (comp.files_root / "gatus/config.yaml").read_text() == "checks: new\n"
+        assert not [n for n in comp.notes if "old place" in n]
+    # A plan for ANOTHER project is not blocked by it.
+    plan = planmod.make_plan(planmod.load_project(cx_of(world), "other"), planmod.PlanOptions())
+    assert plan["blockers"] == [], plan["blockers"]
+    assert plan["verdict"] == "auto" and plan["steps"] == []
+    # bay up of that project deploys the file from the fleet HEAD, at the same box path.
+    up = applymod.up(planmod.load_project(cx_of(world), "other"), planmod.PlanOptions())
+    assert up["result"] == "ok"
+    assert box.config_files[-1] == {"gatus/config.yaml": b"checks: new\n"}
+    # gatus keeps its pin: a project in the fleet moves only with its own bay up.
+    raw = lockfile.read(lockfile.lock_path(fleet, "gatus"))
+    assert raw is not None and raw["commit"] == pin
+
+
+def test_moved_mount_is_a_zero_step_plan_for_the_project_itself(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    _gatus_moved(world)
+    plan = planmod.make_plan(planmod.load_project(cx_of(world), "gatus"), planmod.PlanOptions())
+    assert plan["blockers"] == [], plan["blockers"]
+    assert plan["verdict"] == "auto" and plan["steps"] == []
+    assert not [n for n in plan["notes"] if "old place" in n]
+
+
 def test_deploy_reads_the_scratch_files_of_the_compile(
     world: dict[str, Path], box: FakeBox
 ) -> None:
