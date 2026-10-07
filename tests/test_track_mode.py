@@ -93,7 +93,8 @@ def test_reconcile_helper_hash_matches_cli(tmp_path: Path) -> None:
     """The hash `bay compile` writes is what the shipped helper prints for the same file."""
     fleet = tmp_path / "fleet"
     shutil.copytree(FIXTURE, fleet)
-    data = yaml.safe_load(compiler.compile_fleet(load_inputs(fleet)).body())
+    inputs = load_inputs(fleet, checkouts={"shop": fleet / "checkouts" / "shop"})
+    data = yaml.safe_load(compiler.compile_fleet(inputs).body())
     compiled = data["services"]["shop"]["build"]["bay_toml_hash"]
 
     # The box runs the package from <stack_dir>/.reconcile, isolated (-I would
