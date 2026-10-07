@@ -71,13 +71,17 @@ def _values(part: str, field: int) -> list[int]:
 
 def _field(text: str, field: int) -> str:
     """One cron field as an OnCalendar component (``*`` stays ``*``)."""
-    _, low, _ = _FIELDS[field]
+    _, low, high = _FIELDS[field]
     if text == "*":
         return "*"
     if text.startswith("*/") and field < 4:
         step = text[2:]
         if not step.isdigit() or int(step) < 1:
             raise ValueError(f"{_FIELDS[field][0]}: step {step!r} must be a whole number of 1 or more")
+        if int(step) >= high - low + 1:
+            # systemd rejects a step as wide as the field (``00/24``); cron
+            # means "only the first value", so say that.
+            return f"{low:02d}"
         return f"{low:02d}/{int(step)}"
     values: set[int] = set()
     for part in text.split(","):

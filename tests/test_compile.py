@@ -1120,6 +1120,12 @@ def test_compile_volume_backup_entries(fleet: Path) -> None:
     ("0 4 * * sun", "Sun *-*-* 04:00:00 UTC"),
     ("0 4 * * 0,7", "Sun *-*-* 04:00:00 UTC"),
     ("5/20 1 * jan-mar *", "*-01,02,03-* 01:05,25,45:00 UTC"),
+    # A step as wide as the field selects only its first value; systemd rejects "00/24".
+    ("0 */24 * * *", "*-*-* 00:00:00 UTC"),
+    ("*/60 * * * *", "*-*-* *:00:00 UTC"),
+    ("0 0 */31 * *", "*-*-01 00:00:00 UTC"),
+    ("0 0 1 */12 *", "*-01-01 00:00:00 UTC"),
+    ("*/59 * * * *", "*-*-* *:00/59:00 UTC"),
 ])
 def test_cron_to_on_calendar(line: str, want: str) -> None:
     from bay_cli import cron
