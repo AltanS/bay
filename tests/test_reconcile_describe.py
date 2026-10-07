@@ -147,6 +147,31 @@ def test_image_label_port_and_volume_changes_are_named() -> None:
     assert _codes(entry) == {"config_hash", "image", "labels", "ports", "volumes"}
 
 
+def _volume_codes(wanted: tuple[str, ...], observed: tuple[str, ...]) -> set[str]:
+    """Reason codes for a recreate (the hashes differ) whose mounts may or may not."""
+    entry = _one(_spec(volumes=wanted), _state(volumes=observed))
+    return _codes(entry)
+
+
+def test_a_missing_mount_mode_equals_rw() -> None:
+    assert "volumes" not in _volume_codes(("v:/p",), ("v:/p:rw",))
+    assert "volumes" not in _volume_codes(("v:/p:rw",), ("v:/p",))
+
+
+def test_a_read_only_mount_differs_from_the_default() -> None:
+    assert "volumes" in _volume_codes(("v:/p:ro",), ("v:/p",))
+    assert "volumes" in _volume_codes(("v:/p",), ("v:/p:ro",))
+
+
+def test_mount_mode_flag_order_does_not_matter() -> None:
+    assert "volumes" not in _volume_codes(("v:/p:rw,z",), ("v:/p:z,rw",))
+
+
+def test_a_different_source_or_target_still_differs() -> None:
+    assert "volumes" in _volume_codes(("v:/p",), ("w:/p:rw",))
+    assert "volumes" in _volume_codes(("v:/p",), ("v:/q:rw",))
+
+
 def test_image_drift_under_the_same_hash() -> None:
     state = _state(config_hash="h2", image_id="sha256:aaa", local_image_id="sha256:bbb")
     entry = _one(_spec(), state)

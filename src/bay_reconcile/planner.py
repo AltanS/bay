@@ -21,7 +21,7 @@ from .models import (
     Remove,
     action_target,
 )
-from .observe import desired_port_tuples
+from .observe import desired_port_tuples, volume_tuples
 
 
 def plan(
@@ -186,7 +186,7 @@ def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
             "ports: the published ports differ"
             + (" (a canary is unsafe, so a plain recreate)" if spec.zero_downtime else "")
         )
-    if state.volumes is not None and tuple(sorted(spec.volumes)) != state.volumes:
+    if state.volumes is not None and volume_tuples(spec.volumes) != volume_tuples(state.volumes):
         detail.append("volumes: the mounts differ")
     memory = _memory_reason(spec, state)
     if memory:

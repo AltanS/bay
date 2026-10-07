@@ -65,6 +65,42 @@ def desired_port_tuples(ports: Sequence[str]) -> tuple[str, ...]:
     return tuple(sorted(t for t in (port_spec_tuple(p) for p in ports) if t))
 
 
+def volume_tuple(spec: object) -> str:
+    """A docker bind spec -> '<source>:<target>:<mode>', the mode normalized.
+
+    Docker treats a missing mode as ``rw`` and reports binds either way, so
+    ``data:/data`` and ``data:/data:rw`` are the same mount. The order of the
+    mode flags does not matter either:
+
+    "data:/data"       -> "data:/data:rw"
+    "data:/data:rw"    -> "data:/data:rw"
+    "data:/data:z,rw"  -> "data:/data:rw,z"
+    "data:/data:ro"    -> "data:/data:ro"
+    "/data"            -> ":/data:rw"      (anonymous volume, no source)
+    """
+    if spec is None:
+        return ""
+    s = str(spec).strip()
+    if not s:
+        return ""
+    parts = s.split(":")
+    if len(parts) == 1:
+        source, target, mode = "", parts[0], ""
+    elif len(parts) == 2:
+        source, target, mode = parts[0], parts[1], ""
+    else:
+        source, target, mode = parts[0], parts[1], ":".join(parts[2:])
+    flags = {f.strip() for f in mode.split(",") if f.strip()}
+    if not flags & {"ro", "rw"}:
+        flags.add("rw")
+    return f"{source}:{target}:{','.join(sorted(flags))}"
+
+
+def volume_tuples(specs: Sequence[object]) -> tuple[str, ...]:
+    """Normalized, sorted bind specs, for comparing the wanted mounts with the observed ones."""
+    return tuple(sorted(t for t in (volume_tuple(v) for v in specs) if t))
+
+
 def observed_port_tuples(port_bindings: Mapping[str, Any] | None) -> tuple[str, ...]:
     """Normalized, sorted host-binding tuples from HostConfig.PortBindings."""
     if not port_bindings:
