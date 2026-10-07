@@ -1,6 +1,12 @@
 ---
 # Config files: copy each service's and accessory's `config_files` from the
-# consumer's files/ to {{ stack_dir }}/config/, same relative path.
+# fleet's files/ to {{ stack_dir }}/config/, same relative path.
+#
+# The source directory is `bay_config_files_root`. `bay up` and the box check
+# of `bay plan` set it to the files/ of their scratch copy of the fleet: the
+# fleet's files/ at its commit, plus each file a bay.toml mounts from beside
+# it, so the deploy ships what the plan compiled and never an uncommitted
+# file. Unset (a plain `bay deploy`), it is the fleet's own files/.
 #
 # Default mode (`config_files_mode` absent or `private`): files 0640 and
 # directories 0750, owner app_user, group docker. Only root, the deploy user
@@ -69,7 +75,7 @@
 
 - name: Deploy config files
   ansible.builtin.copy:
-    src: "{{ bay_fleet_root }}/files/{{ item }}"
+    src: "{{ bay_config_files_root | default(bay_fleet_root ~ '/files') }}/{{ item }}"
     dest: "{{ stack_dir }}/config/{{ item }}"
     owner: "{{ app_user }}"
     group: docker
