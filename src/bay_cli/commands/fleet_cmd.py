@@ -35,9 +35,13 @@ env = "production"
 """
 
 
+_FIRST_COMMIT = "bay: fleet init"
+
 _GITIGNORE = """\
 # Caches of fleet state that Bay keeps per fleet. Never commit them.
 .bay-cache/
+# The ansible-vault password. Never commit it.
+.vault_pass
 """
 
 
@@ -47,6 +51,41 @@ def _check_name(name: str) -> None:
             f"'{name}' is not a fleet name",
             hint="Use lowercase letters, digits and hyphens, and start with a letter or digit.",
             code=ErrorCode.VALIDATION_ERROR,
+        )
+
+
+def _first_commit(dest: Path) -> None:
+    """``git init``, then commit the two files. A failure leaves the fleet and warns."""
+    try:
+        runner.run(["git", "init", "--quiet", str(dest)])
+    except (BayError, OSError, subprocess.SubprocessError):
+        console.warning("git init failed. The fleet is created, but it is not a git repo yet.")
+        return
+    try:
+        runner.run(["git", "-C", str(dest), "add", FLEET_FILE, ".gitignore"])
+        runner.run(["git", "-C", str(dest), "commit", "--quiet", "-m", _FIRST_COMMIT])
+    except (BayError, OSError, subprocess.SubprocessError):
+        console.warning(
+            "The first commit failed (for example, git has no user name or email). "
+            "The fleet is created. Run: "
+            f'git -C {dest} add {FLEET_FILE} .gitignore && git -C {dest} commit -m "{_FIRST_COMMIT}"'
+        )
+
+
+def _warn_vault_pass_not_ignored(dest: Path) -> None:
+    """A cloned fleet may not ignore ``.vault_pass``. Say so, so the password is never committed."""
+    try:
+        done = subprocess.run(
+            ["git", "-C", str(dest), "check-ignore", "-q", ".vault_pass"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return
+    if done.returncode == 1:
+        console.warning(
+            f".vault_pass is not in the .gitignore of {dest}. "
+            "Add the line `.vault_pass` so the vault password is never committed."
         )
 
 
@@ -69,7 +108,8 @@ def init(
 ) -> None:
     """Create a fleet at ~/.config/bay/fleets/<name>, or clone one with --from.
 
-    A new fleet gets a minimal bay.fleet.toml and an empty git repo.
+    A new fleet gets a minimal bay.fleet.toml, a .gitignore that holds
+    .vault_pass, and a git repo with the first commit ("bay: fleet init").
 
     Examples:
 
@@ -90,14 +130,12 @@ def init(
         runner.run(["git", "clone", from_url, str(dest)], message=f"Cloning {from_url}...")
         if not (dest / FLEET_FILE).is_file():
             console.warning(f"{FLEET_FILE} is not in the clone. Check that this is a fleet repo.")
+        _warn_vault_pass_not_ignored(dest)
     else:
         dest.mkdir()
         (dest / FLEET_FILE).write_text(_FLEET_TEMPLATE.format(file=FLEET_FILE, name=name))
         (dest / ".gitignore").write_text(_GITIGNORE)
-        try:
-            runner.run(["git", "init", "--quiet", str(dest)])
-        except (BayError, OSError, subprocess.SubprocessError):
-            console.warning("git init failed. The fleet is created, but it is not a git repo yet.")
+        _first_commit(dest)
 
     if console.is_json_mode():
         console.emit_result({"name": name, "path": str(dest), "cloned": from_url is not None}, command="fleet init")

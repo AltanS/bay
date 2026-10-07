@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -73,6 +74,84 @@ def test_fleet_init_from_clones_the_repo(home: Path, tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     cloned = home / ".config" / "bay" / "fleets" / "cloned"
     assert (cloned / FLEET_FILE).read_text() == 'name = "cloned"\n'
+
+
+def _identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    for who in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{who}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{who}_EMAIL", "t@example.test")
+
+
+def test_fleet_init_commits(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A new fleet has its first commit, so `bay init` and `bay adopt` accept it at once."""
+    _identity(monkeypatch)
+    result = runner.invoke(cli.app, ["fleet", "init", "prod"])
+    assert result.exit_code == 0, result.output
+    path = home / ".config" / "bay" / "fleets" / "prod"
+    assert _git(path, "log", "--format=%s") == "bay: fleet init"
+    assert set(_git(path, "ls-tree", "-r", "--name-only", "HEAD").split()) == {
+        FLEET_FILE,
+        ".gitignore",
+    }
+    assert _git(path, "status", "--porcelain") == ""
+
+
+def test_fleet_init_commits_warns_when_the_commit_fails(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No git identity: the fleet stays, and the warning names the commit line to run."""
+    for var in ("AUTHOR", "COMMITTER"):
+        monkeypatch.delenv(f"GIT_{var}_NAME", raising=False)
+        monkeypatch.delenv(f"GIT_{var}_EMAIL", raising=False)
+    (tmp_path / "gitconfig").write_text("[commit]\n\tgpgsign = false\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    # `useConfigOnly` makes git refuse to guess a name and email from the machine.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+    result = runner.invoke(cli.app, ["fleet", "init", "prod"])
+    assert result.exit_code == 0, result.output
+    path = home / ".config" / "bay" / "fleets" / "prod"
+    assert (path / FLEET_FILE).is_file() and (path / ".git").exists()
+    flat = "".join(result.output.split())  # the console wraps long lines
+    assert "firstcommitfailed" in flat
+    assert f'git -C {path} commit -m "bay: fleet init"'.replace(" ", "") in flat
+
+
+def test_fleet_init_gitignores_vault_pass(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _identity(monkeypatch)
+    assert runner.invoke(cli.app, ["fleet", "init", "prod"]).exit_code == 0
+    path = home / ".config" / "bay" / "fleets" / "prod"
+    (path / ".vault_pass").write_text("not-a-real-password\n")
+    ignored = subprocess.run(
+        ["git", "-C", str(path), "check-ignore", ".vault_pass"], capture_output=True, text=True
+    )
+    assert ignored.returncode == 0 and ignored.stdout.strip() == ".vault_pass"
+    # plans are committed, so plans/ is not ignored
+    (path / "plans").mkdir()
+    (path / "plans" / "x.json").write_text("{}")
+    kept = subprocess.run(
+        ["git", "-C", str(path), "check-ignore", "plans/x.json"], capture_output=True, text=True
+    )
+    assert kept.returncode == 1
+
+
+def test_fleet_init_from_warns_when_the_clone_does_not_ignore_vault_pass(
+    home: Path, tmp_path: Path
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init", "--quiet")
+    (source / FLEET_FILE).write_text('name = "cloned"\n')
+    _git(source, "add", "-A")
+    _git(source, "commit", "--quiet", "-m", "fleet")
+    result = runner.invoke(cli.app, ["fleet", "init", "cloned", "--from", str(source)])
+    assert result.exit_code == 0, result.output
+    assert ".vault_pass is not in the .gitignore" in " ".join(result.output.split())
+    # and `--from` makes no commit of its own
+    cloned = home / ".config" / "bay" / "fleets" / "cloned"
+    assert _git(cloned, "log", "--format=%s") == "fleet"
 
 
 def test_fleet_ls_lists_fleets_and_says_when_there_are_none(home: Path) -> None:
@@ -429,3 +508,16 @@ def test_doctor_reports_untracked_plans(home: Path, tmp_path: Path) -> None:
     _git(fleet, "commit", "-q", "-m", "plans")
     doc, _ = _doctor(["--fleet", str(fleet)], tmp_path)
     assert _line(doc, "Plans")["status"] == "ok"
+
+
+def test_self_update_help_names_current_version() -> None:
+    from bay_cli.context import package_root
+    from bay_cli.paths import read_installed_version
+
+    declared = read_installed_version(package_root())
+    assert declared
+    result = runner.invoke(cli.app, ["self", "update", "--help"])
+    assert result.exit_code == 0, result.output
+    assert f"bay self update --to v{declared}" in " ".join(result.output.split())
+    # The help is computed from version.yml; no literal version stays in the source.
+    assert not re.search(r"v\d+\.\d+\.\d+", Path(self_cmd.__file__).read_text())

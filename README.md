@@ -74,12 +74,10 @@ git clone https://github.com/AltanS/bay ~/.local/share/bay/framework
 ~/.local/share/bay/framework/bootstrap.sh
 bay fleet init prod
 # edit ~/.config/bay/fleets/prod/bay.fleet.toml: the box name and default_domain
-git -C ~/.config/bay/fleets/prod add -A
-git -C ~/.config/bay/fleets/prod commit -m "fleet: first bay.fleet.toml"
 cd my-app && bay init --fleet prod
 ```
 
-`bay fleet init` writes a `bay.fleet.toml` with one box, `main` (`env = "production"`), `default_box = "main"` and `default_domain = "example.com"`, and runs `git init`. It makes no commit, and `bay init` refuses a fleet with no commit, so commit the file first. `bay init` also needs an `origin` remote in the app repo.
+`bay fleet init` writes a `bay.fleet.toml` with one box, `main` (`env = "production"`), `default_box = "main"` and `default_domain = "example.com"`, and runs `git init`. It makes the first commit (`bay: fleet init`) and puts `.vault_pass` in the `.gitignore`, so `bay init` accepts the fleet at once. Commit your edit of `bay.fleet.toml` in the fleet before `bay up`. `bay init` needs an `origin` remote in the app repo.
 
 Here `--fleet prod` after `init` is the fleet name, the folder `~/.config/bay/fleets/prod`. It is not the global `--fleet <path>` option, which goes before the verb. `bay init` writes `fleet = "prod"` into the `bay.toml` it drafts, and later commands in this repo find the fleet from that line.
 
