@@ -117,10 +117,12 @@ A command that works on a fleet finds it in this order. The first rule that appl
    looks in the working directory and above it.
 4. `BAY_FLEET_NAME=<name>`, a fleet in `~/.config/bay/fleets`.
 5. The fleet directory you stand in: the nearest directory at or above the working directory that has
-   a `bay.fleet.toml`. Only `bay plan`, `bay up`, `bay approve`, `bay rollback`, `bay remove` and
-   `bay doctor` use rule 5. Every other verb (`init`, `adopt`, `show`, `deploy`, `provision`, `vault`, `secret`,
-   `status`, `route` and the rest) skips it: from inside a fleet directory, pass `--fleet <path>` or
-   set `BAY_FLEET`.
+   a `bay.fleet.toml`. These verbs use rule 5: `plan`, `up`, `approve`, `rollback`, `remove`,
+   `doctor` and `show <name>` (not `show --routes`). This is the one list; the other docs repeat it.
+   Every other verb (`init`, `adopt`, `deploy`, `provision`, `vault`, `secret`, `status`, `route`,
+   `compile` and the rest) skips rule 5: from inside a fleet directory, pass `--fleet <path>` or
+   set `BAY_FLEET`. The verbs that edit the fleet by hand (`service add|edit|remove|prune-webhooks`,
+   `server add|remove`) take the working directory as the fleet when rules 1 to 4 find none.
 
 With none of these, the command stops and lists the ways to pick one.
 

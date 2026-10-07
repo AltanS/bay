@@ -4,7 +4,7 @@ Three kinds of place hold Bay files. Each scenario below shows all three.
 
 | Place | Who writes it | What it holds |
 |---|---|---|
-| Machine | `uv tool install`, `bay fleet init` | the CLI, the fleets, caches |
+| Machine | `bootstrap.sh` (the install; `uv tool install --editable` alone cannot deploy), `bay fleet init` | the CLI, the fleets, caches |
 | Fleet repo | you (`bay.fleet.toml`, vault, hosts) and the CLI (locks, plans, compiled file) | boxes, secrets, shared resources, one folder per project |
 | App repo | you | `bay.toml` next to the code, plus any files it mounts |
 
@@ -16,7 +16,7 @@ Everything here is valid in Bay 2.1 and the files pass `bay toml validate`. A fe
 Bay does not have yet carries the tag `(planned)` on its line. Some valid keys are also not
 deployable yet: `bay plan` blocks a file that uses one (the `unsupported` list) unless you pass
 `--allow-unsupported`. The list is in [plan.md](plan.md#features-bay-cannot-deploy-yet). Scenarios
-3 and 9 use some of those keys and say so.
+3, 8 and 9 use some of those keys and say so.
 
 Names below are examples. `acme` is the fleet. `eu-1`, `eu-2`, `infra` and `na-1` are
 boxes. `shop` and `blog` are apps.
@@ -88,7 +88,7 @@ that project in `project` and keeps its own risk, so two safe changes give `auto
 | Verdict | Exit | What you do |
 |---|---|---|
 | `auto` | 0 | Run `bay up`. |
-| `approve` | 10 | Read the steps. Run `bay approve <plan-id> --reason "<why>"`, then `bay up`. |
+| `approve` | 10 | Read the steps. Run `bay approve <plan-id> --reason "<why>"`, then `bay up <env> --plan-id <plan-id>`. A plain `bay up` plans again, and it applies the approval only when nothing moved and the plan used no `--remote` (see [plan.md](plan.md#the-box-prediction---remote)). |
 | `blocked` | 20 | Fix what `blockers` says. Approval cannot help. |
 | `stale` | 30 | Something moved since the plan. Run `bay plan` again. |
 
@@ -101,12 +101,32 @@ The one-line list is near the top of this page. This is the full table. Four wor
 | Box | `[boxes.<name>]` in `bay.fleet.toml` | One server. The name (`eu-1`) is a label that `box = "eu-1"` in a deploy table uses. No inventory host is named after it. |
 | Box env | `env` of the box | The box environment. It names the inventory file `hosts/<env>`, the folder `group_vars/<env>/` (the secrets), and the receipt `/var/lib/bay/receipts/<env>.json`. `bay provision <box env>` and the deploy of `bay up` run against it. |
 | Group | `group` of the box | The inventory group: the `[eu]` heading inside the hosts file. It limits a container to the boxes of that group. |
-| Deploy env | `[deploy.<env>]` in a `bay.toml` | An environment of one app: own pin, data, secret values and container suffix. `bay plan <env>` and `bay up <env>` take this name. |
+| Deploy env | `[deploy.<env>]` in a `bay.toml` | An environment of one app: own box, data and container suffix, and its own record in the lock. `bay plan <env>` and `bay up <env>` take this name. Its secret values come from the box env of its box (below). |
 
 The deploy env and the box env often have the same name (`production` on production boxes,
 `staging` on the staging box), but they are two keys. Bay finds the box env from the box that
 the deploy table names. `primary_env` in `bay.fleet.toml` is a deploy env: the one that gets
 bare container names. Its default is `production`.
+
+### Which env does a verb take?
+
+| Verb | The env is a | Bay uses it for |
+|---|---|---|
+| `bay plan`, `bay up`, `bay rollback` (`[env]`, default `primary_env`), `bay remove --env` | deploy env | the `[deploy.<env>]` table of each `bay.toml` |
+| `bay approve <plan-id>`, `bay show [name]` | none | `show` prints the status of every deploy env of the project |
+| `bay deploy <env>`, `bay provision <env>` | box env (or a group name inside the hosts file) | the inventory file `hosts/<env>` |
+| `bay validate --env <env>` | box env | `hosts/<env>` and its vault |
+| `bay vault <verb> <env>`, `bay secret missing <env>` | box env | `group_vars/<env>/secrets.yml`, else `group_vars/all/secrets.yml` |
+| `bay doctor [env]` | box env | the vault file and the box receipts. The default is `primary_env`, read as a box env name: pass the box env when the two differ. |
+| `bay status --env <env>` | box env | the receipts to read |
+| The receipt file | box env | `/var/lib/bay/receipts/<box env>.json`, written by every deploy of that box env, one per box env |
+
+**Secret values are per box env.** They live in `group_vars/<box env>/secrets.yml`, one
+encrypted file for the whole box env. Two deploy envs on one box env share that file: one key
+name has one value for both. `bay secret missing <box env>` compares that file with every
+secret name that any project of the fleet needs. It does not filter by deploy env. To give two
+deploy envs different values, put their boxes in different box envs (scenario 4), or use
+different key names.
 
 Give each box of one box env its own `group`, and a matching heading in the hosts file.
 Boxes that share a group would each run the containers of both. A box that is alone in
@@ -125,8 +145,9 @@ its box env may leave `group` out.
 
 Bay picks the fleet in one fixed order of five rules: `--fleet <path>`, `BAY_FLEET=<path>`,
 the `fleet = "acme"` line of the `bay.toml` you stand in, `BAY_FLEET_NAME=acme`, and last the
-fleet directory you stand in (for `plan`, `up`, `approve`, `rollback` and `remove`). The
-rules, and which verbs use the last one, are in [install.md](install.md#pick-a-fleet). `bay init`
+fleet directory you stand in (for `plan`, `up`, `approve`, `rollback`, `remove`, `doctor` and
+`show <name>` only). The rules, and the list of verbs that use the last one, are in
+[install.md](install.md#pick-a-fleet). `bay init`
 and `bay adopt` have no `bay.toml` to read yet, so they do not use the third rule. A stray
 `BAY_FLEET` in your shell profile beats the `bay.toml` line. A command that changes something
 prints `fleet: acme (<path>)` first on stderr, so you see which fleet won. A command that
@@ -290,6 +311,11 @@ domain = "shop.acme.example"
 }
 ```
 
+`adopted` holds the names that Bay keeps from before the fleet: an existing database, role,
+volume or container, so nothing is renamed. It is not the verb `bay adopt` (scenario 7), except
+that the verb writes two commit keys into the same object. `commit` is the one project pin; each
+env record may also hold the `commit` of its own last `bay up` (plan.md, [The lockfile](plan.md#the-lockfile)).
+
 Flow from the app repo:
 
 ```
@@ -297,13 +323,22 @@ cd ~/code/shop
 bay init --fleet acme                     # once: drafts bay.toml, writes projects/shop/bay.lock in the fleet
                                           # (no bay.toml yet, so name the fleet; later commands read `fleet =`)
 git add bay.toml && git commit -m "chore: add bay.toml"
-git push                                  # push FIRST
+git push                                  # 1. push first: bay up refuses a commit the remote lacks
 bay plan production                       # WANTED (this commit) vs PINNED vs RUNNING
-bay up production                         # pins this commit, deploys the whole env, commits and pushes the fleet
+bay up production                         # 2. pins this commit, deploys the whole env, puts the webhook script on the box
+git commit -am "feat: first build"        # 3. a push that changes code, made AFTER bay up
+git push                                  #    the webhook builds the first image
+bay plan production                       # 4. then see plan.md "The first image" for the last steps
 ```
 
-The first image does not come from `bay up`. See [plan.md](plan.md#the-first-image): the first
-push to the deploy branch builds it, once `bay up` has put the webhook script on the box.
+The push of step 1 builds nothing, because the box has no webhook script for `shop` yet. The
+first image comes from a push made after `bay up` (step 3), or from a full `bay deploy production`
+with no `--tags`, which clones and builds. Followed in this order, `bay show` says `HALF` until the
+build has finished and a `bay up` has run again ([plan.md](plan.md#the-first-image)). The push
+reaches the box through the webhook receiver: you register the GitHub hook by hand, in the repo
+settings, with the payload URL `https://<webhook domain>/webhook/<container name>` (`shop` here). The
+webhook domain is `[webhook] domain` of `bay.fleet.toml`, or `webhook_domain` of the box that runs
+the container. Bay has no verb that creates the hook; `bay validate --check-webhook-health` probes it.
 
 Where Bay reads the app code, in this order:
 
@@ -365,11 +400,13 @@ until you pass `--allow-unsupported` ([plan.md](plan.md#features-bay-cannot-depl
 ## 4. Two environments, two boxes
 
 Same `shop` repo. Production on `eu-1`, staging on `eu-2` from the `develop` branch.
-Each environment owns its data and its secret values.
+Each environment owns its data. Its secret values are separate because `eu-2` is its own box env
+(`staging`): secrets are per box env, not per deploy env (see [Words](#words-deploy-env-box-env-and-group)).
 
 The fleet gets `hosts/staging` and `group_vars/staging/secrets.yml`, next to the production
-files. One `projects/shop/bay.lock` holds `envs.production` and `envs.staging`, each with
-its own pin. One compiled `services.yml` covers both envs.
+files. One `projects/shop/bay.lock` holds one project pin (`commit`, the one the fleet
+compiles) and one record per env: `envs.production` and `envs.staging`, each with the `commit`
+of its own last `bay up`. One compiled `services.yml` covers both envs, from the one pin.
 
 ```toml
 # bay.fleet.toml
@@ -402,8 +439,11 @@ access.mode = "tailnet"
 LOG_LEVEL = "debug"
 ```
 
-`bay up staging` deploys every project that has a `[deploy.staging]` on `eu-2`. It does
-not touch production.
+`bay up staging` deploys every project that has a `[deploy.staging]` on `eu-2`. It does not
+deploy to the production box. But the project has one pin, so `bay up staging` moves it: the
+compiled production entries move to the same commit, and `bay show shop` says `drift` for
+production until `bay up production` runs (plan.md, [The lockfile](plan.md#the-lockfile)).
+Read the plan before you approve it.
 
 Container names. The primary env (`production`) has no suffix. Other envs add `-<env>`.
 
@@ -432,9 +472,19 @@ Missing secrets: `bay secret missing staging` lists the names. It never prints a
    that `bay secret missing staging` lists. Staging has its own values: nothing is shared with
    production unless the project uses `fleet_secrets`.
 4. Commit and push the fleet. Provision the box: `bay provision staging` (scenario 11).
-5. In the app repo add the `[deploy.staging]` table above, commit, and push the `develop` branch.
-6. `bay plan staging`, then `bay up staging`. The first image comes from the push of step 5 (see
-   [plan.md](plan.md#the-first-image)). Staging owns its data: it starts with an empty database.
+5. In the app repo add the `[deploy.staging]` table above and commit it on the `develop` branch.
+   Push `develop`. `bay up` refuses a commit that the remote lacks, so this push comes first. It
+   builds nothing yet.
+6. Stand on the right commit. WANTED is the HEAD of the checkout you stand in, so run
+   `git switch develop` before `bay plan staging`. On `main` the plan would pin the commit of
+   `main` to staging. Or run from the fleet directory (`bay plan staging` with no `bay.toml` above):
+   there WANTED is the head of the deploy branch in the repo cache, `develop` for staging.
+7. `bay plan staging`, then `bay up staging`. This puts the webhook script on `eu-2`.
+8. Push to `develop` again with a code change. The webhook builds the first image (see
+   [plan.md](plan.md#the-first-image)). The push reaches `eu-2` through the webhook receiver of that
+   box: `eu-2` uses `[webhook] domain`, or its own `webhook_domain` (scenario 5 sets one on `infra`).
+   Register the GitHub hook for `shop-staging` at `https://<that domain>/webhook/shop-staging`.
+   Staging owns its data: it starts with an empty database.
 
 Scenario 11 shows the box and hosts files in more detail.
 
@@ -476,6 +526,7 @@ image = "pgvector/pgvector:pg17"
 volumes = ["postgres_data:/var/lib/postgresql/data"]
 
 [webhook]
+domain = "deploy.acme.example"            # default webhook domain; a box's `webhook_domain` overrides it
 secret = "WEBHOOK_SECRET"                 # a secret NAME; the value is in the vault
 ```
 
@@ -518,21 +569,30 @@ Point at it with `bay --fleet ~/workspace/devfleet ...`. `bay up` reports `push_
 
 ## 7. Moving an app from the fleet into its repo
 
-Use this when an app has a repo but its `bay.toml` still lives in the fleet. Before and
-after:
+Use this when an app has a repo but its `bay.toml` still lives in the fleet. Two cases:
+
+- **An app that builds from source**, which came into the fleet through `bay import` of an old
+  YAML fleet. Its lock already carries the repo URL that the webhook builds (the import wrote it:
+  no verb sets it for a new in-fleet project). The order below is for this case, because the box
+  has a webhook script for it.
+- **An image-only app** with `repo: null` that has a repo of its own (for example one that holds
+  its config files). It has no webhook script on the box, so a push cannot rebuild it. The adopt
+  only moves the files into the repo. The order still holds, because `bay up` must accept the
+  unpushed adopt commit.
+
+Before and after, for the build case:
 
 ```
 BEFORE                                    AFTER
 fleet projects/shop/bay.toml + files -->  shop/bay.toml + files    (one local commit in the app repo)
 fleet projects/shop/bay.lock              fleet projects/shop/bay.lock
-  repo: null                                repo: git@github.com:acme/shop.git
+  repo: git@github.com:acme/shop.git        repo: git@github.com:acme/shop.git   (the same string)
   adopted: {...}                            adopted: {...}         (kept, so nothing is renamed)
 ```
 
-An in-fleet lock normally has `repo: null`. It carries a URL only when the project builds from
-source (the repo that the webhook builds). The adopt sets `repo` to the `origin` URL of the
-checkout when it was `null`, and keeps the lock's own string when it already named this repo. A
-lock that names another repo stops the adopt.
+The adopt sets `repo` to the `origin` URL of the checkout when it was `null`, and keeps the
+lock's own string when it already named this repo, so the compiled build entry does not change.
+A lock that names another repo stops the adopt.
 
 Steps. The order matters: adopt, `bay up`, then `git push`.
 
@@ -552,8 +612,8 @@ stays local: you push it, after `bay up`. The `bay.toml` is not in the repo yet,
 the fleet with `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME`. For a monorepo, add
 `--toml-path <path>`.
 
-Why `bay up` comes before the push. The box still runs the old `rebuild.sh`, which treats
-every push as code. Pushed first, the adopt commit would build the app and recreate it.
+Why `bay up` comes before the push (the build case). The box still runs the old `rebuild.sh`,
+which treats every push as code. Pushed first, the adopt commit would build the app and recreate it.
 `bay up` writes the new script. It accepts the adopt commit before it is pushed (the one
 exception to "push first") and moves no code for it. Then the push touches only
 `bay.toml` and the files beside it. That is a config-only push: the box logs
@@ -614,6 +674,12 @@ is `<NAME>_URL`. To pick another name, use the table form `[needs.api]` with
 When `api` runs on another box, the fleet decides the network path and the tailnet ACL.
 The compiler picks it. The docs say no more than that, so do not hard-code a tailnet name.
 Each env has its own container network, so a bare name never crosses envs.
+
+As written, `api` hits two unsupported cases of 2.1: it is an internal container (no `domain`,
+no `path`) that builds from source (it has neither `image` nor `[build]`, so it builds
+`./Dockerfile`), and it has a health path other than `/`. `bay plan` lists both in `unsupported` and
+blocks until you pass `--allow-unsupported`
+([plan.md](plan.md#features-bay-cannot-deploy-yet)). `web` plans clean.
 
 A project whose lock pins no commit is not deployed: run `bay up` for `api` once. `bay up`
 deploys the whole env in one run, so do not count on `api` being ready before `web`
@@ -685,8 +751,9 @@ track = "branch"                          # default: a push builds and deploys n
 | Code and `bay.toml` | builds, then **holds**: the alert `build.held` names `bay up` | builds, then holds |
 | A `[build]` edit (Dockerfile path, build arg, `image`) | builds, then holds | builds, then holds |
 
-The checks apply in a fixed order, from the webhook's `watch` and `ignore` filter to the
-hold guard: see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push). A push that
+The checks apply in a fixed order: the webhook's `watch` and `ignore` filter, the config-only
+rule, then the hold guard. The order is stated once, in
+[build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push). A push that
 the filter drops (it touches only files outside `watch`, a push of `bay.toml` alone included)
 reaches none of the other checks: it is not built, not held and not logged as config-only.
 
@@ -719,6 +786,13 @@ moves code forward only: when the box runs a commit newer than the pin, `:latest
 only the config changes. A whole-environment `bay up <env>` makes the same check for every
 project. `--force-code` moves it anyway, as a destructive step. `pin` mode and
 `bay rollback` move code backwards on purpose.
+
+**An image-only app in the fleet** (such as gatus, `image = "...:latest"`). It builds nothing, so
+rollback moves the config pin only: Bay compiles the previous `bay.toml` and runs `bay up`. There is
+no code target, because the box has no commit-tagged image to point `:latest` at. The freeze is
+set in the lock but changes nothing, because no push builds this app. `bay rollback --to` refuses
+with "builds no image". Rollback cannot undo a bad `:latest` pull: the pin changes the
+`bay.toml` that Bay compiles, not which image `:latest` names. Pin a tag in `image` (for example `:1.4.2`) if you need to go back to an older image.
 
 `previous` is one level deep. For anything older, or to undo only the last bad push:
 
@@ -836,7 +910,7 @@ again.
 ## 13. Multi-tenant: one app, three customers
 
 One repo, three customers. Each customer gets its own project: `shop-acme`, `shop-globex`,
-`shop-initech`. Each has its own data, its own secrets and its own pin.
+`shop-initech`. Each has its own data, its own secret names and its own project pin.
 
 ```
 shop/                                     # one app repo
@@ -853,8 +927,10 @@ acme-fleet/projects/
 name = "shop-globex"
 fleet = "acme"
 port = 3000
-secrets = ["SESSION_SECRET"]              # globex has its own value; project name prefixes the secret
 needs = ["postgres"]                      # globex has its own database
+
+[fleet_secrets]                           # container variable = vault key. One vault file serves all three
+SESSION_SECRET = "GLOBEX_SESSION_SECRET"  # tenants, so each tenant names its own key
 
 [access]
 mode = "public"
@@ -868,9 +944,11 @@ Register each one with `bay init --toml-path tenants/globex/bay.toml`.
 
 Why not one project with three envs (`[deploy.acme]`, `[deploy.globex]` ...)?
 
-- One project has one pin, shared by all its envs: a `bay up globex` also moves the compiled
-  entries of the project's other envs (`acme`, `initech`) to that pin. With one project per tenant, `bay up` for
-  `shop-globex` leaves `shop-acme` at its pin. You can roll one tenant back alone.
+- One project has one pin (`commit` in the lock), shared by all its envs, as in scenario 4: a
+  `bay up globex` also moves the compiled entries of the project's other envs (`acme`, `initech`) to
+  that pin. With one project per tenant, `bay up` with `--project shop-globex` leaves `shop-acme` at its
+  own pin. You can roll one tenant back alone. (A `bay up globex` from the fleet directory pins every
+  covered project, see [What `bay up` does](#what-bay-up-does).)
 - A deploy env has its own suffix on the container name (`shop-globex`) but not its own box
   env: its box env is the one of its box (see [Words](#words-deploy-env-box-env-and-group)).
   `bay up globex` deploys the whole box environment, not one tenant.
@@ -898,8 +976,12 @@ alone is not enough to deploy. If the shell cannot find `bay`, run `uv tool upda
 
 - **The vault password** comes from the operator, out of band. Bay never stores it and no
   repo holds it. It is the one file `.vault_pass` in the root of the fleet clone, here
-  `~/.config/bay/fleets/acme/.vault_pass` ([install.md](install.md#the-vault-password)). Add the line
-  to the fleet's `.gitignore`. Without the file `bay doctor` fails its Vault check, and `bay vault edit` and
+  `~/.config/bay/fleets/acme/.vault_pass` ([install.md](install.md#the-vault-password)). After you
+  copy it, run `git status` in the fleet. `bay fleet init --from` clones the repo and leaves its
+  `.gitignore` as it is, and a fleet that was made with `bay fleet init <name>` ignores only
+  `.bay-cache/`. If `.vault_pass` shows as untracked, add the line `.vault_pass` to the `.gitignore`,
+  commit it and push it: an untracked file makes the fleet dirty, and the receipt records
+  `fleet_dirty: true`. Without the file `bay doctor` fails its Vault check, and `bay vault edit` and
   every deploy stop. `bay doctor` checks that the vault opens. It prints no name and no value.
 - **SSH access to the boxes** and **tailnet membership** also come out of band.
 - **The fleet name.** `--from <url>` clones into the folder `~/.config/bay/fleets/acme`. That
@@ -947,23 +1029,42 @@ needs `--ingress-box` and `--cert-domain` the first time.
 never the ACL. Two hand edits are needed: grant the ingress box the upstream port, and carve
 that port out of any broader range. They are listed once, with the deploy order, in
 [tailnet-ingress.md](tailnet-ingress.md#adding-a-proxy-under-default-deny). Do them, and deploy
-them (`bay deploy production --tags headscale`), before or with the route. `bay plan` shows no step
+them (`bay deploy production --tags headscale`), before the route. `bay plan` shows no step
 for an ACL edit.
 
 Add, list and remove with the CLI. `add` and `rm` edit `bay.fleet.toml`, keep its comments
-and commit the fleet repo (`--no-commit` only edits):
+and commit the fleet repo (`--no-commit` only edits). The `route` verbs skip the fleet directory
+you stand in (rule 5 of [install.md](install.md#pick-a-fleet)), so each command here names the fleet
+with `--fleet`. You may leave it out when `BAY_FLEET` is set, or when you run from an app repo whose
+`bay.toml` names the fleet:
 
 ```
-bay route add notes --domain notes.ts.acme.example \
+F=~/.config/bay/fleets/acme
+bay --fleet $F route add notes --domain notes.ts.acme.example \
     --upstream http://devbox.acme.tailnet.internal:8787 --host upstream --identity \
     --ingress-box infra --cert-domain "*.ts.acme.example"      # the last two: first route only
-bay route ls
-bay route rm notes
-bay plan production                       # steps: route_added, route_changed, route_removed (risk: shared)
-bay approve <plan-id> --reason "<why>"
-bay up production                         # runs the deploy_stack, headscale and traefik tags
+bay --fleet $F route ls
+bay --fleet $F route rm notes
+bay --fleet $F plan production            # steps: route_added, route_changed, route_removed (risk: shared)
+bay --fleet $F approve <plan-id> --reason "<why>"
+bay --fleet $F up production --plan-id <plan-id>   # runs the deploy_stack, headscale and traefik tags
 ```
 
+**Where to run `plan` and `up` for a route.** A route has no project, so the route step is the
+same in both forms. Run from the fleet directory, `bay plan production` covers the whole env and
+`bay up production` pins every covered project to its WANTED commit, so the route ships every
+pending app change too. Run `bay plan production` first and read all the steps, not only the
+route step. To ship the route alone, run `bay up` from an app repo, or with `--project <name>`: it pins
+only that project (plan.md, [The whole environment](plan.md#the-whole-environment)).
+
+**What the tags do.** A `bay up` with a route step runs `--tags deploy_stack,headscale,traefik`.
+The `headscale` tag runs the tasks of the Headscale role, and they include the ACL render when the
+fleet defines `headscale_acl_policy`. So that `bay up` also deploys ACL edits you made by hand, when
+the Headscale server is a box of the plan's box env. A plain `bay up` with no route step runs
+`deploy_stack` only, which does not. Deploy the ACL first with
+`bay deploy <env> --tags headscale` anyway, as the steps of
+[tailnet-ingress.md](tailnet-ingress.md#add-a-route-in-order) say: a bad policy then fails before the
+route changes.
 A fleet that still has `group_vars/all/tailnet_proxies.yml` (the method from before 2.1) runs
 `bay route import` once. It moves the routes into `bay.fleet.toml` and deletes the file. The
 first `bay up` shows one `route_added` step per route and recreates no container.
@@ -1017,6 +1118,17 @@ box env is deployed once).
 Only a receipt that confirms the containers are gone deletes the env from the lock. With no
 env left, `projects/shop/` leaves the fleet. The volumes and the database stay. See
 [plan.md](plan.md#bay-remove).
+
+**The app side.** `bay remove` changes the fleet and the boxes only. It never touches the app
+repo, the GitHub hook or the `bay.toml` in the repo: they stay as they were. After a full remove
+the lock is gone, so `bay plan` from that repo stops with "project shop is not in fleet acme"
+(`bay init` refuses a repo that still has a `bay.toml`, so to register the app again, move the file
+aside, run `bay init`, and restore it). The compiled file no longer lists the project, so the
+box's webhook receiver gets its service list and image map without it, so a push has no service to build. The docs
+make no promise that the old webhook script file on the box is deleted. Remove the GitHub hook
+yourself: `bay service prune-webhooks <owner>/<repo>` lists the hooks that no service claims and deletes
+them on request (it needs `github_admin_token` in the vault). Delete the `bay.toml` from the repo when you
+no longer want it.
 
 ## What never goes where
 

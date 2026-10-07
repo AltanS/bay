@@ -25,7 +25,8 @@ No verb asks a question. No verb takes a secret on the command line.
   [install.md](install.md#pick-a-fleet): `--fleet <path>`, `BAY_FLEET`, the `fleet =`
   line of the `bay.toml` you stand in, `BAY_FLEET_NAME`, and last the fleet directory
   you stand in (a `bay.fleet.toml` here or above). That last rule applies to `plan`,
-  `up`, `approve`, `rollback` and `remove` only. `bay init` and `bay adopt` run in an app
+  `up`, `approve`, `rollback`, `remove`, `doctor` and `show <name>` only (the list is in
+  [install.md](install.md#pick-a-fleet)). `bay init` and `bay adopt` run in an app
   repo that has no `bay.toml` yet, so they cannot use the `fleet =` line (see
   [bay init](#bay-init)).
 - `--project <name>` works from any directory. The fleet then comes from the order above.
@@ -65,8 +66,9 @@ You write no lock. A project with no lock plans as a new project (one `create` s
 container). The first `bay up` writes `projects/<name>/bay.lock` with `repo: null`,
 `toml_path: bay.toml`, `commit` (the fleet commit that last changed
 `projects/<name>/`) and the environment record. A project that builds from source
-needs a lock with a `repo` (the compile stops with "names no repo"), and no verb sets
-one for a project in the fleet: keep a project that builds in its own repo (`bay init`).
+needs a lock with a `repo` (the compile stops with "names no repo"). Only `bay import` writes
+that `repo` for a project in the fleet (it does so for an app it brings in from an old YAML fleet).
+No other verb sets one: keep a new project that builds in its own repo (`bay init`).
 
 plan, up, show and rollback work as for any project, with these differences:
 
@@ -156,7 +158,8 @@ leave it out.
    Uncommitted edits are not part of the plan. The plan
    records them as `wanted.dirty`. When the WANTED commit is on no branch of
    the remote, the plan says so in a note: `bay up` will refuse it. For the `bay adopt`
-   commit (`adopted.app_commit` in the lock) the note says instead that it is the adopt
+   commit (`adopted.app_commit` in the lock; `adopted` is the lock's object of kept names plus the
+   two commit keys that `bay adopt` writes, see [The lockfile](#the-lockfile)) the note says instead that it is the adopt
    commit and not pushed yet, that `bay up` takes it and moves no code, and that you run
    `git push` after. Ignore the refusal wording there: there is none for that commit.
 2. Bay copies the fleet inputs to a temporary directory. Every project is
@@ -358,7 +361,12 @@ owns, so a change to them can touch every project:
 
 The proxy, the gateway, the update watcher and the networks are refreshed by
 every `bay up` but are not steps (see the note below). A step whose
-`project` is null is always one of the shared things above.
+`project` is null is one of the shared things above, or a step of `source: box` for a container
+that no project owns (a shared resource's container, for example). A `source: box` step is `safe`
+(create, start, recreate) or `destructive` (remove) by the last two rows of the table, whoever owns
+the container. So a recreate of the shared postgres container that only the box predicted reads
+`safe`, while any change to the `[resources.*]` entry in the fleet file is `shared`. Read the
+`reason` of such a step before you skip an approval.
 
 `bay up` also refreshes the shared proxy, the gateway and the update watcher
 on the boxes. That work comes from the fleet, not from `bay.toml`. The plan
@@ -484,7 +492,10 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    not clone or build anything, and it pulls nothing through Ansible (see
    [The first image](#the-first-image)). When the plan has a `route` step, Bay
    runs `--tags deploy_stack,headscale,traefik`: Headscale renders the
-   split-DNS records and Traefik the route file. A route change is blocked in
+   split-DNS records and Traefik the route file. The `headscale` tag runs every task of the
+   Headscale role, the ACL render included (when `headscale_acl_policy` is defined). So this
+   `bay up` also deploys a hand-edited ACL, if the Headscale server is a box of the plan's box
+   env. A `bay up` with no route step does not. A route change is blocked in
    a plan for a box env other than the ingress box's.
 7. Bay reads the receipt back and pins every project that the deploy
    covered (see below). Bay commits all those locks once:
@@ -616,6 +627,11 @@ it. The two pins swap, so a second rollback undoes the first. Bay refuses when t
   descendant of `frozen_commit`) clears the freeze. A `bay up` to the same or an
   older commit, or to a commit Bay cannot order against it, keeps it.
 
+**An image-only project.** A project with no build container has no code target. Plain rollback
+moves the config pin back and nothing else. `--to` refuses with "builds no image". The freeze is
+recorded but changes nothing, because no push builds the project. Rollback cannot change which
+image `:latest` names: pin a tag in `image` to go back to an older image.
+
 **`bay rollback --to <commit>`** is the one form for anything older than `previous`.
 It rolls the code back to that commit's image. Bay asks the box first
 (`docker image ls`). When `<image>:<commit12>` is not on the box, Bay refuses before
@@ -669,6 +685,10 @@ until a `bay up` to a newer app commit records a `previous` again.
 `bay rollback --to <commit>` of an app commit still works: it moves the pin and the code.
 
 ### bay adopt
+
+Do not confuse the verb with the lock key. The verb `bay adopt` moves a `bay.toml` into its repo.
+The `adopted` object of a lock keeps the names that exist from before the fleet (database, role,
+volumes, containers, images, files). The verb adds two commit keys to that object.
 
 `bay adopt <name>` moves a project's `bay.toml` out of the fleet and into its
 app repo. Run it inside a checkout of the app repo. The `bay.toml` is not
@@ -854,6 +874,15 @@ Bay refuses or blocks a remove when:
   project, a route, the webhook or the tailnet allowlist. Apply that with
   `bay up` first, so the remove plan holds only the removal.
 - the fleet is behind its remote, or the fleet repo has uncommitted changes.
+
+**The app side.** `bay remove` changes the fleet and the boxes only. It never touches the app
+repo, the GitHub hook or the repo's `bay.toml`. After a full remove the lock is gone, so `bay plan`
+from that repo stops with "project <name> is not in fleet <fleet>". `bay init` refuses a repo that
+has a `bay.toml`, so to register the app again, move the file aside, run `bay init` and restore it.
+The compiled file no longer lists the project, so the box's webhook receiver gets an image map
+without it, so a push has no service to build. Whether the old webhook script file on the box is deleted is
+not promised. `bay service prune-webhooks <owner>/<repo>` deletes the GitHub hooks that no service
+claims (it needs `github_admin_token` in the vault).
 
 ### Code and config
 

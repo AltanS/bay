@@ -119,12 +119,13 @@ Do these once per fleet, before the first `bay route add` goes live. Other docs
 (scenario 15 of [layout-scenarios.md](layout-scenarios.md#15-tailnet-route)) link here
 instead of repeating them.
 
-1. **DNS-01 and the wildcard certificate.** In the group_vars of the ingress box (the
-   box that `ingress_box` names):
+1. **DNS-01 and the wildcard certificate.** In `group_vars/<box env>/main.yml`, where `<box env>`
+   is the `env` of the ingress box (the box that `ingress_box` names). Any other file under
+   `group_vars/<box env>/` works too, and so does `group_vars/all/`:
 
    ```yaml
    traefik_dns_challenge_enabled: true
-   traefik_cloudflare_dns_api_token: "{{ secrets.CLOUDFLARE_DNS_API_TOKEN }}"  # Zone:DNS:Edit
+   traefik_cloudflare_dns_api_token: "{{ secrets.cloudflare_dns_api_token }}"  # Zone:DNS:Edit
    tailnet_ingress_cert_domain: "*.ts.example.com"   # one wildcard for all routes
 
    # Fail-closed listener (recommended on the ingress host; needs netplan_address):
@@ -132,12 +133,18 @@ instead of repeating them.
    vpn_entrypoints: "websecure,websecure_tailnet"     # VPN services: public(allowlisted)+tailnet
    ```
 
-   The token goes into the vault under `CLOUDFLARE_DNS_API_TOKEN` (`bay vault edit <env>`).
+   The token goes into the vault of the same box env, `group_vars/<box env>/secrets.yml`, under
+   the key `cloudflare_dns_api_token` (`bay vault edit <box env>`). The Traefik role reads only
+   the variable `traefik_cloudflare_dns_api_token`. The vault key behind it can be spelled any way,
+   but it must match the text after `secrets.` exactly: an unmatched name resolves undefined. The spelling here is lowercase, as for every Ansible
+   role variable (container variables from `bay.toml` use UPPERCASE keys). A vault that already holds the token as
+   `CLOUDFLARE_DNS_API_TOKEN` can keep it: write `{{ secrets.CLOUDFLARE_DNS_API_TOKEN }}` then.
    With `traefik_dns_challenge_enabled` off, the deploy renders no route file and says nothing.
    `tailnet_ingress_cert_domain` is the certificate Traefik asks for. `[tailnet] cert_domain`
    in `bay.fleet.toml` is only the name check of the compile (each domain must be one label
    under it). Neither sets the other: write the same wildcard in both.
-2. **Identity (only for `identity = true`).** In the same group_vars:
+2. **Identity (only for `identity = true`).** In the same group_vars file (its key is
+   lowercase for the same reason):
 
    ```yaml
    tailnet_identity_enabled: true
@@ -250,14 +257,17 @@ One list. Do every step in this order.
 3. Only with the policy: edit the same file again. Carve the port out of any broader
    range that already covers the node (edit 2 in the same section). Run `bay validate`.
 4. Only with the policy: deploy the ACL with `bay deploy <env> --tags headscale`. A plain
-   `bay up` runs `deploy_stack` only, which does not refresh the ACL. Until the grant is live
-   the route answers 502.
+   `bay up` with no route step runs `deploy_stack` only, which does not refresh the ACL. (The
+   route `bay up` of step 7 does, see there.) Until the grant is live the route answers 502.
 5. `bay route add ...` (add `--ingress-box` and `--cert-domain` the first time).
 6. `bay plan <env>` for a project on the ingress box's env. A route change is a step of
    kind `route` (`route_added`, `route_changed`, `route_removed`) at risk `shared`, so it
    needs `bay approve <plan-id> --reason "<why>"`. When the domains change, the step says
    "Headscale restarts": the split-DNS records change.
-7. `bay up <env>`. With a route step it runs the tags `deploy_stack,headscale,traefik`. Like
+7. `bay up <env>`. With a route step it runs the tags `deploy_stack,headscale,traefik`. The
+   `headscale` tag runs every task of the Headscale role, the ACL render included, so this
+   `bay up` also deploys ACL edits when the Headscale server is a box of the plan's box env. Step 4
+   stays: it applies and checks the ACL before the route moves. Like
    every `bay up`, it deploys the whole box environment. A plan for a project on another
    env is blocked while a route change is pending, because that deploy would never reach the
    ingress box.
@@ -334,7 +344,14 @@ CrowdSec bouncer set lives. So a port published on `0.0.0.0` has no firewall in 
 of it at all — the only thing that ever protected it was Docker's own destination-IP
 scoping, and `expose: host` is the single switch that turns that off.
 
-Because that is a real choice and not a typo, it must be recorded:
+Because that is a real choice and not a typo, it must be recorded.
+
+This section shows the compiled form, `services.yml` (the keys `accessories:` and `ports`). In
+2.1 that file is generated. `bay.toml` and `bay.fleet.toml` accept `expose = "loopback"` or
+`expose = "tailnet"` only (a tailnet-only port compiles to `ports.expose: tailnet`), so the compile
+never writes `expose: host`. The check below guards a hand-written file from before 2.1. It is also
+a different thing from `[access.identity]`, a `bay.toml` access setting that 2.1 cannot deploy yet
+(plan.md, unsupported list), and not the route's `identity = true`.
 
 ```yaml
 accessories:
@@ -353,8 +370,8 @@ services:
 
 `bay validate` **fails** on any `expose: host` without `expose_host_ack: true`, on
 both the accessory and the service `ports` form. The flag changes nothing about the
-rendered binding. Prefer `expose: gateway` (tailnet-only) or letting Traefik front the
-service; reach for `host` only when the port genuinely must be public.
+rendered binding. Prefer `expose: gateway` (tailnet-only; `expose = "tailnet"` in `bay.toml`) or
+letting Traefik front the service; reach for `host` only when the port genuinely must be public.
 
 ### Host-routing backends (e.g. `tailscale serve`)
 

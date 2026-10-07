@@ -207,7 +207,7 @@ memory = "512m"                # default none; swap never allowed
 update = "notify"              # notify | auto | off  (default notify)
 zero_downtime = false          # true = old and new overlap; refused if a mount is single-writer
 logs = "7d"                    # "off" | duration; log archive on the box (rotation always on, fleet cap)
-secrets = ["SESSION_SECRET"]   # names only; fleet holds values per environment
+secrets = ["SESSION_SECRET"]   # names only; the fleet holds the values, one vault file per box env
 
 # ── Needs (table form here; `needs = ["postgres", "redis"]` when no need has options) ──
 [needs.postgres]
@@ -358,7 +358,7 @@ These keys sit at the top level. Every key in this table may also be set in a
 | `update` | `notify`, `auto`, `off` | `notify` | What happens when a newer image appears. |
 | `zero_downtime` | bool | `false` | `true`: the previous container keeps running until the new one is healthy. `false`: there is a gap. |
 | `logs` | `"off"` or duration | fleet setting | How long the log archive on the box keeps logs. Rotation is always on. |
-| `secrets` | list of names | `[]` | Secret names. The fleet holds one value per environment. |
+| `secrets` | list of names | `[]` | Secret names. The values are in the vault of the box env (`group_vars/<box env>/secrets.yml`), so two deploy envs on one box env share one value per name. |
 
 Two more top-level keys apply to the main container. An environment cannot override
 them.
@@ -538,8 +538,11 @@ service may use that name. Container names are in rule 8.
 
 ### `[deploy.<env>]`
 
-One table per environment. Each environment has its own data and its own secret
-values. `bay up` deploys `production`; `bay up staging` deploys `staging`.
+One table per deploy environment. Each has its own data and container suffix. Its secret
+values come from the vault of the box env of its box (`group_vars/<box env>/secrets.yml`), so two
+deploy envs on one box env share them (see
+[layout-scenarios.md](layout-scenarios.md#which-env-does-a-verb-take)). `bay plan <env>` and
+`bay up <env>` take this name.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
@@ -552,8 +555,11 @@ values. `bay up` deploys `production`; `bay up staging` deploys `staging`.
 
 #### `track`: what a push deploys
 
-Every push builds an image and tags it with its commit, `<image>:<commit12>`
-(the first 12 characters of the commit). The image moves to `:latest`, and the
+Every push that passes the guards before the build builds an image and tags it with its
+commit, `<image>:<commit12>` (the first 12 characters of the commit). Those guards run first,
+in a fixed order: the `watch` filter, then the config-only rule. A push that fails the filter
+or is config-only builds nothing. The order is in
+[build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push). The image moves to `:latest`, and the
 container starts, only when the push may deploy. The pinned config (the
 `bay.toml` that `bay up` compiled) always decides the config.
 
@@ -563,7 +569,7 @@ container starts, only when the push may deploy. The pinned config (the
   "config changed, run bay up". Bay compares the parsed file, so a comment or a
   key order change is not a config change. `bay up` deploys the held commit
   with its new config.
-- `track = "pin"`. Every push is held. Only `bay up` deploys, and it deploys
+- `track = "pin"`. Every push that builds is held (the last guard, the hold guard). Only `bay up` deploys, and it deploys
   the image of the pinned commit. The image must be on the box, so push first
   and let the build finish. `track = "pin"` needs the `bay.toml` in the app
   repo; a project in the fleet cannot use it.

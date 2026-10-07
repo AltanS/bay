@@ -35,7 +35,9 @@ receipt is its `$defs/receipt`.
 ### Where it is
 
 `/var/lib/bay/receipts/<env>.json` on every box of the environment. `<env>` is
-the environment name that `bay deploy <env>` got, for example `production`.
+the box environment: the name that `bay deploy <env>` got (the inventory file `hosts/<env>`),
+for example `production`. `bay up` deploys against the box env of the project's box, not the
+deploy env (see [layout-scenarios.md](layout-scenarios.md#which-env-does-a-verb-take)).
 There is one file per environment, so one box can hold several.
 
 The receipt that the last deploy replaced stays next to it as

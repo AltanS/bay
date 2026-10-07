@@ -244,7 +244,7 @@ Bay is a command you install once per machine. It does not live inside your proj
 └── hosts/                   # Real inventory
 ```
 
-Bay picks the fleet in one fixed order: `--fleet <path>`, `BAY_FLEET`, the `fleet =` line of the `bay.toml` you stand in, `BAY_FLEET_NAME`, and for `plan`, `up`, `approve`, `rollback`, `remove` and `doctor` the fleet directory you stand in. With none of these, the command stops and lists them. The full rule is in [docs/install.md](docs/install.md#pick-a-fleet).
+Bay picks the fleet in one fixed order: `--fleet <path>`, `BAY_FLEET`, the `fleet =` line of the `bay.toml` you stand in, `BAY_FLEET_NAME`, and, for `plan`, `up`, `approve`, `rollback`, `remove`, `doctor` and `show <name>` only, the fleet directory you stand in. With none of these, the command stops and lists them. The full rule is in [docs/install.md](docs/install.md#pick-a-fleet).
 
 [SKILL.md](SKILL.md) is the framework's orientation document for an AI agent working in a fleet: the rules that bite, the whole command inventory (compiled from the CLI itself), and the doc map. `bay --skill` prints it raw for piping anywhere else.
 
