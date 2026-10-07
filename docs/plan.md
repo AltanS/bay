@@ -5,8 +5,8 @@ These are the daily verbs of Bay v2. They work on one project of one fleet.
 Bay keeps three truths apart:
 
 - **WANTED**: `bay.toml` at the project's current commit.
-- **PINNED**: the fleet lockfile `projects/<name>.lock`, and the services file
-  that the fleet last compiled from it.
+- **PINNED**: the fleet lockfile `projects/<name>/bay.lock`, and the services
+  file that the fleet last compiled from it.
 - **RUNNING**: the receipt that the box wrote after its last deploy
   (see [deploy-receipt.md](deploy-receipt.md)).
 
@@ -22,9 +22,13 @@ No verb asks a question. No verb takes a secret on the command line.
   `BAY_FLEET=<path>` uses another directory.
 - `--project <name>` works from any directory. The fleet then comes from
   `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME`.
-- Bay reads the project from the checkout that the lock names
-  (`local_path`). When you run a verb in another clone, the plan says so in a
-  note.
+- Bay finds the app repo by the lock's `repo` URL, never by a path. It reads
+  the git checkout you stand in when its `origin` is that repo. Otherwise it
+  reads the fleet's repo cache, `<fleet>/.bay-cache/repos/<slug>`, which it
+  clones on first use and fetches before each plan. Two projects in one repo
+  share one cache. See [install.md](install.md#where-bay-reads-an-app-repo).
+- A pinned commit that is in neither the checkout nor the cache is an error
+  that names the project. Bay never skips the project.
 
 ### Projects with no repo
 
@@ -33,10 +37,11 @@ mounts) live in the fleet as `projects/<name>/`. Use `--project <name>` (or
 `bay show <name>`) for them. plan, up, show and rollback work the same way,
 with these differences:
 
-- WANTED is `projects/<name>/` at the fleet's HEAD. Commit an edit in the
-  fleet repo before you plan it.
-- The lock has `repo: null` and `local_path: null`. Its `commit` is the fleet
-  commit that last changed `projects/<name>/`.
+- WANTED is `projects/<name>/` at the fleet's HEAD, without
+  `projects/<name>/bay.lock`. Commit an edit in the fleet repo before you plan
+  it. `bay up` commits the lock, and that commit does not change WANTED.
+- Its `commit` is the fleet commit that last changed `projects/<name>/`,
+  the lock not counted. Its `repo` may name the repo a webhook builds from.
 - `bay show` reports WANTED as dirty when the working tree of
   `projects/<name>/` differs from HEAD.
 - A project in the fleet with no lock, or with no pinned commit, is read at
@@ -46,7 +51,7 @@ with these differences:
 ## The verbs
 
 ```bash
-bay init [--name N] [--fleet F] [--box B] [--domain D]   # draft bay.toml, register the project
+bay init [--name N] [--fleet F] [--box B] [--domain D] [--toml-path P]   # draft bay.toml, register the project
 bay plan [env] [--json] [--log PATH] [--at SHA] [--plan-id ID] [--remote] [--no-remote]
 bay approve <plan-id> --reason "<why>"
 bay up [env] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--json] [--log PATH] [--no-push]
@@ -77,23 +82,32 @@ Run it in an app repo that has no `bay.toml`.
    There is one `[deploy.<primary env>]` table with the fleet's default box and
    the domain `<name>.<default_domain>`.
 2. Bay checks the draft with the `bay.toml` validator.
-3. Bay writes `projects/<name>.lock`: `repo` from `git remote get-url origin`,
-   `commit: null`, and `local_path` set to the repo path.
+3. Bay writes `projects/<name>/bay.lock`: `repo` from
+   `git remote get-url origin`, `toml_path`, and `commit: null`.
 4. Bay commits the fleet repo with the message `bay: init <name>`.
 
-Bay refuses when `bay.toml` exists or the name is taken. A name never
-changes. Check the draft, commit it in the app repo, then run `bay plan`.
+`--toml-path services/api/bay.toml` puts the draft at that path, relative to
+the repo root, for a repo with several apps. The lock records it as
+`toml_path`. The default is `bay.toml` at the repo root.
+
+Bay refuses when `bay.toml` exists, when the name is taken, and when the repo
+has no `origin` remote: Bay finds the repo by that URL. A name never changes.
+Check the draft, commit it in the app repo, push it, then run `bay plan`.
 
 A project whose lock pins no commit is not deployed. Other projects' plans
 leave it out.
 
 ### bay plan
 
-1. **WANTED**: Bay reads `bay.toml` at HEAD of the checkout (`--at` picks
+1. **WANTED**: Bay reads `bay.toml` at HEAD of the checkout you stand in, or
+   at the head of the remote's default branch in the repo cache (`--at` picks
    another commit). Uncommitted edits are not part of the plan. The plan
-   records them as `wanted.dirty`.
+   records them as `wanted.dirty`. When the WANTED commit is on no branch of
+   the remote, the plan says so in a note: `bay up` will refuse it.
 2. Bay copies the fleet inputs to a temporary directory. Every project is
    read at its pinned commit. This project is read at the WANTED commit.
+   Each file that a `bay.toml` mounts is copied from beside the toml to
+   `files/<target>` in the copy (see [The project folder](#the-project-folder)).
    Bay compiles the whole fleet from that copy, the same way `bay up` will.
 3. **PINNED**: Bay compares the result with the fleet's services file, entry
    by entry. Each difference gives one or more steps.
@@ -250,7 +264,9 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
 2. Bay refuses `blocked` (exit 20) and `stale` (exit 30). Bay refuses
    `approve` (exit 10) unless an approval matches. `--force --reason "<why>"`
    overrides `approve` only, never `blocked` or `stale`. The reason goes into
-   the lock as `previous.force_reason`.
+   the lock as `previous.force_reason`. Bay also refuses a repo project's
+   commit that is on no branch of its remote: "push first". The box can only
+   build what the remote has.
 3. Bay writes the lock: the project pin moves to the planned commit. The
    environment record gets `result: pending` and `previous` (the pin it
    replaces).
@@ -333,8 +349,52 @@ box receipt), and one status word per environment:
 `bay compile` reads every project at the commit its lock pins, through the
 same temporary copy of the fleet that `bay plan` and `bay up` compile. A
 project with no pinned commit is left out, with a note on stderr.
-`bay compile --working-tree` reads the local checkouts as they are instead.
-Use it while you develop, never to deploy.
+`bay compile --working-tree` reads the fleet and the checkout you stand in as
+they are instead. A repo project you do not stand in is not read, and the
+compile names it. Use it while you develop, never to deploy.
+
+## The project folder
+
+From 2.1 (`format = 2` in `bay.fleet.toml`), a project is one folder:
+
+```
+projects/
+├── shop/
+│   └── bay.lock           # a repo project: only its lock lives here
+└── gatus/
+    ├── bay.toml
+    ├── bay.lock
+    └── config.yaml        # from = "config.yaml"
+```
+
+- `from =` in a mount is relative to the directory of the `bay.toml`, in the
+  fleet and in an app repo.
+- `from = "fleet:<path>"` mounts the shared fleet file `files/<path>`.
+- The box keeps the path it has today: `config/<target>`, where `<target>`
+  is the adopted path in the lock or `<name>/<from>`. So the move recreates
+  no container.
+- Bay copies each mounted file into the temporary fleet as `files/<target>`.
+  The copy is made at the commit Bay reads, so an uncommitted file is not
+  part of the plan.
+- `files/` stays for rig files, `[resources.*]` files and shared files.
+
+**The deploy still reads the fleet's working tree.** It copies each config
+file from `<fleet>/files/<target>`, not from the temporary fleet. So the plan
+is blocked when a compiled config file is missing from `files/<target>` or
+differs from it there. Keep a copy at `files/<target>` until the deploy reads
+the mapped files.
+
+**One release of overlap.** A file that is not beside the toml is still read
+from its old place, `files/<name>/<from>`, with a note that names it. Do not
+move it out of `files/` while the deploy still reads the working tree (above).
+
+**The move to format 2.** The first `bay plan`, `bay up`, `bay show`,
+`bay compile` or `bay init` of a 2.1 CLI moves each `projects/<name>.lock` to
+`projects/<name>/bay.lock` (`git mv`), adds `format = 2` after the `name`
+line of `bay.fleet.toml`, and commits once:
+`bay: move locks into project folders`. It refuses when one project has both
+lock forms, and when `bay.fleet.toml` has uncommitted changes. A CLI refuses
+a fleet whose `format` is newer than it knows.
 
 ## The plan JSON
 
@@ -418,9 +478,14 @@ know.
 
 ## The lockfile
 
-`projects/<name>.lock` (schema `src/bay_cli/schemas/bay_lock.schema.json`).
-Only the CLI writes it, atomically. `bay up` adds these optional keys to an
-environment:
+`projects/<name>/bay.lock` (schema `src/bay_cli/schemas/bay_lock.schema.json`),
+version 2. Only the CLI writes it, atomically. It holds `repo` (the clone URL,
+or `null` for a project that lives in the fleet), `toml_path` (default
+`bay.toml`), the project pin `commit`, and `envs`. It names no path on any
+machine. A version 1 lock is read as version 2: its `local_path` is dropped,
+and the next write stores version 2.
+
+`bay up` adds these optional keys to an environment:
 
 ```json
 "envs": {

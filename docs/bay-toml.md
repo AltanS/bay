@@ -36,9 +36,11 @@ bay import --fleet ./fleet --check             # writes nothing; exit 1 on a dif
 bay import --fleet ./fleet --check --diff      # also prints the diff of each container
 ```
 
-- `bay import` writes `bay.fleet.toml`, `projects/<name>/bay.toml` for every project,
-  `projects/<name>.lock` with every adopted name, and a copy of the config files under
-  `files/`. `--out` must be empty or new.
+- `bay import` writes `bay.fleet.toml` (with `format = 2`), and one folder per
+  project: `projects/<name>/bay.toml`, `projects/<name>/bay.lock` with every adopted
+  name, and the config files the project mounts from `files/<name>/` today, now beside
+  its `bay.toml`. Other config files (a path outside `<name>/`, the resources' files)
+  are copied under `files/`. `--out` must be empty or new.
 - Each container becomes a project with the same name. `<name>-prod`, `-staging` and
   `-dev` become an environment of `<name>`. `<name>-<suffix>` with the same repo or
   image becomes `[services.<suffix>]` when the result is exact. The report lists every
@@ -255,7 +257,7 @@ volume = "cache"
 backup = false
 [[mounts]]
 path = "/etc/app/config.yaml"
-from = "deploy/config.yaml"    # file or directory from this repo, read-only; a change recreates the container
+from = "deploy/config.yaml"    # file or directory beside this bay.toml, read-only; a change recreates the container
 mode = "0644"                  # default 0600
 
 [backup]                       # managed mounts with backup = true (databases follow the fleet policy)
@@ -427,13 +429,32 @@ Each mount sets `path` and exactly one of `volume` or `from`.
 |-----|------|---------|---------|
 | `path` | absolute path | required | Where the mount appears inside the container. |
 | `volume` | name | none | A named volume that Bay manages. It survives recreation. |
-| `from` | repo path | none | A file or directory from this repo, read-only. A change recreates the container. No leading `/` and no `..`. |
+| `from` | path | none | A file or directory relative to the directory of this `bay.toml`, read-only. A change recreates the container. No leading `/` and no `..`. `fleet:<path>` mounts the shared fleet file `files/<path>` instead. |
 | `owner` | `uid` or `uid:gid` | root | Volume mounts only. |
 | `backup` | bool | `true` | Volume mounts only. |
 | `mode` | octal string | `"0600"` | `from` mounts only. |
 
 Two mounts in one container may not use the same `path`. A volume name is shared by the
 whole project. Two services that mount the same volume name share one volume.
+
+Where `from` is read:
+
+- **Beside the toml.** `from` is relative to the directory of the `bay.toml`, in an app
+  repo and in the fleet alike. In a repo with several apps,
+  `services/api/bay.toml` with `from = "conf/app.yaml"` reads
+  `services/api/conf/app.yaml`. A project that lives in the fleet reads
+  `projects/<name>/<from>`.
+- **A shared fleet file.** `from = "fleet:crowdsec/whitelist.yaml"` reads
+  `files/crowdsec/whitelist.yaml` in the fleet. The prefix is explicit; Bay never
+  guesses. On the box the file is `config/crowdsec/whitelist.yaml`.
+- **The old place, for one release.** When the file is not beside the toml, Bay still
+  reads `files/<name>/<from>` in the fleet, and prints a note that names the file. 2.1
+  reads both places; a later release reads only the new one. Until the deploy reads
+  the mapped copy, keep the file in `files/` too (see `docs/plan.md`, The project
+  folder).
+- On the box the file is `config/<name>/<from>`, or `config/<adopted path>` when the
+  lock adopts one. Moving a file beside the toml does not change that path, so no
+  container is recreated.
 
 ### `[backup]`
 

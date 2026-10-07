@@ -65,14 +65,36 @@ With none of these, the command stops and lists the ways to pick one.
 `--fleet <path>` is also how you try a fleet that is not under `~/.config/bay/fleets`.
 It works from any directory.
 
+## Where Bay reads an app repo
+
+A lock (`projects/<name>/bay.lock`) names the app repo by its clone URL (`repo`),
+never by a path on a machine. When Bay needs the repo, it looks in this order:
+
+1. **The checkout you stand in.** When the git checkout of the current directory has
+   an `origin` that is the lock's `repo`, Bay reads it. URLs are compared in one form,
+   so `git@github.com:acme/app.git` and `https://github.com/acme/app` match.
+2. **The repo cache of the fleet.** `<fleet>/.bay-cache/repos/<slug>` is a mirror
+   clone of the repo. The slug comes from the URL, so the same URL gives the same
+   directory on every machine, and two projects in one repo share one cache. Bay clones
+   it the first time and fetches it (`--prune`) before each plan. You need read access
+   to the repo from this machine.
+
+Bay only reads both: it never writes to your checkout. A pinned commit that is in
+neither place is an error that names the project.
+
+**Push first.** `bay up` refuses a commit that is on no branch of the remote. The box
+builds from the remote, so it cannot run a commit that only your machine has. `bay plan`
+says so in a note.
+
 ## Caches
 
 Bay keeps what it learns about a fleet in `<fleet>/.bay-cache/`. This holds the
-rig-state cache (`.rig-state-cache`) and the probe cache of `bay validate`
-(`.validate-probe-cache`). Each file expires after one hour. Two fleets on one machine
-never share a cache. `bay fleet init` adds `.bay-cache/` to the `.gitignore` of a new
-fleet. If you cloned a fleet with `--from`, add that line yourself. Delete the
-directory at any time. Bay builds it again.
+rig-state cache (`.rig-state-cache`), the probe cache of `bay validate`
+(`.validate-probe-cache`) and the repo cache (`repos/`). The two cache files expire
+after one hour. Two fleets on one machine never share a cache. `bay fleet init` adds
+`.bay-cache/` to the `.gitignore` of a new fleet, and the directory also holds its own
+`.gitignore` of `*`, so git never shows it. Delete the directory at any time. Bay
+builds it again; the repo cache is cloned again on the next plan.
 
 ## Uninstall
 
