@@ -2209,9 +2209,12 @@ def _source_built_repos(doc: dict[str, Any]) -> list[str | None]:
 
     The main container builds when no ``image`` is set at the top or in some
     ``[deploy.<env>]``. A service builds when it has a ``[services.<n>.build]``
-    table, or when it has no ``image`` and shares the main build. A service
-    with its own ``image`` never builds. The compile takes the repo from the
-    entry's own ``build`` table, then from the project ``[build]`` table.
+    table, or when it has no ``image`` and shares the main build, or when it
+    has no ``image``, no ``build`` and ``inherit = false`` (the compile builds
+    it from the project ``[build]`` table even if the main container pulls an
+    image). A service with its own ``image`` never builds. The compile takes
+    the repo from the entry's own ``build`` table, then from the project
+    ``[build]`` table.
     """
     project = doc.get("build") if isinstance(doc.get("build"), dict) else {}
     deploys = [d for d in (doc.get("deploy") or {}).values() if isinstance(d, dict)] or [{}]
@@ -2224,7 +2227,7 @@ def _source_built_repos(doc: dict[str, Any]) -> list[str | None]:
             continue
         if isinstance(svc.get("build"), dict):
             found.append(svc["build"].get("repo") or project.get("repo"))
-        elif main_builds:
+        elif main_builds or svc.get("inherit") is False:
             found.append(project.get("repo"))
     return found
 

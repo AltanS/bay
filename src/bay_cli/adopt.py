@@ -230,7 +230,10 @@ def _prepare(cx: Context, cwd: Path, name: str, toml_path: str | None) -> AdoptP
             f"{toml_rel_fleet} names [build] repo {toml_repo}, but {folder}/{LOCK_FILE} names "
             f"repo {raw['repo']}",
             code=ErrorCode.CONFLICT,
-            hint="Make the two name the same repo (fix [build] repo or the lock), then adopt.",
+            hint=(
+                f"Fix [build] repo in {toml_rel_fleet} so it names the repo the lock names, "
+                "or remove it to use the lock repo, then adopt."
+            ),
         )
     if not toml_repo and raw.get("repo") and not reposource.same_repo(str(raw["repo"]), origin):
         raise BayError(

@@ -105,7 +105,7 @@
 
     - name: Ensure systemd unit directory exists
       ansible.builtin.file:
-        path: /etc/systemd/system
+        path: "{{ git_deploy_systemd_unit_dir | default('/etc/systemd/system') }}"
         state: directory
         mode: "0755"
       become_user: root
@@ -113,7 +113,7 @@
     - name: Deploy systemd path units
       ansible.builtin.template:
         src: bay-build@.path.j2
-        dest: "/etc/systemd/system/bay-build@.path"
+        dest: "{{ git_deploy_systemd_unit_dir | default('/etc/systemd/system') }}/bay-build@.path"
         mode: "0644"
       become_user: root
       notify: reload systemd
@@ -121,7 +121,7 @@
     - name: Deploy systemd service units
       ansible.builtin.template:
         src: bay-build@.service.j2
-        dest: "/etc/systemd/system/bay-build@.service"
+        dest: "{{ git_deploy_systemd_unit_dir | default('/etc/systemd/system') }}/bay-build@.service"
         mode: "0644"
       become_user: root
       notify: reload systemd
@@ -129,7 +129,7 @@
     - name: Deploy systemd alert units
       ansible.builtin.template:
         src: bay-build-alert@.service.j2
-        dest: "/etc/systemd/system/bay-build-alert@.service"
+        dest: "{{ git_deploy_systemd_unit_dir | default('/etc/systemd/system') }}/bay-build-alert@.service"
         mode: "0644"
       become_user: root
       notify: reload systemd
@@ -147,7 +147,7 @@
     # mode the enable runs only when the template is already on the box.
     - name: Check whether the path unit template is on the box
       ansible.builtin.stat:
-        path: /etc/systemd/system/bay-build@.path
+        path: "{{ git_deploy_systemd_unit_dir | default('/etc/systemd/system') }}/bay-build@.path"
       register: _bay_build_path_template
 
     - name: Enable and start path units for build services

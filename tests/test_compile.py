@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -365,6 +366,26 @@ def test_validate_build_repo_mixed_image_and_source_services(fleet: Path) -> Non
     assert len(bad.failed) == 1 and "projects/gatus" in bad.failed[0]
 
     # The lock names a repo: every source-built entry has one.
+    _gatus_lock(fleet, "https://github.com/acme/gatus.git")
+    fine = ValidationResult()
+    _validate_build_repos(fleet, fine)
+    assert fine.failed == []
+
+
+def test_validate_build_repo_inherit_false_service_builds(fleet: Path) -> None:
+    """A service with no image, no build and inherit = false builds in the compile."""
+    from bay_cli.commands.validate import ValidationResult, _source_built_repos, _validate_build_repos
+
+    # The main container pulls an image; the side service opts out of
+    # inheriting it and has no image of its own, so it builds from source.
+    path = fleet / GATUS
+    path.write_text(path.read_text() + '\n[services.worker]\ninherit = false\n')
+    assert _source_built_repos(tomllib.loads(path.read_text())) == [None]
+    _gatus_lock(fleet, None)
+    bad = ValidationResult()
+    _validate_build_repos(fleet, bad)
+    assert len(bad.failed) == 1 and "projects/gatus" in bad.failed[0]
+
     _gatus_lock(fleet, "https://github.com/acme/gatus.git")
     fine = ValidationResult()
     _validate_build_repos(fleet, fine)
