@@ -14,7 +14,8 @@ Which project and which fleet:
   directory you stand in (a ``bay.fleet.toml`` here or above).
 
 No verb asks a question. Secrets never travel on the command line.
-Plan exit codes: 0 auto, 10 approve, 20 blocked, 30 stale.
+Plan exit codes: 0 auto, 10 approve, 20 blocked, 30 stale. ``bay up`` also
+exits 40 when the deploy failed only for a first image.
 """
 
 from __future__ import annotations
@@ -585,7 +586,11 @@ def _apply(
                 else f"the fleet pins the planned commits of {len(exc.result['projects'])} projects"
             )
             console.error(f"{exc}. {pins}; bay show says HALF until a deploy succeeds.")
-        raise typer.Exit(1) from None
+            if exc.exit_code == applymod.FIRST_IMAGE_EXIT:
+                for note in exc.result.get("notes") or []:
+                    if note.startswith("first deploy of "):
+                        console.info(note)
+        raise typer.Exit(exc.exit_code) from None
     if removed is not None:
         _report_remove(removed, as_json)
         return
@@ -648,7 +653,9 @@ def up(
     an approve plan (exit 10) without `bay approve`. Then writes the lock,
     compiles, commits the fleet repo, deploys, records the receipt, prunes
     old records from plans/ and pushes the fleet repo (not with --no-push; a
-    failed push is only a warning).
+    failed push is only a warning). A failed deploy exits 1, or 40 when the
+    only failure is a build container with no image yet (the first deploy of
+    a build app: push so the webhook builds it, then bay up again).
 
     In a fleet directory (or with --fleet and no bay.toml here), with no
     --project, it applies a whole-environment plan: every project of the
@@ -705,7 +712,8 @@ def rollback(
 
     Runs bay up with the commit the lock records as previous; the two pins
     swap, so a second rollback undoes the first. The box points the image
-    back at what it ran before the last bay up. The environment is frozen:
+    back at the code the lock records for each build container before the
+    last bay up (previous.containers). The environment is frozen:
     a push builds and tags its image but does not deploy, until a bay up to
     a newer commit. Refuses when there is no previous pin.
 
@@ -750,9 +758,12 @@ def show(
 ) -> None:
     """Print WANTED, PINNED and RUNNING for a project, and a status per environment.
 
-    Status: ok, behind (the project is ahead of the pin), drift (the box
-    differs from the pin), unknown (no receipt) or HALF (the last bay up
-    failed). With --routes: the same for every tailnet route of the fleet.
+    Status: ok, ahead (the box runs WANTED, a push deployed it, and the pin
+    is behind), behind (the project is ahead of the pin and the box does not
+    run it yet), drift (the box differs from the pin), unknown (no receipt)
+    or HALF (the last bay up failed). RUNNING names the code each build
+    container runs. With --routes: the same for every tailnet route of the
+    fleet.
     """
     from bay_cli import apply as applymod
 

@@ -468,11 +468,13 @@ def test_rollback_lists_code_it_kept(
     assert do_up(world)["result"] == "ok"
     edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
     assert do_up(world)["result"] == "ok"
+    _pre_2_2_lock(world)
 
     result = cli(world, "rollback", "--json")
     assert result.exit_code == 0, result.output
     doc = json.loads(result.stdout)
     assert doc["code_targets"] == {"webapp": {"source": "prev", "strict": False}}
+    assert applymod.PREV_FALLBACK_NOTE in doc["notes"]
     assert doc["code_kept"] == [
         {
             "box": "box-1",
@@ -487,9 +489,18 @@ def test_rollback_lists_code_it_kept(
     # The text output prints it too.
     edit_app(world, 'LOG_LEVEL = "debug"', 'LOG_LEVEL = "warn"')
     assert do_up(world)["result"] == "ok"
+    _pre_2_2_lock(world)
     said = cli(world, "rollback")
     assert said.exit_code == 0, said.output
     assert "code: kept webapp (the previous receipt names no commit" in said.output
+
+
+def _pre_2_2_lock(world: dict[str, Path]) -> None:
+    """Drop ``previous.containers``, as a lock written before 2.2.0 has none."""
+    raw = lock_of(world)
+    raw["envs"]["production"]["previous"].pop("containers", None)
+    lockfile.write(lockfile.lock_path(world["fleet"], "webapp"), raw)
+    commit_all(world["fleet"], "a lock from before 2.2.0")
 
 
 def test_receipt_records_code_moves() -> None:
@@ -4351,3 +4362,264 @@ def test_migration_only_diff_rejects_other_changes(tmp_path: Path) -> None:
     git(repo, "mv", "projects/webapp.lock", "projects/other/bay.lock")
     commit_all(repo, "wrong target")
     assert layout.is_migration_only_diff(repo, old, git(repo, "rev-parse", "HEAD")) is False
+
+
+# ── M118/01: plan, show and rollback tell the truth ───────────────────────
+
+
+def test_plan_shows_code_step_for_held_push(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap 15: the box runs code older than WANTED, so bay up moves it: one step, safe."""
+    _code_deploys(monkeypatch, box)
+    first = _build_app(world)
+    assert do_up(world)["result"] == "ok"
+    _stamp(box, "webapp", first)
+    assert make(world)["steps"] == []
+
+    # A push the box has not deployed (held, or not built yet).
+    wanted = _push_code(world, "v2")
+    plan = make(world)
+    (step,) = plan["steps"]
+    assert (step["kind"], step["action"], step["risk"], step["container"], step["source"]) == (
+        "image",
+        "update",
+        "safe",
+        "webapp",
+        "box",
+    )
+    assert step["reason"] == (
+        f"the box runs code {first[:12]}; bay up deploys {wanted[:12]} (a held build, or a "
+        f"build not deployed yet); with no image for {wanted[:12]} on the box, :latest stays"
+    )
+    assert plan["verdict"] == "auto" and plan["exit_code"] == 0
+    assert "code" not in plan  # nothing kept: bay up moves the code
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    # The whole-environment plan says the same.
+    env_plan = planmod.make_env_plan(cx_of(world), planmod.PlanOptions(), cwd=world["fleet"])
+    assert [s["kind"] for s in env_plan["steps"]] == ["image"]
+
+    # The box runs WANTED: the same commit, no step.
+    _stamp(box, "webapp", wanted)
+    assert make(world)["steps"] == []
+
+
+def test_plan_note_names_held_commit(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap 15: the note names WANTED (the held commit), not only the running code."""
+    _code_deploys(monkeypatch, box)
+    pin = _build_app(world)
+    assert do_up(world)["result"] == "ok"
+    running = _push_code(world, "v2")
+    _stamp(box, "webapp", running)  # a push deployed it
+    held = _push_code(world, "v3")  # a push the box held
+    plan = make(world)
+    line = f"code at {running[:12]}, config pinned at {pin[:12]}, WANTED {held[:12]}"
+    assert line in plan["notes"]
+    assert f"note: {line}" in planmod.render(plan)
+    # When the box runs WANTED, the note has no WANTED part.
+    _stamp(box, "webapp", held)
+    notes = make(world)["notes"]
+    assert f"code at {held[:12]}, config pinned at {pin[:12]}" in notes
+    assert not any("WANTED" in n for n in notes)
+
+
+def test_show_prints_running_commit(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap 16: RUNNING names the code of each build container, `code ?` when unknown."""
+    _code_deploys(monkeypatch, box)
+    first = _build_app(world)
+    assert do_up(world)["result"] == "ok"
+    shown = json.loads(cli(world, "show", "--json").stdout)
+    assert shown["envs"][0]["running"]["code"] == {"webapp": None}
+    assert "webapp code ?" in applymod.render_show(shown)
+
+    _stamp(box, "webapp", first)
+    result = cli(world, "show", "--json")
+    assert result.exit_code == 0, result.output
+    shown = json.loads(result.stdout)
+    run = shown["envs"][0]["running"]
+    assert run["code"] == {"webapp": first[:12]}
+    (container,) = [c for b in run["boxes"] for c in b["containers"] if c["name"] == "webapp"]
+    assert container["commit"] == first[:12]
+    text = cli(world, "show").output
+    (line,) = [ln for ln in text.splitlines() if " pinned " in ln and "RUNNING" in ln]
+    assert f"webapp code {first[:12]}" in line
+    assert re.search(r"code [0-9a-f?]", line)
+    # An image-only container carries no code: no `code` part for it.
+    assert "postgres code" not in line
+
+
+def test_show_ahead_when_box_runs_wanted(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap 16: `ahead` when a push deployed WANTED; `behind` while the box runs the pin."""
+    _code_deploys(monkeypatch, box)
+    pin = _build_app(world)
+    assert do_up(world)["result"] == "ok"
+    _stamp(box, "webapp", pin)
+    assert json.loads(cli(world, "show", "--json").stdout)["envs"][0]["status"] == "ok"
+
+    wanted = _push_code(world, "v2")
+    row = json.loads(cli(world, "show", "--json").stdout)["envs"][0]
+    assert row["status"] == "behind"
+    assert row["reason"].endswith("and the box does not run it yet")
+
+    _stamp(box, "webapp", wanted)
+    row = json.loads(cli(world, "show", "--json").stdout)["envs"][0]
+    assert row["status"] == "ahead", row["reason"]
+    assert row["reason"] == (
+        f"the box runs {wanted[:12]} (a push deployed it); the fleet pins {pin[:12]}: "
+        "run bay up to pin it"
+    )
+    assert "ahead" in applymod.STATUS_WORDS
+    # bay up pins it: ok again.
+    assert do_up(world)["result"] == "ok"
+    _stamp(box, "webapp", wanted)
+    assert json.loads(cli(world, "show", "--json").stdout)["envs"][0]["status"] == "ok"
+
+
+def _failing_deploy(
+    box: FakeBox, failed: set[str], seen: list[Any] | None = None
+) -> Any:
+    """A deploy whose receipt marks ``failed`` containers as failed actions, then fails."""
+
+    def deploy(
+        cx: Context,
+        box_env: str,
+        *,
+        config_files_root: Path | None = None,
+        code_targets: Any = None,
+    ) -> None:
+        if seen is not None:
+            seen.append(code_targets)
+        box.fail = True
+        try:
+            box.deploy(cx, box_env, config_files_root=config_files_root)
+        finally:
+            box.fail = False
+            for c in box.receipts[box_env]["containers"]:
+                c["failed"] = c["name"] in failed
+
+    return deploy
+
+
+def test_first_image_failure_exit_40(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap 13: the expected first-image failure exits 40 and names the way out."""
+    asked: list[str] = []
+    tags: dict[str, list[str]] = {"box-1": []}
+
+    def lister(cx: Context, box_env: str, repo: str) -> dict[str, list[str]]:
+        asked.append(repo)
+        return dict(tags)
+
+    monkeypatch.setattr(applymod, "default_image_tags", lister)
+    monkeypatch.setattr(applymod, "default_deploy", _failing_deploy(box, {"webapp"}))
+    commit = _build_app(world)
+
+    result = cli(world, "up", "--json")
+    assert result.exit_code == 40, result.output
+    doc = json.loads(result.stdout)
+    assert doc["result"] == "failed" and doc["first_image"] == ["webapp"]
+    message = (
+        f"first deploy of webapp: the box has no image for {commit[:12]} yet. Push to main "
+        "so the webhook builds it, wait for the build, then run bay up again."
+    )
+    assert message in doc["notes"]
+    # The receipt names no image for a build container here: the box's build tag.
+    assert asked == ["argo-testfleet-webapp"]  # kept-argo: live build tag on boxes
+    # The lock and the receipt behave as before: pin kept, result failed, HALF.
+    assert lock_of(world)["envs"]["production"]["result"] == "failed"
+    shown = json.loads(cli(world, "show", "--json").stdout)
+    assert shown["envs"][0]["status"] == "HALF"
+
+    # The text form says it too.
+    said = cli(world, "up")
+    assert said.exit_code == 40
+    assert "Push to" in said.output and "run bay up again" in said.output
+
+    # Another failed action as well: exit 1.
+    monkeypatch.setattr(
+        applymod, "default_deploy", _failing_deploy(box, {"webapp", "postgres"})
+    )
+    other = cli(world, "up", "--json")
+    assert other.exit_code == 1, other.output
+    assert json.loads(other.stdout)["first_image"] == ["webapp"]
+
+    # The box has an image (:latest): not a first image, exit 1.
+    monkeypatch.setattr(applymod, "default_deploy", _failing_deploy(box, {"webapp"}))
+    tags["box-1"] = ["latest"]
+    has_image = cli(world, "up", "--json")
+    assert has_image.exit_code == 1
+    assert json.loads(has_image.stdout)["first_image"] == []
+
+    # The container ran code before: not a first image either.
+    tags["box-1"] = []
+    assert "commit" not in box.container("webapp")
+    _stamp(box, "webapp", commit)
+    ran = cli(world, "up", "--json")
+    assert ran.exit_code == 1
+    assert json.loads(ran.stdout)["first_image"] == []
+
+
+def test_rollback_code_target_from_lock(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Gap 14: plain rollback takes its code target from the lock, not <env>.prev.json."""
+    seen = _code_deploys(monkeypatch, box)
+    good = _build_app(world)
+    assert do_up(world)["result"] == "ok"
+    _stamp(box, "webapp", good)
+    box.container("webapp")["image"] = f"app/webapp:{good[:12]}"
+
+    # The bad bay up: the lock records what ran before it.
+    bad = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    assert do_up(world)["result"] == "ok"
+    previous = lock_of(world)["envs"]["production"]["previous"]
+    assert previous["commit"] == good
+    assert previous["containers"] == {
+        "webapp": {"commit": good[:12], "image": f"app/webapp:{good[:12]}"}
+    }
+    _stamp(box, "webapp", bad)
+
+    # A second bay up that changes nothing: the box would rotate <env>.prev.json
+    # to the bad state; the lock's previous does not move.
+    assert do_up(world)["result"] == "ok"
+    assert lock_of(world)["envs"]["production"]["previous"] == previous
+    _stamp(box, "webapp", bad)  # the fake deploy rewrote the row; the box still runs bad
+
+    result = cli(world, "rollback", "--json")
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert seen[-1] == {"webapp": {"commit": good[:12], "strict": False}}
+    assert doc["code_targets"] == seen[-1] and doc["code_kept"] == []
+    assert applymod.PREV_FALLBACK_NOTE not in doc["notes"]
+    # The pins swap; previous now names the bad code that ran before the rollback.
+    swapped = lock_of(world)["envs"]["production"]["previous"]
+    assert swapped["commit"] == bad and swapped["containers"]["webapp"]["commit"] == bad[:12]
+
+    # A container the lock names with no commit is kept and reported.
+    _stamp(box, "webapp", good)
+    later = edit_app(world, 'LOG_LEVEL = "debug"', 'LOG_LEVEL = "warn"')
+    assert do_up(world)["result"] == "ok" and lock_of(world)["commit"] == later
+    raw = lock_of(world)
+    raw["envs"]["production"]["previous"]["containers"]["webapp"]["commit"] = None
+    lockfile.write(lockfile.lock_path(world["fleet"], "webapp"), raw)
+    commit_all(world["fleet"], "no commit for webapp")
+    doc = json.loads(cli(world, "rollback", "--json").stdout)
+    assert doc["code_targets"] == {}
+    assert doc["code_kept"] == [
+        {"box": "box-1", "container": "webapp", "reason": applymod.LOCK_NO_COMMIT}
+    ]
+    assert f"code: kept webapp ({applymod.LOCK_NO_COMMIT})" in doc["notes"]
+
+    # A lock from before 2.2.0 has no map: the box's <env>.prev.json, with a note.
+    assert do_up(world, at=later)["result"] == "ok"
+    _pre_2_2_lock(world)
+    doc = json.loads(cli(world, "rollback", "--json").stdout)
+    assert doc["code_targets"] == {"webapp": {"source": "prev", "strict": False}}
+    assert applymod.PREV_FALLBACK_NOTE in doc["notes"]

@@ -161,11 +161,21 @@ def _write_services(cx: Context, text: str) -> Path:
     return target
 
 
-def _previous_for(record: Mapping[str, Any], lock: Mapping[str, Any]) -> dict[str, Any] | None:
+def _previous_for(
+    record: Mapping[str, Any],
+    lock: Mapping[str, Any],
+    containers: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """The env's ``previous``: the pin this ``bay up`` replaces.
+
+    ``containers`` (:func:`_previous_containers`) is the code each build
+    container ran before this ``bay up``; ``bay rollback`` takes its code
+    target from it. None leaves it out (the box was not read).
+    """
     commit = record.get("commit") or lock.get("commit")
     if not commit:
         return None
-    previous = {
+    previous: dict[str, Any] = {
         "commit": commit,
         "deployed_at": record.get("deployed_at"),
         "receipt_sha256": record.get("last_receipt_sha256"),
@@ -173,7 +183,57 @@ def _previous_for(record: Mapping[str, Any], lock: Mapping[str, Any]) -> dict[st
     if record.get("plan_id"):
         # The plan that deployed the replaced pin; plans/ prune keeps it.
         previous["plan_id"] = record["plan_id"]
+    if containers is not None:
+        previous["containers"] = {name: dict(row) for name, row in sorted(containers.items())}
     return previous
+
+
+def _previous_containers(
+    before: list[dict[str, Any]] | None,
+    data: Mapping[str, Any],
+    proj: planmod.ProjectRef,
+    lock: Mapping[str, Any],
+    env: str,
+    pin: str | None,
+) -> dict[str, dict[str, str | None]] | None:
+    """``{container: {"commit", "image"}}``: what each build container ran before this up.
+
+    ``before`` is RUNNING as the plan read it; ``data`` is the services file
+    before this up's compile, so the build containers are those of the old
+    pin. A container the receipt does not list gets ``commit: null``. None
+    when the plan did not read the box, a box could not be read, or the old
+    pin's bay.toml cannot be read: then the lock records no map and
+    ``bay rollback`` falls back to ``<env>.prev.json``.
+    """
+    if before is None or not pin or any(e.get("error") for e in before):
+        return None
+    if planmod.doc_at(proj, pin) is None:
+        return None
+    built = _build_containers(data, proj, lock, env, pin)
+    code = planmod.running_code(before, set(built))
+    return {name: code.get(name) or {"commit": None, "image": None} for name in built}
+
+
+class _SeenReceipts:
+    """A receipt reader that keeps what it read, per box env.
+
+    ``bay up`` plans with it, so the apply step knows RUNNING as the plan saw
+    it, before the deploy: the lock's ``previous.containers`` and the first
+    image check read it. No second read of the box.
+    """
+
+    def __init__(self, reader: planmod.ReceiptReader | None) -> None:
+        self._reader = reader
+        self._seen: dict[str, list[dict[str, Any]]] = {}
+
+    def __call__(self, cx: Context, box_env: str) -> list[dict[str, Any]]:
+        # Resolved per call: tests swap planmod.default_receipt_reader.
+        entries = (self._reader or planmod.default_receipt_reader)(cx, box_env)
+        self._seen[box_env] = entries
+        return entries
+
+    def get(self, box_env: str) -> list[dict[str, Any]] | None:
+        return self._seen.get(box_env)
 
 
 def _gate(plan: dict[str, Any], force: bool, reason: str | None, say: Echo) -> bool:
@@ -216,7 +276,9 @@ def up(
 
     ``code`` is what the box does with this project's build images
     (:func:`_code_targets`): ``None`` lets ``up`` decide; ``bay rollback``
-    passes ``{"source": "prev"}`` or ``{"commit": <sha>, "strict": True}``.
+    passes ``{"containers": {<name>: <target>}}`` (the lock's
+    ``previous.containers``), ``{"source": "prev"}`` (a lock from before
+    2.2.0) or ``{"commit": <sha>, "strict": True}`` (``--to``).
     A rollback also freezes the env; a later ``up`` to a newer commit thaws
     it (:func:`_freeze`).
     """
@@ -228,13 +290,12 @@ def up(
     if moved:
         proj = planmod.load_project(cx, proj.name, cwd=proj.cwd)
 
+    seen = _SeenReceipts(read_receipts)
     if plan_id:
         saved = planmod.load_saved(cx, plan_id)
-        plan = planmod.recheck(
-            proj, saved, opts, read_receipts=read_receipts, check_box=check_box
-        )
+        plan = planmod.recheck(proj, saved, opts, read_receipts=seen, check_box=check_box)
     else:
-        plan = planmod.make_plan(proj, opts, read_receipts=read_receipts)
+        plan = planmod.make_plan(proj, opts, read_receipts=seen)
     planmod.save(cx, plan)
     forced = _gate(plan, force, reason, say)
     commit = str(plan["wanted"]["commit"])
@@ -251,6 +312,7 @@ def up(
         say=say,
         push=push,
         code=code,
+        before=seen.get(str(plan.get("box_env"))),
     ))
 
 
@@ -297,13 +359,14 @@ def up_env(
     if force and not (reason and reason.strip()):
         raise BayError("--force needs --reason", hint='Pass --reason "<why>".')
     moved = _migrate_layout(cx, say)
+    seen = _SeenReceipts(read_receipts)
     if plan_id:
         saved = planmod.load_saved(cx, plan_id)
         plan = planmod.recheck_env(
-            cx, saved, opts, cwd=cwd, read_receipts=read_receipts, check_box=check_box
+            cx, saved, opts, cwd=cwd, read_receipts=seen, check_box=check_box
         )
     else:
-        plan = planmod.make_env_plan(cx, opts, cwd=cwd, read_receipts=read_receipts)
+        plan = planmod.make_env_plan(cx, opts, cwd=cwd, read_receipts=seen)
     planmod.save(cx, plan)
     if not plan["projects"]:
         raise BayError(
@@ -327,6 +390,7 @@ def up_env(
         deploy=deploy,
         say=say,
         push=push,
+        before=seen.get(str(plan.get("box_env"))),
     ))
 
 
@@ -344,10 +408,14 @@ def _apply_plan(
     say: Echo,
     push: bool,
     code: Mapping[str, Any] | None = None,
+    before: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Steps 2 to 8 of ``bay up`` for the projects of an accepted plan.
 
     ``code`` goes to :func:`_code_targets` for every project (``bay rollback``).
+    ``before`` is the receipt of the plan's box env as the plan read it (None
+    when it did not): it fills the lock's ``previous.containers`` and the
+    first image check (:func:`first_image`).
     """
     env = str(plan["env"])
     box_env = str(plan["box_env"])
@@ -375,6 +443,8 @@ def _apply_plan(
     # 2. the locks
     locks: dict[str, dict[str, Any]] = {}
     previous_by: dict[str, dict[str, Any] | None] = {}
+    # The services file before this up's compile: the old pins' build containers.
+    old_data, _ = planmod.current_services(cx)
     for proj, commit in members:
         lock = copy.deepcopy(proj.lock)
         envs = lock.setdefault("envs", {})
@@ -382,7 +452,11 @@ def _apply_plan(
         old_pin = lockfile.env_pin(proj.lock, env)
         previous = record.get("previous")
         if old_pin and old_pin != commit:
-            previous = _previous_for(record, proj.lock)
+            previous = _previous_for(
+                record,
+                proj.lock,
+                _previous_containers(before, old_data, proj, proj.lock, env, old_pin),
+            )
         if forced and previous is not None:
             previous = {**previous, "force_reason": str(reason).strip()}
         lock["commit"] = commit
@@ -424,9 +498,12 @@ def _apply_plan(
         # (branch mode); both the one-project and the whole-env plan carry it.
         keep = set((plan.get("code") or {}).get("keep") or [])
         code_targets: dict[str, dict[str, Any]] = {}
+        built_by: dict[str, list[str]] = {}
         for proj, commit in members:
             built = _build_containers(comp.result.data(), proj, locks[proj.name], env, commit)
+            built_by[proj.name] = built
             code_targets.update(_code_targets(proj, env, commit, built, code, keep=keep))
+        compiled = comp.result.data()
 
         # 4. commit
         paths = [p.lock_file for p, _ in members]
@@ -521,6 +598,8 @@ def _apply_plan(
         commits=compiled_commits,
         entries=entries,
         stamp={"result": word, "deployed_at": deployed_at, "plan_id": plan["plan_id"]},
+        before=before,
+        old_data=old_data,
     )
     lock_files += more_files
     pinned += more_rows
@@ -536,7 +615,25 @@ def _apply_plan(
         if name not in code_targets
     ]
     code_kept = kept_code(entries, fleet_commit, code_targets)
+    code_kept += _lock_kept(code, built_by, code_targets, plan)
+    code_kept.sort(key=lambda r: (r["container"], r["box"]))
     notes += [f"code: kept {k['container']} ({k['reason']})" for k in code_kept]
+    if code is not None and code.get("source") == "prev":
+        notes.append(PREV_FALLBACK_NOTE)
+    first: list[str] = []
+    first_exit = False
+    if failure:
+        first, first_exit, first_notes = first_image(
+            cx,
+            box_env,
+            members,
+            built_by,
+            compiled,
+            before=before,
+            after=entries,
+            fleet_commit=fleet_commit,
+        )
+        notes += first_notes
     applied, stale_boxes = applied_from(entries, fleet_commit)
     notes += [
         f"box {b}: the receipt is not from this deploy, so `applied` leaves it out"
@@ -593,12 +690,13 @@ def _apply_plan(
         "notes": notes,
         "code_targets": code_targets,
         "code_kept": code_kept,
+        "first_image": first,
         "frozen": any(bool(locks[p.name]["envs"][env].get("frozen")) for p, _ in members),
     }
     if push:
         push_fleet(cx, result, say)
     if failure:
-        raise DeployFailed(result)
+        raise DeployFailed(result, exit_code=FIRST_IMAGE_EXIT if first_exit else 1)
     return result
 
 
@@ -771,6 +869,8 @@ def _pin_deployed(
     commits: Mapping[str, str],
     entries: list[dict[str, Any]],
     stamp: Mapping[str, Any],
+    before: list[dict[str, Any]] | None = None,
+    old_data: Mapping[str, Any] | None = None,
 ) -> tuple[list[Path], list[dict[str, Any]]]:
     """Record the deploy in the lock of every other project it deployed.
 
@@ -782,7 +882,8 @@ def _pin_deployed(
       that is the last fleet commit that touched ``projects/<name>/``; for a
       repo project, the commit its lock already pins (it keeps it). The
       top-level ``commit`` moves with it.
-    * ``previous``: the pin it replaces, when there was one and it differs.
+    * ``previous``: the pin it replaces, when there was one and it differs,
+      with ``containers`` read from ``before`` (:func:`_previous_containers`).
     * ``result``, ``deployed_at``, ``plan_id`` from ``stamp``, and
       ``last_receipt_sha256`` from this project's part of the receipt.
 
@@ -813,7 +914,11 @@ def _pin_deployed(
             record = dict(envs.get(env, {}))
             old_pin = lockfile.env_pin(other.lock, env)
             if old_pin and old_pin != commit:
-                previous = _previous_for(record, other.lock)
+                previous = _previous_for(
+                    record,
+                    other.lock,
+                    _previous_containers(before, old_data or {}, other, other.lock, env, old_pin),
+                )
                 if previous is not None:
                     record["previous"] = previous
             if not record.get("box") and box:
@@ -843,11 +948,137 @@ def _pin_deployed(
 
 
 class DeployFailed(Exception):
-    """The deploy ran and failed. The lock says ``result: failed`` (HALF)."""
+    """The deploy ran and failed. The lock says ``result: failed`` (HALF).
 
-    def __init__(self, result: dict[str, Any]) -> None:
+    ``exit_code`` is :data:`FIRST_IMAGE_EXIT` when the only failures are
+    build containers with no image yet (:func:`first_image`), else 1.
+    """
+
+    def __init__(self, result: dict[str, Any], *, exit_code: int = 1) -> None:
         super().__init__(f"deploy failed: {result['error']}")
         self.result = result
+        self.exit_code = exit_code
+
+
+#: ``bay up`` exits with this when the deploy failed only because a build
+#: container has no image yet (the first deploy of a build app).
+FIRST_IMAGE_EXIT = 40
+
+#: The note of a plain ``bay rollback`` whose lock has no ``previous.containers``.
+PREV_FALLBACK_NOTE = (
+    "the lock names no code per container (written before 2.2.0, or the box was not read), "
+    "so the code target is the box's <env>.prev.json, which every deploy rotates"
+)
+
+#: The local build tag of a build container on the boxes, as
+#: ``git_deploy_image_prefix`` and the compiler derive it.
+_BUILD_TAG = "argo-{stack}-{name}"  # kept-argo: live tag on boxes
+
+#: ``code_kept`` reason for a container the lock's ``previous.containers``
+#: names with no commit.
+LOCK_NO_COMMIT = "the lock names no commit for this container"
+
+
+def _lock_kept(
+    code: Mapping[str, Any] | None,
+    built_by: Mapping[str, list[str]],
+    code_targets: Mapping[str, Any],
+    plan: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """``code_kept`` rows for build containers a per-container code map gives no target."""
+    if code is None or "containers" not in code:
+        return []
+    box = str(plan.get("box") or plan.get("box_env") or "")
+    return [
+        {"box": box, "container": name, "reason": LOCK_NO_COMMIT}
+        for built in built_by.values()
+        for name in built
+        if name not in code_targets
+    ]
+
+
+def first_image(
+    cx: Context,
+    box_env: str,
+    members: list[tuple[planmod.ProjectRef, str]],
+    built_by: Mapping[str, list[str]],
+    compiled: Mapping[str, Any],
+    *,
+    before: list[dict[str, Any]] | None,
+    after: list[dict[str, Any]],
+    fleet_commit: str,
+) -> tuple[list[str], bool, list[str]]:
+    """``(containers, exit 40, notes)`` after a failed deploy.
+
+    A build container of a member project is a first image when RUNNING
+    names no commit for it (``before``, the receipt the plan read, or the new
+    one when the plan read none) and no box has ``<image>:<commit12>`` of its
+    pin or ``<image>:latest``. ``containers`` lists the first images whose
+    action failed. Exit 40 only when every failed action of this deploy
+    (``failed`` in the receipt, or a ``missing`` code move) is one of them.
+    A receipt that is not this deploy's, or that names no failed action,
+    gives exit 1. The image repo is the one this deploy's receipt names for
+    the container (``image_ref``), else the box's build tag
+    (``git_deploy_image_prefix``-``<container>``, see :data:`_BUILD_TAG`).
+    """
+    from bay_reconcile.images import short, split_ref
+
+    failed: set[str] = set()
+    refs: dict[str, str] = {}
+    for entry in after:
+        receipt = entry.get("receipt")
+        if not isinstance(receipt, Mapping) or receipt.get("fleet_commit") != fleet_commit:
+            continue
+        for c in receipt.get("containers") or []:
+            if not isinstance(c, Mapping):
+                continue
+            ref = c.get("image_ref") or c.get("image")
+            if ref:
+                refs.setdefault(str(c.get("name")), str(ref))
+            if c.get("failed") is True:
+                failed.add(str(c.get("name")))
+        for move in receipt.get("code_moves") or []:
+            if isinstance(move, Mapping) and move.get("status") == "missing":
+                failed.add(str(move.get("name")))
+    if not failed:
+        return [], False, []
+    running = before if before is not None else after
+    candidates: dict[str, tuple[planmod.ProjectRef, str]] = {}
+    for proj, commit in members:
+        names = [n for n in built_by.get(proj.name, []) if n in failed]
+        commits = planmod.running_commits(running, set(names))
+        for name in names:
+            if not commits.get(name):
+                candidates[name] = (proj, commit)
+    lister = default_image_tags
+    first: list[str] = []
+    notes: list[str] = []
+    for name in sorted(candidates):
+        proj, commit = candidates[name]
+        repo = split_ref(refs.get(name) or "")[0]
+        if not repo:
+            # The build tag on the boxes (git_deploy_image_prefix).
+            repo = _BUILD_TAG.format(stack=planmod.stack_name(cx, box_env), name=name)
+        try:
+            found = lister(cx, box_env, repo)
+        except OSError as exc:
+            notes.append(f"cannot check the box for an image of {name}: {exc}")
+            continue
+        wanted = {"latest"} | (set() if proj.in_fleet else {short(commit)})
+        if any(wanted & set(tags) for tags in found.values()):
+            continue
+        first.append(name)
+        what = name if proj.in_fleet else short(commit)
+        entry = (compiled.get("services") or {}).get(name) or (
+            compiled.get("accessories") or {}
+        ).get(name)
+        build = entry.get("build") if isinstance(entry, Mapping) else None
+        branch = str((build or {}).get("branch") or "main")
+        notes.append(
+            f"first deploy of {proj.name}: the box has no image for {what} yet. Push to "
+            f"{branch} so the webhook builds it, wait for the build, then run bay up again."
+        )
+    return first, bool(first) and failed <= set(first), notes
 
 
 # ── Code and config: track, freeze, code targets ──────────────────────────
@@ -914,7 +1145,11 @@ def _code_targets(
 ) -> dict[str, dict[str, Any]]:
     """``{container: {"commit"|"source", "strict"}}``: where ``:latest`` must point.
 
-    * ``code`` given (``bay rollback``): that, for every build container.
+    * ``code`` given (``bay rollback``): that, for every build container. A
+      per-container map ``{"containers": {<name>: <target>}}`` (plain
+      ``bay rollback`` with the lock's ``previous.containers``) gives each
+      container its own target; a build container it does not name gets
+      none and keeps its image (:func:`_lock_kept` reports it).
     * ``bay up`` of a project whose bay.toml lives in the app repo: the pinned
       commit, which is also the code commit. Strict in ``track = "pin"`` (the
       image must be on the box, built by a push). Not strict in ``branch``
@@ -932,6 +1167,9 @@ def _code_targets(
     if not built:
         return {}
     if code is not None:
+        if "containers" in code:
+            per = code["containers"] or {}
+            return {name: dict(per[name]) for name in built if name in per}
         return {name: dict(code) for name in built}
     if proj.in_fleet or planmod.adopt_pending(proj, env, commit):
         return {}
@@ -990,7 +1228,7 @@ def rollback(
                 code=ErrorCode.NOT_FOUND,
                 hint="A rollback needs one earlier bay up for this environment.",
             )
-        at, code = str(previous["commit"]), {"source": "prev", "strict": False}
+        at, code = str(previous["commit"]), _rollback_code(previous)
     restored = planmod.PlanOptions(
         env=env,
         at=at,
@@ -1002,6 +1240,26 @@ def rollback(
         code_order=False,
     )
     return up(proj, restored, action="rollback", code=code, **kwargs)
+
+
+def _rollback_code(previous: Mapping[str, Any]) -> dict[str, Any]:
+    """The code target of a plain ``bay rollback``: the lock's ``previous.containers``.
+
+    Each container with a commit gets ``{"commit": <it>, "strict": False}``:
+    a missing image keeps the container on what it runs (``code_kept``). A
+    container with ``commit: null`` gets no target (:data:`LOCK_NO_COMMIT`).
+    A lock with no map (before 2.2.0) falls back to ``{"source": "prev"}``,
+    the box's ``<env>.prev.json``.
+    """
+    containers = previous.get("containers")
+    if not isinstance(containers, Mapping):
+        return {"source": "prev", "strict": False}
+    targets = {
+        str(name): {"commit": str(row["commit"]), "strict": False}
+        for name, row in containers.items()
+        if isinstance(row, Mapping) and row.get("commit")
+    }
+    return {"containers": targets}
 
 
 def _rollback_to(
@@ -1087,9 +1345,16 @@ def default_tag_lister(cx: Context, box_env: str, repo: str) -> dict[str, list[s
     return list_commit_tags(cx, box_env, repo)
 
 
+def default_image_tags(cx: Context, box_env: str, repo: str) -> dict[str, list[str]]:
+    """:func:`default_tag_lister` plus ``latest`` when the box has it (the first image check)."""
+    from bay_cli.receipts import list_commit_tags
+
+    return list_commit_tags(cx, box_env, repo, latest=True)
+
+
 # ── show ────────────────────────────────────────────────────────────────────
 
-STATUS_WORDS = ("ok", "behind", "drift", "unknown", "HALF")
+STATUS_WORDS = ("ok", "ahead", "behind", "drift", "unknown", "HALF")
 
 
 def env_status(
@@ -1097,8 +1362,15 @@ def env_status(
     lock_commit: str | None,
     wanted_commit: str | None,
     running: Mapping[str, Any] | None,
+    commits: Mapping[str, str | None] | None = None,
 ) -> tuple[str, str]:
-    """``(status word, reason)`` for one env. Order: HALF, unknown, drift, behind, ok."""
+    """``(status word, reason)`` for one env. Order: HALF, unknown, drift, ahead, behind, ok.
+
+    ``commits`` is ``{build container: running commit12 or None}`` of the
+    project in RUNNING. ``ahead``: WANTED is not the pin, and every build
+    container runs WANTED (a push deployed it). ``behind``: WANTED is not the
+    pin, and the box does not run WANTED yet.
+    """
     if record.get("result") in ("failed", "pending"):
         return "HALF", (
             "the last bay up failed; the pin moved but the box may not run it"
@@ -1120,9 +1392,17 @@ def env_status(
     if record.get("last_receipt_sha256") != running.get("receipt_sha256"):
         return "drift", "the box receipt differs from the one bay up recorded"
     if wanted_commit and lock_commit and wanted_commit != lock_commit:
+        wanted12 = wanted_commit[:12]
+        if commits and all(c == wanted12 for c in commits.values()):
+            return (
+                "ahead",
+                f"the box runs {wanted12} (a push deployed it); the fleet pins "
+                f"{lock_commit[:12]}: run bay up to pin it",
+            )
         return (
             "behind",
-            f"the project is at {wanted_commit[:12]}, the fleet pins {lock_commit[:12]}",
+            f"the project is at {wanted12}, the fleet pins {lock_commit[:12]}, and the box "
+            "does not run it yet",
         )
     return "ok", "WANTED, PINNED and RUNNING agree"
 
@@ -1143,6 +1423,14 @@ def show(
     reader = read_receipts or planmod.default_receipt_reader
     cache: dict[str, list[dict[str, Any]]] = {}
     rows: list[dict[str, Any]] = []
+    # The pinned services file names the build containers (they carry code).
+    compiled, _ = planmod.current_services(cx)
+    builds = {
+        name
+        for group in ("accessories", "services")
+        for name, entry in (compiled.get(group) or {}).items()
+        if isinstance(entry, Mapping) and "build" in entry
+    }
     for env in envs:
         record = (lock.get("envs") or {}).get(env, {})
         box, box_env = planmod.resolve_box(proj, env, pinned_doc or wanted.doc)
@@ -1155,6 +1443,7 @@ def show(
             )
         running = None
         detail: list[dict[str, Any]] = []
+        code: dict[str, str | None] = {}
         if remote and box_env is not None:
             if box_env not in cache:
                 try:
@@ -1165,7 +1454,14 @@ def show(
                     ]
             running = planmod.running_slice(cache[box_env], names)
             detail = planmod.running_detail(cache[box_env], names)
-        status, why = env_status(record, lock_commit, wanted.commit, running)
+            listed = {c["name"] for b in detail for c in b["containers"]}
+            built = (names & builds) & listed
+            code = {
+                n: c
+                for n, c in planmod.running_commits(cache[box_env], built).items()
+                if n in built
+            }
+        status, why = env_status(record, lock_commit, wanted.commit, running, code)
         rows.append(
             {
                 "env": env,
@@ -1183,6 +1479,8 @@ def show(
                 "running": {
                     "checked": running is not None,
                     "receipt_sha256": (running or {}).get("receipt_sha256"),
+                    # Build container -> the commit it runs (null: the receipt names none).
+                    "code": dict(sorted(code.items())),
                     "boxes": detail,
                 },
             }
@@ -1233,6 +1531,8 @@ def render_show(doc: Mapping[str, Any]) -> str:
         else:
             names = [c["name"] for b in run["boxes"] for c in b["containers"]]
             running = f"{len(names)} container(s), receipt {short(run['receipt_sha256'])}"
+            for name, commit in (run.get("code") or {}).items():
+                running += f", {name} code {str(commit)[:12] if commit else '?'}"
         lines.append(
             f"  {row['env']:<12} {row['status']:<8} box {row['box']}  pinned "
             f"{short(row['pinned']['commit'])}  RUNNING {running}"

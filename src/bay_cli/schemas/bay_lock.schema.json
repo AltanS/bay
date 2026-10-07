@@ -42,7 +42,20 @@
           "type": "string",
           "pattern": "^[0-9a-f]{12}$"
         },
-        "force_reason": { "type": "string", "minLength": 1 }
+        "force_reason": { "type": "string", "minLength": 1 },
+        "containers": {
+          "description": "Since 2.2.0: the code each build container of the project ran before the bay up that set this previous, from the receipt the plan read. Plain bay rollback takes its code target from it. commit null: the receipt named none, so a rollback keeps that container's image. Absent in a lock written before 2.2.0 (bay rollback then falls back to the box's <env>.prev.json).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["commit", "image"],
+            "properties": {
+              "commit": { "type": ["string", "null"], "pattern": "^[0-9a-f]{7,64}$" },
+              "image": { "type": ["string", "null"] }
+            }
+          }
+        }
       }
     },
     "env": {

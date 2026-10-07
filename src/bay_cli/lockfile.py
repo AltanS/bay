@@ -19,7 +19,8 @@ Deploy record of one environment (all optional, see ``docs/plan.md``)::
         "result": "ok",                  # pending | ok | failed (failed = HALF)
         "plan_id": "<12 hex>",
         "last_receipt_sha256": "<64 hex>",
-        "previous": {"commit": "<sha>", "deployed_at": ..., "receipt_sha256": ...}
+        "previous": {"commit": "<sha>", "deployed_at": ..., "receipt_sha256": ...,
+                     "containers": {"<name>": {"commit": "<12 hex>", "image": "..."}}}
     }}
 """
 

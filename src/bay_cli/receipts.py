@@ -185,9 +185,12 @@ def fetch_receipts(cx: Context, env: str, *, run: Runner | None = None) -> list[
 
 
 def list_commit_tags(
-    cx: Context, env: str, repo: str, *, run: Runner | None = None
+    cx: Context, env: str, repo: str, *, run: Runner | None = None, latest: bool = False
 ) -> dict[str, list[str]]:
     """``{box: [commit tags of repo]}`` for every box of ``env`` that answered.
+
+    ``latest``: also list the ``latest`` tag when the box has it (``bay up``
+    asks after a failed deploy whether a build container has any image).
 
     One ``docker image ls <repo>`` per box (``bay rollback --to`` asks before
     it moves anything). The default table output is parsed, because an ad-hoc
@@ -213,7 +216,9 @@ def list_commit_tags(
         tags: set[str] = set()
         for line in str(result.get("stdout") or "").splitlines()[1:]:
             cols = line.split()
-            if len(cols) >= 2 and cols[0] == repo and is_commit(cols[1]):
+            if len(cols) >= 2 and cols[0] == repo and (
+                is_commit(cols[1]) or (latest and cols[1] == "latest")
+            ):
                 tags.add(cols[1])
         out[name] = sorted(tags)
     if not out:

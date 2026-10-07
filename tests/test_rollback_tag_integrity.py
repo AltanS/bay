@@ -401,8 +401,12 @@ def test_rollback_restores_config_and_code(
     # Config: the pin moves back and the first commit's bay.toml is compiled.
     assert (doc["commit"], doc["previous_commit"]) == (first, second)
     assert "LOG_LEVEL: info" in (world["fleet"] / GENERATED_SERVICES).read_text()
-    # Code: the box points :latest at the image the previous receipt names.
-    assert seen[-1] == {"webapp": {"source": "prev", "strict": False}}
+    # Code: the box points :latest at the commit the lock's previous.containers
+    # names (2.2.0), the code the box ran before the second bay up.
+    assert lock_of(world)["envs"]["production"]["previous"]["containers"] == {
+        "webapp": {"commit": second[:12], "image": f"app/webapp:{second[:12]}"}
+    }
+    assert seen[-1] == {"webapp": {"commit": first[:12], "strict": False}}
     assert doc["code_targets"] == seen[-1] and doc["frozen"] is True
 
     images = _Images(

@@ -1508,12 +1508,15 @@ def code_status(
 
     * ``track = "branch"``: a push deploys new code under the pinned config,
       so a receipt commit that differs from the pin is expected, not drift.
-      One info line: ``code at <commit>, config pinned at <commit>``.
+      One info line: ``code at <commit>, config pinned at <commit>``, plus
+      ``, WANTED <commit>`` when WANTED is not the running code.
       ``bay up`` moves code only forward (``order`` given, app-repo project):
 
       - running newer than the commit ``bay up`` pins: keep it (``keep``);
         ``bay up`` applies the config only;
-      - running older or the same: ``bay up`` moves ``:latest`` to the pin;
+      - running older: a step ``image``, risk safe (a held build, or a build
+        not deployed yet); ``bay up`` moves ``:latest`` to the pin;
+      - the same: no step; ``bay up`` still points ``:latest`` at the pin;
       - order unknown: a blocker, ``cannot order <pin> and <running>``, or
         with ``force_code`` a step ``image`` of risk destructive.
     * ``track = "pin"`` (bay.toml in the app repo): the code must be the
@@ -1554,6 +1557,22 @@ def code_status(
             where = order(wanted_commit, known[name])
             if where == "newer":
                 out.keep.append(name)
+            elif where == "older":
+                # bay up points :latest at the WANTED image (_code_targets), so
+                # the plan says so: a held build, or a build not deployed yet.
+                steps.append(
+                    _step(
+                        "image",
+                        "update",
+                        "safe",
+                        f"the box runs code {known[name]}; bay up deploys {target} (a held "
+                        f"build, or a build not deployed yet); with no image for {target} on "
+                        "the box, :latest stays",
+                        container=name,
+                        project=project,
+                        source="box",
+                    )
+                )
             elif where == "unknown":
                 problem = f"cannot order {target} and {known[name]}"
                 if not force_code:
@@ -1579,12 +1598,51 @@ def code_status(
     pinned = (pinned_commit or "")[:12]
     running = sorted(set(known.values()))
     if pinned and running and running != [pinned]:
-        info.append(f"code at {', '.join(running)}, config pinned at {pinned}")
+        line = f"code at {', '.join(running)}, config pinned at {pinned}"
+        wanted = (wanted_commit or "")[:12]
+        # An in-fleet pin is a fleet commit, never a code commit.
+        if wanted and not in_fleet and running != [wanted]:
+            # The held commit: what bay up deploys, not only what runs.
+            line += f", WANTED {wanted}"
+        info.append(line)
+    return out
+
+
+def running_code(
+    entries: list[dict[str, Any]], names: set[str]
+) -> dict[str, dict[str, str | None]]:
+    """``{container: {"commit": commit12 or None, "image": image or None}}`` from the receipts.
+
+    ``image`` is what the container runs (the receipt's ``image``, which a
+    webhook stamp moves), not the reference the deploy asked for. A container
+    on several boxes keeps the first row that names a commit.
+    """
+    out: dict[str, dict[str, str | None]] = {}
+    for entry in entries:
+        receipt = entry.get("receipt")
+        if not isinstance(receipt, Mapping):
+            continue
+        for c in receipt.get("containers") or []:
+            if not isinstance(c, Mapping) or c.get("name") not in names:
+                continue
+            name = str(c["name"])
+            if name in out and out[name]["commit"]:
+                continue
+            commit = c.get("commit")
+            image = c.get("image")
+            out[name] = {
+                "commit": str(commit)[:12] if commit else None,
+                "image": str(image) if image else None,
+            }
     return out
 
 
 def running_detail(entries: list[dict[str, Any]], names: set[str]) -> list[dict[str, Any]]:
-    """For ``bay show``: per box the receipt result, time and this project's containers."""
+    """For ``bay show``: per box the receipt result, time and this project's containers.
+
+    Each container keeps ``commit`` (the code it runs, or None), so ``bay
+    show`` can name the running code.
+    """
     out: list[dict[str, Any]] = []
     for entry in entries:
         receipt = entry.get("receipt") if isinstance(entry.get("receipt"), Mapping) else None
@@ -1596,7 +1654,7 @@ def running_detail(entries: list[dict[str, Any]], names: set[str]) -> list[dict[
                 "deployed_at": receipt.get("deployed_at") if receipt else None,
                 "fleet_commit": receipt.get("fleet_commit") if receipt else None,
                 "containers": [
-                    {k: c.get(k) for k in ("name", "image", "action", "healthy")}
+                    {k: c.get(k) for k in ("name", "image", "commit", "action", "healthy")}
                     for c in (receipt.get("containers") or [] if receipt else [])
                     if isinstance(c, Mapping) and c.get("name") in names
                 ],
