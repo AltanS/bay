@@ -102,6 +102,38 @@ class Lock:
         return self.envs.get(env, LockEnv())
 
 
+#: The addresses the access gateway keeps in vpn_allowed_ips next to the
+#: fleet [tailnet] allowlist, for health checks from the box itself.
+LOOPBACK_ALLOWED = ("127.0.0.1", "::1")
+
+
+def tailnet_allowlist(fleet_root: Path) -> list[str] | None:
+    """``tailnet_allowlist`` of the compiled services file, or None when it has none."""
+    import yaml
+
+    try:
+        data = yaml.safe_load((fleet_root / GENERATED_SERVICES).read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return None
+    allow = data.get("tailnet_allowlist") if isinstance(data, Mapping) else None
+    return [str(ip) for ip in allow] if isinstance(allow, list) else None
+
+
+def enforced_vpn_allowed_ips(fleet_root: Path, group_vars_ips: Any) -> list[str]:
+    """The list the vpn-only IPAllowList enforces, as roles/access_gateway resolves it.
+
+    With a compiled ``tailnet_allowlist``: loopback, then the allowlist (it
+    replaces ``vpn_allowed_ips`` from group_vars). Without one: the
+    group_vars list. The Headscale range the gateway appends is not added.
+    """
+    allow = tailnet_allowlist(fleet_root)
+    if allow is None:
+        if isinstance(group_vars_ips, str):
+            return [group_vars_ips]
+        return [str(ip) for ip in group_vars_ips or []]
+    return [*LOOPBACK_ALLOWED, *(ip for ip in allow if ip not in LOOPBACK_ALLOWED)]
+
+
 def lock_file(fleet_root: Path, name: str) -> Path:
     """``<fleet>/projects/<name>/bay.lock``."""
     return fleet_root / PROJECTS_DIR / name / LOCK_FILE

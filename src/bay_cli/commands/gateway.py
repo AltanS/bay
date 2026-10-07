@@ -286,6 +286,10 @@ def _get_gateway_config(cx: Context) -> dict:
         if "vpn_allowed_ips" in data:
             config["vpn_allowed_ips"] = data["vpn_allowed_ips"]
 
+    # bay.fleet.toml [tailnet] allowlist replaces the group_vars list on the box.
+    from bay_cli.fleet import enforced_vpn_allowed_ips
+
+    config["vpn_allowed_ips"] = enforced_vpn_allowed_ips(cx.fleet_root, config["vpn_allowed_ips"])
     return config
 
 

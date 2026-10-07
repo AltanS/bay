@@ -1497,7 +1497,8 @@ def tailnet_step(cx: Context, fleet_doc: Mapping[str, Any]) -> dict[str, Any] | 
         "tailnet",
         "update",
         "shared",
-        "the tailnet allowlist in bay.fleet.toml changed since the last fleet commit",
+        "the tailnet allowlist in bay.fleet.toml changed since the last fleet commit; "
+        "it replaces vpn_allowed_ips, the vpn-only allowlist of every box",
         resource="allowlist",
     )
 

@@ -1,0 +1,18 @@
+---
+# The fleet [tailnet] allowlist (bay.fleet.toml), compiled to
+# `tailnet_allowlist` in services.yml, REPLACES vpn_allowed_ips from
+# group_vars: it is the list Traefik's vpn-only IPAllowList enforces.
+# 127.0.0.1 and ::1 always stay, for health checks from the box itself.
+# Without the fleet key this does nothing.
+#
+# Tagged always, and also run from deploy.yml pre_tasks: a deploy without the
+# rig roles must render the same list as `bay up`, or the vpn-only labels
+# flip-flop between the two lists and recreate containers on every switch.
+# The access gateway appends the Headscale range after this.
+- name: Use the fleet tailnet allowlist as vpn_allowed_ips
+  ansible.builtin.set_fact:
+    vpn_allowed_ips: >-
+      {{ ['127.0.0.1', '::1']
+         + (tailnet_allowlist | reject('in', ['127.0.0.1', '::1']) | list) }}
+  when: tailnet_allowlist is defined
+  tags: [always]

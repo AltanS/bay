@@ -1246,6 +1246,28 @@ def _validate_connectivity(
         probe_cache.flush()
 
 
+TAILNET_ALLOWLIST_WARNING = "[tailnet] allowlist replaces vpn_allowed_ips from group_vars"
+
+
+def _validate_tailnet_allowlist(
+    services_data: dict[str, Any], parsed: dict[str, Any], result: ValidationResult
+) -> None:
+    """Warn when the fleet allowlist and group_vars ``vpn_allowed_ips`` are both set.
+
+    The access gateway makes the compiled ``tailnet_allowlist`` the enforced
+    ``vpn_allowed_ips`` (roles/access_gateway/tasks/allowlist.yml), so the
+    group_vars list no longer reaches Traefik.
+    """
+    if services_data.get("tailnet_allowlist") is None:
+        return
+    files = sorted(
+        rel for rel, data in parsed.items()
+        if "group_vars" in rel and isinstance(data, dict) and "vpn_allowed_ips" in data
+    )
+    if files:
+        result.warn(f"{TAILNET_ALLOWLIST_WARNING} ({', '.join(files)})")
+
+
 def _check_domain_uniqueness(
     services: dict[str, Any],
     result: ValidationResult,
@@ -3290,6 +3312,10 @@ def run_validation(
 
     # 8d. A project in the fleet that builds from source names its repo
     _validate_build_repos(root, result)
+
+    # 8e. The fleet tailnet allowlist replaces vpn_allowed_ips from group_vars
+    if services_data is not None:
+        _validate_tailnet_allowlist(services_data, parsed, result)
 
     # 9. Token scope probe (opt-in, never runs automatically)
     if check_token_scope and services_data is not None:

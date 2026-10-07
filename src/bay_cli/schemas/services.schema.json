@@ -57,6 +57,12 @@
         }
       }
     },
+    "tailnet_allowlist": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[0-9a-fA-F:.]+(/[0-9]{1,3})?$" },
+      "description": "[tailnet] allowlist of bay.fleet.toml. The access gateway makes it vpn_allowed_ips (the vpn-only IPAllowList), with 127.0.0.1 and ::1 kept for health checks."
+    },
     "volume_backups": {
       "type": "object",
       "description": "Volume mounts with backup true, compiled from bay.toml mounts. Keyed by the volume name. The backup role adds a restic file backup <stack_name>_<volume> on the box that runs `container`.",

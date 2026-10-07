@@ -49,6 +49,7 @@ from bay_cli.context import (
     context_from,
 )
 from bay_cli.errors import BayError
+from bay_cli.fleet import LOOPBACK_ALLOWED, tailnet_allowlist
 
 DOCTOR_VERSION = 1
 
@@ -538,7 +539,11 @@ def _environment_checks(cx: Context, env: str, report: Report) -> None:
 
     # ── Gateway config ───────────────────────────────────────────────
     gw_issues = _check_gateway_config(
-        gateway_type, headscale_domain, vpn_cfg, _vpn_services(services_file)
+        gateway_type,
+        headscale_domain,
+        vpn_cfg,
+        _vpn_services(services_file),
+        fleet_allowlist=tailnet_allowlist(cx.fleet_root),
     )
     if gw_issues:
         for msg in gw_issues:
@@ -874,14 +879,19 @@ def _check_gateway_config(
     headscale_domain: str | None,
     vpn_cfg: dict | None,
     vpn_services: list[str] | None = None,
+    *,
+    fleet_allowlist: list[str] | None = None,
 ) -> list[str]:
     """Validate gateway-specific configuration, returning a list of issues.
 
     ``vpn_services`` are the services with ``access: vpn``; None when unknown.
-    With wireguard, ``vpn_allowed_ips`` is the only source of the vpn-only
-    allowlist, but it matters only to a vpn service: a fleet that serves
+    With wireguard, the list is the whole vpn-only allowlist (no Headscale
+    CIDR is added), but it matters only to a vpn service: a fleet that serves
     everything public (the role default gateway, no access_gateway.yml) needs
     no list.
+
+    ``fleet_allowlist`` is the compiled ``tailnet_allowlist``. When it is set
+    it replaces ``vpn_allowed_ips`` on the box, so it is the list checked.
     """
     issues: list[str] = []
 
@@ -890,8 +900,15 @@ def _check_gateway_config(
             issues.append("headscale gateway requires headscale_domain in access_gateway.yml")
 
     if gateway_type in ("headscale", "wireguard"):
-        allowed = vpn_cfg.get("vpn_allowed_ips", []) if vpn_cfg else []
         needed = gateway_type == "headscale" or vpn_services is None or bool(vpn_services)
+        if fleet_allowlist is not None:
+            if needed and not [ip for ip in fleet_allowlist if ip not in LOOPBACK_ALLOWED]:
+                issues.append(
+                    "[tailnet] allowlist in bay.fleet.toml is empty, so only the box "
+                    "itself passes the vpn-only allowlist; add trusted IPs"
+                )
+            return issues
+        allowed = vpn_cfg.get("vpn_allowed_ips", []) if vpn_cfg else []
         if not allowed and needed:
             issues.append("vpn_allowed_ips is empty in vpn_access.yml — add trusted IPs")
 

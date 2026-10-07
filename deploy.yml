@@ -105,6 +105,14 @@
       when: bay_minimum_version is defined
       tags: [always]
 
+    # bay.fleet.toml [tailnet] allowlist replaces vpn_allowed_ips on every
+    # deploy, with or without the rig roles (roles/access_gateway/tasks/allowlist.yml).
+    - name: Apply the fleet tailnet allowlist
+      ansible.builtin.include_role:
+        name: access_gateway
+        tasks_from: allowlist
+      tags: [always]
+
     - name: Initialize active services
       ansible.builtin.set_fact:
         active_services: {}

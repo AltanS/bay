@@ -3,6 +3,12 @@
 # Selects between wireguard (default) and headscale backends.
 # Sets vpn_allowed_ips fact before traefik/container_lifecycle consume it.
 
+# ── Fleet allowlist ──────────────────────────────────────────────────────
+
+- name: Apply the fleet tailnet allowlist
+  ansible.builtin.include_tasks: allowlist.yml
+  tags: [always]
+
 # ── Headscale Backend ────────────────────────────────────────────────────
 
 # Append the tailnet CIDR to the operator's allowlist — do NOT replace.

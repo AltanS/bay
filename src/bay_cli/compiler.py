@@ -104,6 +104,8 @@ class CompileResult:
     #: Volume mounts with ``backup`` true, keyed by volume name (see
     #: :meth:`_Compiler._volume_backup`).
     volume_backups: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: ``[tailnet] allowlist`` of bay.fleet.toml; None when the key is not set.
+    tailnet_allowlist: list[str] | None = None
 
     def data(self) -> dict[str, Any]:
         out: dict[str, Any] = {"accessories": self.accessories, "services": self.services}
@@ -115,6 +117,9 @@ class CompileResult:
             out["jobs"] = self.jobs
         if self.volume_backups:
             out["volume_backups"] = self.volume_backups
+        if self.tailnet_allowlist is not None:
+            # The access gateway makes it the enforced vpn_allowed_ips.
+            out["tailnet_allowlist"] = self.tailnet_allowlist
         if self.tailnet_proxies:
             # Only when routes exist, so a fleet without them compiles to the same bytes.
             out["tailnet_proxies"] = self.tailnet_proxies
@@ -282,6 +287,7 @@ class _Compiler:
             tailnet_proxies=proxies,
             jobs=self.jobs,
             volume_backups=self.volume_backups,
+            tailnet_allowlist=self._tailnet_allowlist(),
         )
 
     def _err(self, msg: str) -> None:
@@ -1200,6 +1206,11 @@ class _Compiler:
         return mw
 
     # ── fleet-wide ──────────────────────────────────────────────────────
+    def _tailnet_allowlist(self) -> list[str] | None:
+        """``[tailnet] allowlist`` as written, or None when bay.fleet.toml does not set it."""
+        allowlist = (self.fleet.get("tailnet") or {}).get("allowlist")
+        return None if allowlist is None else [str(ip) for ip in allowlist]
+
     def _tailnet_proxies(self) -> dict[str, dict[str, Any]]:
         proxies, errors = routes.compile_routes(self.fleet, self.domains)
         self.errors.extend(errors)
