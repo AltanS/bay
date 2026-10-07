@@ -8,6 +8,33 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [Unreleased]
+
+### Fixed
+
+- `bay up` now runs the deploy with the tags `deploy_stack,git_deploy`. Before,
+  it ran `deploy_stack` only, so `rebuild.sh` kept a frozen copy of each
+  container's labels, ports and mounts from before the `up`. The next webhook
+  build then recreated the container with the old values. `bay plan`'s box
+  check still runs `deploy_stack` only: it asks the reconciler, and
+  `git_deploy` has no part in that answer.
+- The plan no longer shows a false `volumes` reason when the box reports a
+  mount with Docker's default `:rw` suffix. A missing mode now equals `rw`,
+  and the order of mode flags does not matter.
+- `bay compile` writes a loopback resource port as `127.0.0.1:5432:5432`, not
+  `5432:5432`. The deploy role always bound loopback, so the container spec
+  does not change. A `tailnet` resource port keeps `5432:5432` and its
+  `expose` line.
+
+### Upgrade notes
+
+- The first `bay up` after this release runs the `git_deploy` role, as a full
+  `bay deploy` does. It renders `rebuild.sh`, the webhook units and the image
+  map, and it can clone and build images for services with a local build
+  strategy. Expect this first `up` to take longer on a box with such services.
+- The next compile changes the `port` line of each loopback resource in
+  `group_vars/all/services.yml`. Commit it. The containers do not recreate.
+
 ## [2.0.0] - 2026-10-07
 
 Bay 2.0 is a machine-level tool. You install it once per machine, a fleet
