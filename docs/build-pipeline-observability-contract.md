@@ -1,5 +1,7 @@
 # Build Pipeline Observability Contract
 
+A held build waits for `bay up`, which deploys the whole box environment, not one project.
+
 ## Invariant
 
 Every push that enters the build pipeline MUST terminate in a state that is

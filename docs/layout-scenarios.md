@@ -20,7 +20,7 @@ boxes. `shop` and `blog` are apps.
 
 ## What `bay up` does
 
-`bay up <env>` deploys the **whole box environment**, not one project. It runs from an app
+`bay up <env>` deploys the whole box environment, not one project. It runs from an app
 repo or from the fleet. It pins every project it covered. It commits the plan record under
 `plans/` and the receipt, and it pushes the fleet. Other projects' pins do not move: they
 deploy at their own pin, whoever runs `bay up`. `bay plan production` with no

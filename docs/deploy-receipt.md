@@ -146,7 +146,7 @@ The two new fields are additive, so the receipt stays `receipt_version` 1 and
 `bay status --json` stays `status_version` 2. A reader of an older receipt
 must treat a missing `commit` or `image_ref` as null.
 
-`bay up` reads `action` back: every container that is not `noop` goes into
+`bay up` deploys the whole box environment, so the receipt covers every project on it. It reads `action` back: every container that is not `noop` goes into
 the `applied` list of its JSON result, when the receipt's `fleet_commit` is
 the commit of that `bay up` (see [plan.md](plan.md)). It reads `code_moves`
 the same way: every `skipped` or `missing` move goes into `code_kept` and

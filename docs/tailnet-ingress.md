@@ -159,7 +159,7 @@ Then plan and apply as for any change: `bay plan <env>` for a project on the ing
 env. A route change is a step of kind `route` (`route_added`, `route_changed`,
 `route_removed`) at risk `shared`, so it needs `bay approve`. When the domains change, the
 step says "Headscale restarts": the split-DNS records change. `bay up` then runs the tags
-`deploy_stack,headscale,traefik`. A plan for a project on another env is blocked while a
+`deploy_stack,headscale,traefik`. Like every `bay up`, it deploys the whole box environment. A plan for a project on another env is blocked while a
 route change is pending, because that deploy would never reach the ingress box.
 
 `bay show --routes` prints one status per route: `ok`, `pending` (the fleet file differs

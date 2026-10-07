@@ -38,7 +38,7 @@ bay plan      # compare WANTED (bay.toml), PINNED (the lock) and RUNNING (the bo
 bay up        # pin this commit in the fleet and deploy it
 ```
 
-`bay plan` prints the steps, the risk of each, and a verdict. `bay up` refuses a plan that
+`bay plan` prints the steps, the risk of each, and a verdict. `bay up` deploys the whole box environment, not one project. It refuses a plan that
 needs approval until you run `bay approve`. See **[plan.md](plan.md)**.
 
 If you already have a fleet in the older YAML layout, `bay import --fleet <path> --out

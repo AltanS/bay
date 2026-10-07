@@ -6,7 +6,7 @@ lockfile. Only the `bay` CLI writes the fleet repo.
 
 Status: the schema and the validator ship today, and so do the commands that act on the
 file (`bay init`, `bay plan`, `bay up`, `bay show`, `bay rollback`, see [plan.md](plan.md)).
-This page is the contract they follow.
+This page is the contract they follow. `bay up` deploys the whole box environment, not one project.
 
 ## Check a file
 
