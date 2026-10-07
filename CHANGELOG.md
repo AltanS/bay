@@ -30,6 +30,17 @@ Spec 02: the webhook follows bay up
 - Every alert delivery from a shell emitter writes one line to stderr, with no setting: `alert <id> <level> sent <adapter>`, `alert <id> failed <adapter> <reason>` (`http_code=<n>` or `unreachable`), or `alert <id> <level> muted`. The line lands in the journal of the unit that sent it, for example `journalctl -u bay-build@<container>`. `BAY_ALERT_FAILURE_LOG` works as before. See docs/alerting.md, "The delivery log".
 - The first clone and the SSH deploy key of a `local` build app still come only from a `bay deploy <env>` with no `--tags`.
 
+Spec 03: init, fleet init and the dead verbs
+
+- `bay fleet init` makes the first commit, `bay: fleet init`, so the README quick start works with no manual `git commit`. When the commit fails (for example, git has no user name), the fleet stays and Bay prints the `git commit` line to run. `--from` makes no commit.
+- `bay fleet init` puts `.vault_pass` in the new `.gitignore`. After `--from`, Bay warns when the clone does not ignore `.vault_pass`.
+- `bay init` stops in a fleet folder, or below one, before it writes anything. The hint says to write `projects/<name>/bay.toml`.
+- `bay init` looks for the `Dockerfile`, `package.json` and `pyproject.toml` at the repo root, the default build context. With `--toml-path services/api/bay.toml` it no longer warns "no Dockerfile" for a root `Dockerfile`.
+- `[build] repo` is a new key in `bay.toml`. An app that lives in the fleet and builds from source names its repo there. The compile takes the build repo from `[build] repo`, then from the lock `repo`. With neither, the error names both places. An app in its own repo builds from its lock `repo`, and a different `[build] repo` there is a compile error. `bay validate` reports an in-fleet build with no repo before a deploy.
+- `bay adopt` takes `[build] repo` as the lock `repo` and leaves the key out of the `bay.toml` it writes into the app repo. The compiled `build.repo` does not change.
+- `bay self update --help` shows the version from `version.yml` in its example, not a fixed tag.
+- Removed `bay service add`, `bay service edit` and `bay service remove`. They wrote the generated `services.yml` by hand, and the next compile refused the file. `bay service list|show|catalog|prune-webhooks` and `bay server add|remove` stay. The helpers that only the removed verbs used are gone too: `StackConfig` write methods, `catalog.resolve_dependencies` and `BayError.dependency`.
+
 ### Upgrade notes
 
 - New status word `ahead` in `bay show`. A script that matches status words must accept it.
@@ -37,6 +48,7 @@ Spec 02: the webhook follows bay up
 - New lock field `previous.containers`, written by the next `bay up` that moves a pin. A lock written before 2.2 has none, so a plain `bay rollback` falls back to the box's `<env>.prev.json` and says so in a note, until the next pin move.
 - New receipt field `failed` per container. It ships with the deploy, so it needs no manual step.
 - `bay webhook` is removed. Use `bay deploy <env>` instead, or `bay up`, which now renders the receiver and the build triggers. The first `bay up` on each box with a webhook receiver after 2.2.0 rebuilds `bay-webhook:latest` (the receiver code changed) and recreates the `bay-webhook` container. Expect a `rebuild_script` step on those boxes too: the alert snippet changed, so `rebuild.sh` renders anew. Each emitter gets the delivery line when its script renders next. `bay up` renders `rebuild.sh`, `build-alert.sh` and the log archive scripts. `bay deploy <env>` renders the backup scripts and the trigger watchdog. The disk and outbound checks need `bay --fleet <path> provision <env> --tags outbound_monitor`.
+- `bay service add|edit|remove` are removed, write `bay.toml` instead. An in-fleet app that builds from source may set `[build] repo`; without it, the compile still uses the lock `repo`.
 
 ## [2.1.13] - 2026-10-07
 
