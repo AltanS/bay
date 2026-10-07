@@ -385,6 +385,34 @@ def test_expose_publishes_the_container_port(fleet: Path) -> None:
     assert out["services"]["gatus"]["ports"] == {"internal": 8080, "expose": "tailnet"}
 
 
+def test_a_loopback_resource_port_spells_the_bind_out(fleet: Path) -> None:
+    """The deploy role strips the address and re-binds loopback: same container spec."""
+    import re
+
+    edit(fleet, FLEET, 'image = "redis:7"', 'image = "redis:7"\nport = 6379\nexpose = "loopback"')
+    acc = yaml.safe_load(compiled(fleet).body())["accessories"]
+    assert acc["redis"]["port"] == "127.0.0.1:6379:6379"
+    assert "expose" not in acc["redis"], "loopback is the default"
+    # The strip the deploy role applies (build_specs.yml, _macros.j2, rebuild.sh.j2).
+    assert re.sub(r"^\d+\.\d+\.\d+\.\d+:", "", acc["redis"]["port"]) == "6379:6379"
+
+
+def test_a_tailnet_resource_port_has_no_address_and_keeps_expose(fleet: Path) -> None:
+    edit(fleet, FLEET, 'image = "redis:7"', 'image = "redis:7"\nport = 6379\nexpose = "tailnet"')
+    acc = yaml.safe_load(compiled(fleet).body())["accessories"]
+    assert acc["redis"]["port"] == "6379:6379" and acc["redis"]["expose"] == "tailnet"
+
+
+def test_a_resource_without_expose_publishes_nothing(fleet: Path) -> None:
+    acc = yaml.safe_load(compiled(fleet).body())["accessories"]
+    assert "port" not in acc["redis"]
+
+
+def test_no_resource_port_is_ever_bound_to_all_interfaces(data: dict[str, Any]) -> None:
+    for name, entry in data["accessories"].items():
+        assert not str(entry.get("port", "")).startswith("0.0.0.0:"), name
+
+
 def test_log_rotation(fleet: Path) -> None:
     edit(fleet, GATUS, 'update = "auto"', 'update = "auto"\nlog_rotation = { max_size = "10m", max_file = 2 }')
     out = yaml.safe_load(compiled(fleet).body())
@@ -489,7 +517,7 @@ def test_rate_per_minute(fleet: Path) -> None:
 def test_resources_compile_to_accessories(data: dict[str, Any]) -> None:
     pg = data["accessories"]["postgres"]
     assert pg["image"] == "postgres:16"
-    assert pg["port"] == "5432:5432" and "expose" not in pg
+    assert pg["port"] == "127.0.0.1:5432:5432" and "expose" not in pg
     assert pg["regions"] == ["eu", "na"]
     assert pg["env"] == {
         "clear": {"POSTGRES_DB": "app", "POSTGRES_USER": "app"},

@@ -341,8 +341,14 @@ class _Compiler:
     def _emit_resource(self, key: str, res: dict[str, Any]) -> None:
         entry: dict[str, Any] = {"image": res["image"]}
         if "expose" in res:
-            entry["port"] = f"{res['port']}:{res['port']}"
-            if res["expose"] != "loopback":
+            pair = f"{res['port']}:{res['port']}"
+            if res["expose"] == "loopback":
+                # Spell the bind out. The deploy role strips any address from
+                # the string and binds 127.0.0.1 for loopback, so the container
+                # spec is the same as for a bare pair. Never 0.0.0.0.
+                entry["port"] = f"127.0.0.1:{pair}"
+            else:
+                entry["port"] = pair
                 entry["expose"] = res["expose"]
         if "command" in res:
             entry["command"] = res["command"]
