@@ -16,6 +16,17 @@
 {% set _ = entry.update({"paths": paths}) %}
 {% endif %}
 {% endif %}
+{#
+  The hold keys of an app-repo project (compiler.py `_hold_keys`). The receiver
+  passes a push that changes the bay.toml or a mounted file whatever `watch`
+  says, so the config-only rule and the hold guard in rebuild.sh see it.
+#}
+{% if build.bay_toml_path is defined and build.bay_toml_path %}
+{% set _ = entry.update({"bay_toml_path": build.bay_toml_path}) %}
+{% endif %}
+{% if build.bay_toml_files is defined and build.bay_toml_files %}
+{% set _ = entry.update({"bay_toml_files": build.bay_toml_files | list}) %}
+{% endif %}
 {% set _ = entry.update({"regions": svc.regions | default([])}) %}
 {% set _ = entry.update({"peer_urls": git_deploy_peer_webhook_urls | default({})}) %}
 {% set _ = entry.update({"strategy": build.strategy | default(git_deploy_build_strategy | default('local'))}) %}

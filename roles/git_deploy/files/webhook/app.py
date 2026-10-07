@@ -217,6 +217,46 @@ def _extract_changed_files(payload: dict) -> set[str]:
     return changed
 
 
+def config_files_changed(changed_files: set[str], svc_config: dict | None) -> list[str]:
+    """The pushed files that are the project's bay.toml or a file its mounts read.
+
+    `bay_toml_path` and `bay_toml_files` come from the compiled hold keys
+    (compiler.py `_hold_keys`), repo-relative. A mount `from` can be a
+    directory, so a file under a listed path counts too. A push of these files
+    must reach rebuild.sh, where the config-only rule and the hold guard decide
+    what it does. The `watch` filter does not know them, so this check runs
+    before it.
+    """
+    if not svc_config or not changed_files:
+        return []
+    paths: list[str] = []
+    toml_path = svc_config.get("bay_toml_path")
+    if isinstance(toml_path, str) and toml_path.strip("/"):
+        paths.append(toml_path.strip("/"))
+    for entry in svc_config.get("bay_toml_files") or []:
+        if isinstance(entry, str) and entry.strip("/"):
+            paths.append(entry.strip("/"))
+    if not paths:
+        return []
+    return sorted(
+        f for f in changed_files
+        if any(f == p or f.startswith(p + "/") for p in paths)
+    )
+
+
+def push_filter(changed_files: set[str], svc_config: dict | None) -> tuple[bool, str]:
+    """Decide whether a (not forced, not truncated) push writes a trigger.
+
+    A push that changes the bay.toml or a mounted file always passes, whatever
+    `watch` (`paths.include`) and `ignore` (`paths.exclude`) say. Every other
+    push goes through `should_rebuild`.
+    """
+    config = config_files_changed(changed_files, svc_config)
+    if config:
+        return True, f"config file changed: {', '.join(config)}"
+    return should_rebuild(changed_files, (svc_config or {}).get("paths"))
+
+
 def should_rebuild(
     changed_files: set[str], paths_config: dict | None
 ) -> tuple[bool, str]:
@@ -534,12 +574,12 @@ class WebhookHandler(BaseHTTPRequestHandler):
             force_rebuild = True
             force_reason = "large push (20+ commits), rebuilding to be safe — file list may be incomplete"
 
-        # Path filtering (skip if force_rebuild is set)
+        # Path filtering (skip if force_rebuild is set). A push of the
+        # bay.toml or a mounted file passes before the filter (push_filter).
         changed_files = _extract_changed_files(payload)
-        paths_config = svc_config.get("paths")
 
         if not force_rebuild:
-            rebuild, reason = should_rebuild(changed_files, paths_config)
+            rebuild, reason = push_filter(changed_files, svc_config)
             if not rebuild:
                 print(
                     f"[webhook] Skipping {service}: {reason} "
@@ -553,6 +593,8 @@ class WebhookHandler(BaseHTTPRequestHandler):
                     "files_changed": len(changed_files),
                 })
                 return
+            if reason.startswith("config file changed"):
+                print(f"[webhook] {service}: {reason}", flush=True)
         else:
             reason = force_reason
             print(f"[webhook] {service}: {force_reason}", flush=True)

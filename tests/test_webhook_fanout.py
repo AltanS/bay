@@ -150,6 +150,35 @@ class TestTemplateRendering:
             "exclude": ["*.md"],
         }
 
+    def test_webhook_config_carries_bay_toml_paths(self):
+        """The receiver gets the hold keys, so a config push passes `watch` (M118 gap 3)."""
+        services = {
+            "shop": {
+                "build": {
+                    "repo": "git@x:acme/shop.git",
+                    "paths": {"include": ["src/**"]},
+                    "bay_toml_path": "apps/shop/bay.toml",
+                    "bay_toml_files": ["apps/shop/config/app.yml", "apps/shop/legal"],
+                    "bay_toml_hash": "sha256:abc",
+                },
+            },
+            "noconfig": {
+                "build": {"repo": "git@x:acme/other.git", "bay_toml_path": "bay.toml"},
+            },
+            "infleet": {"build": {"repo": "git@x:acme/infleet.git"}},
+        }
+        config = _render_template(services, {})
+        assert config["shop"]["bay_toml_path"] == "apps/shop/bay.toml"
+        assert config["shop"]["bay_toml_files"] == ["apps/shop/config/app.yml", "apps/shop/legal"]
+        assert config["shop"]["paths"] == {"include": ["src/**"]}
+        # Only the two path keys travel; the hashes stay in rebuild.sh.
+        assert "bay_toml_hash" not in config["shop"]
+        assert config["noconfig"]["bay_toml_path"] == "bay.toml"
+        assert "bay_toml_files" not in config["noconfig"]
+        # An in-fleet project has no hold keys: nothing is added.
+        assert "bay_toml_path" not in config["infleet"]
+        assert "bay_toml_files" not in config["infleet"]
+
 
 # ── Routing helper ───────────────────────────────────────────────────────
 

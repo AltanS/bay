@@ -42,7 +42,8 @@ _webhook_dir = str(
 if _webhook_dir not in sys.path:
     sys.path.insert(0, _webhook_dir)
 
-from app import should_rebuild, _extract_changed_files, _load_config
+import app as webhook_app  # noqa: E402
+from app import should_rebuild, _extract_changed_files, _load_config, push_filter  # noqa: E402
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -578,3 +579,101 @@ class TestEdgeCases:
         changed = _extract_changed_files(payload)
         rebuild, _ = should_rebuild(changed, {"exclude": ["*.md"]})
         assert rebuild is False
+
+
+# ── bay.toml and mounted files pass the watch filter (M118 gap 3) ────────
+
+
+_WATCHED_CONFIG = {
+    "branch": "main",
+    "paths": {"include": ["src/**"], "exclude": ["*.md"]},
+    "bay_toml_path": "apps/shop/bay.toml",
+    "bay_toml_files": ["apps/shop/config/app.yml", "apps/shop/legal"],
+}
+
+
+def _post_push(svc_config: dict, files: list[str], tmp_path: Path, monkeypatch) -> tuple[dict, Path]:
+    """POST one signed push through the real receiver; return its JSON answer and trigger dir."""
+    import threading
+    import urllib.request
+    from http.server import HTTPServer
+
+    trigger_dir = tmp_path / "triggers"
+    trigger_dir.mkdir(parents=True)
+    monkeypatch.setattr(webhook_app, "WEBHOOK_SECRET", "testsecret")
+    monkeypatch.setattr(webhook_app, "TRIGGER_DIR", trigger_dir)
+    monkeypatch.setattr(webhook_app, "LOCAL_REGION", "eu")
+    monkeypatch.setattr(webhook_app, "HOSTNAME", "test-eu")
+    monkeypatch.setattr(webhook_app, "TELEGRAM_BOT_TOKEN", "")
+    monkeypatch.setattr(webhook_app, "TELEGRAM_CHAT_ID", "")
+    monkeypatch.setattr(webhook_app, "SERVICE_CONFIG", {"shop": svc_config})
+    body = json.dumps({
+        "ref": "refs/heads/main",
+        "forced": False,
+        "commits": [{"id": "abc1234567890", "message": "m", "added": [], "removed": [], "modified": files}],
+        "head_commit": {"id": "abc1234567890", "message": "m"},
+        "pusher": {"name": "tester"},
+        "repository": {"full_name": "acme/shop"},
+    }).encode()
+    sig = "sha256=" + hmac.new(b"testsecret", body, hashlib.sha256).hexdigest()
+    server = HTTPServer(("127.0.0.1", 0), webhook_app.WebhookHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}/webhook/shop",
+            data=body,
+            headers={"Content-Type": "application/json", "X-Hub-Signature-256": sig, "X-GitHub-Event": "push"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return json.loads(resp.read()), trigger_dir
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class TestConfigFilesPassTheFilter:
+    """A push of bay.toml or a mounted file reaches rebuild.sh whatever `watch` says."""
+
+    def test_receiver_passes_bay_toml_only_push_outside_watch(self, tmp_path, monkeypatch):
+        # bay_toml_path itself.
+        ok, reason = push_filter({"apps/shop/bay.toml"}, _WATCHED_CONFIG)
+        assert ok is True
+        assert reason == "config file changed: apps/shop/bay.toml"
+        # A file listed in bay_toml_files.
+        ok, reason = push_filter({"apps/shop/config/app.yml"}, _WATCHED_CONFIG)
+        assert (ok, reason) == (True, "config file changed: apps/shop/config/app.yml")
+        # A file under a directory listed there (a mount `from` can be a directory).
+        ok, reason = push_filter({"apps/shop/legal/en/terms.md"}, _WATCHED_CONFIG)
+        assert (ok, reason) == (True, "config file changed: apps/shop/legal/en/terms.md")
+        # Mixed with files the filter would drop: only the config files are named.
+        ok, reason = push_filter({"README.md", "apps/shop/bay.toml"}, _WATCHED_CONFIG)
+        assert (ok, reason) == (True, "config file changed: apps/shop/bay.toml")
+        # Controls: the same pushes without the hold keys are skipped by `watch`...
+        bare = {"branch": "main", "paths": _WATCHED_CONFIG["paths"]}
+        for files in ({"apps/shop/bay.toml"}, {"apps/shop/config/app.yml"}, {"apps/shop/legal/en/terms.md"}):
+            assert push_filter(files, bare)[0] is False, files
+        # ...and other files outside `watch` are still skipped with the keys set.
+        ok, reason = push_filter({"docs/guide.txt"}, _WATCHED_CONFIG)
+        assert ok is False
+        assert "matched include patterns" in reason
+        # A sibling that only shares the prefix is not under the directory.
+        assert push_filter({"apps/shop/legalese.txt"}, _WATCHED_CONFIG)[0] is False
+        # Inside `watch` the normal filter still decides.
+        assert push_filter({"src/app.py"}, _WATCHED_CONFIG) == (True, "1 file(s) matched after filtering")
+
+        # End to end through the real handler: triggered, and a trigger file exists.
+        answer, triggers = _post_push(_WATCHED_CONFIG, ["apps/shop/bay.toml"], tmp_path / "a", monkeypatch)
+        assert answer["status"] == "triggered", answer
+        assert (triggers / "shop.trigger").exists()
+        answer, triggers = _post_push(_WATCHED_CONFIG, ["docs/guide.txt"], tmp_path / "b", monkeypatch)
+        assert answer["status"] == "skipped", answer
+        assert not (triggers / "shop.trigger").exists()
+
+    def test_in_fleet_project_without_hold_keys_is_unchanged(self):
+        """An in-fleet project gets no hold keys: the filter decides as before."""
+        cfg = {"branch": "main", "paths": {"include": ["src/**"]}}
+        assert push_filter({"bay.toml"}, cfg) == should_rebuild({"bay.toml"}, cfg["paths"])
+        assert push_filter({"x"}, None) == (True, "no path filtering configured")
+
