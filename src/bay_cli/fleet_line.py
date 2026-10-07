@@ -41,6 +41,7 @@ MUTATING_VERBS: frozenset[str] = frozenset(
         "remove",
         "route add",
         "route rm",
+        "route import",
         # fleet files
         "compile",
         "import",
