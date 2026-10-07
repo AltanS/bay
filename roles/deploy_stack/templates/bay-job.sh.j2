@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # {{ ansible_managed }}
-# Bay job {{ job_name }} (bay.toml [[jobs]] of {{ job.of }}). Run by
-# bay-job@{{ job_name }}.service, which bay-job@{{ job_name }}.timer starts.
+# A Bay job (bay.toml [[jobs]]): the job container and its main container are
+# named below. Run by bay-job@<job>.service, which bay-job@<job>.timer starts.
 # One run at a time: systemd does not start the service while it runs.
+# No value is interpolated into a comment: a newline in it would end the comment.
 set -euo pipefail
 
 # The image the main container runs now, so a job always runs the deployed code.
