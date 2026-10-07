@@ -4,13 +4,13 @@ Two shipped definitions did not: Gatus used `healthcheck: {path: ...}`
 (the schema's healthcheck block has no `path` — the probe path is the
 sibling key `healthcheck_path`), and MariaDB used
 `backup.method: mysqldump`, which is not in the method enum. Both reached
-the fleet through `bay service add`, so the very first `bay validate` on
-a fresh project failed on a file the tool had just written.
+the fleet through the catalog, so the
+very first `bay validate` on a fresh project failed on a file the tool had
+just written.
 
-Catalog `spec` blocks are fragments — `bay service add` fills in the
-service-level keys (`access`, `domains`) from the consumer's config — so
-each fragment is completed here before validation, exactly the way the
-add path completes it.
+Catalog `spec` blocks are fragments. The service-level keys (`access`,
+`domains`) come from the consumer's config, so each fragment is completed
+here before validation.
 """
 
 from __future__ import annotations

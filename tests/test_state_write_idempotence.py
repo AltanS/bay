@@ -1,6 +1,6 @@
 """Every writer under {{ stack_dir }}/state must leave a group-writable file.
 
-roles/git_deploy/tasks/webhook.yml's "Re-group pre-existing state files" task
+roles/git_deploy/tasks/render_webhook.yml's "Re-group pre-existing state files" task
 recursively sweeps state/ to group git_deploy_build_group with g+w. Anything
 that writes a file there without that group + write bit gets flipped by the
 sweep on the very next run, and reports "changed" forever instead of once.

@@ -89,7 +89,6 @@ QUIET_VERBS: frozenset[str] = frozenset(
         "test",
         "logs",
         "healthcheck",
-        "webhook",
         "toml validate",
         "self version",
         "self update",

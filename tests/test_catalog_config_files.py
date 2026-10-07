@@ -1,10 +1,9 @@
 """Every catalog `config_files` entry must have a file behind it.
 
 `catalog/gatus/definition.yml` declared `config_files: [gatus/config.yaml]`
-for its whole life and no such file was ever shipped. `bay service add`
-copied nothing (its source directory did not exist), the wizard copied
-nothing at all, and the failure surfaced on the server, mid-deploy, at the
-"Deploy config files" task — for the wizard's *default* service.
+for its whole life and no such file was ever shipped. Nothing was copied
+(the source directory did not exist), and the failure surfaced on the
+server, mid-deploy, at the "Deploy config files" task.
 
 This test walks the catalog itself, so a new definition that names a config
 file it forgot to ship fails here instead of on someone's first deploy.

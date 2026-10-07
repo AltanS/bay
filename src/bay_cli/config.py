@@ -27,8 +27,9 @@ def _commented_map() -> type:
 class StackConfig:
     """Read/write interface to the consumer's group_vars YAML files.
 
-    Uses a copy-on-write pattern: load() stores the original, mutations
-    operate on a deep copy, diff() compares them, save() writes the copy.
+    Read-only: it loads the YAML files and answers questions about them.
+    Bay writes the generated services file through the compiler, and the
+    other files by hand or through their own verbs.
     """
 
     def __init__(self, root: Path) -> None:

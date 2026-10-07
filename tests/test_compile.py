@@ -350,6 +350,27 @@ def test_validate_reports_an_in_fleet_build_with_no_repo(fleet: Path) -> None:
     assert declared.failed == []
 
 
+def test_validate_build_repo_mixed_image_and_source_services(fleet: Path) -> None:
+    """One image service must not hide a source-built main container with no repo."""
+    from bay_cli.commands.validate import ValidationResult, _validate_build_repos
+
+    # The main container builds from source (no image, no [build] table); a
+    # side service pulls an image.
+    edit(fleet, GATUS, 'image = "twinproduction/gatus:latest"\n', "")
+    path = fleet / GATUS
+    path.write_text(path.read_text() + '\n[services.cache]\nimage = "redis:7"\n')
+    _gatus_lock(fleet, None)
+    bad = ValidationResult()
+    _validate_build_repos(fleet, bad)
+    assert len(bad.failed) == 1 and "projects/gatus" in bad.failed[0]
+
+    # The lock names a repo: every source-built entry has one.
+    _gatus_lock(fleet, "https://github.com/acme/gatus.git")
+    fine = ValidationResult()
+    _validate_build_repos(fleet, fine)
+    assert fine.failed == []
+
+
 def test_bay_toml_hash_written_to_services_yml(fleet: Path) -> None:
     """Spec M117/05: the hold guard's pinned hash, per build container, app-repo projects only."""
     from bay_reconcile.tomlhash import canonical_hash

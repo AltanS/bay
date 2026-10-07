@@ -469,8 +469,9 @@
         # webhook-config.json, image-map.json) have been rendered.
         # `bay validate --check-config-age` reads this file and warns when
         # rebuild.sh or webhook configs are older than the sentinel, indicating
-        # a partial deploy (e.g., `--tags deploy_stack` without `git_deploy`)
-        # left the webhook infrastructure stale.
+        # a partial deploy left the webhook infrastructure stale. Since 2.2.0,
+        # `--tags deploy_stack` renders those files itself. In this role, only
+        # this sentinel and the trigger watchdog wait for the full deploy path.
         - name: Write git_deploy config sentinel timestamp
           ansible.builtin.copy:
             content: "{{ ansible_date_time.iso8601 }}\n"

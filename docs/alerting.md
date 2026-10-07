@@ -600,7 +600,9 @@ not run. That is the structural fix for the GH#33 class of bug.
 
 Every shell emitter writes one line to stderr for each delivery attempt. No
 setting turns it on, and it is never off. The line goes to the journal of the
-unit that sent the alert. For a build, that is `journalctl -u bay-build@<container>`.
+unit that sent the alert. For a build alert such as `build.failed`, that is
+`journalctl -u bay-build@<container>`. `build.killed` comes from the alert unit, so it lands in
+`journalctl -u bay-build-alert@<container>`.
 For the stall watchdog, it is `journalctl -u bay-trigger-watchdog`.
 
 The line has one of three forms:

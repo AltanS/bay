@@ -22,7 +22,7 @@ Design notes:
     `min_level: critical` on-call recipient either pages a human or is filtered
     out and exercises nothing, so `--live` is an explicit gate.
 
-  * **Config writes go through ruamel** (`StackConfig`), so comments in the
+  * **Config writes go through ruamel directly**, so comments in the
     consumer's group_vars survive.
 
 Exit codes:

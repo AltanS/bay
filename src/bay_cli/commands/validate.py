@@ -27,8 +27,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # See tests/test_cli_import_time.py.
 
 # ── Stale config detection constants ──────────────────────────────────────
-# sentinel file written by git_deploy/tasks/main.yml on every deploy
-# (after both webhook.yml and systemd.yml complete)
+# sentinel file written by git_deploy/tasks/main.yml on the full deploy path
+# (after both webhook.yml and systemd.yml complete). `--tags deploy_stack`
+# does not write it.
 _GIT_DEPLOY_SENTINEL = "state/git-deploy-config.timestamp"
 # config files rendered by git_deploy that should be newer than the sentinel
 _GIT_DEPLOY_CONFIG_FILES = [
@@ -81,7 +82,10 @@ def _check_config_age_remote(
 
     Compares the mtime of each config file against the sentinel timestamp.
     Files older than the sentinel indicate a partial deploy left the webhook
-    infrastructure stale (e.g., `--tags deploy_stack` without `git_deploy`).
+    infrastructure stale. Since 2.2.0, `--tags deploy_stack` renders these
+    three files itself. Only the sentinel, the backup scripts and the trigger
+    watchdog still wait for the full deploy path (`bay deploy <env>` with no
+    `--tags`).
 
     Reports a warning (not a hard failure) because:
     - The files might not exist yet (first deploy, or no build services).
@@ -2200,12 +2204,29 @@ def _validate_tailnet_routes(
         result.ok(f"Tailnet routes      {len(table)} route(s), {mode}")
 
 
-def _has_key(node: Any, key: str) -> bool:
-    if isinstance(node, dict):
-        return key in node or any(_has_key(v, key) for v in node.values())
-    if isinstance(node, list):
-        return any(_has_key(v, key) for v in node)
-    return False
+def _source_built_repos(doc: dict[str, Any]) -> list[str | None]:
+    """One entry per source-built container of a bay.toml: the repo it names, or None.
+
+    The main container builds when no ``image`` is set at the top or in some
+    ``[deploy.<env>]``. A service builds when it has a ``[services.<n>.build]``
+    table, or when it has no ``image`` and shares the main build. A service
+    with its own ``image`` never builds. The compile takes the repo from the
+    entry's own ``build`` table, then from the project ``[build]`` table.
+    """
+    project = doc.get("build") if isinstance(doc.get("build"), dict) else {}
+    deploys = [d for d in (doc.get("deploy") or {}).values() if isinstance(d, dict)] or [{}]
+    main_builds = "image" not in doc and any("image" not in d for d in deploys)
+    found: list[str | None] = []
+    if main_builds:
+        found.append(project.get("repo"))
+    for svc in (doc.get("services") or {}).values():
+        if not isinstance(svc, dict) or "image" in svc:
+            continue
+        if isinstance(svc.get("build"), dict):
+            found.append(svc["build"].get("repo") or project.get("repo"))
+        elif main_builds:
+            found.append(project.get("repo"))
+    return found
 
 
 def _validate_build_repos(root: Path, result: ValidationResult) -> None:
@@ -2229,9 +2250,8 @@ def _validate_build_repos(root: Path, result: ValidationResult) -> None:
             doc = tomllib.loads(toml.read_text())
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
             continue  # the compile reports an unreadable bay.toml
-        tables = bay_toml.build_tables(doc)
-        builds = bool(tables) or not _has_key(doc, "image")
-        if not builds:
+        repos = _source_built_repos(doc)
+        if not repos:
             continue
         checked += 1
         name = toml.parent.name
@@ -2239,7 +2259,7 @@ def _validate_build_repos(root: Path, result: ValidationResult) -> None:
             raw = lockfile.read(lockfile.lock_path(root, name)) or {}
         except (OSError, ValueError):
             raw = {}
-        if not raw.get("repo") and not any(t.get("repo") for t in tables):
+        if not raw.get("repo") and not all(repos):
             missing.append(name)
     if not checked:
         return
