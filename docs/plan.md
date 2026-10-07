@@ -257,7 +257,10 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
 5. Bay commits the fleet repo: `bay: up <name> <env> <short sha>`, and
    prints the fleet commit.
 6. Bay runs today's deploy for the box's environment, limited to
-   `--tags deploy_stack` (the same work as `bay deploy <env> --tags deploy_stack`).
+   `--tags deploy_stack,git_deploy` (the same work as
+   `bay deploy <env> --tags deploy_stack,git_deploy`). The `git_deploy` tag
+   makes `bay up` render the webhook rebuild script too, so a later webhook
+   build uses the deployed config, not the config from before this `up`.
 7. Bay reads the receipt back and pins every project that the deploy
    covered (see below). Bay commits all those locks once:
    `bay: receipt <box env> (<n> projects)`.

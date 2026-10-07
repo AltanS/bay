@@ -1647,6 +1647,33 @@ def test_up_deploy_reports_go_to_a_temp_dir_never_cwd(
     assert list(cwd.iterdir()) == []
 
 
+def test_up_deploy_runs_deploy_stack_and_git_deploy_tags(
+    world: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``git_deploy`` renders rebuild.sh; ``bay up`` must run it with ``deploy_stack``."""
+    from types import SimpleNamespace
+
+    from bay_cli.commands import ops, validate
+
+    seen: dict[str, Any] = {}
+
+    def fake_run(cx: Context, playbook: str, env: str, tags: Any, extra: list[str]) -> None:
+        seen["tags"] = tags
+        seen["playbook"] = playbook
+
+    monkeypatch.setattr(
+        validate, "run_validation", lambda *a, **k: SimpleNamespace(total_issues=0)
+    )
+    monkeypatch.setattr(ops, "_run_playbook", fake_run)
+    monkeypatch.setattr(ops, "_invalidate_rig_cache", lambda *_: None)
+    monkeypatch.setattr(ops, "_run_post_deploy_healthcheck", lambda *a, **k: None)
+    _REAL_DEFAULT_DEPLOY(cx_of(world), "production")
+
+    assert seen["playbook"] == "deploy"
+    assert seen["tags"] == "deploy_stack,git_deploy"
+    assert sorted(seen["tags"].split(",")) == ["deploy_stack", "git_deploy"]
+
+
 def test_the_report_hand_off_honours_the_report_dir_var() -> None:
     tasks = _named(_RECONCILE_YML)
     for name in (

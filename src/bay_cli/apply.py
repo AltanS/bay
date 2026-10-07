@@ -10,7 +10,7 @@
    record gets ``result: pending`` and ``previous`` (the pin it replaces).
 3. Compile the fleet into its services file (hash header).
 4. Commit the fleet repo: ``bay: up <name> <env> <short sha>``.
-5. Run today's deploy for the box env, limited to the ``deploy_stack`` tag.
+5. Run today's deploy for the box env, limited to the ``deploy_stack`` and ``git_deploy`` tags.
 6. Read the receipt back. The deploy covered the whole box env, so every
    project the compile read that has a ``[deploy.<env>]`` on that box env is
    pinned (:func:`_pin_deployed`): ``commit``, ``result``, ``deployed_at``,
@@ -56,8 +56,16 @@ class Refused(Exception):
         self.exit_code = int(plan["exit_code"]) or 1
 
 
+#: The tags ``bay up`` runs. ``git_deploy`` renders ``rebuild.sh``, which holds a
+#: frozen copy of each container's labels, ports and mounts. Without it, the next
+#: webhook build would recreate a container with the values from before this up.
+#: ``bay plan``'s box check runs ``deploy_stack`` only: it asks the reconciler
+#: what it would do, and ``git_deploy`` has no part in that answer.
+UP_DEPLOY_TAGS = "deploy_stack,git_deploy"
+
+
 def default_deploy(cx: Context, box_env: str) -> None:
-    """Today's ``bay deploy <env> --tags deploy_stack``, without the prompts and the banner."""
+    """Today's ``bay deploy <env> --tags deploy_stack,git_deploy``, without the prompts and the banner."""
     from bay_cli.commands import ops
     from bay_cli.commands.validate import run_validation
     from bay_cli.healthcheck import new_report_dir, report_dir_vars
@@ -78,7 +86,7 @@ def default_deploy(cx: Context, box_env: str) -> None:
             *deploy_extra_vars(cx),
             *report_dir_vars(report_dir),
         ]
-        ops._run_playbook(cx, "deploy", box_env, "deploy_stack", extra)
+        ops._run_playbook(cx, "deploy", box_env, UP_DEPLOY_TAGS, extra)
         ops._invalidate_rig_cache(cx.cache_dir)
         ops._run_post_deploy_healthcheck(
             box_env, cx.fleet_root, cx.framework_root, report_dir=report_dir
