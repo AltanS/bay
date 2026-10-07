@@ -43,6 +43,30 @@ needing manual action is called out under **Upgrade notes**. Entries for
 
 ### Added
 
+- **`bay remove <project> [--env <env>]`.** It plans taking a project, or one
+  environment of it, out of the fleet: one `remove` step per container, risk
+  `destructive`, so the verdict is `approve`. The plan record has a `remove`
+  block with the containers per environment, every volume by its name on the
+  box, and the database and its role. `bay approve`, then
+  `bay up <env> --plan-id <id>` applies it: compile without the project,
+  commit, deploy, read the receipt. Only a receipt that confirms the containers
+  are gone deletes the environment from the lock; with none left,
+  `projects/<name>/` leaves the fleet (`git rm`). Otherwise the lock keeps the
+  environment with `result: failed` and the command exits 1. Bay never deletes
+  data: it prints the `docker volume rm` and `DROP DATABASE ...; DROP ROLE ...;`
+  lines to run by hand. `--env` is blocked while `bay.toml` still has
+  `[deploy.<env>]`. A remove is blocked when another project needs the project,
+  or when the compile would change anything else. A `[resources.*]` entry and
+  the containers Bay runs on every box are refused. See `docs/plan.md`,
+  "bay remove".
+- **`bay doctor` answers the pre-deploy questions.** New lines: the fleet Bay
+  picked and why, with its real path; the fleet `format`; the CLI version and
+  install path; whether the vault opens; whether each box answers; whether each
+  app repo's pinned commit can be read; whether the fleet clone is behind its
+  remote; plan files that are not committed. Bay 1 leftovers stay a warning.
+  Each line is `ok`, `warn` or `fail`; a `fail` exits 1. `--json` prints the
+  lines, `--no-remote` skips the boxes and the fetch. The environment argument
+  now defaults to the fleet's primary environment. See `docs/install.md`.
 - **`bay adopt <name>`.** Run it in a checkout of the app repo, with the fleet
   named by `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME`. It moves an in-fleet
   project's `bay.toml` and its files (including a mount still read from the old

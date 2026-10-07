@@ -96,6 +96,28 @@ after one hour. Two fleets on one machine never share a cache. `bay fleet init` 
 `.gitignore` of `*`, so git never shows it. Delete the directory at any time. Bay
 builds it again; the repo cache is cloned again on the next plan.
 
+## Check a machine and a fleet: bay doctor
+
+`bay doctor [env]` answers the questions to ask before a deploy. It prints one
+line per check, each `ok`, `warn` or `fail`, and exits 1 when a check fails:
+
+| Check | What it says |
+|---|---|
+| Fleet | The fleet Bay picked, its real path (a fleet may be a symlink), and why: `--fleet`, `BAY_FLEET`, the `fleet` line of a `bay.toml`, `BAY_FLEET_NAME`, or the fleet directory you stand in. |
+| Fleet format | The `format` of `bay.fleet.toml`. Format 1 is a warning; a format newer than the CLI knows fails. |
+| CLI | The installed version and the checkout it runs from, as `bay self version`. |
+| Vault | Whether the secrets of the environment open with `.vault_pass`. No name and no value is printed. |
+| Box | Whether each box answers. Bay reads its receipt the way `bay status` does, with a short timeout. |
+| Repo | Whether each app repo's pinned commit can be read: in the checkout you stand in, in the repo cache, else after one fetch that never asks for a password. |
+| Fleet clone | Whether the fleet clone is behind its remote. Pull first: a stale clone reverts config on the next deploy. |
+| v1 leftovers | The `bin/` folder, the old copy of Bay and the old pin file of a Bay 1 fleet. Bay 2 does not use them; remove them. |
+| Plans | Plan files in `plans/` that are not committed. `bay plan` saves every plan, `bay up` commits only the one it applies. |
+
+Then come the older checks: the inventory, SSH, DNS, the gateway and the
+webhook. `--no-remote` asks no box and fetches no app repo. `--json` prints the
+lines as one document: `{"doctor_version": 1, "ok", "env", "fleet", "lines":
+[{"check", "status", "detail"}]}`.
+
 ## Uninstall
 
 ```bash

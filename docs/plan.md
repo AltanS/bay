@@ -70,6 +70,7 @@ bay up [env] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--data keep] 
 bay show [name] [--json] [--no-remote]
 bay rollback [env] [--force --reason "<why>"] [--data keep] [--json] [--log PATH] [--no-push]
 bay adopt <name> [--toml-path P] [--check] [--json]   # move an in-fleet bay.toml into its app repo
+bay remove <name> [--env E] [--json] [--no-remote]   # plan taking a project out; bay up --plan-id applies it
 ```
 
 `env` is the `[deploy.<env>]` name. The default is the fleet's primary
@@ -569,6 +570,76 @@ files then land in `services/shop/`. `--check` prints the file list and the
 lock diff and writes nothing. `--json` prints one document with `files`,
 `removed`, `kept`, `lock_diff`, `app_commit`, `fleet_commit` and `next`.
 
+### bay remove
+
+`bay remove <name>` takes a project out of the fleet. `bay remove <name> --env
+<env>` takes out one environment of it. Like every change, it is a plan first:
+
+```bash
+bay --fleet ~/fleets/prod remove shop                 # saves a plan, exit 10 (approve)
+bay --fleet ~/fleets/prod approve 3f2a9c0d1e2b --reason "shop is retired"
+bay --fleet ~/fleets/prod up production --plan-id 3f2a9c0d1e2b
+```
+
+**The plan.** Bay compiles the fleet without the project (or without that
+environment of it) and compares the result with the services file. Each
+container of the project that the fleet compiled or the box runs becomes one
+step: `kind: container`, `action: remove`, risk `destructive`. The reason of
+each step names the volumes and the database that stay. So the verdict is
+`approve`. The plan record has a `remove` block (see [The plan JSON](#the-plan-json)):
+the containers per environment, every named volume by its name on the box
+(`<stack_name>_<volume>`), and the database and its role (the adopted names
+from the lock, else the derived ones). `bay plan --plan-id <id>` checks a saved
+remove plan again.
+
+**Bay never deletes data.** The containers stop and leave. The volumes and the
+database stay where they are. The plan and `bay up` print the lines to delete
+them, marked "run by hand when you are sure":
+
+```text
+box eu-1: docker volume rm acme_shop-data
+box eu-1, resource postgres: DROP DATABASE shop; DROP ROLE shop;
+```
+
+Run the SQL line in the postgres resource of that box. Take a backup first if
+you may need the data again.
+
+**Apply.** `bay up <env> --plan-id <id>` applies the approved plan:
+
+1. Plan again. A blocked or stale plan is refused, and an unapproved one too.
+2. The lock: each environment that leaves gets `result: pending`.
+3. Compile the fleet without the project, and commit:
+   `bay: remove <name> (plan <id>)`.
+4. Deploy each box environment the project ran on. The reconciler removes
+   every container that is no longer in the compiled file.
+5. Read the receipt. It must be from this deploy and must not list a container
+   of the project, other than as `action: remove`.
+6. Confirmed: the environment leaves the lock. With no environment left,
+   `projects/<name>/` leaves the fleet (`git rm`, so the history keeps it):
+   `bay: remove <name>: the receipt confirms it`. Not confirmed: the
+   environment stays in the lock with `result: failed`, and the command exits
+   1. Run `bay remove <name>` again: the new plan finds the containers in the
+   receipt.
+7. Prune `plans/` and push the fleet, as `bay up` does.
+
+**One environment.** `--env <env>` is blocked while `bay.toml` still has
+`[deploy.<env>]`, because the next `bay up` would start it again. Delete that
+table, commit it (and push it, for a project in an app repo), then run
+`bay remove <name> --env <env>`. The plan reads `bay.toml` at that commit, and
+`bay up` moves the lock's pin to it. The other environments do not change.
+
+Bay refuses or blocks a remove when:
+
+- the name is a `[resources.*]` entry, or a container that Bay runs on every
+  box itself (the proxy, the IDS, the update watcher, the gateway, the
+  registry, the webhook receiver). Bay refuses these at once.
+- another project needs the project (`needs` in its `bay.toml`). Take that
+  need out and run `bay up` for that project first.
+- the compile without the project would change anything else: another
+  project, a route, the webhook or the tailnet allowlist. Apply that with
+  `bay up` first, so the remove plan holds only the removal.
+- the fleet is behind its remote, or the fleet repo has uncommitted changes.
+
 ### Code and config
 
 The pin is config: the `bay.toml` that `bay up` compiled. The code is the
@@ -778,6 +849,12 @@ know.
   (notes are text for the reader and never change a deploy). `plan_id` is
   its first 12 hex digits. The same inputs give the same id.
 - A plan holds secret names, never values.
+- Only a `bay remove` plan has `remove`: `project`, `scope` (`project` or
+  `env`), `in_fleet`, `commit` (with `--env`: the commit the pin moves to),
+  `envs` (per environment `env`, `box`, `box_env` and every container name,
+  which the receipt must confirm gone), `volumes` (`env`, `box`, and `name` as
+  the box names it), `databases` (`env`, `box`, `resource`, `name`, `role`)
+  and `cleanup` (the lines to run by hand). See [bay remove](#bay-remove).
 
 ## The lockfile
 
