@@ -27,7 +27,7 @@ from typing import Any
 import typer
 
 #: Verbs that write to a fleet repo or act on a box. Paths are the words
-#: after ``bay``. Names that do not exist yet (adopt, remove, route) are
+#: after ``bay``. Names that do not exist yet (remove) are
 #: listed so they print the line the day they are added.
 MUTATING_VERBS: frozenset[str] = frozenset(
     {

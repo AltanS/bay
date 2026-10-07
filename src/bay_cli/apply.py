@@ -865,6 +865,19 @@ def rollback(
         at, code = _rollback_to(proj, env, to, list_tags=list_tags, reader=reader)
     else:
         previous = record.get("previous")
+        adopted_from = (record.get("adopted") or {}).get("from_fleet_commit")
+        if (not previous or not previous.get("commit")) and adopted_from:
+            from bay_cli.adopt import ROLLBACK_AFTER_ADOPT
+
+            # bay adopt cleared previous: it was a fleet commit, and the pin
+            # is now an app repo commit.
+            raise BayError(
+                f"{proj.name} {env}: {ROLLBACK_AFTER_ADOPT}",
+                code=ErrorCode.CONFLICT,
+                hint=f"bay adopt moved the bay.toml out of the fleet (fleet commit "
+                f"{str(adopted_from)[:12]}). Pin an app repo commit with bay up --at, or "
+                "roll the code back with bay rollback --to <commit>.",
+            )
         if not previous or not previous.get("commit"):
             raise BayError(
                 f"{proj.name} has no previous pin for {env}",

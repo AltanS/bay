@@ -128,6 +128,7 @@ app.command(rich_help_panel="Daily")(project_cmd.approve)
 app.command(rich_help_panel="Daily")(project_cmd.up)
 app.command(rich_help_panel="Daily")(project_cmd.show)
 app.command(rich_help_panel="Daily")(project_cmd.rollback)
+app.command(rich_help_panel="Daily")(project_cmd.adopt)
 app.add_typer(route_cmd.app, name="route", rich_help_panel="Daily")
 
 # Framework commands (top-level)

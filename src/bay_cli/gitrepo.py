@@ -229,10 +229,17 @@ def tracked_files(repo: Path, rel: str) -> list[str]:
 
 def remove_and_commit(repo: Path, rels: Sequence[str], message: str) -> str:
     """``git rm`` the tracked ``rels`` and commit only that removal. Return the new HEAD."""
+    remove(repo, rels)
+    return commit_staged(repo, rels, message)
+
+
+def remove(repo: Path, rels: Sequence[str]) -> None:
+    """``git rm`` the tracked ``rels`` (work tree and index). Raises GitError."""
+    if not rels:
+        return
     done = _run(repo, "rm", "--quiet", "--", *rels)
     if done is None or done.returncode != 0:
         raise GitError(_last_line(str(done.stderr)) if done is not None else "git rm failed")
-    return commit_staged(repo, rels, message)
 
 
 def move(repo: Path, old: str, new: str) -> None:

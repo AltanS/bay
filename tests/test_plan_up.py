@@ -3098,3 +3098,437 @@ def test_branch_mode_up_refuses_when_order_unknown_unless_force_code(
     done = cli(world, "up", "--force-code", "--force", "--reason", "rebuilt box", "--json")
     assert done.exit_code == 0, done.output
     assert seen[-1] == {"webapp": {"commit": config, "strict": False}}
+
+
+# ── bay adopt (M117/06) ─────────────────────────────────────────────────────
+
+SHOP_TOML = """\
+name = "shop"
+fleet = "testfleet"
+image = "ghcr.io/acme/shop:1"
+port = 8080
+health = "none"
+
+[env]
+MODE = "one"
+
+[access]
+mode = "public"
+
+[[mounts]]
+path = "/etc/shop/site.conf"
+from = "site.conf"
+
+[[mounts]]
+path = "/etc/shop/x.yaml"
+from = "deploy/x.yaml"
+
+[[mounts]]
+path = "/etc/shop/legacy.conf"
+from = "legacy.conf"
+
+[[mounts]]
+path = "/etc/shop/rules.yaml"
+from = "fleet:shared/rules.yaml"
+
+[deploy.production]
+domain = "shop.example.com"
+"""
+
+BUILD_SHOP_TOML = """\
+name = "shop"
+fleet = "testfleet"
+port = 8080
+health = "none"
+
+[build]
+dockerfile = "Dockerfile"
+
+[access]
+mode = "public"
+
+[deploy.production]
+domain = "shop.example.com"
+"""
+
+
+def _shop(world: dict[str, Path], tmp_path: Path, *, toml: str = SHOP_TOML) -> dict[str, Path]:
+    """An in-fleet project ``shop`` that bay up deployed, and its app repo (not adopted yet).
+
+    Its mounts read a file beside the toml, one in a subdirectory, one in the
+    old place files/shop/ and one shared fleet file (``fleet:``). The lock
+    keeps an adopted container name, which the adopt must not touch.
+    """
+    fleet = world["fleet"]
+    remote = tmp_path / "remotes" / "shop.git"
+    git(tmp_path, "init", "-q", "--bare", str(remote))
+    app_repo = tmp_path / "shop"
+    git(tmp_path, "clone", "-q", str(remote), str(app_repo))
+    (app_repo / "Dockerfile").write_text("FROM scratch\n")
+    commit_all(app_repo, "app")
+    git(app_repo, "push", "-q", "-u", "origin", "main")
+
+    folder = fleet / "projects" / "shop"
+    (folder / "deploy").mkdir(parents=True)
+    (folder / "bay.toml").write_text(toml)
+    (folder / "site.conf").write_text("site: 1\n")
+    (folder / "deploy" / "x.yaml").write_text("x: 1\n")
+    (fleet / "files" / "shop").mkdir(parents=True)
+    (fleet / "files" / "shop" / "legacy.conf").write_text("legacy: 1\n")
+    (fleet / "files" / "shared").mkdir(parents=True)
+    (fleet / "files" / "shared" / "rules.yaml").write_text("rules: 1\n")
+    lock = lockfile.new_lock("shop", repo=str(remote) if "[build]" in toml else None)
+    lock["envs"] = {"production": {"adopted": {"containers": {"web": "old-shop"}}}}
+    lockfile.write(folder / "bay.lock", lock)
+    commit_all(fleet, "add shop")
+    up = applymod.up(planmod.load_project(cx_of(world), "shop"), planmod.PlanOptions())
+    assert up["result"] == "ok", up
+    return {"app": app_repo, "remote": remote, "folder": folder}
+
+
+def _adopt(world: dict[str, Path], shop: dict[str, Path], *args: str) -> Any:
+    return cli(world, "adopt", "shop", *args, cwd=shop["app"])
+
+
+def _said(result: Any) -> str:
+    try:
+        err = result.stderr
+    except ValueError:
+        err = ""
+    return f"{result.output}\n{err}"
+
+
+def _shop_lock(world: dict[str, Path]) -> dict[str, Any]:
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "shop"))
+    assert raw is not None
+    return raw
+
+
+def _body(text: str) -> str:
+    from bay_cli import compiler
+
+    return compiler.split_header(text)[1]
+
+
+def test_adopt_copies_toml_and_files(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
+    shop = _shop(world, tmp_path)
+    result = _adopt(world, shop)
+    assert result.exit_code == 0, _said(result)
+    app_repo = shop["app"]
+    assert (app_repo / "bay.toml").read_text() == SHOP_TOML
+    assert (app_repo / "site.conf").read_text() == "site: 1\n"
+    # A subdirectory keeps its place beside the toml.
+    assert (app_repo / "deploy" / "x.yaml").read_text() == "x: 1\n"
+    # The old place files/shop/<from> moves beside the toml as well.
+    assert (app_repo / "legacy.conf").read_text() == "legacy: 1\n"
+    # A fleet: mount stays in the fleet.
+    assert not (app_repo / "rules.yaml").exists() and not (app_repo / "shared").exists()
+    assert (world["fleet"] / "files" / "shared" / "rules.yaml").is_file()
+    assert "files/shared/rules.yaml" in git(world["fleet"], "ls-files", "files/shared")
+
+
+def test_adopt_rewrites_lock_to_repo_form(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    shop = _shop(world, tmp_path)
+    before = _shop_lock(world)
+    assert before["repo"] is None and before["envs"]["production"]["commit"]
+    assert _adopt(world, shop).exit_code == 0
+    raw = _shop_lock(world)
+    head = git(shop["app"], "rev-parse", "HEAD")
+    assert raw["repo"] == str(shop["remote"])
+    assert raw["toml_path"] == "bay.toml"
+    assert raw["commit"] == head
+    record = raw["envs"]["production"]
+    assert record["commit"] == head
+    assert "previous" not in record
+    # The other adopted names and the deploy record stay as they were.
+    assert record["adopted"]["containers"] == {"web": "old-shop"}
+    for key in ("box", "deployed_at", "result", "plan_id", "last_receipt_sha256"):
+        assert record[key] == before["envs"]["production"][key]
+    assert not lockfile.problems(raw)
+
+
+def test_adopt_records_from_fleet_commit(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    shop = _shop(world, tmp_path)
+    fleet_head = git(world["fleet"], "rev-parse", "HEAD")
+    assert _adopt(world, shop).exit_code == 0
+    raw = _shop_lock(world)
+    assert raw["envs"]["production"]["adopted"]["from_fleet_commit"] == fleet_head
+
+
+def test_adopt_clears_fleet_folder_except_lock(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    shop = _shop(world, tmp_path)
+    assert _adopt(world, shop).exit_code == 0
+    fleet = world["fleet"]
+    assert git(fleet, "ls-files", "projects/shop").splitlines() == ["projects/shop/bay.lock"]
+    assert sorted(p.name for p in shop["folder"].rglob("*") if p.is_file()) == ["bay.lock"]
+    assert git(fleet, "ls-files", "files/shop") == ""
+    assert not (fleet / "files" / "shop" / "legacy.conf").exists()
+    assert git(fleet, "status", "--porcelain", "--", "projects", "files") == ""
+
+
+def test_adopt_commits_both_repos_without_push(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    shop = _shop(world, tmp_path)
+    remote_before = git(shop["remote"], "rev-parse", "main")
+    assert _adopt(world, shop).exit_code == 0
+    app_repo, fleet = shop["app"], world["fleet"]
+    assert git(app_repo, "log", "-1", "--format=%s") == (
+        "chore: add bay.toml (adopted from fleet testfleet)"
+    )
+    changed = git(app_repo, "show", "--name-only", "--format=", "HEAD").splitlines()
+    assert sorted(changed) == ["bay.toml", "deploy/x.yaml", "legacy.conf", "site.conf"]
+    assert git(app_repo, "status", "--porcelain") == ""
+    # Never pushed: the remote is where it was, and the commit is ahead of it.
+    assert git(shop["remote"], "rev-parse", "main") == remote_before
+    assert git(app_repo, "rev-list", "--count", "origin/main..HEAD") == "1"
+    assert git(fleet, "log", "-1", "--format=%s") == f"bay: adopt shop into {shop['remote']}"
+    fleet_changed = git(fleet, "show", "--name-only", "--format=", "HEAD").splitlines()
+    assert sorted(fleet_changed) == [
+        "files/shop/legacy.conf",
+        "projects/shop/bay.lock",
+        "projects/shop/bay.toml",
+        "projects/shop/deploy/x.yaml",
+        "projects/shop/site.conf",
+    ]
+
+
+def test_adopt_prints_plan_hint(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
+    shop = _shop(world, tmp_path)
+    result = _adopt(world, shop)
+    assert result.exit_code == 0, _said(result)
+    said = _said(result)
+    assert "now run `bay plan production`" in said
+    assert "push it before bay up" in said and "`git push`" in said
+    second = _second_in_fleet(world, tmp_path)
+    doc = json.loads(cli(world, "adopt", "board", "--json", cwd=second).stdout)
+    assert doc["next"] == ["git push", "bay plan production", "bay up production"]
+
+
+def _second_in_fleet(world: dict[str, Path], tmp_path: Path) -> Path:
+    """A second in-fleet project ``board`` with no lock, and its app checkout."""
+    base = tmp_path / "second"
+    base.mkdir()
+    remote = base / "board.git"
+    git(base, "init", "-q", "--bare", str(remote))
+    app_repo = base / "board"
+    git(base, "clone", "-q", str(remote), str(app_repo))
+    (app_repo / "README").write_text("board\n")
+    commit_all(app_repo, "app")
+    git(app_repo, "push", "-q", "-u", "origin", "main")
+    folder = world["fleet"] / "projects" / "board"
+    folder.mkdir()
+    (folder / "bay.toml").write_text(_toml("board"))
+    commit_all(world["fleet"], "add board")
+    return app_repo
+
+
+def test_adopt_check_changes_nothing(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
+    shop = _shop(world, tmp_path)
+    fleet_head = git(world["fleet"], "rev-parse", "HEAD")
+    app_head = git(shop["app"], "rev-parse", "HEAD")
+    lock_before = lockfile.lock_path(world["fleet"], "shop").read_bytes()
+    result = _adopt(world, shop, "--check", "--json")
+    assert result.exit_code == 0, _said(result)
+    doc = json.loads(result.stdout)
+    assert doc["check"] is True and doc["app_commit"] is None and doc["fleet_commit"] is None
+    assert {(f["from"], f["to"]) for f in doc["files"]} == {
+        ("projects/shop/bay.toml", "bay.toml"),
+        ("projects/shop/site.conf", "site.conf"),
+        ("projects/shop/deploy/x.yaml", "deploy/x.yaml"),
+        ("files/shop/legacy.conf", "legacy.conf"),
+    }
+    assert any('"from_fleet_commit"' in line for line in doc["lock_diff"])
+    assert any("<the adopt commit>" in line for line in doc["lock_diff"])
+    assert git(world["fleet"], "rev-parse", "HEAD") == fleet_head
+    assert git(shop["app"], "rev-parse", "HEAD") == app_head
+    assert lockfile.lock_path(world["fleet"], "shop").read_bytes() == lock_before
+    assert git(world["fleet"], "status", "--porcelain") == ""
+    assert git(shop["app"], "status", "--porcelain") == ""
+    # The text form prints the same list and says nothing changed.
+    said = _said(_adopt(world, shop, "--check"))
+    assert "would copy files/shop/legacy.conf -> legacy.conf" in said
+    assert "nothing changed" in said
+    assert git(world["fleet"], "rev-parse", "HEAD") == fleet_head
+
+
+def test_adopt_refusals_change_nothing(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    shop = _shop(world, tmp_path)
+    fleet, app_repo = world["fleet"], shop["app"]
+    heads = [git(fleet, "rev-parse", "HEAD"), git(app_repo, "rev-parse", "HEAD")]
+
+    def refused(text: str, *args: str, name: str = "shop", cwd: Path | None = None) -> None:
+        result = cli(world, "adopt", name, *args, cwd=cwd or app_repo)
+        assert result.exit_code != 0, _said(result)
+        assert text in str(result.exception), str(result.exception)
+        assert [git(fleet, "rev-parse", "HEAD"), git(app_repo, "rev-parse", "HEAD")] == heads
+
+    # Not a project of the fleet, or one that already lives in its repo.
+    refused("fleet testfleet has no projects/ghost/bay.toml", name="ghost")
+    refused("it already lives in its repo", name="webapp")
+    # The working directory is no git repo, or has no origin remote.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    refused("is not a git repo", cwd=plain)
+    git(plain, "init", "-q")
+    (plain / "README").write_text("x\n")
+    commit_all(plain, "x")
+    refused("has no origin remote", cwd=plain)
+    # A bay.toml is already there.
+    (app_repo / "bay.toml").write_text("name = 'x'\n")
+    refused("already exists")
+    # The app repo has uncommitted changes.
+    (app_repo / "bay.toml").unlink()
+    (app_repo / "notes.txt").write_text("draft\n")
+    refused("has uncommitted changes")
+    (app_repo / "notes.txt").unlink()
+    # The fleet folder has uncommitted changes.
+    site = shop["folder"] / "site.conf"
+    site.write_text("site: 2\n")
+    refused("projects/shop has uncommitted changes in the fleet")
+    site.write_text("site: 1\n")
+    # The name in bay.toml is not the folder name.
+    toml = shop["folder"] / "bay.toml"
+    toml.write_text(SHOP_TOML.replace('name = "shop"', 'name = "store"'))
+    heads[0] = commit_all(fleet, "rename by hand")
+    refused("name is 'store', not 'shop'")
+    # The fleet changed after bay up pinned the project.
+    toml.write_text(SHOP_TOML.replace('MODE = "one"', 'MODE = "two"'))
+    heads[0] = commit_all(fleet, "undeployed change")
+    refused("changed after bay up pinned it")
+    # The lock names another repo.
+    up = applymod.up(planmod.load_project(cx_of(world), "shop"), planmod.PlanOptions())
+    assert up["result"] == "ok"
+    raw = _shop_lock(world)
+    raw["repo"] = "git@example.com:acme/elsewhere.git"
+    lockfile.write(lockfile.lock_path(fleet, "shop"), raw)
+    heads[0] = commit_all(fleet, "other repo")
+    refused("names repo git@example.com:acme/elsewhere.git, but this checkout's origin is")
+
+
+def test_adopt_golden_compile_is_byte_identical(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    shop = _shop(world, tmp_path)
+    before = _body((world["fleet"] / GENERATED_SERVICES).read_text())
+    assert "{{ stack_dir }}/config/shop/deploy/x.yaml:/etc/shop/x.yaml:ro" in before
+    assert _adopt(world, shop).exit_code == 0
+    git(shop["app"], "push", "-q", "origin", "main")
+    cx = cx_of(world)
+    with planmod.compiled_fleet(cx, cwd=shop["app"]) as comp:
+        assert comp.result is not None, comp.errors
+        assert _body(comp.result.text()) == before
+        for rel, text in {
+            "shop/site.conf": "site: 1\n",
+            "shop/deploy/x.yaml": "x: 1\n",
+            "shop/legacy.conf": "legacy: 1\n",
+            "shared/rules.yaml": "rules: 1\n",
+        }.items():
+            assert (comp.files_root / rel).read_text() == text
+    # The same from anywhere: the fleet's repo cache serves the pushed commit.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    with planmod.compiled_fleet(cx, cwd=elsewhere) as comp:
+        assert comp.result is not None, comp.errors
+        assert _body(comp.result.text()) == before
+
+    proj = planmod.load_project(cx, "shop", cwd=shop["app"])
+    assert proj.in_fleet is False and proj.source == "checkout"
+    plan = planmod.make_plan(proj, planmod.PlanOptions())
+    assert plan["steps"] == [] and plan["verdict"] == "auto", plan
+    assert applymod.show(proj, remote=True)["envs"][0]["status"] == "ok"
+    up = applymod.up(proj, planmod.PlanOptions())
+    assert up["result"] == "ok"
+    assert {c["action"] for c in box.receipts["production"]["containers"]} == {"noop"}
+    assert _body((world["fleet"] / GENERATED_SERVICES).read_text()) == before
+
+
+def test_adopt_build_project_plans_zero_steps(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    from bay_reconcile import tomlhash
+
+    shop = _shop(world, tmp_path, toml=BUILD_SHOP_TOML)
+    before = yaml.safe_load(_body((world["fleet"] / GENERATED_SERVICES).read_text()))
+    assert "bay_toml_hash" not in before["services"]["old-shop"]["build"]
+    assert _adopt(world, shop).exit_code == 0
+    git(shop["app"], "push", "-q", "origin", "main")
+    proj = planmod.load_project(cx_of(world), "shop", cwd=shop["app"])
+    with planmod.compiled_fleet(cx_of(world), cwd=shop["app"]) as comp:
+        assert comp.result is not None, comp.errors
+        after = yaml.safe_load(_body(comp.result.text()))
+    # The toml now lives in the app repo, so the build gains the hold-guard
+    # keys. Nothing else changes, and the container hash leaves build out.
+    build = after["services"]["old-shop"]["build"]
+    assert build.pop("bay_toml_path") == "bay.toml"
+    assert build.pop("bay_toml_hash") == tomlhash.canonical_hash(BUILD_SHOP_TOML.encode())
+    build.pop("bay_toml_files", None)
+    assert after == before
+    plan = planmod.make_plan(proj, planmod.PlanOptions())
+    assert plan["steps"] == [] and plan["verdict"] == "auto", plan
+
+
+def test_adopt_toml_path_monorepo(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
+    shop = _shop(world, tmp_path)
+    before = _body((world["fleet"] / GENERATED_SERVICES).read_text())
+    result = _adopt(world, shop, "--toml-path", "services/shop/bay.toml")
+    assert result.exit_code == 0, _said(result)
+    base = shop["app"] / "services" / "shop"
+    assert (base / "bay.toml").read_text() == SHOP_TOML
+    assert (base / "deploy" / "x.yaml").read_text() == "x: 1\n"
+    assert (base / "legacy.conf").read_text() == "legacy: 1\n"
+    assert not (shop["app"] / "bay.toml").exists()
+    assert _shop_lock(world)["toml_path"] == "services/shop/bay.toml"
+    git(shop["app"], "push", "-q", "origin", "main")
+    with planmod.compiled_fleet(cx_of(world), cwd=shop["app"]) as comp:
+        assert comp.result is not None, comp.errors
+        assert _body(comp.result.text()) == before
+    proj = planmod.load_project(cx_of(world), "shop", cwd=shop["app"])
+    assert planmod.make_plan(proj, planmod.PlanOptions())["steps"] == []
+
+
+def test_rollback_after_adopt_refused(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    shop = _shop(world, tmp_path)
+    toml = shop["folder"] / "bay.toml"
+    toml.write_text(SHOP_TOML.replace('MODE = "one"', 'MODE = "two"'))
+    commit_all(world["fleet"], "shop two")
+    up = applymod.up(planmod.load_project(cx_of(world), "shop"), planmod.PlanOptions())
+    assert up["result"] == "ok"
+    assert _shop_lock(world)["envs"]["production"]["previous"]["commit"]
+    assert _adopt(world, shop).exit_code == 0
+    git(shop["app"], "push", "-q", "origin", "main")
+    fleet_head = git(world["fleet"], "rev-parse", "HEAD")
+
+    result = cli(world, "rollback", cwd=shop["app"])
+    assert result.exit_code != 0
+    message = str(result.exception)
+    assert "the previous pin is a fleet commit; use `bay up --at <commit>`" in message
+    assert git(world["fleet"], "rev-parse", "HEAD") == fleet_head
+    # Still refused after a bay up to the same commit: there is no earlier app pin.
+    assert cli(world, "up", "--json", cwd=shop["app"]).exit_code == 0
+    again = cli(world, "rollback", cwd=shop["app"])
+    assert "the previous pin is a fleet commit" in str(again.exception)
+
+
+def test_up_at_commit(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
+    path = _in_fleet(world)
+    first = git(world["fleet"], "log", "-1", "--format=%H", "--", "projects/status")
+    _edit_in_fleet(path, world, 'MODE = "one"', 'MODE = "two"')
+    anywhere = tmp_path / "anywhere"
+    anywhere.mkdir()
+    result = cli(world, "up", "--project", "status", "--at", first[:12], "--json", cwd=anywhere)
+    assert result.exit_code == 0, _said(result)
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "status"))
+    assert raw is not None
+    assert raw["commit"] == first and raw["envs"]["production"]["commit"] == first
+    assert "MODE: one" in (world["fleet"] / GENERATED_SERVICES).read_text()

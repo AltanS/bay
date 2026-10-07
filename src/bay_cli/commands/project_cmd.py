@@ -1,4 +1,4 @@
-"""The daily verbs: ``bay init``, ``plan``, ``approve``, ``up``, ``rollback`` and ``show``.
+"""The daily verbs: ``bay init``, ``plan``, ``approve``, ``up``, ``rollback``, ``show``, ``adopt``.
 
 Which project and which fleet:
 
@@ -310,6 +310,71 @@ def init(
     for warning in result["warnings"]:
         console.warning(warning)
     console.info("Next: check bay.toml, commit it, then run `bay plan`.")
+
+
+def adopt(
+    ctx: typer.Context,
+    name: Annotated[str, typer.Argument(help="The project that lives in the fleet.")],
+    toml_path: Annotated[
+        str | None,
+        typer.Option(
+            "--toml-path",
+            help="Where bay.toml goes, relative to the repo root (a monorepo). "
+            "Default: bay.toml at the repo root.",
+        ),
+    ] = None,
+    check: Annotated[
+        bool, typer.Option("--check", help="Print the files and the lock change; change nothing.")
+    ] = False,
+    as_json: _JsonOpt = False,
+) -> None:
+    """Move a project's bay.toml and its files from the fleet into this app repo.
+
+    Run it inside a checkout of the app repo, with the fleet named by
+    --fleet, BAY_FLEET or BAY_FLEET_NAME. Copies projects/<name>/bay.toml and
+    every file of the folder here, commits them in this repo (local only:
+    you push it), rewrites the lock to repo form, and commits the fleet
+    without the folder contents (the lock stays). Container, volume,
+    database and config names stay, so the next bay plan shows 0 steps.
+
+    Examples:
+
+        bay --fleet ~/fleets/prod adopt shop
+        bay --fleet ~/fleets/prod adopt api --toml-path services/api/bay.toml
+        bay --fleet ~/fleets/prod adopt shop --check
+    """
+    from bay_cli import adopt as adoptmod
+
+    try:
+        cx = fleet_context(ctx, None)
+        result = adoptmod.adopt(cx, Path.cwd(), name, toml_path=toml_path, check=check)
+    except BayError as exc:
+        if not as_json:
+            raise
+        _json_error(exc)
+    if as_json:
+        _echo_json(result)
+        return
+    verb = "would copy" if check else "copied"
+    for item in result["files"]:
+        console.info(f"{verb} {item['from']} -> {item['to']}")
+    gone = "would remove" if check else "removed"
+    for path in result["removed"]:
+        console.info(f"{gone} {path} from the fleet")
+    for path in result["kept"]:
+        console.info(f"kept {path} in the fleet: another fleet entry reads it")
+    typer.echo("\n".join(result["lock_diff"]))
+    if check:
+        console.info("check only: nothing changed")
+        return
+    console.success(
+        f"app commit {result['app_commit'][:12]} in {result['repo_root']} (local: push it "
+        "before bay up)"
+    )
+    console.success(f"fleet commit {result['fleet_commit'][:12]}: {name} adopted")
+    push, plan_cmd, up_cmd = result["next"]
+    console.info(f"Next: `{push}` in the app repo (the box does nothing for it).")
+    console.info(f"Then: now run `{plan_cmd}` (it must show 0 steps), then `{up_cmd}`.")
 
 
 def plan(

@@ -915,6 +915,30 @@ def _changed_keys(old: Mapping[str, Any], new: Mapping[str, Any]) -> list[str]:
     return sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
 
 
+#: Build keys that only the build side reads (the hold guard, docs/plan.md).
+#: The container hash leaves the whole ``build`` table out, so a change of
+#: these alone recreates nothing; ``bay up`` still writes them to the box.
+_HOLD_KEYS = ("bay_toml_hash", "bay_toml_path", "bay_toml_files")
+
+
+def _hold_only(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
+    """True when two entries differ only in the hold-guard keys of ``build``.
+
+    That is the case right after ``bay adopt``: the bay.toml moved into the
+    app repo, so the build gains the hash of the file, and nothing else
+    changes.
+    """
+
+    def strip(entry: Mapping[str, Any]) -> dict[str, Any]:
+        out = dict(entry)
+        build = out.get("build")
+        if isinstance(build, Mapping):
+            out["build"] = {k: v for k, v in build.items() if k not in _HOLD_KEYS}
+        return out
+
+    return strip(old) == strip(new)
+
+
 def _container_steps(
     name: str,
     old: dict[str, Any] | None,
@@ -1116,7 +1140,7 @@ def diff_steps(
     steps: list[dict[str, Any]] = []
     for name in sorted(set(old_all) | set(new_all)):
         old, new = old_all.get(name), new_all.get(name)
-        if old == new:
+        if old == new or (old is not None and new is not None and _hold_only(old, new)):
             continue
         if name in resources:
             if new is None:
