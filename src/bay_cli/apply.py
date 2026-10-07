@@ -497,7 +497,9 @@ def _apply_plan(
         for b in stale_boxes
     ]
     for move in moves.values():
-        notes.extend(planmod.move_notes(move))
+        notes.extend(
+            planmod.move_notes(move, planmod.stack_name(cx, move.get("from_box_env")))
+        )
     for note in notes:
         say(f"note: {note}")
     try:

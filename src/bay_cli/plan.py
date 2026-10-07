@@ -1732,10 +1732,39 @@ def move_record(
     }
 
 
-def _left_behind(move: Mapping[str, Any]) -> str:
+def stack_name(cx: Context, box_env: str | None) -> str:
+    """The stack name on the boxes of ``box_env``: the prefix of every Docker volume.
+
+    The deploy names a volume ``<stack_name>_<volume>`` (``bay_prefix_volumes``).
+    ``stack_name`` comes from ``group_vars/<box_env>/`` when set there, else
+    ``group_vars/all/``, else ``bay`` (the templates' default).
+    """
+    import yaml
+
+    for env in ([box_env] if box_env else []) + ["all"]:
+        folder = cx.env_dir(env)
+        files = sorted([*folder.glob("*.yml"), *folder.glob("*.yaml")]) if folder.is_dir() else []
+        for path in files:
+            if path.name.startswith(("secrets", "vault")) or path.name == "services.yml":
+                continue
+            try:
+                data = yaml.safe_load(path.read_text())
+            except (OSError, yaml.YAMLError):
+                continue
+            if isinstance(data, dict) and isinstance(data.get("stack_name"), str):
+                return data["stack_name"]
+    return "bay"
+
+
+def _volume_names(move: Mapping[str, Any], stack: str | None) -> list[str]:
+    """The move's volumes as Docker names on the box: ``<stack>_<volume>``."""
+    return [f"{stack}_{v}" if stack else str(v) for v in move["volumes"]]
+
+
+def _left_behind(move: Mapping[str, Any], stack: str | None = None) -> str:
     parts = []
     if move["volumes"]:
-        parts.append("volumes " + ", ".join(move["volumes"]))
+        parts.append("volumes " + ", ".join(_volume_names(move, stack)))
     if move["databases"]:
         parts.append("database " + ", ".join(d["name"] for d in move["databases"]))
     return " and ".join(parts)
@@ -1789,18 +1818,22 @@ def move_blocker(move: Mapping[str, Any]) -> str | None:
     )
 
 
-def move_notes(move: Mapping[str, Any]) -> list[str]:
-    """With ``--data keep``: what stays on the old box, and how to remove it later by hand."""
+def move_notes(move: Mapping[str, Any], stack: str | None = None) -> list[str]:
+    """With ``--data keep``: what stays on the old box, and how to remove it later by hand.
+
+    ``stack`` is the stack name of the old box (:func:`stack_name`): the
+    volumes are named as Docker knows them there, ``<stack>_<volume>``.
+    """
     if move.get("data") != DATA_KEEP or move["risk"] != "destructive":
         return []
     out = [
-        f"after the move, {_left_behind(move)} of {move['project']} stay on box "
+        f"after the move, {_left_behind(move, stack)} of {move['project']} stay on box "
         f"{move['from']}; Bay never removes them"
     ]
     if move["volumes"]:
         out.append(
             f"to remove them later on box {move['from']}: docker volume rm "
-            + " ".join(move["volumes"])
+            + " ".join(_volume_names(move, stack))
         )
     for db in move["databases"]:
         out.append(
@@ -2082,6 +2115,7 @@ def _apply_moves(
     steps: list[dict[str, Any]],
     blockers: list[str],
     notes: list[str],
+    cx: Context,
 ) -> list[dict[str, Any]]:
     """Put each move's steps first; a destructive move without ``--data keep`` blocks."""
     lead: list[dict[str, Any]] = []
@@ -2090,7 +2124,7 @@ def _apply_moves(
         blocker = move_blocker(move)
         if blocker:
             blockers.append(blocker)
-        notes.extend(move_notes(move))
+        notes.extend(move_notes(move, stack_name(cx, move.get("from_box_env"))))
     return lead + steps
 
 
@@ -2221,7 +2255,7 @@ def make_plan(
         )
         if move is not None:
             moves.append(move)
-    steps = _apply_moves(moves, diff.steps, blockers, notes)
+    steps = _apply_moves(moves, diff.steps, blockers, notes, cx)
 
     plan: dict[str, Any] = {
         "plan_version": PLAN_VERSION,
@@ -2452,7 +2486,7 @@ def make_env_plan(
         )
         if move is not None:
             moves.append(move)
-    steps = _apply_moves(moves, diff.steps, blockers, notes)
+    steps = _apply_moves(moves, diff.steps, blockers, notes, cx)
 
     plan: dict[str, Any] = {
         "plan_version": PLAN_VERSION,

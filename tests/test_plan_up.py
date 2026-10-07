@@ -2640,7 +2640,18 @@ def test_data_keep_unblocks_move_and_data_move_refused(
     assert (plan["verdict"], plan["exit_code"]) == ("approve", 10)
     assert plan["moves"][0]["data"] == "keep"
     notes = " ".join(plan["notes"])
-    assert "docker volume rm webapp-data" in notes and "DROP DATABASE webapp" in notes
+    # The volume as Docker names it on the old box: <stack_name>_<volume>.
+    assert "docker volume rm testfleet_webapp-data" in notes and "DROP DATABASE webapp" in notes
+    assert "after the move, volumes testfleet_webapp-data and database webapp" in notes
+    # A stack name set for the box env wins over group_vars/all.
+    (world["fleet"] / "group_vars" / "production" / "main.yml").write_text(
+        "---\nstack_name: prodstack\n"
+    )
+    assert planmod.stack_name(cx_of(world), "production") == "prodstack"
+    assert planmod.stack_name(cx_of(world), "nowhere") == "testfleet"
+    assert planmod.move_notes(plan["moves"][0], "prodstack")[1].endswith(
+        "docker volume rm prodstack_webapp-data"
+    )
 
     with pytest.raises(BayError, match="deferred"):
         make(world, data="move")

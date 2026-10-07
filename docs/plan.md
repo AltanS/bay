@@ -313,7 +313,10 @@ the project are removed (a `remove` step, so `bay approve` is still needed).
 The old volumes and the old database stay untouched on the old box. Bay never
 removes them. The plan lists them by name in `moves` and in `notes`, with the
 `docker volume rm <name>` and `DROP DATABASE <name>;` lines to run by hand
-later, when you no longer need the data.
+later, when you no longer need the data. The notes name a volume as Docker
+knows it on the old box, `<stack_name>_<volume>`: `stack_name` from
+`group_vars/<box env>/`, else `group_vars/all/`, else `bay`. The `volumes`
+list in `moves` keeps the bare name.
 
 **`--data move` is deferred.** Bay does not copy volumes or databases between
 boxes yet, and refuses the flag. Copy the data yourself (backup on the old
