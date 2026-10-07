@@ -386,7 +386,8 @@ def _apply_plan(
         services = _write_services(cx, comp.result.text())
         compiled_commits = dict(comp.commits)
         left_out = list(comp.unpinned)
-        # Only a one-project plan carries code.keep (branch mode, newer code runs).
+        # code.keep: build containers that run code newer than their pin
+        # (branch mode); both the one-project and the whole-env plan carry it.
         keep = set((plan.get("code") or {}).get("keep") or [])
         code_targets: dict[str, dict[str, Any]] = {}
         for proj, commit in members:
@@ -494,8 +495,8 @@ def _apply_plan(
         for name in left_out
     ]
     notes += [
-        f"{name} runs code newer than {members[0][1][:12]}; bay up kept that code and "
-        "applied the config only"
+        f"{name} runs code newer than its pin; bay up kept that code and applied the "
+        "config only"
         for name in sorted(keep)
         if name not in code_targets
     ]

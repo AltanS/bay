@@ -162,7 +162,9 @@ needing manual action is called out under **Upgrade notes**. Entries for
 - In branch mode `bay up` applies config at the pin and moves code only
   forward. When the box runs a commit newer than the pin, `:latest` stays and
   only the config changes (plan field `code.keep`). So a `bay up` from a stale
-  checkout never moves the running code to an older image. When Bay cannot
+  checkout never moves the running code to an older image. The
+  whole-environment plan (`bay plan <env>`, `bay up <env>`) runs the same check
+  per project and carries the union in `code.keep`. When Bay cannot
   order the two commits, `bay up` refuses: "cannot order <pin> and <running>;
   fetch the repo or pass --force-code". `--force-code` (on `bay plan` and
   `bay up`) moves the code anyway, as a destructive `image` step. Pin mode and

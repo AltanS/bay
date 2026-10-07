@@ -2165,9 +2165,10 @@ def make_plan(
     # WANTED
     wanted = read_wanted(proj, opts.at)
     blockers.extend(wanted.problems)
-    adopt_commit = adopt_pending(proj, env, wanted.commit)
     if wanted.commit and not wanted.problems and commit_on_remote(proj, wanted.commit) is not True:
-        notes.append(_unpushed_note(proj, wanted.commit, adopt_commit))
+        notes.append(
+            _unpushed_note(proj, wanted.commit, adopt_pending(proj, env, wanted.commit))
+        )
     if wanted.dirty:
         notes.append(
             f"the project has uncommitted changes; the plan uses commit "
@@ -2222,39 +2223,9 @@ def make_plan(
             check_box=check_box,
             fleet_doc=proj.fleet,
         )
-    built = {
-        n
-        for n in env_names
-        if "build" in ((diff.wanted_data.get("services") or {}).get(n) or {})
-        or "build" in ((diff.wanted_data.get("accessories") or {}).get(n) or {})
-    }
     keep: list[str] = []
-    if wanted.doc is not None and receipt_entries:
-        from bay_cli import bay_toml
-
-        # Only build containers carry this project's code; a pulled image's
-        # revision label names someone else's repo.
-        commits = {
-            name: c
-            for name, c in running_commits(receipt_entries, env_names).items()
-            if name in built
-        }
-        code = code_status(
-            commits,
-            project=proj.name,
-            track=bay_toml.track(wanted.doc, env),
-            in_fleet=proj.in_fleet,
-            pinned_commit=pinned_commit,
-            wanted_commit=wanted.commit,
-            frozen=(proj.lock.get("envs") or {}).get(env),
-            # The adopt commit moves no code (bay up passes no code target).
-            order=_code_orderer(proj) if opts.code_order and not adopt_commit else None,
-            force_code=opts.force_code,
-        )
-        explained = {str(s["container"]) for s in diff.steps if s["container"]}
-        diff.steps.extend(
-            s for s in code.steps if s["risk"] == "destructive" or s["container"] not in explained
-        )
+    code = project_code(proj, wanted, env, env_names, diff, receipt_entries, opts)
+    if code is not None:
         notes.extend(code.info)
         blockers.extend(code.blockers)
         keep = code.keep
@@ -2317,6 +2288,57 @@ def make_plan(
         # Hashed: it changes what bay up does with the code.
         plan["code"] = {"keep": keep}
     return _finish(cx, plan, state, proj.fleet, diff.box_checked, place.box_env)
+
+
+def project_code(
+    proj: ProjectRef,
+    wanted: Wanted,
+    env: str,
+    env_names: set[str],
+    diff: _Diff,
+    receipt_entries: list[dict[str, Any]],
+    opts: PlanOptions,
+) -> CodeStatus | None:
+    """:func:`code_status` for one project of a plan; its code steps go into ``diff.steps``.
+
+    The one-project plan and the whole-environment plan both call this, so a
+    ``bay up <env>`` moves code only forward exactly as ``bay up`` of one
+    project does. None when there is no WANTED document or no receipt.
+    """
+    if wanted.doc is None or not receipt_entries:
+        return None
+    from bay_cli import bay_toml
+
+    built = {
+        n
+        for n in env_names
+        if "build" in ((diff.wanted_data.get("services") or {}).get(n) or {})
+        or "build" in ((diff.wanted_data.get("accessories") or {}).get(n) or {})
+    }
+    # Only build containers carry this project's code; a pulled image's
+    # revision label names someone else's repo.
+    commits = {
+        name: c for name, c in running_commits(receipt_entries, env_names).items() if name in built
+    }
+    code = code_status(
+        commits,
+        project=proj.name,
+        track=bay_toml.track(wanted.doc, env),
+        in_fleet=proj.in_fleet,
+        pinned_commit=lockfile.env_pin(proj.lock, env),
+        wanted_commit=wanted.commit,
+        frozen=(proj.lock.get("envs") or {}).get(env),
+        # The adopt commit moves no code (bay up passes no code target).
+        order=_code_orderer(proj)
+        if opts.code_order and not adopt_pending(proj, env, wanted.commit)
+        else None,
+        force_code=opts.force_code,
+    )
+    explained = {str(s["container"]) for s in diff.steps if s["container"]}
+    diff.steps.extend(
+        s for s in code.steps if s["risk"] == "destructive" or s["container"] not in explained
+    )
+    return code
 
 
 def _services_blockers(state: str, blockers: list[str]) -> None:
@@ -2462,7 +2484,7 @@ def make_env_plan(
     box = next(iter(boxes_used)) if len(boxes_used) == 1 else None
     all_names = set().union(*env_names.values()) if env_names else set()
 
-    running, _ = _read_running(cx, opts, box_env, all_names, notes, read_receipts)
+    running, receipt_entries = _read_running(cx, opts, box_env, all_names, notes, read_receipts)
 
     diff = _Diff()
     if members and not any(w.problems for _, w in members):
@@ -2484,6 +2506,15 @@ def make_env_plan(
             check_box=check_box,
             fleet_doc=fleet_doc,
         )
+    # Code against config, per project, as the one-project plan does it.
+    keep: list[str] = []
+    for proj, wanted in members:
+        code = project_code(proj, wanted, env, env_names[proj.name], diff, receipt_entries, opts)
+        if code is None:
+            continue
+        notes.extend(f"{proj.name}: {line}" for line in code.info)
+        blockers.extend(f"{proj.name}: {line}" for line in code.blockers)
+        keep.extend(code.keep)
     moves: list[dict[str, Any]] = []
     for proj, _ in members:
         place = placements[proj.name]
@@ -2541,6 +2572,9 @@ def make_env_plan(
     }
     if moves:
         plan["moves"] = moves
+    if keep:
+        # Hashed: it changes what bay up does with the code.
+        plan["code"] = {"keep": sorted(keep)}
     return _finish(cx, plan, state, fleet_doc, diff.box_checked, box_env)
 
 

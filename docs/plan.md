@@ -697,7 +697,12 @@ commit), with `git merge-base --is-ancestor`:
 of kind `image`, action `update`, risk `destructive`: the code moves to the pin
 even when it may be older than what runs. Like any destructive step it needs
 `bay approve` or `--force --reason`. So a `bay up` from a stale checkout never
-moves the running code to an older image.
+moves the running code to an older image. That holds for a whole-environment
+`bay up <env>` too: its plan runs the same check per project, prefixes the
+notes and blockers with the project name, and carries the union of the kept
+containers in `code.keep`. Two exceptions move code backwards on purpose:
+`pin` mode and `bay rollback` (below). The `bay adopt` commit moves no code
+at all.
 
 In `pin` mode the code follows the pin exactly, backwards included: that is
 what `pin` means. `bay rollback` also skips the order check, because it moves

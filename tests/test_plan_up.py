@@ -3105,6 +3105,34 @@ def test_branch_mode_up_never_moves_code_backwards(
     assert seen[-1] == {"webapp": {"commit": pin, "strict": True}}
 
 
+def test_env_plan_keeps_newer_running_code(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S1: a whole-environment bay up from a stale checkout never moves code backwards."""
+    seen = _code_deploys(monkeypatch, box)
+    _build_app(world)
+    assert do_up(world)["result"] == "ok"
+    config = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    stale = world["app"].parent / "stale"
+    git(world["app"].parent, "clone", "-q", str(world["remote"]), str(stale))
+    code = _push_code(world, "v2")
+    _stamp(box, "webapp", code)
+
+    cx = cx_of(world)
+    plan = planmod.make_env_plan(cx, planmod.PlanOptions(), cwd=stale)
+    assert plan["project"] is None
+    assert plan["code"] == {"keep": ["webapp"]}
+    assert f"webapp: code at {code[:12]}, config pinned at {config[:12]}" in plan["notes"]
+    jsonschema.validate(plan, PLAN_SCHEMA)
+
+    up = applymod.up_env(cx, planmod.PlanOptions(), cwd=stale)
+    assert up["result"] == "ok"
+    assert lock_of(world)["envs"]["production"]["commit"] == config
+    # The running code stays: no code target, :latest is not touched.
+    assert up["code_targets"] == {} and not seen[-1]
+    assert any(n.startswith("webapp runs code newer than its pin") for n in up["notes"])
+
+
 def test_branch_mode_up_releases_held_build_forward(
     world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
