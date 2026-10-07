@@ -8,6 +8,19 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.1.7] - 2026-10-07
+
+Docs only. Reader round 7: fourteen places where two docs stated different facts.
+
+- Circuit breaker: the README says 5 consecutive failures by default (`git_deploy_cb_max_failures`). `bay build` takes the fleet from `--fleet` or `BAY_FLEET`, not from the directory you stand in.
+- Prune cron: every doc names `docker system prune -af --volumes` and says it keeps named volumes (on Docker Engine 23 and later it removes only anonymous ones), so `--data keep` and `bay remove` volumes stay.
+- "Full deploy" is gone: the docs say "`bay deploy <env>` with no `--tags`" for the untagged run, and "every deploy that reaches the container pass" for the `.prev.json` rotation. deploy-receipt.md names the verbs that rotate it.
+- Webhook: the hook URL is `https://<webhook domain>/webhook/<container name>`. `bay deploy <env>` installs the receiver and trigger and makes the deploy key on the box; you add the key to GitHub. `bay webhook` is marked as the v1 form.
+- `services.yml` is generated: install.md, layout-scenarios.md and onboarding.md no longer tell you to edit it or copy it from `example/`.
+- Multi-region: a deploy aimed at a group writes `<group>.json`, which `bay status` and `bay plan` do not read. Use `bay deploy <env> -- --limit <group>`.
+- Quick start: commit the new fleet before `bay init`. install.md says what `bay fleet init` writes.
+- bay-toml.md: `dockerfile` and `context` are relative to the repo root, `track = "pin"` holds each push with `build.held`, and the old mounts fallback stays until a release removes it. plan.md states WANTED as two cases.
+
 ## [2.1.6] - 2026-10-07
 
 Docs only. Reader round 6: nineteen points that confused two new readers.
