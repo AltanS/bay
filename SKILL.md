@@ -163,13 +163,10 @@ to reproduce it. The flags that change what a command *means*:
 - `bay server inspect [env]` — Inspect live network configuration from servers via SSH.
 - `bay server list [env]` — List servers from the inventory.
 - `bay server remove <ip>` — Remove a server from the inventory.
-- `bay service` — Manage services and accessories in services.yml.
-- `bay service add [catalog_id]` — Add a service or accessory from the catalog or a custom definition.
+- `bay service` — List services, show the catalog, and prune orphan GitHub webhooks.
 - `bay service catalog` — List available service/accessory definitions from the catalog.
-- `bay service edit <name>` — Edit an existing service's configuration in services.yml.
 - `bay service list` — List all configured services and accessories.
 - `bay service prune-webhooks <repo>` — List and optionally delete orphan GitHub webhooks for a repository.
-- `bay service remove <name>` — Remove a service or accessory from services.yml.
 - `bay service show <name>` — Show the full configuration for a service or accessory.
 
 ### Vault

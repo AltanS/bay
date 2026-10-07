@@ -1,10 +1,8 @@
-"""Config read/write layer — comment-preserving YAML round-trips via ruamel.yaml."""
+"""Config read layer: comment-preserving YAML reads of the fleet's group_vars files via ruamel.yaml."""
 
 from __future__ import annotations
 
 import copy
-import difflib
-from io import StringIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -84,18 +82,6 @@ class StackConfig:
             raise BayError(f"Not a valid YAML mapping: {path}")
         return data
 
-    def load_gateway(self) -> dict[str, Any]:
-        """Load access gateway config from group_vars/all/access_gateway.yml."""
-        path = self._root / "group_vars" / "all" / "access_gateway.yml"
-        if not path.is_file():
-            # vpn_access.yml is the legacy name
-            path = self._root / "group_vars" / "all" / "vpn_access.yml"
-        if not path.is_file():
-            return {}
-        with path.open() as f:
-            data = self._yaml.load(f)
-        return dict(data) if isinstance(data, dict) else {}
-
     def load_domains(self, env: str = "production") -> dict[str, Any]:
         """Load domain config from group_vars/<env>/domains.yml."""
         path = self._root / "group_vars" / env / "domains.yml"
@@ -160,86 +146,6 @@ class StackConfig:
             if isinstance(block, dict) and name in block:
                 return dict(block[name])
         return None
-
-    # ── Mutations (copy-on-write) ────────────────────────────────────
-
-    def add_service(self, name: str, block: dict[str, Any], category: str = "service") -> None:
-        """Add a service or accessory to the working copy.
-
-        Idempotent: if name already exists, this is a no-op.
-        Handles ``services: {}`` → populated mapping transition.
-        """
-        self._ensure_loaded()
-        section = "services" if category == "service" else "accessories"
-        current = self._working.get(section)  # type: ignore[union-attr]
-
-        cm_type = _commented_map()
-        if not isinstance(current, cm_type):
-            # Section doesn't exist or is empty scalar — create it
-            current = cm_type()
-            self._working[section] = current  # type: ignore[index]
-
-        if name in current:
-            return  # idempotent
-
-        # Convert block to CommentedMap for proper YAML output
-        current[name] = self._to_commented(block)
-
-    def remove_service(self, name: str) -> bool:
-        """Remove a service or accessory from the working copy.
-
-        Returns True if removed, False if not found (idempotent).
-        """
-        self._ensure_loaded()
-        for section in ("services", "accessories"):
-            block = self._working.get(section)  # type: ignore[union-attr]
-            if isinstance(block, dict) and name in block:
-                del block[name]
-                return True
-        return False
-
-    def update_service(self, name: str, changes: dict[str, Any]) -> None:
-        """Patch specific keys on a service/accessory in the working copy.
-
-        Only the keys present in *changes* are updated; all other keys
-        are preserved. Raises BayError if the service does not exist.
-        """
-        self._ensure_loaded()
-        for section in ("services", "accessories"):
-            block = self._working.get(section)  # type: ignore[union-attr]
-            if isinstance(block, dict) and name in block:
-                svc = block[name]
-                for key, value in changes.items():
-                    svc[key] = self._to_commented(value) if isinstance(value, dict) else value
-                return
-        raise BayError(f"Service or accessory '{name}' not found in services.yml")
-
-    # ── Diff & Save ──────────────────────────────────────────────────
-
-    def diff(self) -> str:
-        """Return a unified diff of original vs working copy."""
-        self._ensure_loaded()
-        original_text = self._dump_to_string(self._original)
-        working_text = self._dump_to_string(self._working)
-
-        diff_lines = difflib.unified_diff(
-            original_text.splitlines(keepends=True),
-            working_text.splitlines(keepends=True),
-            fromfile=str(self._services_path),
-            tofile=str(self._services_path),
-        )
-        return "".join(diff_lines)
-
-    def save(self) -> None:
-        """Write the working copy back to services.yml."""
-        self._ensure_loaded()
-        with self._services_path.open("w") as f:
-            self._yaml.dump(self._working, f)
-
-    def has_changes(self) -> bool:
-        """Check if there are unsaved changes."""
-        self._ensure_loaded()
-        return self._dump_to_string(self._original) != self._dump_to_string(self._working)
 
     # ── Multi-Region Detection ───────────────────────────────────────
 
@@ -369,22 +275,3 @@ class StackConfig:
                 with main_yml.open() as f:
                     merged.update(scalars(self._yaml.load(f)))
         return {env: merged} if merged else {}
-
-    # ── Helpers ───────────────────────────────────────────────────────
-
-    def _dump_to_string(self, data: Any) -> str:
-        buf = StringIO()
-        self._yaml.dump(data, buf)
-        return buf.getvalue()
-
-    def _to_commented(self, obj: Any) -> Any:
-        """Recursively convert plain dicts to CommentedMap for YAML output."""
-        cm_type = _commented_map()
-        if isinstance(obj, dict) and not isinstance(obj, cm_type):
-            cm = cm_type()
-            for k, v in obj.items():
-                cm[k] = self._to_commented(v)
-            return cm
-        if isinstance(obj, list):
-            return [self._to_commented(item) for item in obj]
-        return obj

@@ -87,17 +87,6 @@ class BayError(Exception):
         return cls(message, code=ErrorCode.CONFIG_ERROR, hint=hint)
 
     @classmethod
-    def dependency(cls, service: str, dependents: list[str]) -> BayError:
-        """Cannot remove due to dependents."""
-        deps = ", ".join(dependents)
-        return cls(
-            f"Cannot remove '{service}' — required by: {deps}",
-            code=ErrorCode.DEPENDENCY_ERROR,
-            field=service,
-            hint=f"Remove {deps} first, or use --force",
-        )
-
-    @classmethod
     def remote(cls, message: str, *, hint: str | None = None) -> BayError:
         """Remote operation failed."""
         return cls(message, code=ErrorCode.REMOTE_ERROR, hint=hint)

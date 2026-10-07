@@ -51,9 +51,6 @@ MUTATING_VERBS: frozenset[str] = frozenset(
         "vault encrypt",
         "vault decrypt",
         "vault set",
-        "service add",
-        "service edit",
-        "service remove",
         "service prune-webhooks",
         "server add",
         "server remove",
@@ -122,8 +119,7 @@ QUIET_VERBS: frozenset[str] = frozenset(
 
 #: Verbs that fall back to the working directory as the fleet (``context_or_cwd``).
 _CWD_IS_FLEET = frozenset(
-    {"service add", "service edit", "service remove", "service prune-webhooks",
-     "server add", "server remove"}
+    {"service prune-webhooks", "server add", "server remove"}
 )
 #: Verbs that also find a fleet directory at or above the working directory.
 _FLEET_DIR_ABOVE = frozenset({"plan", "up", "approve", "remove"})

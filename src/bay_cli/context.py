@@ -299,8 +299,8 @@ def _fleet_is_explicit(ctx: typer.Context | None) -> bool:
 def context_or_cwd(ctx: typer.Context | None) -> Context:
     """Like :func:`context_from`, but a project-less directory means "here".
 
-    For the commands that edit ``services.yml`` and work before any fleet is
-    set up (``bay service add`` in a fresh directory). A fleet the operator
+    For the commands that edit fleet files by hand-run verbs and work before any
+    fleet is set up (``bay server add`` in a fresh directory). A fleet the operator
     named on purpose (``--fleet``, ``BAY_FLEET``, ``BAY_FLEET_NAME``, or the
     ``fleet`` of a bay.toml) is never replaced by the working directory: that
     error is raised.

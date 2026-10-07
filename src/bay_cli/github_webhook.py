@@ -2,7 +2,7 @@
 
 This module owns all GitHub webhook API calls, URL parsing, and probe logic
 used by both ``bay validate --check-webhook-health`` and
-``bay service prune-webhooks`` / ``bay service remove``.
+``bay service prune-webhooks``.
 
 Token values are NEVER included in any log or error message — only vault key
 names are referenced.
