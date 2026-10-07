@@ -907,7 +907,10 @@ Bay refuses, before it changes anything, when:
 - `projects/<name>/`, or a `files/` copy that a mount reads, has uncommitted
   changes in the fleet;
 - `name` in the `bay.toml` is not `<name>`, or the `bay.toml` is not valid;
-- the lock names another `repo` than the checkout's `origin`;
+- the `[build] repo` in the fleet's `bay.toml` names another repo than the checkout's `origin`.
+  When the key is absent, the lock `repo` must be the checkout's `origin` instead. When
+  `[build] repo` matches `origin` but the lock names a different repo, Bay refuses too, and the
+  message names both repos;
 - the fleet changed `projects/<name>/` after `bay up` pinned it (WANTED is not
   PINNED). Run `bay up` first, so the adopt moves exactly what runs;
 - an environment is frozen by `bay rollback`;
@@ -927,10 +930,12 @@ What it does:
    `chore: add bay.toml (adopted from fleet <fleet>)`. It stays local. You
    push it after `bay up`, which accepts this one commit unpushed.
 3. **Lock.** `projects/<name>/bay.lock` takes the repo form. A lock of a project in the
-   fleet has `repo: null`, or a clone URL when the project builds from source. `repo` becomes
-   the `origin` URL when the lock had `null` (or no lock), and stays the lock's own string when it
-   already named this repo (so the compiled build entry does not change). A lock that names another repo
-   is refused. The lock also gets
+   fleet has `repo: null`, or a clone URL when the project builds from source. `repo` is the
+   `[build] repo` of the `bay.toml` when it sets one (it matches `origin`, or Bay refused). With
+   no such key, `repo` stays the lock's own string when it already named this repo, so the
+   compiled build entry does not change. With neither, it becomes the `origin` URL. A lock that
+   names another repo is refused. The adopted `bay.toml` has no `[build] repo`.
+   The lock also gets
    `toml_path` and `commit` (the app commit). Every environment with a pin
    moves its `commit` to the app commit. Every environment gets
    `adopted.from_fleet_commit` (the fleet HEAD before the adopt) and

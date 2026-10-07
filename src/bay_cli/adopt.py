@@ -219,6 +219,19 @@ def _prepare(cx: Context, cwd: Path, name: str, toml_path: str | None) -> AdoptP
             code=ErrorCode.CONFLICT,
             hint="Run bay adopt in a checkout of the repo that [build] names.",
         )
+    if (
+        toml_repo
+        and raw.get("repo")
+        and not reposource.same_repo(str(raw["repo"]), str(toml_repo))
+    ):
+        # The adopt would overwrite the lock repo with [build] repo. Refuse, so
+        # no one repoints a build by accident.
+        raise BayError(
+            f"{toml_rel_fleet} names [build] repo {toml_repo}, but {folder}/{LOCK_FILE} names "
+            f"repo {raw['repo']}",
+            code=ErrorCode.CONFLICT,
+            hint="Make the two name the same repo (fix [build] repo or the lock), then adopt.",
+        )
     if not toml_repo and raw.get("repo") and not reposource.same_repo(str(raw["repo"]), origin):
         raise BayError(
             f"{folder}/{LOCK_FILE} names repo {raw['repo']}, but this checkout's origin is "

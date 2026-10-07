@@ -3914,6 +3914,26 @@ def test_in_fleet_build_project_repo_from_toml_adopt_refuses_other_origin(
     assert _shop_lock(world)["repo"] is None and (shop["folder"] / "bay.toml").is_file()
 
 
+def test_adopt_refuses_build_repo_that_differs_from_the_lock_repo(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    """``[build] repo`` matches origin but the lock names another repo: refuse, name both."""
+    shop = _shop(world, tmp_path, toml=BUILD_REPO_SHOP_TOML)
+    raw = _shop_lock(world)
+    raw["repo"] = "https://example.com/acme/other.git"
+    lockfile.write(lockfile.lock_path(world["fleet"], "shop"), raw)
+    commit_all(world["fleet"], "lock names another repo")
+    result = _adopt(world, shop)
+    said = _said(result) + str(result.exception)
+    assert result.exit_code != 0
+    assert str(shop["remote"]) in said and "https://example.com/acme/other.git" in said
+    assert "[build] repo" in said and "bay.lock" in said
+    # Nothing changed: the lock keeps its repo and the fleet folder keeps its toml.
+    assert _shop_lock(world)["repo"] == "https://example.com/acme/other.git"
+    assert (shop["folder"] / "bay.toml").is_file()
+    assert not (shop["app"] / "bay.toml").exists()
+
+
 def test_up_accepts_unpushed_adopt_commit_without_code_move(
     world: dict[str, Path], tmp_path: Path, box: FakeBox
 ) -> None:

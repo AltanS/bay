@@ -421,7 +421,7 @@ domain = "deploy.example.com"
 secret = "WEBHOOK_SECRET"   # a secret name; the value is in the encrypted secrets file
 ```
 
-The repo URL comes from the project's lock (`bay init` writes it from `git remote get-url origin`). `bay compile` turns all of this into the `build:` and `webhook:` blocks below. That is the compiled form: do not edit it, write `bay.toml` or `bay.fleet.toml` instead.
+The repo URL comes from the project's lock (`bay init` writes it from `git remote get-url origin`). A project that lives in the fleet may set `[build] repo` in its `bay.toml` instead, and the compile prefers that key over the lock. `bay adopt` checks `[build] repo` against `origin`, writes it into the lock, and leaves it out of the `bay.toml` it moves to the app repo. `bay compile` turns all of this into the `build:` and `webhook:` blocks below. That is the compiled form: do not edit it, write `bay.toml` or `bay.fleet.toml` instead.
 
 ```yaml
 # compiled form (group_vars/all/services.yml), do not edit
