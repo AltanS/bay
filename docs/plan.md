@@ -246,6 +246,7 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
 
 1. Bay plans again. With `--plan-id`, Bay checks the saved plan: it is
    `stale` when the lock, the box receipt or any other plan input moved.
+   `bay up --plan-id` plans again with the same box check the saved plan used.
 2. Bay refuses `blocked` (exit 20) and `stale` (exit 30). Bay refuses
    `approve` (exit 10) unless an approval matches. `--force --reason "<why>"`
    overrides `approve` only, never `blocked` or `stale`. The reason goes into
@@ -410,7 +411,8 @@ know.
   from the box prediction.
 - `box_prediction` is empty without `--remote`.
 - `plan_sha256` is the SHA-256 of the plan without `plan_id`, `plan_sha256`,
-  `created_at`, `verdict`, `exit_code`, `approval` and `stale`. `plan_id` is
+  `created_at`, `verdict`, `exit_code`, `approval`, `stale` and `notes`
+  (notes are text for the reader and never change a deploy). `plan_id` is
   its first 12 hex digits. The same inputs give the same id.
 - A plan holds secret names, never values.
 

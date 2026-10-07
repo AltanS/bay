@@ -133,6 +133,7 @@ def up(
     reason: str | None = None,
     action: str = "up",
     read_receipts: planmod.ReceiptReader | None = None,
+    check_box: planmod.BoxCheck | None = None,
     deploy: Deployer | None = None,
     echo: Echo | None = None,
     push: bool = True,
@@ -150,7 +151,9 @@ def up(
 
     if plan_id:
         saved = planmod.load_saved(cx, plan_id)
-        plan = planmod.recheck(proj, saved, opts, read_receipts=read_receipts)
+        plan = planmod.recheck(
+            proj, saved, opts, read_receipts=read_receipts, check_box=check_box
+        )
     else:
         plan = planmod.make_plan(proj, opts, read_receipts=read_receipts)
     planmod.save(cx, plan)

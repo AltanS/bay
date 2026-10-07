@@ -8,6 +8,24 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [Unreleased]
+
+### Fixed
+
+- `bay up --plan-id` no longer calls a plan stale when the plan was made with
+  `--remote`. The re-check now runs the same check on the box, so the two plans
+  match. Before, the re-check skipped the box check, and a plan that you had
+  approved came back stale.
+- The stale reason now names the plan field that changed. It used to print `?`
+  when the change was outside the five fields it knew.
+- Plan `notes` are no longer part of the plan hash. They are text for the
+  reader, such as a hint to pass `--remote`, and they never change a deploy.
+
+### Upgrade notes
+
+- Plans saved by an earlier version have a different hash. Run `bay plan` again
+  for any plan that you have not applied yet, and approve the new plan id.
+
 ## [2.0.1] - 2026-10-07
 
 ### Fixed

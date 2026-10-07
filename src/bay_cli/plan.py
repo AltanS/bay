@@ -1097,7 +1097,18 @@ class PlanOptions:
     cwd_repo: Path | None = None
 
 
-_UNHASHED = ("plan_id", "plan_sha256", "created_at", "verdict", "exit_code", "approval", "stale")
+# ``notes`` is text for the reader (a missing --remote hint, the directory the
+# command ran in). It never changes what a deploy does, so it is not hashed.
+_UNHASHED = (
+    "plan_id",
+    "plan_sha256",
+    "created_at",
+    "verdict",
+    "exit_code",
+    "approval",
+    "stale",
+    "notes",
+)
 
 
 def body_sha256(plan: Mapping[str, Any]) -> str:
@@ -1458,12 +1469,12 @@ def stale_reasons(saved: Mapping[str, Any], fresh: Mapping[str, Any]) -> list[st
     ):
         reasons.append("the box changed: its receipt for this project differs from the plan")
     if not reasons and saved["plan_id"] != fresh["plan_id"]:
-        changed = [
-            k
-            for k in ("fleet", "wanted", "steps", "running", "blockers")
-            if saved.get(k) != fresh.get(k)
-        ]
-        reasons.append("the plan inputs changed since the plan: " + ", ".join(changed or ["?"]))
+        keys = sorted((set(saved) | set(fresh)) - set(_UNHASHED))
+        changed = [k for k in keys if saved.get(k) != fresh.get(k)]
+        if changed:
+            reasons.append("the plan inputs changed since the plan: " + ", ".join(changed))
+        else:
+            reasons.append("plan id differs but no input changed")
     return reasons
 
 
@@ -1475,7 +1486,12 @@ def recheck(
     read_receipts: ReceiptReader | None = None,
     check_box: BoxCheck | None = None,
 ) -> dict[str, Any]:
-    """Plan again with the saved plan's env and commit. Mark it stale when it moved."""
+    """Plan again with the saved plan's env, commit and checks. Mark it stale when it moved.
+
+    A plan made with a box check is checked again on the box, so the two bodies
+    can match. Without that the ``box_checked`` and ``box_prediction`` fields
+    would always differ and the plan would look stale.
+    """
     if saved.get("project") != proj.name:
         raise BayError(
             f"plan {saved.get('plan_id')} is for project {saved.get('project')}, not {proj.name}"
@@ -1484,7 +1500,7 @@ def recheck(
         env=str(saved["env"]),
         at=saved["wanted"]["commit"],
         read_running=opts.read_running or bool(saved["running"].get("checked")),
-        box_check=opts.box_check,
+        box_check=opts.box_check or bool(saved.get("box_checked")),
         allow_unsupported=opts.allow_unsupported,
         cwd_repo=opts.cwd_repo,
     )

@@ -734,6 +734,83 @@ def test_another_projects_deploy_does_not_make_the_plan_stale(
     assert again["stale"] == [] and again["verdict"] == "auto"
 
 
+def _quiet_check(world: dict[str, Path]) -> tuple[Any, list[Path]]:
+    calls: list[Path] = []
+
+    def check(cx: Context, box_env: str, services_file: Path) -> list[dict[str, Any]] | None:
+        calls.append(services_file)
+        return _box_report(("webapp", "noop", []))
+
+    return check, calls
+
+
+def test_recheck_keeps_saved_box_check(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    do_up(world)
+    check, _ = _quiet_check(world)
+    saved = planmod.make_plan(
+        project(world), planmod.PlanOptions(box_check=True), check_box=check
+    )
+    assert saved["box_checked"] is True
+
+    seen: list[planmod.PlanOptions] = []
+    real = planmod.make_plan
+
+    def spy(proj: Any, opts: planmod.PlanOptions, **kw: Any) -> dict[str, Any]:
+        seen.append(opts)
+        return real(proj, opts, **kw)
+
+    monkeypatch.setattr(planmod, "make_plan", spy)
+    planmod.recheck(
+        project(world), saved, planmod.PlanOptions(box_check=False), check_box=check
+    )
+    assert [o.box_check for o in seen] == [True]
+
+    unchecked = real(project(world), planmod.PlanOptions())
+    planmod.recheck(project(world), unchecked, planmod.PlanOptions(box_check=False))
+    assert [o.box_check for o in seen] == [True, False]
+
+
+def test_stale_reason_names_the_changed_key(world: dict[str, Path], box: FakeBox) -> None:
+    do_up(world)
+    saved = make(world)
+    fresh = make(world)
+    fresh["box_checked"] = True
+    fresh["plan_id"] = "0" * 12
+    reasons = planmod.stale_reasons(saved, fresh)
+    assert reasons == ["the plan inputs changed since the plan: box_checked"]
+    assert not any("?" in r for r in reasons)
+
+    fresh = dict(saved, plan_id="0" * 12)
+    assert planmod.stale_reasons(saved, fresh) == ["plan id differs but no input changed"]
+
+
+def test_notes_do_not_change_the_plan_id(world: dict[str, Path], box: FakeBox) -> None:
+    do_up(world)
+    saved = make(world)
+    changed = dict(saved, notes=[*saved["notes"], "something to read"])
+    assert planmod.body_sha256(changed) == saved["plan_sha256"]
+
+
+def test_up_with_a_box_checked_plan_id_is_not_stale(world: dict[str, Path], box: FakeBox) -> None:
+    do_up(world)
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    check, calls = _quiet_check(world)
+    saved = planmod.make_plan(
+        project(world), planmod.PlanOptions(box_check=True), check_box=check
+    )
+    assert saved["box_checked"] is True and saved["verdict"] == "auto"
+    planmod.save(cx_of(world), saved)
+    planmod.approve(cx_of(world), saved["plan_id"], "checked on the box")
+
+    result = applymod.up(
+        project(world), planmod.PlanOptions(), plan_id=saved["plan_id"], check_box=check
+    )
+    assert len(calls) == 2
+    assert result["plan_id"] == saved["plan_id"]
+
+
 def test_project_flag_works_from_anywhere(
     world: dict[str, Path], tmp_path: Path, box: FakeBox
 ) -> None:
