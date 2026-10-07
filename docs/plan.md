@@ -22,6 +22,18 @@ No verb asks a question. No verb takes a secret on the command line.
   `BAY_FLEET=<path>` uses another directory.
 - `--project <name>` works from any directory. The fleet then comes from
   `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME`.
+- With no `bay.toml` here or above and no `--project`, `bay plan <env>` and
+  `bay up <env>` cover the whole environment (see
+  [The whole environment](#the-whole-environment)). The fleet is the one that
+  `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME` names, or the fleet directory you
+  stand in (a `bay.fleet.toml` here or above). `bay approve` also finds the
+  fleet directory you stand in.
+- Every verb that writes to a fleet repo or acts on a box prints
+  `fleet: <name> (<path>)` as its first line on stderr, before it does
+  anything. With `--json` the line stays on stderr, so stdout holds one
+  document. Verbs that only read (`show`, `status`, `toml validate`,
+  `self version`, `fleet ls` and the like) do not print it. When no fleet can
+  be found, there is no line: the verb stops with "no fleet selected".
 - Bay finds the app repo by the lock's `repo` URL, never by a path. It reads
   the git checkout you stand in when its `origin` is that repo. Otherwise it
   reads the fleet's repo cache, `<fleet>/.bay-cache/repos/<slug>`, which it
@@ -52,11 +64,11 @@ with these differences:
 
 ```bash
 bay init [--name N] [--fleet F] [--box B] [--domain D] [--toml-path P]   # draft bay.toml, register the project
-bay plan [env] [--json] [--log PATH] [--at SHA] [--plan-id ID] [--remote] [--no-remote]
+bay plan [env] [--json] [--log PATH] [--at SHA] [--plan-id ID] [--remote] [--no-remote] [--data keep]
 bay approve <plan-id> --reason "<why>"
-bay up [env] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--json] [--log PATH] [--no-push]
+bay up [env] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--data keep] [--json] [--log PATH] [--no-push]
 bay show [name] [--json] [--no-remote]
-bay rollback [env] [--force --reason "<why>"] [--json] [--log PATH] [--no-push]
+bay rollback [env] [--force --reason "<why>"] [--data keep] [--json] [--log PATH] [--no-push]
 ```
 
 `env` is the `[deploy.<env>]` name. The default is the fleet's primary
@@ -212,6 +224,8 @@ A plan is **blocked** when:
   `--allow-unsupported` is given.
 - The fleet repo has uncommitted changes and a step is destructive. Without a
   destructive step, the plan only records `fleet.dirty`.
+- A box move of a project with a named volume or a database, unless
+  `--data keep` is given (see [Box move](#box-move)).
 
 ### Risk
 
@@ -232,17 +246,113 @@ Risk is set by the data that a step touches.
 | Shared resource removed | destructive |
 | Tailnet allowlist in `bay.fleet.toml` changed since the last fleet commit | shared |
 | Deploy webhook changed | shared |
-| Container of another project changed | shared |
-| Container of another project removed | destructive |
+| Container of another project changed or removed | that project's own risk, by the rows above |
+| Container that no project owns changed | shared |
+| Container that no project owns removed | destructive |
+| Box move of a project with a named volume or a database | destructive (blocked until `--data keep`) |
+| Box move of a project with neither | shared |
+| The move's container removed on the old box | the move's risk |
+| The move's container created on the new box | safe |
 | Box predicts a create, recreate or start (`source: box`) | safe |
 | Box predicts a remove (`source: box`) | destructive |
 
 `bay up` writes the whole compiled file, so a change to another project's
-container is part of this plan too.
+container is part of this plan too. Such a step carries that project in
+`project` and keeps the risk it has in its own plan: a safe change of project
+B is safe in a plan for project A, and two safe changes give `auto`.
+
+**What is shared.** `shared` is kept for things that no single `bay.toml`
+owns, so a change to them can touch every project:
+
+- a `[resources.*]` entry of `bay.fleet.toml` (a shared postgres or redis).
+  A change to it reaches every database on it and every project that uses
+  it. A project's own database on that postgres is not shared: its steps
+  carry the project and the risk rows above;
+- the deploy webhook (the webhook receiver);
+- the tailnet allowlist of `bay.fleet.toml`;
+- a container in the services file that no project owns;
+- a box move with no data (the project leaves one box for another).
+
+The proxy, the gateway, the update watcher and the networks are refreshed by
+every `bay up` but are not steps (see the note below). A step whose
+`project` is null is always one of the shared things above.
 
 `bay up` also refreshes the shared proxy, the gateway and the update watcher
 on the boxes. That work comes from the fleet, not from `bay.toml`. The plan
 says so once, in `notes`. It is not a step.
+
+### Box move
+
+The box a project runs on has two truths. WANTED is `deploy.<env>.box` in
+`bay.toml` at the planned commit, or the fleet's `default_box` when it names
+none. PINNED is `box` in the lock's environment record, written by the first
+`bay up`. The compiler uses the PINNED box, so editing `deploy.<env>.box`
+alone never moves a running workload. The plan compares the two.
+
+When they differ, the plan has a step `kind: move`, `action: move`, with
+`resource: "<old box> -> <new box>"`, and it compiles the project on the new
+box. Per container it adds a `remove` on the old box (the move's risk) and a
+`create` on the new box (safe). `moves` in the plan JSON lists, per move,
+`from`, `to`, both box environments, the containers, and the named volumes
+and databases that stay behind.
+
+| The project has | Risk | Verdict |
+|---|---|---|
+| No named volume and no database | `shared` | `approve` |
+| A named volume or a database | `destructive` | `blocked` until `--data keep`, then `approve` |
+
+The blocker names each volume and database that would stay on the old box.
+
+**`--data keep`** (on `bay plan`, `bay up` and `bay rollback`) says: start
+empty on the new box. The new box gets new, empty volumes with the same names
+and a fresh database in its own postgres resource. The old box's containers of
+the project are removed (a `remove` step, so `bay approve` is still needed).
+The old volumes and the old database stay untouched on the old box. Bay never
+removes them. The plan lists them by name in `moves` and in `notes`, with the
+`docker volume rm <name>` and `DROP DATABASE <name>;` lines to run by hand
+later, when you no longer need the data.
+
+**`--data move` is deferred.** Bay does not copy volumes or databases between
+boxes yet, and refuses the flag. Copy the data yourself (backup on the old
+box, restore on the new) after a `--data keep` move, or keep the box.
+
+`bay up` applies an approved move like any plan, and writes the new box into
+the lock's environment record. From then on the compiler uses the new box.
+Both boxes are usually in one box environment (with a `group` each), so one
+deploy covers both: the new box creates the containers, and the old box
+removes the ones it no longer runs. When the old box is in another box
+environment, `bay up` deploys that one too.
+
+A rollback across a move is a move back: it needs `--data keep` again.
+
+### The whole environment
+
+`bay up` always deploys a whole box environment. `bay plan <env>` can show
+all of it. Run it with no `--project` and no `bay.toml` here or above, in the
+fleet directory or with `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME`:
+
+```bash
+cd ~/fleets/prod && bay plan production
+bay --fleet ~/fleets/prod plan production --json
+```
+
+- Every project with `[deploy.<env>]` is read at its WANTED commit: a project
+  in the fleet at the last fleet commit of its folder, a repo project at the
+  head of its repo (the repo cache). The fleet is compiled once.
+- Every step carries the project it belongs to. Risk, verdict and exit code
+  work as for one project.
+- The plan record has `project: null` and a list `projects`: per project its
+  `name`, `box`, `box_env`, `wanted` and `pinned`. The top-level `wanted` and
+  `pinned` hold no commit. A plan is stale when any project's lock moved.
+- The projects must share one box environment. When they do not, the plan is
+  blocked: plan them one at a time with `--project`.
+
+`bay up <env>` in the same place applies such a plan (or `--plan-id <id>`
+names a saved one). It pins every project of the plan to its WANTED commit
+and commits once: `bay: up <env> (<n> projects)`. A `--plan-id` of a
+one-project plan given from the fleet directory applies that project.
+
+In an app repo, `bay plan <env>` keeps its one-project meaning.
 
 ### bay approve
 
@@ -289,6 +399,8 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    not this deploy's commit is an older one (the deploy stopped before the
    box wrote a new one). Bay leaves it out of `applied` and says so in
    `notes`.
+   Then Bay prunes `plans/` (see [plans/ prune](#plans-prune)). `pruned` in
+   the JSON result lists the removed files.
 9. When the fleet repo has a remote, Bay pushes it. `--no-push` skips this.
    A failed push is a warning, never a failed deploy. The JSON result says
    `pushed: true|false` and `push_error`. Bay pushes only when the fleet
@@ -323,6 +435,24 @@ deploy through another project reads it at its pin.
 
 The JSON result lists the pinned environments in `pinned`
 (`project`, `env`, `commit`, `result`) and the left-out projects in `notes`.
+
+#### plans/ prune
+
+`bay up` commits its plan record to `plans/<plan-id>.json`, so `plans/` is
+tracked and grows with every deploy. Do not delete it by hand: an uncommitted
+removal makes the next receipt record `fleet_dirty: true`.
+
+After the receipt commit, `bay up` prunes it:
+
+- It keeps the 50 newest plan records (by `created_at`) and every record a
+  lock still names: `envs.<env>.plan_id` and `envs.<env>.previous.plan_id` of
+  any project.
+- It removes the rest with `git rm`, in one commit:
+  `bay: prune plans (<n> files)`. A removed record's approval file
+  (`<plan-id>.approved`) goes with it.
+- It touches only files git tracks. A plan that `bay plan` saved and no
+  `bay up` applied stays an untracked file. Remove those by hand when you
+  like; never remove a tracked record by hand.
 
 ### bay rollback
 

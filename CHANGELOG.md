@@ -32,8 +32,40 @@ needing manual action is called out under **Upgrade notes**. Entries for
   So the lock commit that `bay up` makes does not make the project look changed.
 - `bay import` writes the new layout: `format = 2`, the lock in the project folder,
   and the files a project owns beside its `bay.toml`.
+- **A step of another project keeps its own risk.** In a plan for project A, a
+  change to project B's container carries `project: B` and B's own risk class. A
+  safe change stays safe, so two safe changes give the verdict `auto`. Before,
+  every such step was `shared`. `shared` now means a fleet-wide thing only: a
+  `[resources.*]` entry, the webhook, the tailnet allowlist, or a container that no
+  project owns.
+- `bay plan` prints a `PROJECT` column in its step table.
+- A lock's `previous` records the `plan_id` that deployed the replaced pin.
 
 ### Added
+
+- **Box move step.** When `deploy.<env>.box` in `bay.toml` (or the fleet default)
+  differs from the box in the lock, the plan has a step `move`. Its risk is
+  `destructive` when the project has a named volume or a database, `shared`
+  otherwise. The plan also lists a `remove` on the old box and a `create` on the
+  new box per container, and a `moves` record. A destructive move is `blocked`
+  until `--data keep`: the new box starts empty, the data stays untouched on the
+  old box, and the notes give the `docker volume rm` and `DROP DATABASE` lines for
+  later. `--data move` is refused as deferred. `bay up` writes the new box into the
+  lock. The compiler still uses the lock's box, so an edit alone moves nothing.
+- **Whole-environment plan.** `bay plan <env>` with no `--project`, run in a fleet
+  directory or with `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME` and no `bay.toml`
+  here, plans every project that has `[deploy.<env>]`, each at its WANTED commit.
+  The record has `project: null` and a `projects` list. `bay up <env>` there
+  applies it; `bay up --plan-id <id>` takes such a plan. In an app repo, `bay plan`
+  keeps its one-project meaning.
+- **`plans/` prune.** After its receipt commit, `bay up` keeps the 50 newest plan
+  records plus every record a lock names (`plan_id`, `previous.plan_id`) and
+  removes the rest with `git rm` in one commit, `bay: prune plans (<n> files)`. An
+  approval file goes with its record. An untracked plan file is never touched.
+- **Fleet line.** Every verb that writes to a fleet repo or acts on a box prints
+  `fleet: <name> (<path>)` as its first stderr line, also with `--json`. Readers
+  (`show`, `status`, `toml validate`, `self version`, `fleet ls` and others) do
+  not. A test walks the CLI, so a new verb must be sorted into one of the two lists.
 
 - `from = "fleet:<path>"` mounts the shared fleet file `files/<path>`.
 - `bay init --toml-path services/api/bay.toml` for a repo with several apps. The
