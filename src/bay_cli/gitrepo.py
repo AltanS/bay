@@ -15,6 +15,7 @@ import io
 import os
 import subprocess
 import tarfile
+from collections.abc import Sequence
 from pathlib import Path
 
 _ENV = {"GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
@@ -80,15 +81,22 @@ def show_file(repo: Path, commit: str, rel: str) -> bytes | None:
     ``rel`` is relative to ``repo`` (``./`` form), so a fleet that is a
     subdirectory of a bigger repo works too.
     """
-    proc = _run_bytes(repo, "show", f"{commit}:./{_plain(rel)}")
+    proc = _run_bytes(repo, "show", _object(repo, commit, rel))
     if proc is None or proc.returncode != 0:
         return None
     return proc.stdout
 
 
 def has_path(repo: Path, commit: str, rel: str) -> bool:
-    proc = _run(repo, "cat-file", "-e", f"{commit}:./{_plain(rel)}")
+    proc = _run(repo, "cat-file", "-e", _object(repo, commit, rel))
     return proc is not None and proc.returncode == 0
+
+
+def _object(repo: Path, commit: str, rel: str) -> str:
+    """``<commit>:./<rel>`` in a work tree; a mirror has none, so ``<commit>:<rel>`` there."""
+    if (repo / "HEAD").is_file() and (repo / "objects").is_dir() and is_bare(repo):
+        return f"{commit}:{_plain(rel)}"
+    return f"{commit}:./{_plain(rel)}"
 
 
 def extract(repo: Path, commit: str, rels: list[str], dest: Path) -> None:
@@ -104,15 +112,99 @@ def extract(repo: Path, commit: str, rels: list[str], dest: Path) -> None:
         tar.extractall(dest, filter="data")
 
 
-def last_change(repo: Path, rel: str, ref: str = "HEAD") -> str | None:
-    """The newest commit at or before ``ref`` that touched ``rel``, or None."""
-    return _out(repo, "log", "-1", "--format=%H", ref, "--", rel) or None
+def _specs(rel: str | Sequence[str]) -> list[str]:
+    return [rel] if isinstance(rel, str) else list(rel)
 
 
-def path_dirty(repo: Path, rel: str) -> bool | None:
+def last_change(repo: Path, rel: str | Sequence[str], ref: str = "HEAD") -> str | None:
+    """The newest commit at or before ``ref`` that touched ``rel``, or None.
+
+    ``rel`` is one path or a list of pathspecs (``:(exclude)...`` works).
+    """
+    return _out(repo, "log", "-1", "--format=%H", ref, "--", *_specs(rel)) or None
+
+
+def path_dirty(repo: Path, rel: str | Sequence[str]) -> bool | None:
     """True when ``rel`` differs from HEAD in the work tree (untracked files count)."""
-    out = _out(repo, "status", "--porcelain", "--untracked-files=normal", "--", rel)
+    out = _out(repo, "status", "--porcelain", "--untracked-files=normal", "--", *_specs(rel))
     return None if out is None else bool(out)
+
+
+def is_bare(repo: Path) -> bool:
+    return _out(repo, "rev-parse", "--is-bare-repository") == "true"
+
+
+def on_remote(repo: Path, commit: str) -> bool | None:
+    """Is ``commit`` on a branch of the remote? None when git cannot tell.
+
+    In a checkout that means a remote-tracking branch (``refs/remotes/``)
+    contains it, as of the last fetch or push. In a mirror (the fleet's repo
+    cache) every branch is the remote's, so ``refs/heads/`` counts.
+    """
+    refs = "refs/heads/" if is_bare(repo) else "refs/remotes/"
+    out = _out(repo, "for-each-ref", "--contains", commit, "--format=%(refname)", refs)
+    if out is None:
+        return None
+    return any(line and not line.endswith("/HEAD") for line in out.splitlines())
+
+
+def clone_mirror(url: str, dest: Path) -> str | None:
+    """``git clone --mirror url dest``. Returns a problem line, or None when it worked."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.run(
+            ["git", "clone", "--quiet", "--mirror", url, str(dest)],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=300,
+            env={**os.environ, **_ENV},
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"git clone failed: {exc}"
+    if proc.returncode != 0:
+        return _last_line(proc.stderr) or "git clone failed"
+    return None
+
+
+def fetch_prune(repo: Path) -> str | None:
+    """``git fetch --prune`` in a mirror. Returns a problem line, or None when it worked."""
+    proc = _run(repo, "fetch", "--quiet", "--prune", "origin", timeout=120)
+    if proc is None:
+        return "git fetch timed out"
+    if proc.returncode != 0:
+        return _last_line(str(proc.stderr)) or "git fetch failed"
+    return None
+
+
+def is_tracked(repo: Path, rel: str) -> bool:
+    proc = _run(repo, "ls-files", "--error-unmatch", "--", rel)
+    return proc is not None and proc.returncode == 0
+
+
+def move(repo: Path, old: str, new: str) -> None:
+    """``git mv old new``. Raises GitError."""
+    proc = _run(repo, "mv", "--", old, new)
+    if proc is None or proc.returncode != 0:
+        raise GitError(_last_line(str(proc.stderr)) if proc is not None else "git mv failed")
+
+
+def add(repo: Path, rels: Sequence[str]) -> None:
+    proc = _run(repo, "add", "--", *rels)
+    if proc is None or proc.returncode != 0:
+        raise GitError(_last_line(str(proc.stderr)) if proc is not None else "git add failed")
+
+
+def commit_staged(repo: Path, rels: Sequence[str], message: str) -> str:
+    """Commit what is staged under ``rels`` (moves included) and nothing else."""
+    done = _run(repo, "commit", "--quiet", "-m", message, "--", *rels, timeout=120)
+    if done is None or done.returncode != 0:
+        detail = (str(done.stderr) or str(done.stdout)) if done is not None else ""
+        raise GitError(_last_line(detail) or "git commit failed")
+    new = head(repo)
+    if new is None:
+        raise GitError("git commit left no HEAD")
+    return new
 
 
 def dirty(repo: Path, *, exclude: tuple[str, ...] = ()) -> bool | None:
