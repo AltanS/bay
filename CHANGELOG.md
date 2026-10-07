@@ -8,6 +8,21 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [Unreleased]
+
+### Fixed
+
+- **A plan saved before the lock migration no longer goes stale.** `bay up --plan-id`
+  moves the locks into project folders first, and that fleet commit made the recheck
+  report `stale` (exit 30, reason `fleet`). When the commits between the saved plan
+  and HEAD only rename `projects/<name>.lock` to `projects/<name>/bay.lock` and change
+  the `format` line of `bay.fleet.toml`, the plan stays fresh and says
+  `fleet commit moved by the layout migration only`. Any other fleet change still
+  makes it stale.
+- **`bay route import --json`.** The verb now takes `--json` like the other route
+  verbs and prints one document: `fleet_commit`, `routes` (name, domain, upstream),
+  `deleted` (the old file) and `cert_domain`.
+
 ## [2.1.0] - 2026-10-07
 
 ### Changed
