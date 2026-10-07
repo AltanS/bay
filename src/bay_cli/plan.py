@@ -56,7 +56,7 @@ import json
 import shutil
 import tempfile
 import tomllib
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from functools import partial
 from dataclasses import dataclass, field
@@ -752,6 +752,33 @@ def _override_boxes(root: Path, boxes: Mapping[str, Mapping[str, str]]) -> None:
         path.write_text(json.dumps(raw, indent=2) + "\n")
 
 
+def _drop_projects(made: _Copy, drop: Mapping[str, Collection[str] | None]) -> None:
+    """Leave projects, or some envs of them, out of the scratch copy (``bay remove``).
+
+    ``{project: None}`` drops the whole project folder; ``{project: {env, ...}}``
+    drops those env records from its scratch lock (the bay.toml read must
+    have no ``[deploy.<env>]`` left, or the compile keeps the env). The
+    fleet's own files are never touched.
+    """
+    for name, envs in drop.items():
+        folder = made.root / PROJECTS_DIR / name
+        if envs is None:
+            shutil.rmtree(folder, ignore_errors=True)
+            made.checkouts.pop(name, None)
+            made.commits.pop(name, None)
+            if name in made.unpinned:
+                made.unpinned.remove(name)
+            continue
+        path = folder / LOCK_FILE
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        for env in envs:
+            (raw.get("envs") or {}).pop(env, None)
+        path.write_text(json.dumps(raw, indent=2) + "\n")
+
+
 def _owners(inputs: Any) -> dict[str, str]:
     """``{container: project}`` for every project the compile read."""
     primary = str(inputs.fleet.get("primary_env", "production"))
@@ -776,12 +803,14 @@ def compiled_fleet(
     *,
     cwd: Path | None = None,
     boxes: Mapping[str, Mapping[str, str]] | None = None,
+    drop: Mapping[str, Collection[str] | None] | None = None,
 ) -> Iterator[Compiled]:
     """Compile the fleet with every project at its pin (``pins`` overrides some).
 
     ``cwd`` is where the command ran: a repo project whose checkout is there
     is read from it, the others from the fleet's repo cache. ``boxes``
     (``{project: {env: box}}``) places a moving project on its new box.
+    ``drop`` leaves projects or some of their envs out (:func:`_drop_projects`).
     """
     from bay_cli import compiler
     from bay_cli.fleet import FleetError, load_inputs
@@ -792,6 +821,8 @@ def compiled_fleet(
         made = _materialize(cx, work, pins or {}, cwd=cwd)
         if boxes:
             _override_boxes(made.root, boxes)
+        if drop:
+            _drop_projects(made, drop)
         errors = list(made.problems)
         notes = [f"fleet layout: {line}" for line in moved] + list(made.notes)
         result = None
@@ -2621,6 +2652,15 @@ def saved_data_mode(saved: Mapping[str, Any]) -> str | None:
     return DATA_KEEP if DATA_KEEP in modes else None
 
 
+def _refuse_remove_plan(saved: Mapping[str, Any]) -> None:
+    """A ``bay remove`` plan is checked again by :mod:`bay_cli.remove`, never here."""
+    if saved.get("remove"):
+        raise BayError(
+            f"plan {saved.get('plan_id')} removes {saved.get('project')}; it is not a deploy plan",
+            hint=f"Apply it with `bay up {saved.get('env')} --plan-id {saved.get('plan_id')}`.",
+        )
+
+
 def recheck(
     proj: ProjectRef,
     saved: Mapping[str, Any],
@@ -2635,6 +2675,7 @@ def recheck(
     can match. Without that the ``box_checked`` and ``box_prediction`` fields
     would always differ and the plan would look stale.
     """
+    _refuse_remove_plan(saved)
     if saved.get("project") != proj.name:
         raise BayError(
             f"plan {saved.get('plan_id')} is for project {saved.get('project')}, not {proj.name}"
@@ -2672,6 +2713,7 @@ def recheck_env(
     check_box: BoxCheck | None = None,
 ) -> dict[str, Any]:
     """:func:`recheck` for a whole-environment plan: each project at its saved commit."""
+    _refuse_remove_plan(saved)
     if saved.get("project") is not None or saved.get("projects") is None:
         raise BayError(
             f"plan {saved.get('plan_id')} is for project {saved.get('project')}, "

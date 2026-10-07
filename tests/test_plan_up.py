@@ -3532,3 +3532,223 @@ def test_up_at_commit(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> N
     assert raw is not None
     assert raw["commit"] == first and raw["envs"]["production"]["commit"] == first
     assert "MODE: one" in (world["fleet"] / GENERATED_SERVICES).read_text()
+
+
+# ── bay remove (M117/08) ────────────────────────────────────────────────────
+
+
+def _remove_json(world: dict[str, Path], *args: str, cwd: Path | None = None) -> tuple[Any, dict]:
+    result = cli(world, "remove", *args, "--json", cwd=cwd)
+    return result, json.loads(result.stdout)
+
+
+def _approve_and_up(
+    world: dict[str, Path], plan: dict[str, Any], *, cwd: Path | None = None
+) -> Any:
+    ok = cli(world, "approve", plan["plan_id"], "--reason", "the project is retired", cwd=cwd)
+    assert ok.exit_code == 0, ok.output
+    return cli(world, "up", plan["env"], "--plan-id", plan["plan_id"], "--json", cwd=cwd)
+
+
+def test_remove_plan_names_containers_volumes_database(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    do_up(world)
+    result, plan = _remove_json(world, "webapp")
+    assert result.exit_code == 10, result.output
+    assert plan["verdict"] == "approve" and plan["project"] == "webapp"
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    assert [(s["kind"], s["container"], s["action"], s["risk"]) for s in plan["steps"]] == [
+        ("container", "webapp", "remove", "destructive")
+    ]
+    reason = plan["steps"][0]["reason"]
+    # The step names the container, the volume (as the box names it) and the database.
+    assert "testfleet_webapp-data" in reason and "database webapp" in reason
+    rm = plan["remove"]
+    assert rm["scope"] == "project"
+    assert rm["envs"] == [
+        {"env": "production", "box": "box-1", "box_env": "production", "containers": ["webapp"]}
+    ]
+    assert rm["volumes"] == [{"env": "production", "box": "box-1", "name": "testfleet_webapp-data"}]
+    assert rm["databases"] == [
+        {"env": "production", "box": "box-1", "resource": "postgres", "name": "webapp",
+         "role": "webapp"}
+    ]
+    # The plan is saved like any plan, and a plan made twice has the same id.
+    assert (world["fleet"] / "plans" / f"{plan['plan_id']}.json").is_file()
+    assert _remove_json(world, "webapp")[1]["plan_id"] == plan["plan_id"]
+    # The human form lists what stays.
+    text = cli(world, "remove", "webapp").output
+    assert "stays: volume testfleet_webapp-data on box box-1" in text
+    assert f"bay up production --plan-id {plan['plan_id']}" in text
+
+
+def test_remove_deletes_lock_after_receipt(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    do_up(world)
+    _, plan = _remove_json(world, "webapp")
+    # No approval: bay up refuses, and nothing changes.
+    refused = cli(world, "up", "production", "--plan-id", plan["plan_id"], "--json")
+    assert refused.exit_code == 10
+    assert lockfile.lock_path(world["fleet"], "webapp").is_file()
+
+    # The box still runs the container after the deploy: the lock stays, marked failed.
+    real = box.deploy
+
+    def stubborn(cx: Context, box_env: str, **kw: Any) -> None:
+        real(cx, box_env, **kw)
+        box.receipts[box_env]["containers"].append(
+            {"name": "webapp", "image": "x", "config_hash": "h", "action": "noop", "healthy": True}
+        )
+
+    monkeypatch.setattr(applymod, "default_deploy", stubborn)
+    failed = _approve_and_up(world, plan)
+    assert failed.exit_code == 1, failed.output
+    doc = json.loads(failed.stdout)
+    assert doc["result"] == "failed" and "still runs webapp" in doc["unconfirmed"]["production"]
+    raw = lock_of(world)
+    assert raw["envs"]["production"]["result"] == "failed"
+    assert raw["envs"]["production"]["plan_id"] == plan["plan_id"]
+    services = (world["fleet"] / GENERATED_SERVICES).read_text()
+    assert "webapp:" not in services  # compiled without it
+
+    # Run bay remove again: the receipt still names the container, so the step is there.
+    monkeypatch.setattr(applymod, "default_deploy", real)
+    _, again = _remove_json(world, "webapp")
+    assert [s["container"] for s in again["steps"]] == ["webapp"]
+    done = _approve_and_up(world, again)
+    assert done.exit_code == 0, done.output
+    doc = json.loads(done.stdout)
+    assert doc["result"] == "ok" and doc["confirmed"] == ["production"] and doc["lock_removed"]
+    assert not lockfile.lock_path(world["fleet"], "webapp").exists()
+    assert not (world["fleet"] / "projects" / "webapp").exists()
+    assert git(world["fleet"], "ls-files", "projects/webapp") == ""
+    msgs = git(world["fleet"], "log", "--format=%s", "-4").splitlines()
+    assert "bay: remove webapp: the receipt confirms it" in msgs
+    assert any(m.startswith("bay: remove webapp (plan ") for m in msgs)
+    # The plan record of the remove is committed with its destructive steps.
+    tracked = git(world["fleet"], "ls-files", "plans")
+    assert f"{again['plan_id']}.json" in tracked
+    assert "destructive" in (world["fleet"] / "plans" / f"{again['plan_id']}.json").read_text()
+
+
+def test_remove_keeps_data_and_prints_cleanup_lines(world: dict[str, Path], box: FakeBox) -> None:
+    do_up(world)
+    _, plan = _remove_json(world, "webapp")
+    assert plan["remove"]["cleanup"] == [
+        "box box-1: docker volume rm testfleet_webapp-data",
+        "box box-1, resource postgres: DROP DATABASE webapp; DROP ROLE webapp;",
+    ]
+    assert any("Bay never deletes data" in n for n in plan["notes"])
+    cli(world, "approve", plan["plan_id"], "--reason", "retired")
+    deploys = len(box.deploys)
+    result = cli(world, "up", "production", "--plan-id", plan["plan_id"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "run by hand when you are sure" in out
+    assert "docker volume rm testfleet_webapp-data" in out
+    assert "DROP DATABASE webapp; DROP ROLE webapp;" in out
+    # One deploy, and it only stopped the container: the shared postgres stays.
+    assert len(box.deploys) == deploys + 1
+    names = [c["name"] for c in box.receipts["production"]["containers"]]
+    assert "postgres" in names and "webapp" not in names
+    services = yaml.safe_load((world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1])
+    assert "postgres" in services["accessories"]
+
+
+def test_remove_single_env(world: dict[str, Path], box: FakeBox) -> None:
+    secrets = world["fleet"] / "group_vars" / "production" / "secrets.yml"
+    data = yaml.safe_load(secrets.read_text())
+    data["secrets"].update(
+        {"WEBAPP_STAGING_SESSION_SECRET": SENTINEL, "WEBAPP_STAGING_POSTGRES_PASSWORD": SENTINEL}
+    )
+    secrets.write_text(yaml.safe_dump(data))
+    commit_all(world["fleet"], "staging secrets")
+    staging = '\n[deploy.staging]\ndomain = "webapp-staging.example.com"\n'
+    edit_app(world, '[deploy.production]\ndomain = "webapp.example.com"\n',
+             '[deploy.production]\ndomain = "webapp.example.com"\n' + staging)
+    do_up(world)
+    do_up(world, env="staging")
+    assert set(lock_of(world)["envs"]) == {"production", "staging"}
+
+    # Blocked while bay.toml still has [deploy.staging].
+    result, plan = _remove_json(world, "webapp", "--env", "staging")
+    assert result.exit_code == 20
+    assert any("still has [deploy.staging]" in b for b in plan["blockers"])
+
+    without = edit_app(world, staging, "\n")
+    result, plan = _remove_json(world, "webapp", "--env", "staging")
+    assert result.exit_code == 10, plan["blockers"]
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    assert [s["container"] for s in plan["steps"]] == ["webapp-staging"]
+    assert plan["remove"]["scope"] == "env" and plan["remove"]["commit"] == without
+    assert plan["remove"]["cleanup"] == [
+        "box box-1: docker volume rm testfleet_webapp-staging-data",
+        "box box-1, resource postgres: DROP DATABASE webapp_staging; DROP ROLE webapp_staging;",
+    ]
+    done = _approve_and_up(world, plan)
+    assert done.exit_code == 0, done.output
+    doc = json.loads(done.stdout)
+    assert doc["confirmed"] == ["staging"] and not doc["lock_removed"]
+    raw = lock_of(world)
+    assert set(raw["envs"]) == {"production"} and raw["commit"] == without
+    services = (world["fleet"] / GENERATED_SERVICES).read_text()
+    assert "webapp-staging:" not in services and "\n  webapp:" in services
+    names = [c["name"] for c in box.receipts["production"]["containers"]]
+    assert "webapp" in names and "webapp-staging" not in names
+    # The production env did not move: the next plan has nothing to do.
+    assert make(world)["steps"] == []
+
+
+def test_remove_blocked_when_another_project_needs_it(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    edit_app(world, 'port = 3000\n', 'port = 3000\npublish = true\n')
+    do_up(world)
+    path = world["fleet"] / "projects" / "status" / "bay.toml"
+    path.parent.mkdir()
+    path.write_text(STATUS_TOML.replace('port = 8080\n', 'port = 8080\nneeds = ["webapp"]\n'))
+    commit_all(world["fleet"], "status needs webapp")
+    result, plan = _remove_json(world, "webapp")
+    assert result.exit_code == 20
+    assert any(b.startswith("status needs webapp") for b in plan["blockers"])
+
+
+def test_remove_in_fleet_project_removes_its_folder(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    do_up(world)
+    path = _in_fleet(world)
+    (path.parent / "notes.txt").write_text("kept in git history only\n")
+    commit_all(world["fleet"], "status notes")
+    anywhere = tmp_path / "anywhere"
+    anywhere.mkdir()
+    assert cli(world, "up", "--project", "status", "--json", cwd=anywhere).exit_code == 0
+
+    result, plan = _remove_json(world, "status", cwd=anywhere)
+    assert result.exit_code == 10, plan["blockers"]
+    assert plan["remove"]["in_fleet"] is True
+    assert plan["remove"]["volumes"] == [] and plan["remove"]["databases"] == []
+    done = _approve_and_up(world, plan, cwd=anywhere)
+    assert done.exit_code == 0, done.output
+    doc = json.loads(done.stdout)
+    assert sorted(doc["removed_files"]) == [
+        "projects/status/bay.lock", "projects/status/bay.toml", "projects/status/notes.txt"
+    ]
+    assert not (world["fleet"] / "projects" / "status").exists()
+    assert "status:" not in (world["fleet"] / GENERATED_SERVICES).read_text()
+    # webapp is untouched, and its plan is still empty.
+    assert make(world)["steps"] == []
+
+
+def test_remove_refuses_rig_and_resources(world: dict[str, Path], box: FakeBox) -> None:
+    resource = cli(world, "remove", "postgres")
+    assert resource.exit_code != 0
+    assert "shared resource" in str(resource.exception)
+    rig = cli(world, "remove", "traefik", "--json")
+    assert rig.exit_code != 0
+    assert "Bay runs on every box itself" in json.loads(rig.stdout)["error"]
+    assert not list((world["fleet"] / "plans").glob("*.json")) if (
+        world["fleet"] / "plans"
+    ).exists() else True

@@ -421,6 +421,10 @@ def plan(
     try:
         planmod.check_data_mode(data)
         with routed_output(as_json, log):
+            removal = _saved_remove(ctx, plan_id) if plan_id else None
+            if removal is not None:
+                result = _plan_remove(removal)
+                raise _Done
             env_cx = whole_env_fleet(ctx, project, at)
             saved = planmod.load_saved(env_cx, plan_id) if env_cx and plan_id else None
             if env_cx is not None and saved is not None and saved.get("project"):
@@ -456,6 +460,8 @@ def plan(
                 else:
                     result = planmod.make_plan(proj, opts)
                 planmod.save(proj.cx, result)
+    except _Done:
+        pass
     except BayError as exc:
         if not as_json:
             raise
@@ -463,7 +469,7 @@ def plan(
     if as_json:
         _echo_json(result)
     else:
-        typer.echo(planmod.render(result))
+        typer.echo(_render(result))
     raise typer.Exit(int(result["exit_code"]))
 
 
@@ -509,10 +515,19 @@ def _apply(
     from bay_cli import apply as applymod
     from bay_cli import plan as planmod
 
+    removed: dict[str, Any] | None = None
     try:
         planmod.check_data_mode(data)
         with routed_output(as_json, log) as say:
             common: dict[str, Any] = {"force": force, "reason": reason, "echo": say, "push": push}
+            removal = _saved_remove(ctx, plan_id) if which == "up" and plan_id else None
+            if removal is not None:
+                from bay_cli import remove as removemod
+
+                removed = removemod.apply_remove(
+                    removal[0], str(plan_id), env=env, cwd=Path.cwd(), **common
+                )
+                raise _Done
             env_cx = whole_env_fleet(ctx, project, at) if which == "up" else None
             if env_cx is not None and plan_id:
                 saved = planmod.load_saved(env_cx, plan_id)
@@ -540,6 +555,8 @@ def _apply(
                     result = applymod.rollback(proj, opts, to=at, **common)
                 else:
                     result = applymod.up(proj, opts, plan_id=plan_id, **common)
+    except _Done:
+        pass
     except BayError as exc:
         if not as_json:
             raise
@@ -548,7 +565,7 @@ def _apply(
         if as_json:
             _echo_json(exc.plan)
         else:
-            typer.echo(planmod.render(exc.plan))
+            typer.echo(_render(exc.plan))
             console.error(str(exc))
         raise typer.Exit(exc.exit_code) from None
     except applymod.DeployFailed as exc:
@@ -562,6 +579,9 @@ def _apply(
             )
             console.error(f"{exc}. {pins}; bay show says HALF until a deploy succeeds.")
         raise typer.Exit(1) from None
+    if removed is not None:
+        _report_remove(removed, as_json)
+        return
     if as_json:
         _echo_json(result)
         return
@@ -772,3 +792,79 @@ def _show_routes(ctx: typer.Context, as_json: bool, no_remote: bool) -> None:
         _echo_json(doc)
     else:
         typer.echo(routes.render_show(doc))
+
+
+# ── bay remove plans (bay plan / bay up --plan-id) ──────────────────────────
+
+
+class _Done(Exception):
+    """Leaves the redirected output block once a remove plan was applied."""
+
+
+def _saved_remove(ctx: typer.Context, plan_id: str) -> tuple[Context, dict[str, Any]] | None:
+    """``(fleet, saved plan)`` when ``plan_id`` names a ``bay remove`` plan, else None."""
+    from bay_cli import plan as planmod
+
+    try:
+        here = find_bay_toml(Path.cwd())
+        _, fleet_name = _read_identity(here) if here else (None, None)
+        cx = fleet_context(ctx, fleet_name, allow_cwd=True)
+        saved = planmod.load_saved(cx, plan_id)
+    except BayError:
+        return None
+    return (cx, saved) if saved.get("remove") else None
+
+
+def _plan_remove(found: tuple[Context, dict[str, Any]]) -> dict[str, Any]:
+    """``bay plan --plan-id`` for a remove plan: plan it again, say whether it is stale."""
+    from bay_cli import plan as planmod
+    from bay_cli import remove as removemod
+
+    cx, saved = found
+    result = removemod.recheck_remove(cx, saved, cwd=Path.cwd())
+    planmod.save(cx, result)
+    return result
+
+
+def _render(plan: dict[str, Any]) -> str:
+    """The human form of a plan; a remove plan adds what stays and the cleanup lines."""
+    if plan.get("remove"):
+        from bay_cli import remove as removemod
+
+        return removemod.render_plan(plan)
+    from bay_cli import plan as planmod
+
+    return planmod.render(plan)
+
+
+def _report_remove(result: dict[str, Any], as_json: bool) -> None:
+    from bay_cli import remove as removemod
+
+    if as_json:
+        _echo_json(result)
+    else:
+        if result["result"] == "ok":
+            gone = (
+                f"projects/{result['project']}/ removed from the fleet"
+                if result["lock_removed"]
+                else f"{', '.join(result['confirmed'])} removed from the lock"
+            )
+            console.success(
+                f"removed {result['project']} ({', '.join(result['envs']) or 'never deployed'}): "
+                f"the receipt confirms it, {gone}, fleet commit {result['receipt_commit'][:12]}"
+                + (", pushed" if result["pushed"] else "")
+            )
+        else:
+            console.error(
+                f"{result['project']} is not removed yet: the receipt does not confirm it"
+            )
+        for note in result["notes"]:
+            console.info(f"note: {note}")
+        for line in removemod.render_cleanup(result["cleanup"]):
+            typer.echo(line)
+        if result["push_error"]:
+            console.warning(f"the fleet repo was not pushed: {result['push_error']}")
+        if result.get("push_skipped"):
+            console.warning(str(result["push_skipped"]))
+    if result["result"] != "ok":
+        raise typer.Exit(1)

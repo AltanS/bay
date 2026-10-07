@@ -73,6 +73,79 @@
         }
       }
     },
+    "remove": {
+      "description": "Only in a bay remove plan: what leaves the fleet, and the data that stays. bay up --plan-id applies it; Bay never deletes the volumes or the databases listed here.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project", "scope", "in_fleet", "commit", "envs", "volumes", "databases", "cleanup"
+      ],
+      "properties": {
+        "project": { "$ref": "#/$defs/name" },
+        "scope": {
+          "description": "project: every environment and the project folder. env: one environment.",
+          "enum": ["project", "env"]
+        },
+        "in_fleet": { "type": "boolean" },
+        "commit": {
+          "description": "scope env: the commit the lock moves to (its bay.toml has no [deploy.<env>]).",
+          "$ref": "#/$defs/commit_or_null"
+        },
+        "envs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["env", "box", "box_env", "containers"],
+            "properties": {
+              "env": { "type": "string" },
+              "box": { "type": ["string", "null"] },
+              "box_env": { "type": ["string", "null"] },
+              "containers": {
+                "description": "Every container name of the project in this env; the receipt must confirm each is gone.",
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        },
+        "volumes": {
+          "description": "Named volumes that stay, by their name on the box (<stack>_<volume>).",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["env", "box", "name"],
+            "properties": {
+              "env": { "type": "string" },
+              "box": { "type": ["string", "null"] },
+              "name": { "type": "string" }
+            }
+          }
+        },
+        "databases": {
+          "description": "Databases and their roles that stay, adopted or derived names.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["env", "box", "resource", "name", "role"],
+            "properties": {
+              "env": { "type": "string" },
+              "box": { "type": ["string", "null"] },
+              "resource": { "type": "string" },
+              "name": { "type": "string" },
+              "role": { "type": "string" }
+            }
+          }
+        },
+        "cleanup": {
+          "description": "The docker volume rm and DROP DATABASE / DROP ROLE lines, to run by hand.",
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
     "env": { "type": "string", "pattern": "^[a-z][a-z0-9]*$" },
     "box": { "type": ["string", "null"] },
     "box_env": { "type": ["string", "null"] },

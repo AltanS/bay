@@ -27,8 +27,7 @@ from typing import Any
 import typer
 
 #: Verbs that write to a fleet repo or act on a box. Paths are the words
-#: after ``bay``. Names that do not exist yet (remove) are
-#: listed so they print the line the day they are added.
+#: after ``bay``. ``remove`` only plans, but it saves the plan into the fleet.
 MUTATING_VERBS: frozenset[str] = frozenset(
     {
         # daily
@@ -127,7 +126,7 @@ _CWD_IS_FLEET = frozenset(
      "server add", "server remove"}
 )
 #: Verbs that also find a fleet directory at or above the working directory.
-_FLEET_DIR_ABOVE = frozenset({"plan", "up", "approve"})
+_FLEET_DIR_ABOVE = frozenset({"plan", "up", "approve", "remove"})
 
 #: Marks a wrapped callback, so a test can tell that :func:`install` covered it.
 MARK = "__bay_fleet_line__"

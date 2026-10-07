@@ -193,7 +193,7 @@ to reproduce it. The flags that change what a command *means*:
 ### Utilities
 
 - `bay compile` — Compile bay.fleet.toml and every pinned bay.toml into services.yml.
-- `bay doctor [env]` — Run pre-flight checks on your project before deploying.
+- `bay doctor [env]` — Run pre-deploy checks: fleet, format, CLI, vault, boxes, repos, git, and more.
 - `bay import` — Import a fleet from today's YAML files into bay.fleet.toml, bay.toml files and lockfiles.
 - `bay secret` — Generate random secrets or hash passwords.
 - `bay secret missing <env>` — List secret NAMES the services need that the env's vault lacks.
@@ -208,6 +208,7 @@ to reproduce it. The flags that change what a command *means*:
 - `bay approve <plan_id>` — Approve a saved plan with destructive or shared steps.
 - `bay init` — Draft a bay.toml in this app repo and register the app in the fleet.
 - `bay plan [env]` — Compare WANTED (bay.toml at HEAD), PINNED (the lock) and RUNNING (the box).
+- `bay remove <project>` — Plan the removal of a project: its containers stop, its data stays.
 - `bay rollback [env]` — Return an environment to its previous pin and its previous code, and freeze it.
 - `bay route` — Tailnet routes in bay.fleet.toml: add, list, remove, import.
 - `bay route add <name>` — Add a tailnet route to bay.fleet.toml.

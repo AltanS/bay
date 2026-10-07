@@ -539,26 +539,34 @@ def _apply_plan(
         "code_targets": code_targets,
         "frozen": any(bool(locks[p.name]["envs"][env].get("frozen")) for p, _ in members),
     }
-    if push and not gitrepo.is_toplevel(cx.fleet_root):
-        # A fleet that is a directory inside a bigger repo (a workspace with
-        # several fleets) shares that repo's remote and branch. Pushing it
-        # would publish everything else committed there too, so bay commits
-        # and leaves the push to the operator.
+    if push:
+        push_fleet(cx, result, say)
+    if failure:
+        raise DeployFailed(result)
+    return result
+
+
+def push_fleet(cx: Context, result: dict[str, Any], say: Echo) -> None:
+    """Step 8: push the fleet repo; set ``pushed``, ``push_error`` and ``push_skipped``.
+
+    A fleet that is a directory inside a bigger repo (a workspace with
+    several fleets) shares that repo's remote and branch. Pushing it would
+    publish everything else committed there too, so bay commits and leaves
+    the push to the operator. A failed push is a warning.
+    """
+    if not gitrepo.is_toplevel(cx.fleet_root):
         top = gitrepo.toplevel(cx.fleet_root)
         result["push_skipped"] = (
             f"the fleet lives inside a larger repo ({top}); it was committed, not pushed"
         )
         say(f"warning: {result['push_skipped']}")
-    elif push:
-        pushed, problem = gitrepo.push(cx.fleet_root)
-        result["pushed"], result["push_error"] = pushed, problem
-        if problem:
-            say(f"warning: the fleet repo was not pushed: {problem}")
-        elif pushed:
-            say("pushed the fleet repo")
-    if failure:
-        raise DeployFailed(result)
-    return result
+        return
+    pushed, problem = gitrepo.push(cx.fleet_root)
+    result["pushed"], result["push_error"] = pushed, problem
+    if problem:
+        say(f"warning: the fleet repo was not pushed: {problem}")
+    elif pushed:
+        say("pushed the fleet repo")
 
 
 #: ``plans/`` keeps this many of the newest plan records, plus every record a
