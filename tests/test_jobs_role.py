@@ -54,7 +54,7 @@ JOBS = {
     },
 }
 SHOP = {
-    "image": "argo-bay-shop:latest",
+    "image": "ghcr.io/acme/shop:1",
     "env": {"clear": {"A": "1"}},
     "volumes": ["shop-data:/app/data", "/opt/bay/config/shop/x.yaml:/etc/x.yaml:ro"],
     "mem_limit": "512m",
