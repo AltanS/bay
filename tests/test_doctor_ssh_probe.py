@@ -224,3 +224,125 @@ def test_missing_ssh_binary_stops_immediately(monkeypatch) -> None:
 def test_describe_user() -> None:
     assert _describe_user("ops", HOST) == f"ops@{HOST}"
     assert _describe_user(None, HOST) == f"{HOST} (ssh default user)"
+
+
+# ── Vault, boxes and repos (M117/08) ─────────────────────────────────────
+
+
+def _git(path: Path, *args: str) -> str:
+    out = subprocess.run(
+        ["git", "-c", "user.email=t@example.test", "-c", "user.name=t", "-C", str(path), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip()
+
+
+def test_doctor_checks_vault_boxes_repos(tmp_path: Path, monkeypatch) -> None:
+    import json
+    import os
+
+    from typer.testing import CliRunner
+
+    from bay_cli import receipts, secrets_check
+    from bay_cli.cli import app
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("BAY_FLEET", raising=False)
+    monkeypatch.delenv("BAY_FLEET_NAME", raising=False)
+
+    # An app repo with one pushed commit, and one commit that was never pushed.
+    remote = tmp_path / "shop.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(remote)], check=True)
+    work = tmp_path / "shop"
+    subprocess.run(["git", "clone", "-q", str(remote), str(work)], check=True)
+    (work / "bay.toml").write_text('name = "shop"\n')
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "one")
+    _git(work, "push", "-q", "origin", "HEAD:main")
+    pushed = _git(work, "rev-parse", "HEAD")
+    (work / "bay.toml").write_text('name = "shop"\n# two\n')
+    _git(work, "commit", "-q", "-am", "two")
+    local_only = _git(work, "rev-parse", "HEAD")
+
+    fleet = tmp_path / "fleet"
+    (fleet / "group_vars" / "production").mkdir(parents=True)
+    (fleet / "bay.fleet.toml").write_text(
+        'name = "demo"\nformat = 2\ndefault_box = "box-1"\ndefault_domain = "example.com"\n'
+        'primary_env = "production"\n\n[boxes.box-1]\nenv = "production"\n'
+    )
+    (fleet / "group_vars" / "production" / "secrets.yml").write_text(
+        "$ANSIBLE_VAULT;1.1;AES256\n3031\n"
+    )
+    (fleet / ".vault_pass").write_text("not-a-real-password\n")
+    for name, repo, commit in (
+        ("shop", str(remote), pushed),
+        ("draft", str(remote), local_only),
+        ("gone", str(tmp_path / "missing.git"), pushed),
+    ):
+        (fleet / "projects" / name).mkdir(parents=True)
+        (fleet / "projects" / name / "bay.lock").write_text(
+            json.dumps({"lock_version": 2, "name": name, "repo": repo, "commit": commit, "envs": {}})
+        )
+    _git(fleet, "init", "-q", "-b", "main")
+    (fleet / ".gitignore").write_text(".vault_pass\n")
+    _git(fleet, "add", "-A")
+    _git(fleet, "commit", "-q", "-m", "fleet")
+
+    seen: list[str] = []
+    monkeypatch.setattr(secrets_check, "vault_names", lambda cx, env: seen.append(env) or {"X"})
+    monkeypatch.setattr(
+        receipts,
+        "fetch_receipts",
+        lambda cx, env, run=None: [
+            {"env": env, "box": "box-1", "receipt": {"deployed_at": "2026-10-07T00:00:00Z"},
+             "error": None},
+            {"env": env, "box": "box-2", "receipt": None, "error": "unreachable: timed out"},
+        ],
+    )
+
+    def run(*extra: str) -> tuple[dict, int, str]:
+        old = Path.cwd()
+        os.chdir(tmp_path)
+        try:
+            result = CliRunner().invoke(app, ["--fleet", str(fleet), "doctor", "--json", *extra])
+        finally:
+            os.chdir(old)
+        return json.loads(result.stdout), result.exit_code, result.output
+
+    doc, code, output = run()
+    lines = [(line["check"], line["status"], line["detail"]) for line in doc["lines"]]
+    assert ("Vault", "ok", "group_vars/production/secrets.yml opens with .vault_pass") in lines
+    assert seen == ["production"]
+    assert "not-a-real-password" not in output
+    boxes = [line for line in lines if line[0] == "Box"]
+    assert boxes == [
+        ("Box", "ok", "box-1 (production) answers; last deploy 2026-10-07T00:00:00Z"),
+        ("Box", "fail", "box-2 (production): unreachable: timed out"),
+    ]
+    repos = {line[2].split(":")[0]: line for line in lines if line[0] == "Repo"}
+    assert repos["shop"][1] == "ok" and pushed[:12] in repos["shop"][2]
+    assert repos["draft"][1] == "fail" and "push it" in repos["draft"][2]
+    assert repos["gone"][1] == "fail" and "cannot reach" in repos["gone"][2]
+    assert code == 1 and doc["ok"] is False
+
+    # The vault does not open: a fail line, and still no secret printed.
+    def broken(cx, env):
+        raise secrets_check.SecretsUncheckable("vault decrypt failed")
+
+    monkeypatch.setattr(secrets_check, "vault_names", broken)
+    doc, _, _ = run("--no-remote")
+    lines = [(line["check"], line["status"], line["detail"]) for line in doc["lines"]]
+    assert (
+        "Vault", "fail", "group_vars/production/secrets.yml does not open: vault decrypt failed"
+    ) in lines
+    # --no-remote asks no box and fetches nothing.
+    assert ("Boxes", "info", "not asked (--no-remote)") in lines
+    assert not [line for line in lines if line[0] == "Box"]
+    (fleet / ".vault_pass").unlink()
+    doc, _, _ = run("--no-remote")
+    assert any(
+        line["check"] == "Vault" and line["status"] == "fail" and ".vault_pass is missing" in
+        line["detail"] for line in doc["lines"]
+    )

@@ -272,3 +272,160 @@ def test_mutating_verbs_print_fleet_line_on_stderr(home: Path, tmp_path: Path) -
         assert verb in fleet_line.QUIET_VERBS
         first, _ = _first_stderr_line(args, outside)
         assert not first.startswith("fleet:"), (verb, first)
+
+
+# ── bay doctor (M117/08) ────────────────────────────────────────────────────
+
+
+def _doctor_fleet(path: Path, *, fmt: int | None = 2) -> Path:
+    path.mkdir(parents=True)
+    head = f"format = {fmt}\n" if fmt is not None else ""
+    (path / FLEET_FILE).write_text(_DEMO_FLEET.replace('name = "demo"\n', f'name = "demo"\n{head}'))
+    _git(path, "init", "-q", "-b", "main")
+    _git(path, "add", "-A")
+    _git(path, "commit", "-q", "-m", "fleet")
+    return path
+
+
+def _doctor(args: list[str], cwd: Path) -> tuple[dict, int]:
+    import json
+    import os
+
+    old = Path.cwd()
+    os.chdir(cwd)
+    try:
+        result = runner.invoke(cli.app, [*args, "doctor", "--json", "--no-remote"])
+    finally:
+        os.chdir(old)
+    return json.loads(result.stdout), result.exit_code
+
+
+def _line(doc: dict, check: str) -> dict:
+    return next(line for line in doc["lines"] if line["check"] == check)
+
+
+def test_doctor_reports_fleet_pick_reason(
+    home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fleet = _doctor_fleet(tmp_path / "real-fleet")
+    link = tmp_path / "linked"
+    link.symlink_to(fleet)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    doc, _ = _doctor(["--fleet", str(link)], outside)
+    line = _line(doc, "Fleet")
+    assert line["status"] == "ok"
+    assert f"demo ({fleet.resolve()}), picked by --fleet {link}" in line["detail"]
+    assert f"{link} resolves to {fleet.resolve()}" in line["detail"]
+    assert doc["fleet"]["root"] == str(fleet.resolve())
+
+    monkeypatch.setenv("BAY_FLEET", str(fleet))
+    doc, _ = _doctor([], outside)
+    assert f"picked by BAY_FLEET={fleet}" in _line(doc, "Fleet")["detail"]
+    monkeypatch.delenv("BAY_FLEET")
+
+    named = home / ".config" / "bay" / "fleets" / "demo"
+    named.parent.mkdir(parents=True)
+    named.symlink_to(fleet)
+    monkeypatch.setenv("BAY_FLEET_NAME", "demo")
+    doc, _ = _doctor([], outside)
+    assert "picked by BAY_FLEET_NAME=demo" in _line(doc, "Fleet")["detail"]
+    monkeypatch.delenv("BAY_FLEET_NAME")
+
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "bay.toml").write_text('name = "shop"\nfleet = "demo"\n')
+    doc, _ = _doctor([], app)
+    assert f'picked by fleet = "demo" in {app / "bay.toml"}' in _line(doc, "Fleet")["detail"]
+
+    doc, _ = _doctor([], fleet)
+    assert "picked by the fleet directory you stand in" in _line(doc, "Fleet")["detail"]
+
+    doc, code = _doctor([], outside)
+    assert code == 1 and _line(doc, "Fleet")["status"] == "fail"
+    assert "no fleet selected" in _line(doc, "Fleet")["detail"]
+
+
+def test_doctor_reports_format_and_cli_version(home: Path, tmp_path: Path) -> None:
+    from bay_cli.context import package_root
+
+    fleet = _doctor_fleet(tmp_path / "two")
+    doc, _ = _doctor(["--fleet", str(fleet)], tmp_path)
+    assert _line(doc, "Fleet format") == {
+        "check": "Fleet format", "status": "ok", "detail": "format 2"
+    }
+    cli_line = _line(doc, "CLI")
+    assert cli_line["detail"].startswith("bay ") and cli_line["detail"].endswith(
+        f" at {package_root()}"
+    )
+
+    old = _doctor_fleet(tmp_path / "one", fmt=None)
+    doc, _ = _doctor(["--fleet", str(old)], tmp_path)
+    line = _line(doc, "Fleet format")
+    assert line["status"] == "warn" and line["detail"].startswith("format 1:")
+
+    future = _doctor_fleet(tmp_path / "nine", fmt=9)
+    doc, code = _doctor(["--fleet", str(future)], tmp_path)
+    assert _line(doc, "Fleet format")["status"] == "fail" and code == 1
+    assert "bay self update" in _line(doc, "Fleet format")["detail"]
+
+
+def test_doctor_reports_fleet_behind_origin(home: Path, tmp_path: Path) -> None:
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+    fleet = _doctor_fleet(tmp_path / "fleet")
+    _git(fleet, "remote", "add", "origin", str(origin))
+    _git(fleet, "push", "-q", "-u", "origin", "main")
+
+    doc, _ = _doctor(["--fleet", str(fleet)], tmp_path)
+    assert _line(doc, "Fleet clone") == {
+        "check": "Fleet clone", "status": "ok", "detail": "not behind its remote"
+    }
+
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+    (other / "README").write_text("newer\n")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-q", "-m", "newer")
+    _git(other, "push", "-q", "origin", "main")
+
+    doc, code = _doctor(["--fleet", str(fleet)], tmp_path)
+    line = _line(doc, "Fleet clone")
+    assert line["status"] == "fail" and "behind its remote; run git pull" in line["detail"]
+    assert code == 1 and doc["ok"] is False
+
+
+def test_doctor_reports_v1_leftovers(home: Path, tmp_path: Path) -> None:
+    fleet = _doctor_fleet(tmp_path / "fleet")
+    doc, _ = _doctor(["--fleet", str(fleet)], tmp_path)
+    assert _line(doc, "v1 leftovers")["status"] == "ok"
+
+    (fleet / "bin").mkdir()
+    (fleet / "bin" / "bay").write_text("#!/bin/sh\n")
+    (fleet / ".bay-version").write_text("v1.0.0\n")
+    doc, _ = _doctor(["--fleet", str(fleet)], tmp_path)
+    line = _line(doc, "v1 leftovers")
+    assert line["status"] == "warn"
+    assert line["detail"].startswith("bin, .bay-version in the fleet")
+    assert "bay='bin/bay'" in line["detail"]
+
+
+def test_doctor_reports_untracked_plans(home: Path, tmp_path: Path) -> None:
+    fleet = _doctor_fleet(tmp_path / "fleet")
+    doc, _ = _doctor(["--fleet", str(fleet)], tmp_path)
+    assert _line(doc, "Plans")["status"] == "ok"
+
+    (fleet / "plans").mkdir()
+    (fleet / "plans" / "0123456789ab.json").write_text("{}\n")
+    (fleet / "plans" / "ba9876543210.json").write_text("{}\n")
+    doc, _ = _doctor(["--fleet", str(fleet)], tmp_path)
+    line = _line(doc, "Plans")
+    assert line["status"] == "warn"
+    assert line["detail"].startswith("2 plan file(s) are not committed")
+    assert "plans/0123456789ab.json" in line["detail"]
+
+    _git(fleet, "add", "plans")
+    _git(fleet, "commit", "-q", "-m", "plans")
+    doc, _ = _doctor(["--fleet", str(fleet)], tmp_path)
+    assert _line(doc, "Plans")["status"] == "ok"
