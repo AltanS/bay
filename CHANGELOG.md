@@ -24,6 +24,21 @@ needing manual action is called out under **Upgrade notes**. Entries for
 - `docs/install.md` has a section "Development mode: the editable install" (M116/08).
 - `docs/plan.md` no longer says a code pin is future work, or that a new box in
   `bay.toml` gives only a note.
+- Fixes from two blind-reader reports of the 2.1 docs. One install path (`bootstrap.sh`)
+  in `install.md`, the README and scenario 14. The vault password file, the rule for the three
+  fleet names and one ordered fleet pick list (the fleet directory you stand in included) are
+  in `install.md`. The README body describes the v2 model. `plan.md` now covers the `--remote`
+  default and its effect on the plan id, the dirty check, the full flag list, how to create a
+  project with no repo, the first image, which projects `bay up` pins, one `rollback --to`
+  rule, undoing a bad push in branch mode, pin-mode rollback, `frozen_commit`, and
+  what `<env>` means in `bay up --plan-id` for a removal. It also lists the features the
+  compiler cannot deploy yet. `layout-scenarios.md` defines deploy env, box env and group,
+  says that `access.mode` has no default and that a resource maps to boxes by `kind` and `box`, and
+  has an ordered "second env on a new box" list. `bay-toml.md` states the container name rule
+  and the `from` fallback. `build-pipeline.md` gives the order of the push guards.
+  `tailnet-ingress.md` is 2.1 first: routes in `[tailnet.routes.*]`, `bay route add` never edits the ACL,
+  one prerequisites list, one list of the two ACL edits, the upstream host form and the
+  `allowlist` key. `deploy-receipt.md` takes the WANTED definition of `plan.md`.
 
 ### Fixed
 
