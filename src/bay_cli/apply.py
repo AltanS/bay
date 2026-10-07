@@ -351,12 +351,16 @@ def _apply_plan(
     """
     env = str(plan["env"])
     box_env = str(plan["box_env"])
+    adopt_notes: list[str] = []
     for proj, commit in members:
         if planmod.adopt_pending(proj, env, commit):
             # The adopt commit: bay up deploys its config before the push, so
-            # the push meets the new rebuild.sh and is config only.
-            say(f"{proj.name}: {commit[:12]} is the bay adopt commit; no code moves, "
-                "git push it after this bay up")
+            # the push meets the new rebuild.sh and is config only. The note
+            # goes to the result's notes, which also echo to the log.
+            adopt_notes.append(
+                f"{proj.name}: {commit[:12]} is the bay adopt commit; no code moves, "
+                "git push it after this bay up"
+            )
             continue
         on_remote = planmod.commit_on_remote(proj, commit)
         if on_remote is not True:
@@ -520,7 +524,8 @@ def _apply_plan(
     )
     lock_files += more_files
     pinned += more_rows
-    notes = [
+    notes = list(adopt_notes)
+    notes += [
         f"{name} has no pinned commit, so this deploy left it out and its lock is unchanged"
         for name in left_out
     ]

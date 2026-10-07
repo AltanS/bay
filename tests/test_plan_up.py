@@ -3877,6 +3877,32 @@ def test_up_accepts_unpushed_adopt_commit_without_code_move(
     assert again["steps"] == [] and again["verdict"] == "auto", again
 
 
+def test_up_json_notes_carry_the_adopt_note(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    """The adopt note is in the up result's notes, not only in the log."""
+    shop = _shop(world, tmp_path, toml=BUILD_SHOP_TOML)
+    assert _adopt(world, shop).exit_code == 0
+    adopt_commit = git(shop["app"], "rev-parse", "HEAD")
+    proj = planmod.load_project(cx_of(world), "shop", cwd=shop["app"])
+    echoed: list[str] = []
+    up = applymod.up(
+        proj,
+        planmod.PlanOptions(),
+        deploy=lambda cx, box_env, **kw: box.deploy(
+            cx, box_env, config_files_root=kw.get("config_files_root")
+        ),
+        echo=echoed.append,
+    )
+    assert up["result"] == "ok"
+    want = (
+        f"shop: {adopt_commit[:12]} is the bay adopt commit; no code moves, "
+        "git push it after this bay up"
+    )
+    assert want in up["notes"]
+    assert f"note: {want}" in echoed
+
+
 def test_adopt_toml_path_monorepo(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
     shop = _shop(world, tmp_path)
     before = _body((world["fleet"] / GENERATED_SERVICES).read_text())

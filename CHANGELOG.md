@@ -24,6 +24,11 @@ needing manual action is called out under **Upgrade notes**. Entries for
   several deploy envs, for the first plan of a new env, for what a plain `bay plan` cannot see, and
   for the risk of a box-predicted step are stated from the code.
 
+### Fixed
+
+- `bay up --json` now carries the adopt note in `notes`. When the commit is the `bay adopt`
+  commit, the sentence "no code moves, git push it after this bay up" went to the log only.
+
 ## [2.1.3] - 2026-10-07
 
 ### Fixed
