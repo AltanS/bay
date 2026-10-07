@@ -26,6 +26,10 @@ def remove(
             "deploy.<env> table. Default: every environment and the project itself.",
         ),
     ] = None,
+    remote: Annotated[
+        bool,
+        typer.Option("--remote", help="Also run the deploy in check mode on the box."),
+    ] = False,
     no_remote: Annotated[
         bool, typer.Option("--no-remote", help="Do not read the box receipt.")
     ] = False,
@@ -45,6 +49,10 @@ def remove(
     Then: bay approve <plan-id> --reason "<why>", and bay up <env> --plan-id
     <plan-id>. bay up deletes the lock only when the box receipt confirms
     the containers are gone.
+
+    With --remote the plan also asks each box, in check mode, what the deploy
+    would remove, as bay plan --remote does. Without it the plan reads the
+    receipt only. --no-remote skips the receipt too.
 
     Examples:
 
@@ -67,7 +75,12 @@ def remove(
             _, fleet_name = _read_identity(here) if here else (None, None)
             cx = fleet_context(ctx, fleet_name, allow_cwd=True)
             plan = removemod.make_remove_plan(
-                cx, project, env=env, read_running=not no_remote, cwd=Path.cwd()
+                cx,
+                project,
+                env=env,
+                read_running=not no_remote,
+                box_check=remote,
+                cwd=Path.cwd(),
             )
             from bay_cli import plan as planmod
 

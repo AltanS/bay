@@ -3938,6 +3938,51 @@ def test_remove_step_reason_grammar_singular_and_plural() -> None:
     assert removemod._stays([], []) == ""
 
 
+def test_remove_plan_box_check_default_matches_plan(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    do_up(world)
+    seen: list[Path] = []
+
+    def check(
+        cx: Context, box_env: str, services_file: Path, **_kw: Any
+    ) -> list[dict[str, Any]] | None:
+        seen.append(services_file)
+        text = services_file.read_text()
+        assert "webapp" not in yaml.safe_load(text.split("\n", 1)[1]).get("services", {})
+        return _box_report(("webapp", "remove", ["orphan: a managed container"]))
+
+    monkeypatch.setattr(planmod, "default_box_check", check)
+    # Default: bay plan and bay remove both leave the box alone.
+    assert planmod.make_plan(project(world), planmod.PlanOptions())["box_checked"] is False
+    _, plain = _remove_json(world, "webapp")
+    assert plain["box_checked"] is False and plain["box_prediction"]["checked"] is False
+    assert any("pass --remote" in n for n in plain["notes"])
+    assert seen == []
+    # --remote: the box is asked, and the remove step carries its prediction.
+    result = cli(world, "remove", "webapp", "--remote", "--json")
+    assert result.stdout, repr(result.output) + repr(result.exception)
+    plan = json.loads(result.stdout)
+    assert result.exit_code == 10, result.output
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    assert plan["box_checked"] is True and plan["box_prediction"]["checked"] is True
+    assert len(seen) == 1
+    step = plan["steps"][0]
+    assert (step["container"], step["action"], step["source"]) == ("webapp", "remove", "box")
+    assert "box box-1 predicts remove: orphan: a managed container" in step["reason"]
+    # Checking the saved plan again keeps the box check.
+    again = cli(world, "plan", "--plan-id", plan["plan_id"], "--json")
+    assert json.loads(again.stdout)["box_checked"] is True
+    # The box does not predict the remove: the step stays, a note says so.
+    monkeypatch.setattr(
+        planmod, "default_box_check", lambda *_a, **_k: _box_report(("other", "noop", []))
+    )
+    _, quiet = _remove_json(world, "webapp", "--remote")
+    assert quiet["box_checked"] is True
+    assert quiet["steps"][0]["action"] == "remove"
+    assert any("does not predict a remove for webapp" in n for n in quiet["notes"])
+
+
 def test_remove_deletes_lock_after_receipt(
     world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:

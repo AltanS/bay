@@ -70,7 +70,7 @@ bay up [env] [--at SHA] [--plan-id ID] [--force --reason "<why>"] [--data keep] 
 bay show [name] [--json] [--no-remote]
 bay rollback [env] [--force --reason "<why>"] [--data keep] [--json] [--log PATH] [--no-push]
 bay adopt <name> [--toml-path P] [--check] [--json]   # move an in-fleet bay.toml into its app repo
-bay remove <name> [--env E] [--json] [--no-remote]   # plan taking a project out; bay up --plan-id applies it
+bay remove <name> [--env E] [--json] [--remote] [--no-remote]   # plan taking a project out; bay up --plan-id applies it
 ```
 
 `env` is the `[deploy.<env>]` name. The default is the fleet's primary
@@ -617,6 +617,21 @@ the containers per environment, every named volume by its name on the box
 (`<stack_name>_<volume>`), and the database and its role (the adopted names
 from the lock, else the derived ones). `bay plan --plan-id <id>` checks a saved
 remove plan again.
+
+**The box check.** `bay remove` takes the same flags as `bay plan`, with the
+same defaults. Without `--remote`, the plan reads the box receipt (RUNNING) and
+does not run the check mode: `box_checked` is `false`, and a note says so.
+`--no-remote` skips the receipt too. With `--remote`, Bay runs the check mode of
+the deploy on each box the project runs on, against the compiled file
+*without* the project, as `bay plan --remote` does. The reconciler lists a
+managed container that the file no longer holds as `remove` (reason `orphan`).
+Each remove step then takes the box's words into its reason and gets
+`source: box`, and `box_checked` and `box_prediction` are filled. When the box
+does not predict a `remove` for a step (the container does not run there, or
+the box runs an older Bay), the step stays, and a note names it: that step
+rests on the receipt alone. Any other change the box predicts becomes a
+`source: box` step, as in a normal plan. `bay plan --plan-id` and `bay up
+--plan-id` repeat the check when the saved plan has it.
 
 **Bay never deletes data.** The containers stop and leave. The volumes and the
 database stay where they are. The plan and `bay up` print the lines to delete

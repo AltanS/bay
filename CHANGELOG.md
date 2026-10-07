@@ -22,6 +22,13 @@ needing manual action is called out under **Upgrade notes**. Entries for
 - **`bay route import --json`.** The verb now takes `--json` like the other route
   verbs and prints one document: `fleet_commit`, `routes` (name, domain, upstream),
   `deleted` (the old file) and `cert_domain`.
+- **`bay remove` takes `--remote` and `--no-remote` like `bay plan`.** It always saved
+  `box_checked: false` and an empty `box_prediction`, and had no flag to change that.
+  The default is the one of `bay plan`: the receipt is read, the box is not asked.
+  With `--remote`, Bay runs the check mode of the deploy on each box against the compile
+  without the project. Each remove step takes the box's prediction into its reason
+  (`source: box`), and a step the box does not predict is named in a note. A saved
+  plan keeps its box check when it is checked again.
 - **The remove step reason has the right verb.** It read `volume <name> stay`. It now reads
   `volume <name> stays`, `volumes <a>, <b> stay`, and the same for databases.
 

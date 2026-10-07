@@ -34,6 +34,7 @@ from __future__ import annotations
 import copy
 import shutil
 from collections.abc import Callable, Mapping
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -255,16 +256,79 @@ def _stays(volumes: list[str], databases: list[dict[str, Any]]) -> str:
     return " and ".join(parts) + (" stays" if one else " stay")
 
 
+def _check_boxes(
+    cx: Context,
+    box_envs: list[str],
+    services_file: Path,
+    checker: planmod.BoxCheck,
+    steps: list[dict[str, Any]],
+    name: str,
+    mine: set[str],
+    blockers: list[str],
+    notes: list[str],
+    owners: Mapping[str, str] | None,
+) -> tuple[bool, dict[str, Any]]:
+    """Ask each box what the deploy of the compiled file (without the project) does.
+
+    The reconciler lists a managed container that the file no longer holds as
+    ``remove`` (reason ``orphan``), so a remove step takes the box's words into its
+    reason. A step the box does not predict as ``remove`` is named in a note: the step
+    then rests on the receipt alone. Any other change the box predicts becomes a
+    ``source: box`` step, as in ``bay plan --remote``.
+    """
+    entries: list[dict[str, Any]] = []
+    for box_env in box_envs:
+        try:
+            entries.extend(checker(cx, box_env, services_file) or [])
+        except (BayError, OSError, SystemExit) as exc:
+            blockers.append(f"the check on the box failed: {exc}")
+            return False, {"checked": False, "containers": [], "errors": []}
+    prediction = planmod.box_prediction(entries)
+    blockers.extend(
+        f"the check on the box gave no prediction: {e}" for e in prediction["errors"]
+    )
+    if not prediction["containers"] and not prediction["errors"]:
+        blockers.append("the check on the box gave no prediction")
+    predicted = {(c["name"]): c for c in prediction["containers"] if c["action"] == "remove"}
+    unpredicted: list[str] = []
+    for step in steps:
+        hit = predicted.get(str(step["container"]))
+        if hit is None:
+            unpredicted.append(str(step["container"]))
+            continue
+        why = "; ".join(hit["reasons"]) or "no reason given"
+        step["reason"] += f"; box {hit['box']} predicts remove: {why}"
+        step["source"] = "box"
+    if unpredicted:
+        notes.append(
+            f"the box checked, but it does not predict a remove for {', '.join(unpredicted)} "
+            "(the container is not running there, or the box runs an older Bay); "
+            "those steps rest on the receipt alone"
+        )
+    explained = {str(s["container"]) for s in steps}
+    steps.extend(
+        planmod.box_steps(prediction, explained, project=name, mine=mine, owners=owners)
+    )
+    return True, prediction
+
+
 def make_remove_plan(
     cx: Context,
     name: str,
     *,
     env: str | None = None,
     read_running: bool = True,
+    box_check: bool = False,
     cwd: Path | None = None,
     read_receipts: planmod.ReceiptReader | None = None,
+    check_box: planmod.BoxCheck | None = None,
 ) -> dict[str, Any]:
-    """The plan that takes ``name`` (or its ``env``) out of the fleet. Does not save it."""
+    """The plan that takes ``name`` (or its ``env``) out of the fleet. Does not save it.
+
+    ``box_check`` is ``bay plan --remote``: ask each box, in check mode, what the deploy
+    of the compiled file (without the project) would do. Off by default, as in
+    ``bay plan``.
+    """
     fleet_doc = planmod.load_fleet_doc(cx)
     refuse_reserved(fleet_doc, name)
     proj = planmod.load_project(cx, name, cwd=cwd)
@@ -406,6 +470,8 @@ def make_remove_plan(
             )
 
     # The compile without the project must change nothing else.
+    box_checked = False
+    prediction: dict[str, Any] = {"checked": False, "containers": [], "errors": []}
     pins = {name: target} if target else {}
     drop: dict[str, set[str] | None] = {name: set(envs)} if env is not None else {name: None}
     with planmod.compiled_fleet(cx, pins, cwd=cwd, drop=drop) as comp:
@@ -446,11 +512,29 @@ def make_remove_plan(
                     f"the compile also changes what bay remove does not cover ({what}); "
                     "apply that with bay up first, then run bay remove again"
                 )
+            if box_check and box_envs and not blockers:
+                services_file = comp.services_file()
+                assert services_file is not None
+                checker = check_box or partial(
+                    planmod.default_box_check, config_files_root=comp.files_root
+                )
+                box_checked, prediction = _check_boxes(
+                    cx, box_envs, services_file, checker, steps, name, all_names, blockers, notes,
+                    comp.owners,
+                )
     if state.is_git and planmod.tailnet_step(cx, fleet_doc) is not None:
         blockers.append(
             "the tailnet allowlist in bay.fleet.toml changed since the last fleet commit; "
             "apply it with bay up first"
         )
+    if not box_check:
+        notes.append(
+            "the steps come from the compiled files and the receipt alone; "
+            "pass --remote to check them on the box"
+        )
+    elif not box_checked and not any("check on the box" in b for b in blockers):
+        notes.append("the box was not checked (--remote): " + (
+            "no box env to ask" if not box_envs else "the plan is blocked"))
 
     whole = env is None
     plan_env = env or (envs[0] if envs else primary)
@@ -495,8 +579,8 @@ def make_remove_plan(
             "lock_sha256": lockfile.sha256_of(proj.lock_file),
         },
         "running": running,
-        "box_checked": False,
-        "box_prediction": {"checked": False, "containers": [], "errors": []},
+        "box_checked": box_checked,
+        "box_prediction": prediction,
         "steps": steps,
         "unsupported": [],
         "missing_secrets": [],
@@ -529,8 +613,12 @@ def recheck_remove(
     *,
     cwd: Path | None = None,
     read_receipts: planmod.ReceiptReader | None = None,
+    check_box: planmod.BoxCheck | None = None,
 ) -> dict[str, Any]:
-    """Plan the saved remove again; mark it stale when it moved."""
+    """Plan the saved remove again; mark it stale when it moved.
+
+    A plan saved with the box check is checked on the box again.
+    """
     rm = saved.get("remove")
     if not isinstance(rm, Mapping):
         raise BayError(f"plan {saved.get('plan_id')} is not a bay remove plan")
@@ -540,8 +628,10 @@ def recheck_remove(
         str(saved["project"]),
         env=env,
         read_running=bool((saved.get("running") or {}).get("checked")),
+        box_check=bool(saved.get("box_checked")),
         cwd=cwd,
         read_receipts=read_receipts,
+        check_box=check_box,
     )
     fresh["stale"] = planmod.stale_reasons(saved, fresh)
     planmod.decide(fresh)
