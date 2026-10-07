@@ -246,9 +246,9 @@ def test_git_deploy_webhook_task_creates_state_dir():
         / "roles"
         / "git_deploy"
         / "tasks"
-        / "webhook.yml"
+        / "render_webhook.yml"
     )
     content = task_file.read_text()
     assert "stack_dir }}/state" in content, (
-        "webhook.yml must ensure ${stack_dir}/state exists before the container starts."
+        "render_webhook.yml must ensure ${stack_dir}/state exists before the container starts."
     )

@@ -1,6 +1,7 @@
 """The build-control directories must agree across every task that touches them.
 
-roles/git_deploy/tasks/webhook.yml creates `{{ stack_dir }}/state` and
+roles/git_deploy/tasks/render_webhook.yml (webhook.yml before 2.2.0) creates
+`{{ stack_dir }}/state` and
 `{{ stack_dir }}/triggers` as 2770, owner app_user, group
 `git_deploy_build_group` — the shared group that lets both the webhook
 container (UID 10001) and rebuild.sh (run as app_user via a systemd path
