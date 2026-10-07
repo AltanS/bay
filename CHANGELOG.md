@@ -42,10 +42,11 @@ needing manual action is called out under **Upgrade notes**. Entries for
   than it knows.
 - `bay up` refuses a repo project's commit that is on no branch of the remote:
   "push first". `bay plan` says so in a note.
-- `bay plan` is blocked when a compiled config file is missing from the fleet's
-  `files/` or differs from it there. The deploy still copies config files from the
-  fleet's working tree, so the plan would otherwise show one file and the deploy
-  ship another.
+- `bay up` and the box check of `bay plan --remote` deploy config files from the
+  plan's scratch copy of the fleet at its commit (`bay_config_files_root`), with each
+  file a `bay.toml` mounts from beside it mapped to `files/<target>`. So the deploy
+  ships what the plan compiled. An uncommitted file is not deployed; the plan names
+  it in a note. A plain `bay deploy` still copies from the fleet's `files/`.
 - `bay doctor` warns when the fleet still has the Bay 1 leftovers `bin/`, `.bay/`
   or `.bay-version`.
 
@@ -60,11 +61,13 @@ needing manual action is called out under **Upgrade notes**. Entries for
   also refuses when one project has a lock in both places.
 - A 2.0 CLI refuses a format 2 fleet (`format: unknown key`), so update every
   machine that works on the fleet with `bay self update`.
-- `files/<name>/<from>` is still read for this release, with a note that names
-  each file. Do not move those files out of `files/` yet: the deploy still copies
-  config files from the fleet's `files/`, and the plan blocks when a compiled file
-  is missing or different there. A file beside the toml needs the same bytes at
-  `files/<name>/<from>` until the deploy reads the mapped copy.
+- Both places work in 2.1: beside the `bay.toml` and the old
+  `files/<name>/<from>`. The old place prints a note that names each file. Move each
+  file with `git mv`, for example
+  `git mv files/gatus/config.yaml projects/gatus/config.yaml`. The box path does not
+  change, so no container is recreated.
+- `bay up` no longer deploys an uncommitted config file. Commit a file before you
+  run `bay up`; the plan names each uncommitted one in a note.
 - `bay init` now refuses a repo with no `origin` remote.
 - Remove the Bay 1 leftovers `bin/`, `.bay/` and `.bay-version` from each fleet
   and drop the shell alias `bay='bin/bay'`. `bay doctor` lists what is left.

@@ -448,10 +448,9 @@ Where `from` is read:
   `files/crowdsec/whitelist.yaml` in the fleet. The prefix is explicit; Bay never
   guesses. On the box the file is `config/crowdsec/whitelist.yaml`.
 - **The old place, for one release.** When the file is not beside the toml, Bay still
-  reads `files/<name>/<from>` in the fleet, and prints a note that names the file. 2.1
-  reads both places; a later release reads only the new one. Until the deploy reads
-  the mapped copy, keep the file in `files/` too (see `docs/plan.md`, The project
-  folder).
+  reads `files/<name>/<from>` in the fleet, and prints a note that names the file. Move
+  it beside the `bay.toml` with `git mv`. 2.1 reads both places; a later release reads
+  only the new one.
 - On the box the file is `config/<name>/<from>`, or `config/<adopted path>` when the
   lock adopts one. Moving a file beside the toml does not change that path, so no
   container is recreated.

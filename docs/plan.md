@@ -378,15 +378,18 @@ projects/
   part of the plan.
 - `files/` stays for rig files, `[resources.*]` files and shared files.
 
-**The deploy still reads the fleet's working tree.** It copies each config
-file from `<fleet>/files/<target>`, not from the temporary fleet. So the plan
-is blocked when a compiled config file is missing from `files/<target>` or
-differs from it there. Keep a copy at `files/<target>` until the deploy reads
-the mapped files.
+**The deploy reads the scratch copy.** The deploy reads mounted files from the
+scratch copy at the pinned commit; uncommitted files are not deployed. `bay up`
+keeps the temporary fleet until its deploy has finished and passes its
+`files/` as `bay_config_files_root`. The box check of `bay plan --remote` passes
+the same, so the prediction and the deploy read the same bytes. The plan lists
+each uncommitted file under `files/` or in a project folder in a note:
+`uncommitted file <path> is not deployed`. A plain `bay deploy` passes no such
+variable and copies from the fleet's `files/` as before.
 
-**One release of overlap.** A file that is not beside the toml is still read
-from its old place, `files/<name>/<from>`, with a note that names it. Do not
-move it out of `files/` while the deploy still reads the working tree (above).
+**One release of overlap.** Both places work in 2.1. A file that is not beside
+the toml is read from its old place, `files/<name>/<from>`, with a note that
+names it. Move it beside the toml with `git mv` when you are ready.
 
 **The move to format 2.** The first `bay plan`, `bay up`, `bay show`,
 `bay compile` or `bay init` of a 2.1 CLI moves each `projects/<name>.lock` to
