@@ -101,6 +101,9 @@ class CompileResult:
     tailnet_proxies: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: ``[[jobs]]``, keyed by job container name (see :meth:`_Compiler._emit_jobs`).
     jobs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Volume mounts with ``backup`` true, keyed by volume name (see
+    #: :meth:`_Compiler._volume_backup`).
+    volume_backups: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def data(self) -> dict[str, Any]:
         out: dict[str, Any] = {"accessories": self.accessories, "services": self.services}
@@ -110,6 +113,8 @@ class CompileResult:
         # uses none of them compiles to the same bytes as before 2.3.0.
         if self.jobs:
             out["jobs"] = self.jobs
+        if self.volume_backups:
+            out["volume_backups"] = self.volume_backups
         if self.tailnet_proxies:
             # Only when routes exist, so a fleet without them compiles to the same bytes.
             out["tailnet_proxies"] = self.tailnet_proxies
@@ -162,6 +167,20 @@ def split_header(text: str) -> tuple[str | None, str]:
     if not match:
         return None, text
     return match.group(1), rest if sep else ""
+
+
+def _keep_days(keep: str) -> int:
+    """A ``keep`` duration (``12h``, ``30d``, ``4w``) as whole days, at least 1.
+
+    The backup role keeps snapshots with ``restic forget --keep-within <n>d``.
+    Hours round up to the next day.
+    """
+    count, unit = int(keep[:-1]), keep[-1]
+    if unit == "w":
+        return count * 7
+    if unit == "h":
+        return max(1, -(-count // 24))
+    return count
 
 
 def body_digest(body: str) -> str:
@@ -230,6 +249,7 @@ class _Compiler:
         self.tailnet_exposed: set[str] = set()
         self.notes: set[str] = set()
         self.jobs: dict[str, dict[str, Any]] = {}
+        self.volume_backups: dict[str, dict[str, Any]] = {}
 
     # ── driver ──────────────────────────────────────────────────────────
     def run(self) -> CompileResult:
@@ -261,6 +281,7 @@ class _Compiler:
             notes=sorted(self.notes),
             tailnet_proxies=proxies,
             jobs=self.jobs,
+            volume_backups=self.volume_backups,
         )
 
     def _err(self, msg: str) -> None:
@@ -461,8 +482,6 @@ class _Compiler:
     # ── projects ────────────────────────────────────────────────────────
     def _emit_unit(self, unit: _Unit) -> None:
         doc = unit.doc
-        if "backup" in doc:
-            self._todo(unit, "backup", "project backup schedule for volumes")
         for service in ["web", *sorted(doc.get("services", {}))]:
             self._emit_container(unit, service)
         self._emit_jobs(unit)
@@ -532,7 +551,7 @@ class _Compiler:
         env, database, depends = self._env(unit, service, level, inherit, base)
         # Mounts are never overridden per environment, so the main container
         # reads them from the top level of the file.
-        volumes, files, files_public = self._mounts(unit, doc if is_web else level, base)
+        volumes, files, files_public = self._mounts(unit, doc if is_web else level, base, name)
 
         entry: dict[str, Any] = {}
         if image is not None:
@@ -977,7 +996,7 @@ class _Compiler:
 
     # ── mounts ──────────────────────────────────────────────────────────
     def _mounts(
-        self, unit: _Unit, level: dict[str, Any], base: str
+        self, unit: _Unit, level: dict[str, Any], base: str, container: str
     ) -> tuple[list[str], list[str], bool]:
         volumes: list[str] = []
         files: list[str] = []
@@ -993,7 +1012,7 @@ class _Compiler:
                 if "owner" in mount:
                     self._todo(unit, _p(mpath, "owner"), "a volume owner")
                 if mount.get("backup", True):
-                    self._todo(unit, _p(mpath, "backup"), "volume backups")
+                    self._volume_backup(unit, vname, container, mount["path"])
                 continue
             src = mount["from"].rstrip("/")
             resolved = self._mount_source(unit, mpath, src)
@@ -1012,6 +1031,27 @@ class _Compiler:
             if int(mount.get("mode", "0600"), 8) & 0o004:
                 public = True
         return volumes, files, public
+
+    def _volume_backup(self, unit: _Unit, volume: str, container: str, path: str) -> None:
+        """One ``volume_backups`` entry: ``{container, path, schedule?, retain?}``.
+
+        The backup role reads ``path`` out of ``container`` through the docker
+        daemon (``docker cp``), so the unit needs no access to the Docker data
+        root. The project ``[backup]`` table, then the fleet
+        ``[defaults.backup]``, give ``schedule`` (``0 <hour> * * *``, UTC) and
+        ``retain`` (days, from ``keep``). Without either the keys are left
+        out and the role defaults apply. The first container that mounts the
+        volume owns the entry.
+        """
+        if volume in self.volume_backups:
+            return
+        entry: dict[str, Any] = {"container": container, "path": path}
+        policy = {**self.defaults.get("backup", {}), **unit.doc.get("backup", {})}
+        if "hour" in policy:
+            entry["schedule"] = f"0 {int(policy['hour'])} * * *"
+        if "keep" in policy:
+            entry["retain"] = _keep_days(str(policy["keep"]))
+        self.volume_backups[volume] = entry
 
     def _mount_source(self, unit: _Unit, mpath: str, src: str) -> tuple[str, Path] | None:
         """``(target, path to list)`` of one ``from``: where it lands under config/ and files/.

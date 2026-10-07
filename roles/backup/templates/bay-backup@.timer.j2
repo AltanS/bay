@@ -16,7 +16,7 @@
 Description=Bay backup timer for {{ accessory_name }}
 
 [Timer]
-OnCalendar={{ cal_dow ~ ' ' if cal_dow }}*-{{ cal_month }}-{{ cal_dom }} {{ cal_hour }}:{{ cal_min }}:00
+OnCalendar={{ cal_dow ~ ' ' if cal_dow }}*-{{ cal_month }}-{{ cal_dom }} {{ cal_hour }}:{{ cal_min }}:00{{ ' UTC' if (timer_utc | default(false) | string | lower) == 'true' }}
 Persistent=true
 RandomizedDelaySec=300
 

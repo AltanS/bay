@@ -539,7 +539,7 @@ def _apply_plan(
 
         tags = routes.deploy_tags(plan["steps"], UP_DEPLOY_TAGS)
         if tags != UP_DEPLOY_TAGS:
-            say(f"deploy tags: {tags} (the plan changes a tailnet route)")
+            say(f"deploy tags: {tags} (the plan changes a tailnet route or a volume backup)")
         deploy_envs = [box_env] + sorted(
             {
                 str(m["from_box_env"])

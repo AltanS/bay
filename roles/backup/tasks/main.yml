@@ -40,6 +40,38 @@
       config: "{{ item.value }}"
   when: backup_enabled
 
+# Volume mounts with backup true (bay.toml mounts, compiled to the top-level
+# `volume_backups:` map, keyed by the volume name). One `file` entry per
+# volume whose container runs on this host, named like the Docker volume
+# (`<stack_name>_<volume>`, see bay_prefix_volumes). The script reads the
+# mount path out of the container through the docker daemon (`docker cp`), so
+# the unit, which runs as app_user, needs no access to the Docker data root.
+- name: Resolve backup configuration for each volume mount
+  ansible.builtin.set_fact:
+    _backup_accessories: "{{ _backup_accessories | default([]) + [_entry] }}"
+  loop: "{{ volume_backups | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    _volume_name: "{{ stack_name }}_{{ item.key }}"
+    _entry:
+      name: "{{ _volume_name }}"
+      method: file
+      schedule: "{{ item.value.schedule | default(backup_schedule) }}"
+      retain: "{{ item.value.retain | default(backup_retain) }}"
+      image: ""
+      repo: "s3:{{ backup_s3_endpoint }}/{{ backup_s3_bucket }}/{{ backup_s3_prefix }}/{{ inventory_hostname }}/{{ _volume_name }}"
+      container: "{{ item.value.container }}"
+      volume: "{{ _volume_name }}"
+      # A schedule from bay.toml or bay.fleet.toml is UTC; backup_schedule is box time.
+      utc: "{{ item.value.schedule is defined }}"
+      config:
+        backup:
+          source_path: "{{ item.value.path }}"
+  when:
+    - backup_enabled
+    - item.value.container in (active_services | default({})) or item.value.container in (active_accessories | default({}))
+
 - name: Register Headscale control-plane state as a backup target (control region only)
   ansible.builtin.set_fact:
     _backup_accessories: "{{ (_backup_accessories | default([])) + [_headscale_backup_entry] }}"
@@ -132,6 +164,7 @@
     retain: "{{ item.retain }}"
     repo: "{{ item.repo }}"
     accessory_config: "{{ item.config }}"
+    backup_container: "{{ item.container | default(item.name) }}"
     bound_databases: "{{ (_bound_databases | default({}))[item.name] | default([]) }}"
   when: backup_enabled
 
@@ -171,6 +204,7 @@
   vars:
     accessory_name: "{{ item.name }}"
     timer_schedule: "{{ item.schedule }}"
+    timer_utc: "{{ item.utc | default(false) | bool }}"
   become: true
   become_user: root
   notify: Reload systemd daemon

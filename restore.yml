@@ -31,7 +31,16 @@
     _backup_scripts_dir: "{{ backup_scripts_dir | default(stack_dir + '/backup') }}"
     _snapshot: "{{ snapshot | default('latest') }}"
     _skip_pre_backup: "{{ skip_pre_backup | default(false) | bool }}"
-    _accessory_config: "{{ accessories[accessory] }}"
+    # A volume backup target is `<stack_name>_<volume>`, the name the backup
+    # role gives a `volume_backups` entry (the Docker volume name).
+    _volume_key: >-
+      {{ accessory[(stack_name | length) + 1:]
+         if accessory is defined and accessory.startswith(stack_name ~ '_') else '' }}
+    _volume_backup: "{{ (volume_backups | default({})).get(_volume_key | trim) }}"
+    _is_volume: "{{ _volume_backup is mapping }}"
+    _accessory_config: >-
+      {{ {'backup': {'method': 'file', 'source_path': _volume_backup.path}}
+         if _is_volume | bool else accessories[accessory] }}
     _image: "{{ _accessory_config.image | default('') }}"
     _backup_raw: "{{ _accessory_config.backup }}"
     _method: >-
@@ -59,11 +68,30 @@
       ansible.builtin.assert:
         that:
           - accessory is defined
-          - accessory in accessories
-          - accessories[accessory].backup is defined
+          - (_is_volume | bool) or (accessory in accessories and accessories[accessory].backup is defined)
         fail_msg: >-
           Required variable 'accessory' must be defined and must reference
-          an accessory with backup enabled in services.yml.
+          an accessory with backup enabled in services.yml, or a volume backup
+          (<stack_name>_<volume>, from volume_backups in services.yml).
+
+    # A volume lives on the one box that runs its container. Every other host
+    # of the env has nothing to restore and no backup script for it.
+    - name: Find the container of the volume on this host
+      ansible.builtin.command:
+        cmd: "docker container inspect --format '{{ '{{' }}.Name{{ '}}' }}' {{ _volume_backup.container }}"
+      register: _volume_container
+      changed_when: false
+      failed_when: false
+      # Read-only: it runs in check mode too, so a dry run skips the same hosts.
+      check_mode: false
+      when: _is_volume | bool
+
+    - name: Skip a host that does not run the container of the volume
+      ansible.builtin.meta: end_host
+      when:
+        - _is_volume | bool
+        - _volume_container is not skipped
+        - _volume_container.rc != 0
 
   tasks:
     # Everything below runs inside one block so a failure anywhere in the
@@ -219,6 +247,48 @@
             - _restore_method == 'redis'
             - _snap is defined
 
+        # A volume: the archive is `docker cp <container>:<path> -`, so its
+        # top entry is the last part of the path. It is written as root into
+        # the volume's Mountpoint (from `docker volume inspect`, so a moved
+        # Docker data root still works), with the container stopped, over the
+        # files that are there. The container starts again in any case.
+        - name: Restore a volume backup
+          when:
+            - _is_volume | bool
+            - _snap is defined
+          block:
+            - name: Stop the container of the volume for restore
+              ansible.builtin.command:
+                cmd: "docker stop {{ _volume_backup.container }}"
+              changed_when: true
+
+            - name: Read the mountpoint of the volume
+              ansible.builtin.command:
+                cmd: "docker volume inspect --format '{{ '{{' }}.Mountpoint{{ '}}' }}' {{ accessory }}"
+              register: _volume_mountpoint
+              changed_when: false
+
+            - name: Restore the volume into its mountpoint
+              ansible.builtin.shell:
+                cmd: >-
+                  set -o pipefail &&
+                  {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+                  /{{ accessory }}.tar
+                  --retry-lock 15m |
+                  tar -C {{ _volume_mountpoint.stdout | trim | quote }}
+                  --strip-components=1 -xpf -
+                executable: /bin/bash
+              environment: "{{ _restic_env }}"
+              changed_when: true
+              become: true
+              become_user: root
+              when: _snap is defined
+          always:
+            - name: Start the container of the volume after restore
+              ansible.builtin.command:
+                cmd: "docker start {{ _volume_backup.container }}"
+              changed_when: true
+
         - name: Restore file backup
           ansible.builtin.shell:
             cmd: >-
@@ -234,6 +304,7 @@
           become_user: root
           when:
             - _restore_method == 'file'
+            - not (_is_volume | bool)
             - _snap is defined
 
         # -- Validation --------------------------------------------------------

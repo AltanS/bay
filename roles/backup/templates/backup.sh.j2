@@ -136,9 +136,14 @@ RESTIC_EXIT=${_pipestatus[1]}
 set -e
 {% elif method == 'file' %}
 SOURCE_PATH={{ accessory_config.backup.source_path | default('/data') | quote }}
+# The container to read from: the accessory itself, or for a volume backup
+# (volume_backups in services.yml) the container that mounts the volume.
+# docker cp reads through the daemon, so a volume needs no access to the
+# Docker data root, wherever it is.
+CONTAINER={{ backup_container | default(accessory_name) | quote }}
 echo "[$(date -Iseconds)] Starting file backup for ${ACCESSORY}..."
 set +e
-docker cp "${ACCESSORY}:${SOURCE_PATH}" - | \
+docker cp "${CONTAINER}:${SOURCE_PATH}" - | \
   "$RESTIC" backup \
     --stdin \
     --stdin-filename "${ACCESSORY}.tar" \

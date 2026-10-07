@@ -1339,6 +1339,7 @@ def diff_steps(
             _step("fleet", "update", "shared", "the deploy webhook changes", resource="webhook")
         )
     steps.extend(_job_steps(current, wanted, project=project, mine=mine, owners=owners))
+    steps.extend(_backup_steps(current, wanted, project=project, mine=mine, owners=owners))
     for i, step in enumerate(steps, start=1):
         step["id"] = f"s{i}"
     return steps
@@ -1365,8 +1366,9 @@ def _job_steps(
     A job is not a container the reconciler runs: ``bay up`` installs its
     script and timer on the box of its main container (``of``).
     """
-    old_all = current.get("jobs") if isinstance(current.get("jobs"), Mapping) else {}
-    new_all = wanted.get("jobs") if isinstance(wanted.get("jobs"), Mapping) else {}
+    raw_old, raw_new = current.get("jobs"), wanted.get("jobs")
+    old_all: Mapping[str, Any] = raw_old if isinstance(raw_old, Mapping) else {}
+    new_all: Mapping[str, Any] = raw_new if isinstance(raw_new, Mapping) else {}
     steps: list[dict[str, Any]] = []
     for name in sorted(set(old_all) | set(new_all)):
         old, new = old_all.get(name), new_all.get(name)
@@ -1375,7 +1377,8 @@ def _job_steps(
         of = (new or old or {}).get("of")
         who = _owner_of(of, project=project, mine=mine, owners=owners)
         if old is None:
-            action, reason = "create", f"new scheduled job of {of}: {new.get('schedule')} UTC"
+            schedule = (new or {}).get("schedule")
+            action, reason = "create", f"new scheduled job of {of}: {schedule} UTC"
         elif new is None:
             action, reason = "remove", f"scheduled job of {of} removed; bay up stops its timer"
         else:
@@ -1383,6 +1386,97 @@ def _job_steps(
             reason = "scheduled job changed: " + ", ".join(_changed_keys(old, new))
         steps.append(_step("job", action, "safe", reason, container=str(name), project=who))
     return steps
+
+
+def _backup_steps(
+    current: Mapping[str, Any],
+    wanted: Mapping[str, Any],
+    *,
+    project: str | None,
+    mine: set[str],
+    owners: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """One ``backup`` step per volume backup that is new, changed or gone (update, safe).
+
+    The backup role installs the scripts and timers, and ``bay up`` runs it
+    (tag ``backup``) only when the plan has such a step
+    (:func:`bay_cli.routes.deploy_tags`). A gone entry keeps its timer on the
+    box: the backup role does not prune (docs/backups.md).
+    """
+    raw_old, raw_new = current.get("volume_backups"), wanted.get("volume_backups")
+    old_all: Mapping[str, Any] = raw_old if isinstance(raw_old, Mapping) else {}
+    new_all: Mapping[str, Any] = raw_new if isinstance(raw_new, Mapping) else {}
+    steps: list[dict[str, Any]] = []
+    for name in sorted(set(old_all) | set(new_all)):
+        old, new = old_all.get(name), new_all.get(name)
+        if old == new:
+            continue
+        container = (new or old or {}).get("container")
+        who = _owner_of(container, project=project, mine=mine, owners=owners)
+        if old is None:
+            reason = f"new volume backup of {name} ({container})"
+        elif new is None:
+            reason = f"volume backup of {name} removed from services.yml; its timer stays"
+        else:
+            reason = f"volume backup of {name} changed: " + ", ".join(_changed_keys(old, new))
+        steps.append(
+            _step("backup", "update", "safe", reason, container=str(container), project=who)
+        )
+    return steps
+
+
+BACKUP_DISABLED_NOTE = "volume backups are compiled, but backup_enabled is false: no backup runs"
+
+
+def backup_disabled_note(
+    cx: Context, box_env: str | None, steps: Sequence[Mapping[str, Any]]
+) -> str | None:
+    """The plan note when the plan has a ``backup`` step but the box env has backups off.
+
+    ``backup_enabled`` is read from the fleet's group_vars, the box env's
+    files first, then ``all``; unset is the role default, false.
+    """
+    if box_env is None or not any(s.get("kind") == "backup" for s in steps):
+        return None
+    value = _group_var(cx, box_env, "backup_enabled")
+    if value is None or not _truthy(value):
+        return BACKUP_DISABLED_NOTE
+    return None
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "on", "1")
+    return bool(value)
+
+
+def _group_var(cx: Context, box_env: str, key: str) -> Any:
+    """``key`` from plain group_vars YAML: ``<box_env>`` first, then ``all``. None when unset.
+
+    Vault files and Jinja values are read as they are written; a key set
+    only in a vault file reads as unset.
+    """
+    import yaml
+
+    for group in (box_env, "all"):
+        base = cx.fleet_root / "group_vars"
+        files = [base / f"{group}.yml"]
+        folder = base / group
+        if folder.is_dir():
+            files += sorted(folder.glob("*.yml")) + sorted(folder.glob("*.yaml"))
+        for path in files:
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text()
+                if text.startswith("$ANSIBLE_VAULT"):
+                    continue
+                data = yaml.safe_load(text)
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
+                continue
+            if isinstance(data, Mapping) and key in data:
+                return data[key]
+    return None
 
 
 def tailnet_step(cx: Context, fleet_doc: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -2306,6 +2400,9 @@ def _finish(
         )
     if box_env is not None:
         notes.append(UNPLANNED_NOTE.format(box_env=box_env))
+    backup_note = backup_disabled_note(cx, box_env, steps)
+    if backup_note is not None:
+        notes.append(backup_note)
     if state.dirty and any(s["risk"] == "destructive" for s in steps):
         blockers.append(
             "the fleet repo has uncommitted changes and a step is destructive; "

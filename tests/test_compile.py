@@ -905,8 +905,6 @@ def test_webhook_domain_collision(fleet: Path) -> None:
 UNSUPPORTED = [
     pytest.param(SHOP, 'volume = "data"\nbackup = false', 'volume = "data"\nbackup = false\nowner = "472:472"', "a volume owner", id="mount-owner"),
     pytest.param(SHOP, "redirect = false\n", "", "alias redirect (HTTP 308); the aliases are served instead", id="alias-redirect"),
-    pytest.param(SHOP, "[deploy.production]", '[backup]\nkeep = "7d"\n\n[deploy.production]', "project backup schedule for volumes", id="project-backup"),
-    pytest.param(SHOP, 'volume = "data"\nbackup = false', 'volume = "data"', "volume backups", id="volume-backup"),
     pytest.param(SHOP, 'realm = "Staff only"', 'realm = "Staff only"\n\n[access.identity]\nheader = "X-Tailnet-Device"', "the tailnet identity header", id="identity"),
     pytest.param(SHOP, 'env = "SHOP_DATABASE_URL"', 'env = "SHOP_DATABASE_URL"\nextensions = ["vector"]', "postgres extensions", id="pg-extensions"),
     pytest.param(SHOP, 'locked = ["/admin"]', 'locked = ["/admin"]\nopen = ["/hooks"]', "open paths that skip the password", id="open-with-password"),
@@ -1074,6 +1072,41 @@ def test_compile_service_path_routes(fleet: Path) -> None:
     result_v = v.ValidationResult()
     v._check_domain_uniqueness(twin, result_v)
     assert any("with path '/warm'" in f for f in result_v.failed), result_v.failed
+
+
+def test_compile_volume_backup_entries(fleet: Path) -> None:
+    """A volume mount with the default backup = true is a volume_backups entry.
+
+    The project [backup] table sets the schedule and the retention, over the
+    fleet [defaults.backup]. backup = false still leaves the volume out.
+    """
+    assert "volume_backups" not in yaml.safe_load(compiled(fleet).body())
+
+    edit(fleet, SHOP, 'volume = "data"\nbackup = false', 'volume = "data"')
+    result = compiled(fleet)
+    assert result.unsupported == []
+    out = yaml.safe_load(result.body())
+    # The fleet [defaults.backup] (keep = "30d", hour = 3) applies.
+    assert out["volume_backups"] == {
+        "shop_data": {"container": "shop", "path": "/app/data", "schedule": "0 3 * * *", "retain": 30},
+        "shop-staging-data": {
+            "container": "shop-staging", "path": "/app/data", "schedule": "0 3 * * *", "retain": 30,
+        },
+    }
+    assert "shop_data:/app/data" in out["services"]["shop"]["volumes"]
+
+    # The project [backup] wins per key; weeks and hours become days.
+    edit(fleet, SHOP, "[deploy.production]", '[backup]\nkeep = "2w"\nhour = 22\n\n[deploy.production]')
+    entry = yaml.safe_load(compiled(fleet).body())["volume_backups"]["shop_data"]
+    assert entry == {"container": "shop", "path": "/app/data", "schedule": "0 22 * * *", "retain": 14}
+    edit(fleet, SHOP, 'keep = "2w"', 'keep = "36h"')
+    assert yaml.safe_load(compiled(fleet).body())["volume_backups"]["shop_data"]["retain"] == 2
+
+    # Without any backup policy the keys are left out: the role defaults apply.
+    edit(fleet, SHOP, '[backup]\nkeep = "36h"\nhour = 22\n\n', "")
+    edit(fleet, FLEET, '[defaults.backup]\nkeep = "30d"\nhour = 3\n', "")
+    entry = yaml.safe_load(compiled(fleet).body())["volume_backups"]["shop_data"]
+    assert entry == {"container": "shop", "path": "/app/data"}
 
 
 @pytest.mark.parametrize(("line", "want"), [

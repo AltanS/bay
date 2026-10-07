@@ -57,6 +57,33 @@
         }
       }
     },
+    "volume_backups": {
+      "type": "object",
+      "description": "Volume mounts with backup true, compiled from bay.toml mounts. Keyed by the volume name. The backup role adds a restic file backup <stack_name>_<volume> on the box that runs `container`.",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["container", "path"],
+        "properties": {
+          "container": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "description": "The container that mounts the volume. The backup reads the volume through it."
+          },
+          "path": {
+            "type": "string",
+            "pattern": "^/.",
+            "description": "Where the volume is mounted in the container."
+          },
+          "schedule": { "type": "string", "pattern": "^0 ([0-9]|1[0-9]|2[0-3]) [*] [*] [*]$", "description": "Daily, at the [backup] hour, UTC. Absent: backup_schedule." },
+          "retain": { "type": "integer", "minimum": 1, "description": "Days to keep, from [backup] keep. Absent: backup_retain." }
+        }
+      }
+    },
     "tailnet_proxies": {
       "type": "object",
       "description": "Tailnet routes, compiled from [tailnet.routes] in bay.fleet.toml. Read by the traefik, headscale and crowdsec templates on the ingress box.",

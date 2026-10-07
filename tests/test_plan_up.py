@@ -4755,3 +4755,62 @@ def test_rollback_code_target_from_lock(
     doc = json.loads(cli(world, "rollback", "--json").stdout)
     assert doc["code_targets"] == {"webapp": {"source": "prev", "strict": False}}
     assert applymod.PREV_FALLBACK_NOTE in doc["notes"]
+
+
+def test_up_runs_backup_tag_on_backup_change(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A volume backup change is a safe ``backup`` step, and ``bay up`` adds the backup tag.
+
+    With ``backup_enabled`` unset or false in the box env's group_vars, the
+    plan says that no backup runs.
+    """
+    tags: list[str | None] = []
+
+    def deploy(
+        cx: Context, box_env: str, *, config_files_root: Path | None = None, **extra: Any
+    ) -> None:
+        tags.append(extra.pop("tags", None))
+        box.deploy(cx, box_env, config_files_root=config_files_root)
+
+    monkeypatch.setattr(applymod, "default_deploy", deploy)
+    do_up(world)
+    assert tags == [None]
+
+    # The default backup = true: a volume_backups entry, one backup step.
+    edit_app(world, 'volume = "data"\nbackup = false\n', 'volume = "data"\n')
+    plan = make(world)
+    backup = [s for s in plan["steps"] if s["kind"] == "backup"]
+    assert [(s["action"], s["risk"], s["container"], s["project"]) for s in backup] == [
+        ("update", "safe", "webapp", "webapp")
+    ]
+    assert "new volume backup of webapp-data (webapp)" in backup[0]["reason"]
+    assert plan["verdict"] == "auto"
+    assert planmod.BACKUP_DISABLED_NOTE in plan["notes"]
+    import jsonschema
+
+    schema = json.loads((ROOT / "src/bay_cli/schemas/plan.schema.json").read_text())
+    jsonschema.validate(plan, schema)
+
+    result = do_up(world)
+    assert tags[-1] == "deploy_stack,backup"
+    assert [s["kind"] for s in result["steps"] if s["kind"] == "backup"] == ["backup"]
+    data = yaml.safe_load((world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1])
+    assert data["volume_backups"] == {"webapp-data": {"container": "webapp", "path": "/data"}}
+    # Nothing changed since: no backup step, the default tags again.
+    assert not [s for s in make(world)["steps"] if s["kind"] == "backup"]
+
+    # backup_enabled true in the box env: a schedule change has no note.
+    (world["fleet"] / "group_vars" / "production" / "backup.yml").write_text(
+        "---\nbackup_enabled: true\n"
+    )
+    commit_all(world["fleet"], "backups on")
+    edit_app(world, "[deploy.production]", "[backup]\nhour = 4\n\n[deploy.production]")
+    plan = make(world)
+    backup = [s for s in plan["steps"] if s["kind"] == "backup"]
+    assert len(backup) == 1 and "changed: schedule" in backup[0]["reason"]
+    assert planmod.BACKUP_DISABLED_NOTE not in plan["notes"]
+    do_up(world)
+    assert tags[-1] == "deploy_stack,backup"
+    do_up(world)
+    assert tags[-1] is None

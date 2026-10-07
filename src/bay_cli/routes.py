@@ -453,11 +453,19 @@ def plan_routes(
     return steps, blockers
 
 
+#: The tag of the backup role in deploy.yml.
+BACKUP_TAG = "backup"
+
+
 def deploy_tags(steps: Sequence[Mapping[str, Any]], base: str) -> str:
-    """The tags ``bay up`` runs: ``base``, plus headscale and traefik on a route step."""
+    """The tags ``bay up`` runs: ``base``, plus headscale and traefik on a route
+    step, plus backup on a backup step (the backup role installs the volume
+    backup scripts and timers)."""
     tags = [t for t in base.split(",") if t]
     if any(s.get("kind") == "route" for s in steps):
         tags += [t for t in ROUTE_TAGS if t not in tags]
+    if any(s.get("kind") == "backup" for s in steps) and BACKUP_TAG not in tags:
+        tags.append(BACKUP_TAG)
     return ",".join(tags)
 
 

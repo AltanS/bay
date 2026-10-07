@@ -1334,6 +1334,9 @@ class _Importer:
                     vkey = name[len(p) :]
                     break
             vkey = vkey.lower() if _VOLUME_KEY_RE.match(vkey.lower()) else "data"
+            # The old YAML fleet backed up no volume. backup = false keeps
+            # that, so the import compiles to the same file; drop it to
+            # start volume backups.
             mounts.append({"path": parts[1], "volume": vkey, "backup": False})
             vols[vkey] = name
         for f in config_files:

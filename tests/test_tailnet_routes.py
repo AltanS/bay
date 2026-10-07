@@ -290,6 +290,11 @@ def test_deploy_tags() -> None:
     assert (
         routes.deploy_tags([{"kind": "route"}], "deploy_stack") == "deploy_stack,headscale,traefik"
     )
+    assert routes.deploy_tags([{"kind": "backup"}], "deploy_stack") == "deploy_stack,backup"
+    assert (
+        routes.deploy_tags([{"kind": "backup"}, {"kind": "route"}], "deploy_stack")
+        == "deploy_stack,headscale,traefik,backup"
+    )
 
 
 # ── plan and up ─────────────────────────────────────────────────────────────
