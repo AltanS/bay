@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from bay_cli import console
+from bay_cli import console, fleet_line
 from bay_cli.commands import compile_cmd, fleet_cmd, import_cmd, project_cmd, self_cmd, toml_cmd
 from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault, webhook
 from bay_cli.context import GlobalOptions, package_root
@@ -28,6 +28,7 @@ def fleet_callback(ctx: typer.Context, value: Path | None) -> Path | None:
     already see ``--fleet`` when it comes first on the command line.
     """
     ctx.obj = GlobalOptions(fleet=value)
+    fleet_line.remember(ctx.obj)
     return value
 
 
@@ -193,6 +194,10 @@ app.add_typer(secret.app, name="secret", rich_help_panel="Utilities")
 
 # Test (top-level)
 app.command(rich_help_panel="Utilities")(test.test)
+
+# Last: every verb that changes a fleet or a box prints `fleet: <name> (<path>)`
+# on stderr before it starts. Register new commands above this line.
+fleet_line.install(app)
 
 
 def _main() -> None:

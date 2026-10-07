@@ -165,3 +165,110 @@ def test_self_update_when_already_current_does_nothing(checkout: tuple[Path, lis
     assert result.exit_code == 0
     assert "Already at v1.0.0" in result.output
     assert steps == []
+
+
+# ── the fleet line ──────────────────────────────────────────────────────────
+
+_DEMO_FLEET = (
+    'name = "demo"\ndefault_box = "box-1"\ndefault_domain = "example.com"\n'
+    'primary_env = "production"\n\n[boxes.box-1]\nenv = "production"\n'
+)
+
+
+def _leaf_paths() -> set[str]:
+    import click
+    import typer.main
+
+    def walk(cmd: click.Command, prefix: tuple[str, ...]) -> list[str]:
+        if isinstance(cmd, click.Group):
+            out: list[str] = []
+            for name, sub in sorted(cmd.commands.items()):
+                out += walk(sub, (*prefix, name))
+            return out
+        return [" ".join(prefix)]
+
+    return set(walk(typer.main.get_command(cli.app), ()))
+
+
+def _first_stderr_line(args: list[str], cwd: Path) -> tuple[str, int]:
+    import os
+
+    old = Path.cwd()
+    os.chdir(cwd)
+    try:
+        result = runner.invoke(cli.app, args)
+    finally:
+        os.chdir(old)
+    lines = result.stderr.splitlines()
+    return (lines[0] if lines else ""), result.exit_code
+
+
+def test_mutating_verbs_print_fleet_line_on_stderr(home: Path, tmp_path: Path) -> None:
+    from bay_cli import fleet_line
+
+    # Every command is classified, so a new verb cannot skip the line.
+    paths = _leaf_paths()
+    unclassified = paths - fleet_line.MUTATING_VERBS - fleet_line.QUIET_VERBS
+    assert not unclassified, f"add these to MUTATING_VERBS or QUIET_VERBS: {sorted(unclassified)}"
+    assert not fleet_line.MUTATING_VERBS & fleet_line.QUIET_VERBS
+    wrapped = {
+        path
+        for path, info in fleet_line.registered(cli.app)
+        if getattr(info.callback, fleet_line.MARK, False)
+    }
+    assert wrapped == paths & fleet_line.MUTATING_VERBS
+
+    fleet = tmp_path / "demo-fleet"
+    fleet.mkdir()
+    (fleet / FLEET_FILE).write_text(_DEMO_FLEET)
+    _git(fleet, "init", "-q")
+    _git(fleet, "add", "-A")
+    _git(fleet, "commit", "-q", "-m", "fleet")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    want = f"fleet: demo ({fleet.resolve()})"
+    g = ["--fleet", str(fleet)]
+    # The verbs the spec names that exist today. Each stops early (no box,
+    # no project), but only after the line.
+    runs = {
+        "plan": [*g, "plan", "production", "--json"],
+        "up": [*g, "up", "production", "--json"],
+        "approve": [*g, "approve", "0" * 12, "--reason", "x"],
+        "rollback": [*g, "rollback", "--project", "nope", "--json"],
+        "compile": [*g, "compile", "--out", str(tmp_path / "compiled")],
+        "import": ["import", "--fleet", str(outside), "--out", str(fleet), "--name", "demo"],
+        "init": [*g, "init", "--json"],
+        "deploy": [*g, "deploy", "production"],
+        "provision": [*g, "provision", "production"],
+    }
+    for verb, args in runs.items():
+        first, _ = _first_stderr_line(args, outside)
+        assert first == want, (verb, first)
+    # --json keeps stdout for the one document: the line is on stderr only.
+    import os
+
+    old = Path.cwd()
+    os.chdir(outside)
+    try:
+        result = runner.invoke(cli.app, runs["plan"])
+    finally:
+        os.chdir(old)
+    assert result.stderr.startswith(want)
+    assert "fleet:" not in result.stdout
+    # Standing in the fleet directory without --fleet: the line names it too.
+    first, _ = _first_stderr_line(["plan", "production", "--json"], fleet)
+    assert first == want
+    assert set(runs) <= fleet_line.MUTATING_VERBS
+
+    # Pure readers do not print it.
+    readers = {
+        "show": [*g, "show", "nope", "--json"],
+        "status": [*g, "status", "--json"],
+        "toml validate": ["toml", "validate", str(outside / "bay.toml")],
+        "self version": ["self", "version"],
+        "fleet ls": ["fleet", "ls"],
+    }
+    for verb, args in readers.items():
+        assert verb in fleet_line.QUIET_VERBS
+        first, _ = _first_stderr_line(args, outside)
+        assert not first.startswith("fleet:"), (verb, first)

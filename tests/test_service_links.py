@@ -111,7 +111,8 @@ class TestServiceAddLink:
                 ],
             )
             assert result.exit_code == 0
-            data = json.loads(result.output)
+            # stdout holds the JSON; the fleet line is on stderr.
+            data = json.loads(result.stdout)
             assert data["ok"]
             assert "postgres" in data["data"]["links"]
 
