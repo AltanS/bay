@@ -3,7 +3,15 @@
 Lessons from the 2026-04-22 `expose:` migration. Treat a deploy session as
 an end-to-end operation, not a sequence of per-host successes.
 
-1. **Before touching anything**, run `bay validate` on each fleet
+0. **Which tool.** Run every verb as `bay --fleet <path> <verb>`, or from
+   inside the fleet directory. There is no consumer clone and no pin to bump:
+   the CLI is installed once per machine, and `bay self update` moves it to a
+   release. For one app, use `bay plan` then `bay up`.
+   `bay up` deploys the whole box environment, so plan the whole env first (`bay plan <env>` in the
+   fleet directory). Use `bay deploy` and `bay provision` for rig work. Pull
+   the fleet before you deploy: a stale clone reverts config.
+
+1. **Before touching anything**, run `bay --fleet <path> validate` on each fleet
    and fix anything that fails. Vault gaps, stale refs, and same-stack
    link errors are easier to debug when they surface before the
    ansible-playbook output.

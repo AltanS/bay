@@ -1,5 +1,7 @@
 # External Tailscale Control Server — Implementation Plan
 
+Status: historical (Bay v1 consumer model; see docs/bay-toml.md and docs/layout-scenarios.md for the current model)
+
 > **Superseded / historical (external Tailscale research).** This plan was never built — the self-hosted Headscale path shipped instead and is the supported model (tailnet HTTPS ingress with DNS-01 wildcard certs, default-deny ACL, per-device identity). Kept for reference only; do not treat its steps as live work. See [access-gateways.md](access-gateways.md) and [tailnet-ingress.md](tailnet-ingress.md) for the current architecture.
 >
 > Reference document from the external Tailscale research phase. This design was evaluated but the decision was made to not build first-class tailscale.com support.

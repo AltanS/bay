@@ -1,6 +1,8 @@
 ---
 # Design Decisions
 
+Status: historical (Bay v1 consumer model; see docs/bay-toml.md and docs/layout-scenarios.md for the current model)
+
 Evaluated features and architectural choices that were explicitly decided against (or deferred), with reasoning. This document exists so we don't re-investigate the same questions.
 
 ## DD-1: External Tailscale Control Server (decided: not prioritized)

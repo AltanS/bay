@@ -1,6 +1,8 @@
 # services.yml Reference
 
-`group_vars/all/services.yml` is the single source of truth for your deployment. It drives Traefik labels, Docker Compose generation, env files, access control, backups, and container update policies.
+`group_vars/all/services.yml` is the compiled form of your app surface. `bay compile` writes it from `bay.fleet.toml` and the pinned `bay.toml` files, and it carries a hash header. Never edit it by hand: the next compile refuses. Edit `bay.toml` or `bay.fleet.toml` instead (see [bay-toml.md](bay-toml.md)). The file still drives Traefik labels, Docker Compose generation, env files, access control, backups, and container update policies, so this page is the schema reference for what the compile writes.
+
+Run every command against a fleet with `bay --fleet <path> <verb>`, or from inside the fleet directory. There is no consumer clone of Bay in the fleet. A machine moves to a new framework release with `bay self update` (see [install.md](install.md)).
 
 - **Services** are app containers that get Traefik routing, SSL, and access control
 - **Accessories** are infrastructure (databases, caches) deployed alongside services
@@ -358,7 +360,7 @@ Builds run with multiple layers of OOM protection to prevent a runaway build fro
 - **Cross-service serialization** -- `rebuild.sh` acquires an exclusive `flock` on `git_deploy_build_lock_path` (default `/run/bay-build.lock`) before doing any work, so at most one build runs at a time per host. Concurrent path-unit firings (common with monorepo pushes that match several services' globs) queue instead of competing for the shared buildkit container. Bounded by `git_deploy_build_lock_timeout` (default 3600s) -- if a queued build can't acquire the lock in that window it aborts with a `⏱️ Build lock timeout` Telegram alert pointing at `journalctl -u bay-build@*` for triage. **Important:** `After=` / `Wants=` between path units does NOT serialize concurrent path-unit firings -- systemd starts each instance independently. The `flock` is the only thing that prevents concurrent buildkit invocations.
 - **OOMScoreAdjust=1000** on the systemd build service (`bay-build@.service`) -- under system-wide memory pressure, builds are the first processes the kernel OOM-killer targets.
 - **OOMScoreAdjust=-900** on the boot safety service (`bay-infra-boot.service`) -- after an OOM event or hard reboot, infrastructure containers (Traefik, etc.) are recovered automatically.
-- **Scheduled cache prune** -- `/usr/local/bin/bay-docker-builder-prune` (installed by the `cronjobs` role) sweeps every builder in `docker_prune_builders` -- the `default` builder *and* the docker-container-driver builder named by `bay_buildx_builder`, retaining `docker_prune_builder_keep_storage` (default `2G`) of hot cache. `docker system prune` runs alongside it. Weekly by default; daily on the `build_server`. Nothing prunes cache before an individual build.
+- **Scheduled cache prune** -- the `bay-docker-builder-prune` script in `/usr/local/bin` (installed by the `cronjobs` role) sweeps every builder in `docker_prune_builders` -- the `default` builder *and* the docker-container-driver builder named by `bay_buildx_builder`, retaining `docker_prune_builder_keep_storage` (default `2G`) of hot cache. `docker system prune` runs alongside it. Weekly by default; daily on the `build_server`. Nothing prunes cache before an individual build.
 
   Pruning the argo builder specifically is not optional bookkeeping: its cache lives in its own Docker volume (`buildx_buildkit_<builder>0_state`), which `docker builder prune` does not reach and `docker system prune -af --volumes` cannot remove while the buildkit container holds it open. `docker system df` reports only the *default* builder, so an unpruned host reads as healthy until the disk fills. The real number is `docker buildx du --builder argo-builder`. (Fixed in v0.111.2 -- GH#34.)  <!-- kept-argo: live buildx builder name on hosts, migrate separately -->
 
@@ -412,7 +414,7 @@ The resolved token is rendered into `/opt/<stack>/bin/rebuild.sh` in **plaintext
 
 - Anyone with shell access to the build server can read the token from `rebuild.sh`.
 - Use a minimal-scope PAT dedicated to the specific repository or organization rather than a personal token with broad access.
-- Rotate tokens using `bay vault edit production`, then redeploy (`bay deploy production --tags deploy_stack`) to re-render `rebuild.sh`.
+- Rotate tokens using `bay vault edit production`, then redeploy (`bay --fleet <path> deploy production --tags deploy_stack`) to re-render `rebuild.sh`.
 
 #### Per-org pattern
 

@@ -37,8 +37,22 @@ bay self version             # what is installed, and where
 
 `bay self update` fetches the tags, checks out the tag, syncs the dependencies,
 installs the command again and prints the old and the new version. It stops when
-the checkout has uncommitted changes. If you develop Bay itself, work in a separate
-clone and point a fleet at it with `bay --fleet <path>`.
+the checkout has uncommitted changes.
+
+## Development mode: the editable install
+
+`uv tool install --editable <checkout>` makes `bay` run the checkout live. This is the
+install above. It is an editable install: the command is the code on disk, not a copy.
+
+- `bay self version` prints the checkout path, so you see which code runs.
+- A framework edit in the checkout takes effect at once. There is no tag to cut and no
+  link to make.
+- There is one checkout. Never edit it while a `bay up` runs: the run reads the Ansible
+  roles and the Python code from disk, so a half-saved edit changes a live deploy.
+- `bay self update` refuses when the checkout has local edits. Commit or stash them first.
+
+To try a change without touching the checkout that deploys, work in a separate clone. Run
+its code from inside it with `uv run bay --fleet <path> <verb>`.
 
 ## Make a fleet
 
