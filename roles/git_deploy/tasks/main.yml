@@ -39,6 +39,27 @@
       tags: [deploy_stack, build, git_deploy]
   tags: [deploy_stack, build, git_deploy]
 
+# The webhook receiver (dirs, HMAC key, config.json, files, image) and the
+# build trigger units, under deploy_stack too. `bay up` runs deploy_stack only,
+# so without these a new build app got a container but no receiver entry and
+# no trigger, and a removed one kept its trigger. Both files resolve their
+# facts through render_image_map.yml and render under the same `when`. The
+# git_deploy role runs before deploy_stack in deploy.yml, so the image exists
+# before the container pass creates or recreates `bay-webhook`.
+- name: Re-render the webhook receiver (runs under deploy_stack too)
+  ansible.builtin.include_tasks:
+    file: render_webhook.yml
+    apply:
+      tags: [deploy_stack, build, git_deploy]
+  tags: [deploy_stack, build, git_deploy]
+
+- name: Re-render the build trigger units (runs under deploy_stack too)
+  ansible.builtin.include_tasks:
+    file: render_trigger_units.yml
+    apply:
+      tags: [deploy_stack, build, git_deploy]
+  tags: [deploy_stack, build, git_deploy]
+
 - name: Resolve all build services
   ansible.builtin.set_fact:
     _all_build_services: >-
@@ -455,7 +476,7 @@
             content: "{{ ansible_date_time.iso8601 }}\n"
             dest: "{{ stack_dir }}/state/git-deploy-config.timestamp"
             owner: "{{ app_user }}"
-            # Group + 0664, not 0644: the re-group task in webhook.yml sweeps
+            # Group + 0664, not 0644: the re-group task in render_webhook.yml sweeps
             # {{ stack_dir }}/state to group git_deploy_build_group with g+w.
             # A file written here without the group and write bit is exactly
             # what that sweep exists to catch, so it flips this file's mode

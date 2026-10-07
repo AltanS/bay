@@ -47,7 +47,7 @@ _audit() {
   # A shell `>>` create picks up mode 666 minus umask, which loses the group
   # write bit under a typical 022 umask. STATE_DIR is shared with the
   # webhook container via git_deploy_build_group (setgid + g+w) — without
-  # this, webhook.yml's re-group task keeps finding the log on every deploy.
+  # this, render_webhook.yml's re-group task keeps finding the log on every deploy.
   chmod 0664 "${AUDIT_LOG}" 2>/dev/null || true
 }
 

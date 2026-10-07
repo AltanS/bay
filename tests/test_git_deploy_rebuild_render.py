@@ -3,8 +3,11 @@
 rebuild.sh holds a frozen copy of each container's labels, ports and mounts.
 The git_deploy role is tagged [build, git_deploy], so the render of rebuild.sh
 is tagged `deploy_stack` on its own, as image-map.json already is (issue #13).
-Nothing that clones, builds or pulls may carry that tag, or a `bay up` would do
-work that `bay plan` (same tag) never predicted.
+Nothing that clones, builds or pulls app code may carry that tag, or a `bay up`
+would do work that `bay plan` (same tag) never predicted. The one build under
+the tag is the webhook receiver image (render_webhook.yml, 2.2.0, see
+tests/test_git_deploy_up_receiver.py): a box's first build app needs it before
+the container pass creates `bay-webhook`.
 """
 
 from __future__ import annotations
@@ -50,11 +53,13 @@ def _include_file(task: dict[str, Any]) -> str | None:
     return inc if isinstance(inc, str) else None
 
 
-def test_only_the_two_render_includes_carry_deploy_stack() -> None:
+def test_only_the_render_includes_carry_deploy_stack() -> None:
     tagged = [t for t in _walk(_load("main.yml")) if "deploy_stack" in _tags(t)]
     assert [_include_file(t) for t in tagged] == [
         "render_image_map.yml",
         "render_rebuild_script.yml",
+        "render_webhook.yml",
+        "render_trigger_units.yml",
     ]
 
 

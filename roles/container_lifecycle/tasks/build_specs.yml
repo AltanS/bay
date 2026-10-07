@@ -339,7 +339,7 @@
       # Fixed UID (the image's `webhook` account) with the host's shared
       # build-control group as the primary GID. That is what lets
       # {{ stack_dir }}/triggers and /state drop from 0777 to 2770 — see
-      # roles/git_deploy/tasks/webhook.yml. The GID must be a number: the
+      # roles/git_deploy/tasks/render_webhook.yml. The GID must be a number: the
       # container cannot resolve a host group name.
       user: "{{ git_deploy_webhook_uid | default(10001) }}:{{ git_deploy_build_gid | default(2000) }}"
       networks:

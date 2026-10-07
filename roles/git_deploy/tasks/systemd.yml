@@ -1,12 +1,17 @@
 ---
-# Deploy systemd path and service units for build triggers
+# The rebuild script and the trigger stall watchdog (full deploy).
+#
+# The trigger units themselves (bay-build@.path, bay-build@.service,
+# bay-build-alert@.service), select-builder.sh, build-alert.sh, the enable of
+# each container's path unit and the stop of stale ones are in
+# render_trigger_units.yml, which main.yml includes under deploy_stack too.
 
 - name: Ensure build state directory exists
-  # Must agree with "Ensure state directory exists" in webhook.yml (2770,
-  # git_deploy_build_group). This task always runs immediately after
-  # webhook.yml (see main.yml), which creates git_deploy_build_group first —
-  # so become: true here can rely on the group already existing. A previous
-  # 0755/no-group version of this task ran after webhook.yml on every deploy
+  # Must agree with "Ensure state directory exists" in render_webhook.yml
+  # (2770, git_deploy_build_group). That file runs earlier in main.yml under
+  # the same `when` and creates git_deploy_build_group first, so become: true
+  # here can rely on the group already existing. A previous 0755/no-group
+  # version of this task ran after webhook.yml on every deploy
   # and flipped the directory back to 0755, locking the webhook container
   # (which writes telegram-failures.log) out of its own state directory.
   ansible.builtin.file:
@@ -24,69 +29,6 @@
     dest: "{{ stack_dir }}/bin/rebuild.sh"
     owner: "{{ app_user }}"
     mode: "0700"
-
-# rebuild.sh asks this helper which buildx builder to use. Only the build
-# server registers the remote builder, so every other host renders it with an
-# empty endpoint and it always prints the local builder name.
-- name: Deploy the builder selection helper
-  ansible.builtin.template:
-    src: select-builder.sh.j2
-    dest: "{{ stack_dir }}/bin/select-builder.sh"
-    owner: "{{ app_user }}"
-    mode: "0700"
-  vars:
-    _select_builder_endpoint: >-
-      {{ git_deploy_remote_builder_endpoint | default('')
-         if (_is_build_server | default(false) | bool) else '' }}
-
-- name: Ensure systemd unit directory exists
-  ansible.builtin.file:
-    path: /etc/systemd/system
-    state: directory
-    mode: "0755"
-  become_user: root
-
-- name: Deploy systemd path units
-  ansible.builtin.template:
-    src: bay-build@.path.j2
-    dest: "/etc/systemd/system/bay-build@.path"
-    mode: "0644"
-  become_user: root
-  notify: reload systemd
-
-- name: Deploy systemd service units
-  ansible.builtin.template:
-    src: bay-build@.service.j2
-    dest: "/etc/systemd/system/bay-build@.service"
-    mode: "0644"
-  become_user: root
-  notify: reload systemd
-
-- name: Deploy systemd alert units
-  ansible.builtin.template:
-    src: bay-build-alert@.service.j2
-    dest: "/etc/systemd/system/bay-build-alert@.service"
-    mode: "0644"
-  become_user: root
-  notify: reload systemd
-
-- name: Deploy build alert script
-  ansible.builtin.template:
-    src: build-alert.sh.j2
-    dest: "{{ stack_dir }}/bin/build-alert.sh"
-    owner: "{{ app_user }}"
-    mode: "0700"
-
-- name: Enable and start path units for build services
-  ansible.builtin.systemd:
-    name: "bay-build@{{ item }}.path"
-    state: started
-    enabled: true
-    daemon_reload: true
-  become_user: root
-  loop: "{{ git_deploy_rebuild_services }}"
-  loop_control:
-    label: "{{ item }}"
 
 # ── Trigger stall watchdog ─────────────────────────────────────────────────
 # Scans ${stack_dir}/triggers/ every 5 minutes for *.trigger files older

@@ -283,10 +283,11 @@ def test_rebuild_hmac_key_comes_from_a_file_not_argv():
 
 
 def test_webhook_hmac_key_file_is_written_private():
-    tasks = yaml.safe_load((_GIT_DEPLOY / "tasks" / "webhook.yml").read_text())
+    tasks = yaml.safe_load((_GIT_DEPLOY / "tasks" / "render_webhook.yml").read_text())
+    flat = [s for t in tasks for s in [t, *(t.get("block") or [])]]
     task = next(
         t
-        for t in tasks
+        for t in flat
         if str(t.get("ansible.builtin.copy", {}).get("dest", "")).endswith("hmac.key")
     )
     assert task["ansible.builtin.copy"]["mode"] == "0600"

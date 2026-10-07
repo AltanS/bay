@@ -6,7 +6,7 @@
 # Two production scars set that boundary:
 #
 #   * `{{ stack_dir }}/state` is created mode 0777 (roles/git_deploy/tasks/
-#     webhook.yml) so the webhook container and app_user can both write it.
+#     render_webhook.yml) so the webhook container and app_user can both write it.
 #     backup.sh and the disk-alert cron run privileged. Sourcing a
 #     world-writable file from them is local root code execution reachable from
 #     any compromised container holding the state mount. Hence /etc/bay,

@@ -40,6 +40,15 @@ def _webhook_tasks() -> list[dict]:
     return _load(_GIT_DEPLOY / "tasks" / "webhook.yml")
 
 
+def _render_tasks() -> list[dict]:
+    """The receiver image check and build, blocks flattened (render_webhook.yml, 2.2.0)."""
+    out: list[dict] = []
+    for task in _load(_GIT_DEPLOY / "tasks" / "render_webhook.yml"):
+        out.append(task)
+        out.extend(task.get("block") or [])
+    return out
+
+
 def test_webhook_pass_reconciles_only_the_receiver_without_orphan_removal():
     task = _by_name(_webhook_tasks(), "Bring the webhook receiver onto the current image")
     assert task["ansible.builtin.include_role"]["name"] == "container_lifecycle"
@@ -49,11 +58,13 @@ def test_webhook_pass_reconciles_only_the_receiver_without_orphan_removal():
 
 
 def test_reconcile_runs_after_the_image_build_and_is_not_gated_on_changed_files():
+    # The build is in render_webhook.yml, which main.yml includes near its top;
+    # the reconcile is in webhook.yml, included later from the deploy blocks.
+    _by_name(_render_tasks(), "Build webhook receiver image")
+    main = (_GIT_DEPLOY / "tasks" / "main.yml").read_text()
+    assert main.index("file: render_webhook.yml") < main.index("include_tasks: webhook.yml")
     tasks = _webhook_tasks()
-    names = [t.get("name") for t in tasks]
-    assert names.index("Build webhook receiver image") < names.index(
-        "Bring the webhook receiver onto the current image"
-    )
+    assert "Build webhook receiver image" not in [t.get("name") for t in tasks]
     # Self-heal: the reconcile compares image IDs on every run.
     when = str(
         _by_name(tasks, "Bring the webhook receiver onto the current image")["when"]
@@ -62,7 +73,7 @@ def test_reconcile_runs_after_the_image_build_and_is_not_gated_on_changed_files(
 
 
 def test_missing_image_triggers_a_build_even_when_files_are_unchanged():
-    tasks = _webhook_tasks()
+    tasks = _render_tasks()
     build = _by_name(tasks, "Build webhook receiver image")
     assert "_webhook_files.changed" in build["when"]
     assert "_webhook_image_inspect.rc != 0" in build["when"]

@@ -1,95 +1,10 @@
 ---
-# Deploy the webhook receiver container
-# Only runs when build services exist and webhook config is defined
-
-# ── Shared build-control group ──────────────────────────────────────────
-# triggers/ and state/ have two writers with different UIDs: app_user (via the
-# bay-build@.path unit, which runs rebuild.sh) and the webhook container. They
-# used to be 0777 to make that work, which meant ANY local user could drop a
-# .trigger file and force a rebuild and restart of any service, or rewrite the
-# circuit-breaker state to suppress or trip the breaker.
+# Bring the webhook receiver container onto the current image (full deploy).
+# Only runs when build services exist and webhook config is defined.
 #
-# The fix is a shared group, not a permissive mode. The GID is fixed rather
-# than allocated because the container cannot resolve a host group name — it
-# is started as "<uid>:{{ git_deploy_build_gid }}" so the GID is its primary
-# group inside the container too.
-- name: Ensure the shared build-control group exists
-  ansible.builtin.group:
-    name: "{{ git_deploy_build_group }}"
-    gid: "{{ git_deploy_build_gid }}"
-    state: present
-  become: true
-  become_user: root
-
-- name: Add app_user to the shared build-control group
-  ansible.builtin.user:
-    name: "{{ app_user }}"
-    groups: "{{ git_deploy_build_group }}"
-    append: true
-  become: true
-  become_user: root
-
-# 2770: owner + group write, setgid so every file the webhook container or
-# rebuild.sh creates inherits the shared group, and nothing for "other".
-- name: Ensure triggers directory exists
-  ansible.builtin.file:
-    path: "{{ stack_dir }}/triggers"
-    state: directory
-    owner: "{{ app_user }}"
-    group: "{{ git_deploy_build_group }}"
-    mode: "2770"
-  become: true
-  become_user: root
-
-- name: Ensure state directory exists
-  # Shared between rebuild.sh (writes CB state files) and the webhook
-  # container (writes telegram-failures.log).
-  ansible.builtin.file:
-    path: "{{ stack_dir }}/state"
-    state: directory
-    owner: "{{ app_user }}"
-    group: "{{ git_deploy_build_group }}"
-    mode: "2770"
-  become: true
-  become_user: root
-
-# One-off migration off 0777. setgid only governs NEW files, so anything
-# written under the old mode (circuit-breaker state, telegram-failures.log)
-# still carries its creator's group and no group write bit — which would leave
-# one of the two writers locked out of its own file.
-- name: Re-group pre-existing state files
-  ansible.builtin.file:
-    path: "{{ stack_dir }}/state"
-    state: directory
-    group: "{{ git_deploy_build_group }}"
-    mode: "g+w"
-    recurse: true
-  become: true
-  become_user: root
-
-- name: Ensure webhook config directory exists
-  ansible.builtin.file:
-    path: "{{ stack_dir }}/webhook"
-    state: directory
-    mode: "0755"
-
-# rebuild.sh signs cross-region pull signals with this key. It reads it via
-# `openssl dgst -macopt hexkey:` so the secret is never an argv element — it
-# used to be passed as `-hmac '<secret>'`, visible in `ps` on every rebuild.
-# Hex-encoded because that is the only form -macopt accepts.
-- name: Render webhook HMAC key file
-  ansible.builtin.copy:
-    content: "{{ webhook.secret | bay_hexkey }}"
-    dest: "{{ stack_dir }}/webhook/hmac.key"
-    owner: "{{ app_user }}"
-    mode: "0600"
-  no_log: true
-
-- name: Render webhook service config
-  ansible.builtin.template:
-    src: webhook-config.json.j2
-    dest: "{{ stack_dir }}/webhook/config.json"
-    mode: "0644"
+# The receiver's directories, HMAC key, config.json, files and image are in
+# render_webhook.yml, which main.yml includes under deploy_stack too (so
+# `bay up` registers a new build app). It runs before this file.
 
 - name: Render image-to-services map for pull signal handler
   # Extracted to render_image_map.yml so it can also run under --tags
@@ -98,29 +13,7 @@
   # guards in render_image_map.yml.
   ansible.builtin.include_tasks: render_image_map.yml
 
-- name: Copy webhook receiver files
-  ansible.builtin.copy:
-    src: webhook/
-    dest: "{{ git_deploy_build_dir }}/webhook/"
-    mode: "0644"
-  register: _webhook_files
-
-# The image can be missing while the files are unchanged (pruned, or a host
-# that has the files from an earlier deploy but never built). Build then too.
-- name: Check whether the webhook receiver image exists
-  ansible.builtin.command:
-    cmd: docker image inspect bay-webhook:latest
-  register: _webhook_image_inspect
-  changed_when: false
-  failed_when: false
-  check_mode: false
-
-- name: Build webhook receiver image
-  ansible.builtin.command:
-    cmd: "docker build -t bay-webhook:latest {{ git_deploy_build_dir }}/webhook/"
-  when: _webhook_files.changed or _webhook_image_inspect.rc != 0
-
-# Building the image does not change the running container: it keeps the image
+# Building the image (render_webhook.yml) does not change the running container: it keeps the image
 # it was created from. Reconcile the receiver through the same spec and the
 # same reconciler deploy_stack uses, so env, volumes, labels, user and
 # networks stay identical and the next deploy_stack sees no drift. The

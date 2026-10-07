@@ -13,8 +13,10 @@
 # so they exist here whatever tags are selected. Include this file only after
 # render_image_map.yml.
 #
-# Only the render is tagged. Clone, build, pull, builder setup, deploy keys,
-# systemd units and the webhook receiver stay under [build, git_deploy].
+# Only the render is tagged. Clone, build, pull, builder setup and deploy
+# keys stay under [build, git_deploy]. The webhook receiver and the trigger
+# units have their own deploy_stack files (render_webhook.yml,
+# render_trigger_units.yml), included right after this one.
 # systemd.yml still renders the same file in a full run; the second render
 # changes nothing.
 #

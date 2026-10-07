@@ -4,21 +4,25 @@
     daemon_reload: true
   become_user: root
 
-# Fires when image-map.json content changes (see tasks/render_image_map.yml).
-# The webhook receiver loads /config/image-map.json once at process start
-# (files/webhook/app.py:_load_image_map called from main()), so a fresh render
-# on disk has no effect until the container restarts. Without this handler,
+# Fires when image-map.json or config.json content changes (see
+# tasks/render_image_map.yml and tasks/render_webhook.yml). The webhook
+# receiver loads /config/image-map.json and /config/config.json once at
+# process start (files/webhook/app.py:_load_image_map and _load_config, called
+# from main()), so a fresh render on disk has no effect until the container
+# restarts. Without this handler,
 # new services added to services.yml would not be expanded into per-service
 # pull triggers by the receiver — see issue #13.
 #
 # Idempotence: Ansible's template task only reports `changed` when content
-# differs, so this handler only runs when the image-map actually changed.
+# differs, so this handler only runs when one of the two files changed.
 #
-# A restart is enough here: it re-reads the bind-mounted map, and the image
-# is already current because webhook.yml reconciles the receiver (build +
-# recreate on image drift) before handlers run. When that reconcile just
-# recreated the container it read the new map already, so the restart is
-# skipped. A host with no receiver yet (fresh host, deploy_stack creates it)
+# A restart is enough here: it re-reads the bind-mounted files, and the image
+# is already current. In a full deploy webhook.yml reconciles the receiver
+# (recreate on image drift) before handlers run; when that reconcile just
+# recreated the container it read the new files already, so the restart is
+# skipped. Under `bay up` (deploy_stack only) the deploy_stack container pass
+# recreates the receiver on image or env drift, and handlers run after it, so
+# the restart may repeat a fresh start. That is harmless. A host with no receiver yet (fresh host, deploy_stack creates it)
 # is not an error. In check mode the command is skipped.
 #
 # Container name `bay-webhook` is the framework-fixed identity used by

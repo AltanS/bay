@@ -1,0 +1,155 @@
+---
+# The build trigger units, under the deploy_stack tag too.
+#
+# A push reaches rebuild.sh through `bay-build@<container>.path`, a systemd
+# path unit that watches the container's trigger file. Before 2.2.0 the units
+# came only from systemd.yml, which main.yml includes with no tags. So `bay up`
+# (`--tags deploy_stack`) gave a new build app no trigger, and `bay remove`
+# left the trigger of a removed app running.
+#
+# Same approach as render_image_map.yml: the facts come through that file
+# (guarded), and the render runs only under the same `when` as the image-map
+# render. The stale-unit cleanup at the end runs on every box that has a
+# webhook, so a box whose last build app left loses that app's unit too.
+#
+# Check mode (`bay plan --remote`): the listing runs for real (read only), and
+# every task that reads a registered result guards it with `is not skipped`.
+
+- name: Trigger units — resolve the build facts when run on its own
+  ansible.builtin.include_tasks: render_image_map.yml
+  when: >-
+    _is_build_server is not defined
+    or _all_build_services is not defined
+    or git_deploy_rebuild_services is not defined
+
+- name: Render the build trigger units (runs under deploy_stack too)
+  when:
+    - webhook is defined
+    - git_deploy_rebuild_services | default([]) | length > 0
+    - (_all_build_services | default([]) | length > 0)
+      or (_is_build_server | bool and (_global_remote_build_services | default([]) | length > 0))
+  block:
+    - name: Ensure bin directory exists for the trigger helpers
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/bin"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        # 0750 app_user, same as every other "Ensure bin directory exists".
+        mode: "0750"
+
+    # rebuild.sh asks this helper which buildx builder to use. Only the build
+    # server registers the remote builder, so every other host renders it
+    # with an empty endpoint and it always prints the local builder name.
+    - name: Deploy the builder selection helper
+      ansible.builtin.template:
+        src: select-builder.sh.j2
+        dest: "{{ stack_dir }}/bin/select-builder.sh"
+        owner: "{{ app_user }}"
+        mode: "0700"
+      vars:
+        _select_builder_endpoint: >-
+          {{ git_deploy_remote_builder_endpoint | default('')
+             if (_is_build_server | default(false) | bool) else '' }}
+
+    - name: Ensure systemd unit directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system
+        state: directory
+        mode: "0755"
+      become_user: root
+
+    - name: Deploy systemd path units
+      ansible.builtin.template:
+        src: bay-build@.path.j2
+        dest: "/etc/systemd/system/bay-build@.path"
+        mode: "0644"
+      become_user: root
+      notify: reload systemd
+
+    - name: Deploy systemd service units
+      ansible.builtin.template:
+        src: bay-build@.service.j2
+        dest: "/etc/systemd/system/bay-build@.service"
+        mode: "0644"
+      become_user: root
+      notify: reload systemd
+
+    - name: Deploy systemd alert units
+      ansible.builtin.template:
+        src: bay-build-alert@.service.j2
+        dest: "/etc/systemd/system/bay-build-alert@.service"
+        mode: "0644"
+      become_user: root
+      notify: reload systemd
+
+    - name: Deploy build alert script
+      ansible.builtin.template:
+        src: build-alert.sh.j2
+        dest: "{{ stack_dir }}/bin/build-alert.sh"
+        owner: "{{ app_user }}"
+        mode: "0700"
+
+    # In check mode the unit template above is not written. On a box that
+    # never had one, systemd cannot load `bay-build@<svc>.path` and the
+    # module fails ("Could not find the requested service"). So in check
+    # mode the enable runs only when the template is already on the box.
+    - name: Check whether the path unit template is on the box
+      ansible.builtin.stat:
+        path: /etc/systemd/system/bay-build@.path
+      register: _bay_build_path_template
+
+    - name: Enable and start path units for build services
+      ansible.builtin.systemd:
+        name: "bay-build@{{ item }}.path"
+        state: started
+        enabled: true
+        daemon_reload: true
+      become_user: root
+      loop: "{{ git_deploy_rebuild_services }}"
+      loop_control:
+        label: "{{ item }}"
+      when: >-
+        not ansible_check_mode
+        or (_bay_build_path_template is not skipped and _bay_build_path_template.stat.exists)
+
+# ── Stale trigger units ──────────────────────────────────────────────────
+# A container that left git_deploy_rebuild_services (`bay remove`, a build
+# block removed, a box move) keeps its enabled path unit: a later trigger
+# file would still run rebuild.sh for it. Stop and disable every loaded
+# `bay-build@<svc>.path` whose <svc> is not in the list. Only loaded units
+# are taken (the `loaded` column): systemd cannot stop a unit it cannot load.
+- name: Stop the trigger units of containers that left the box
+  when: webhook is defined
+  block:
+    - name: List the bay-build path units on the box
+      ansible.builtin.command:
+        cmd: systemctl list-units --all 'bay-build@*.path' --plain --no-legend --no-pager
+      register: _bay_build_path_units
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Find the trigger units no container needs
+      ansible.builtin.set_fact:
+        _bay_stale_trigger_units: >-
+          {{ (_bay_build_path_units.stdout_lines | default([]))
+             | map('regex_findall', 'bay-build@[^ ]+[.]path(?= +loaded )')
+             | flatten | unique
+             | difference(git_deploy_rebuild_services | default([])
+                          | map('regex_replace', '^', 'bay-build@')
+                          | map('regex_replace', '$', '.path') | list) }}
+      when:
+        - _bay_build_path_units is not skipped
+        - (_bay_build_path_units.rc | default(1)) == 0
+
+    - name: Stop and disable the trigger units no container needs
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+        enabled: false
+      become_user: root
+      loop: "{{ _bay_stale_trigger_units | default([]) }}"
+      loop_control:
+        label: "{{ item }}"
+      when: _bay_build_path_units is not skipped
