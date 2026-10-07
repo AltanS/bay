@@ -63,8 +63,9 @@ _UPDATE = {"notify": None, "auto": "auto", "off": False}
 _DB_VARS = ("DATABASE_URL", "DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASSWORD")
 _PG_PORT = 5432
 _REDIS_PORT = 6379
-#: Names the deploy code derives from a container name: routers and the canary.
-_DERIVED_SUFFIXES = ("-vpn", "-public", "-health", "-new")
+#: Names the deploy code derives from a container name: routers, the canary and
+#: the one-shot release container.
+_DERIVED_SUFFIXES = ("-vpn", "-public", "-health", "-new", "-release")
 #: services.schema.json: what a route may contain.
 _ROUTE_RE = re.compile(r"^/[A-Za-z0-9._~%+/*-]*$")
 

@@ -861,6 +861,12 @@ def test_derived_router_name_collision(fleet: Path) -> None:
     assert any("collides with the -vpn name" in m for m in msgs), msgs
 
 
+def test_release_container_name_collision(fleet: Path) -> None:
+    _second_project(fleet, "shop-release", '[access]\nmode = "public"\n[deploy.production]\ndomain = "r.example.com"\n')
+    msgs = problems(fleet)
+    assert any("collides with the -release name" in m for m in msgs), msgs
+
+
 def test_volume_collision(fleet: Path) -> None:
     edit_lock(fleet, lambda d: d["envs"]["production"]["adopted"].update(volumes={"data": "gatus-data"}))
     msgs = problems(fleet)

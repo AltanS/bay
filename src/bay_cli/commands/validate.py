@@ -2881,6 +2881,10 @@ _RESERVED_NAME_SUFFIXES: dict[str, str] = {
     "-public": "Bay names the public-route router '<service>-public'",
     "-health": "Bay names the health-check router '<service>-health'",
     "-tailnet": "Bay names the tailnet proxy router '<name>-tailnet'",
+    "-release": (
+        "Bay names the one-shot release container '<service>-release', so a "
+        "service with this name would own a container name a release run uses"
+    ),
 }
 
 # Suffix of the zero-downtime canary container. This mirrors the

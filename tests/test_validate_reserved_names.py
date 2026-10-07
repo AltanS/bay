@@ -1,7 +1,8 @@
 """`bay validate` must refuse service names that collide with derived names.
 
 Bay derives Traefik router names (`<svc>`, `<svc>-vpn`, `<svc>-public`,
-`<svc>-health`) and the zero-downtime canary container (`<svc>-new`) from the
+`<svc>-health`), the zero-downtime canary container (`<svc>-new`) and the
+one-shot release container (`<svc>-release`) from the
 service name. The CrowdSec VPN-refusal whitelist trusts routers ending in
 `-vpn@docker` and `-tailnet@file`, so a public service literally named
 `foo-vpn` must not exist.
@@ -38,7 +39,7 @@ def _svc() -> dict:
     return {"access": "public", "image": "nginx:latest"}
 
 
-@pytest.mark.parametrize("suffix", ["-vpn", "-public", "-health", "-tailnet"])
+@pytest.mark.parametrize("suffix", ["-vpn", "-public", "-health", "-tailnet", "-release"])
 def test_reserved_router_ending_is_an_error(suffix):
     result = _check({"services": {f"foo{suffix}": _svc()}})
     assert result.total_issues == 1

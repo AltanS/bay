@@ -555,7 +555,7 @@ _promote_latest() {
 # does not move and the old container keeps running.
 #   $1  the new image   $2  a tag to point back at $3 on failure (optional)
 _release_or_fail() {
-  local image="$1" back_tag="${2:-}" back_id="${3:-}" out rc=0
+  local image="$1" back_tag="${2:-}" back_id="${3:-}" out rc=0 owner
   declare -F _run_release >/dev/null || return 0
   _log "Release for ${SERVICE} with ${image}"
   out=$(mktemp)
@@ -565,8 +565,12 @@ _release_or_fail() {
     _log "Release for ${SERVICE} done"
     return 0
   fi
-  # A timeout kills the docker client, not the container: remove it here.
-  docker rm -f "${SERVICE}-release" >/dev/null 2>&1 || true
+  # A timeout kills the docker client, not the container: remove it here, but
+  # only a container this service's release made (its label names the service).
+  owner=$(docker inspect -f '{% raw %}{{index .Config.Labels "com.bay.release-of"}}{% endraw %}' "${SERVICE}-release" 2>/dev/null || true)
+  if [[ "${owner}" == "${SERVICE}" ]]; then
+    docker rm -f "${SERVICE}-release" >/dev/null 2>&1 || true
+  fi
   if [[ -n "${back_tag}" && -n "${back_id}" ]]; then
     docker tag "${back_id}" "${back_tag}" 2>/dev/null || true
   fi

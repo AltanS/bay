@@ -476,7 +476,8 @@ def test_rebuild_runs_release_before_swap(tmp_path):
             f"LOG={log}\nSERVICE=svc-local\nSHA=abc123abc123\n"
             '_log() { echo "LOG $*" >>"$LOG"; }\n'
             '_record_failure() { echo "FAIL $1|$2|$3" >>"$LOG"; }\n'
-            'docker() { echo "DOCKER $*" >>"$LOG"; }\n'
+            # `docker inspect` reports the label of the leftover container: ours.
+            'docker() { echo "DOCKER $*" >>"$LOG"; [[ "$1" == inspect ]] && echo svc-local; return 0; }\n'
             f'_run_release() {{ echo "RUN $1" >>"$LOG"; echo migrate-output; return {code}; }}\n'
             + helper
             + '_release_or_fail "img:abc" "img:latest" "sha256:old"\n'
@@ -494,3 +495,32 @@ def test_rebuild_runs_release_before_swap(tmp_path):
             assert "DOCKER rm -f svc-local-release" in calls
             assert "DOCKER tag sha256:old img:latest" in calls
             assert ("timed out" in calls) is (code == 124)
+
+
+@pytest.mark.parametrize(("label", "removed"), [("svc-local", True), ("other-svc", False), ("", False)])
+def test_release_failure_removes_only_its_own_container(tmp_path, label, removed):
+    """A `<svc>-release` container is removed only when its label names the service.
+
+    Another container may carry the name (a service that is itself called
+    `<svc>-release`, or a hand-made one); a failed release must not remove it.
+    """
+    env = _ansible_env()
+    rendered = env.get_template(_TEMPLATE.name).render(**_release_render_context())
+    helper = _function_body(rendered, "_release_or_fail")
+    log = tmp_path / "calls.log"
+    script = tmp_path / "harness.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        f"LOG={log}\nSERVICE=svc-local\nSHA=abc123abc123\n"
+        '_log() { echo "LOG $*" >>"$LOG"; }\n'
+        '_record_failure() { echo "FAIL $1" >>"$LOG"; }\n'
+        f'docker() {{ echo "DOCKER $*" >>"$LOG"; [[ "$1" == inspect ]] && echo "{label}"; return 0; }}\n'
+        '_run_release() { return 3; }\n'
+        + helper
+        + '_release_or_fail "img:abc"\n'
+    )
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True)
+    calls = log.read_text()
+    assert proc.returncode == 1, (proc.stderr, calls)
+    assert "DOCKER inspect -f" in calls and "svc-local-release" in calls
+    assert ("DOCKER rm -f svc-local-release" in calls) is removed
