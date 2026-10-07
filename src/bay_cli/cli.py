@@ -6,7 +6,7 @@ import typer
 
 from bay_cli import console, fleet_line
 from bay_cli.commands import compile_cmd, fleet_cmd, import_cmd, project_cmd, remove_cmd, route_cmd, self_cmd, toml_cmd
-from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault, webhook
+from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault
 from bay_cli.context import GlobalOptions, package_root
 from bay_cli.errors import BayError
 
@@ -150,9 +150,6 @@ app.command(rich_help_panel="Operations")(ops.restart)
 app.command(rich_help_panel="Operations")(healthcheck_cmd.healthcheck)
 app.command("admin-shell", rich_help_panel="Operations")(ops.admin_shell)
 app.command(rich_help_panel="Operations")(prune_cmd.prune)
-
-# Webhook (top-level)
-app.command(rich_help_panel="Operations")(webhook.webhook)
 
 # Build (sub-app)
 app.add_typer(build.app, name="build", rich_help_panel="Operations")

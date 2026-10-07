@@ -124,7 +124,6 @@ bay/
   ansible.cfg                  # Ansible settings (inventory, roles path)
   provision.yml                # Server hardening playbook
   deploy.yml                   # Service deployment playbook (two-phase)
-  webhook.yml                  # Webhook setup playbook (deploy keys + receiver)
   restore.yml                  # Backup restore playbook
   requirements.yml             # External Galaxy role dependencies
   pyproject.toml               # Python deps (Typer, Rich, Ansible)
@@ -193,7 +192,6 @@ roles/
 |---|---|---|
 | `provision.yml` | One-time server hardening: users, SSH, firewall, CrowdSec, Docker | `bay provision production` |
 | `deploy.yml` | Repeatable deployment: build/pull images, deploy containers, write rig state | `bay deploy production` |
-| `webhook.yml` | Webhook setup: deploy keys, receiver container, systemd triggers | `bay webhook production` (v1 form; use `bay deploy production`, see [Build from source](#build-from-source-github-deploy)) |
 | `restore.yml` | Restore an accessory from backup | `bay backup restore production postgres` (low-level: `bay restore production -- -e accessory=postgres -e confirm=yes`) |
 
 All playbooks require a target environment as the first argument.
@@ -450,8 +448,6 @@ bay --fleet <path> deploy production   # no --tags: receiver, build triggers, de
 ```
 
 Run that once per box env that runs a build app, and again after you add a build app. The receiver, its list of build containers and the build triggers come only from `bay deploy <env>` with no `--tags` or with `--tags git_deploy`. Of the webhook files, `bay up` and `bay remove` refresh only `rebuild.sh` and `image-map.json` ([docs/plan.md](docs/plan.md#bay-up)). `bay up` also does not build the first image of a new build app ([docs/plan.md](docs/plan.md#the-first-image)). On the box it makes one SSH deploy key per build container whose repo has no token: `/opt/<stack>/builds/<container>/.deploy_key.pub`. Bay does not register the key. Add it to the GitHub repo yourself (Settings > Deploy keys, read-only). With an SSH repo URL, the first run stops at the clone until the key is on GitHub: add it and run the deploy again. Then add the hook in the repo settings: payload URL `https://<webhook domain>/webhook/<container name>`, the value of the `[webhook] secret`, content type `application/json`, push events only.
-
-`bay webhook production` is the v1 form of this step. It does not hand the fleet's inventory to Ansible, and it reads deploy keys from `/opt/bay/` only. Use `bay deploy` until a release fixes it.
 
 See **[docs/services.md](docs/services.md#build-from-source)** for the full `build:` schema, image tagging, and webhook configuration.
 

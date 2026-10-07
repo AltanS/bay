@@ -155,7 +155,6 @@ to reproduce it. The flags that change what a command *means*:
 - `bay region add` — Add a new region to an existing multi-region deployment (interactive).
 - `bay restart [service...]` — Restart service containers without a full deploy.
 - `bay restore <env>` — Run the restore playbook directly (low-level).
-- `bay webhook <env>` — Deploy webhook infrastructure and show GitHub setup instructions.
 
 ### Stack Manager
 

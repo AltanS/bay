@@ -14,7 +14,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from ruamel.yaml.comments import CommentedMap
 
 # ruamel.yaml costs ~12 ms to import and this module sits on the
-# `bay_cli.cli` import path (commands/webhook.py, commands/healthcheck.py),
+# `bay_cli.cli` import path (commands/healthcheck.py, among others),
 # so it is imported inside the call sites instead of at module scope.
 # See tests/test_cli_import_time.py.
 
