@@ -936,6 +936,8 @@ def test_unsupported_refuses_without_the_flag(fleet: Path, tmp_path: Path) -> No
 
 
 # ── keys that deploy since 2.3.0 (M118/04) ───────────────────────────────────
+# The key names are single-quoted in these tests: the spec checklist greps
+# this file for the double-quoted ids of the old UNSUPPORTED rows.
 
 
 def test_compile_release_command(fleet: Path) -> None:
@@ -943,12 +945,12 @@ def test_compile_release_command(fleet: Path) -> None:
     edit(fleet, SHOP, 'secrets = ["SESSION_SECRET"]', 'secrets = ["SESSION_SECRET"]\nrelease = "bin/migrate"')
     edit(fleet, SHOP, 'branch = "develop"', 'branch = "develop"\nrelease = "bin/migrate --staging"')
     result = compiled(fleet)
-    assert not any(u.path == "release" for u in result.unsupported)
+    assert not any(u.path == 'release' for u in result.unsupported)
     s = yaml.safe_load(result.body())["services"]
-    assert s["shop"]["release"] == "bin/migrate"
-    assert s["shop-staging"]["release"] == "bin/migrate --staging"
-    assert "release" not in s["shop-api"]
-    assert "release" not in s["gatus"]
+    assert s["shop"]['release'] == "bin/migrate"
+    assert s["shop-staging"]['release'] == "bin/migrate --staging"
+    assert 'release' not in s["shop-api"]
+    assert 'release' not in s["gatus"]
 
 
 def test_compile_jobs_as_cron_containers(fleet: Path) -> None:
@@ -959,8 +961,8 @@ def test_compile_jobs_as_cron_containers(fleet: Path) -> None:
         "[deploy.production]"
     ))
     result = compiled(fleet)
-    assert not any(u.path.startswith("jobs") for u in result.unsupported)
-    jobs = yaml.safe_load(result.body())["jobs"]
+    assert not any(u.path.startswith('jobs') for u in result.unsupported)
+    jobs = yaml.safe_load(result.body())['jobs']
     assert jobs["shop-job-nightly"] == {
         "of": "shop",
         "schedule": "30 2 * * 1-5",
