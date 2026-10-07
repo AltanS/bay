@@ -2801,6 +2801,34 @@ def _refuse_remove_plan(saved: Mapping[str, Any]) -> None:
         )
 
 
+MIGRATION_NOTE = "fleet commit moved by the layout migration only"
+
+
+def _absorb_migration(cx: Context, saved: Mapping[str, Any], fresh: dict[str, Any]) -> None:
+    """Keep a plan fresh when only the lock migration moved the fleet commit.
+
+    ``bay up --plan-id`` moves the locks into project folders first, and that
+    is a fleet commit. When the diff from the saved commit to HEAD is that move
+    and nothing else (:func:`bay_cli.layout.is_migration_only_diff`), the plan
+    inputs did not change: the fresh plan keeps the saved fleet commit, so its
+    id, its approval and the receipt's plan id still match. Says so in a note.
+    """
+    from bay_cli import layout
+
+    old = (saved.get("fleet") or {}).get("commit")
+    new = fresh["fleet"]["commit"]
+    if not old or not new or old == new:
+        return
+    if not layout.is_migration_only_diff(cx.fleet_root, old, new):
+        return
+    fresh["fleet"]["commit"] = old
+    fresh["notes"] = [*fresh.get("notes", []), MIGRATION_NOTE]
+    sha = body_sha256(fresh)
+    fresh["plan_sha256"] = sha
+    fresh["plan_id"] = sha[:12]
+    fresh["approval"] = find_approval(cx, fresh)
+
+
 def recheck(
     proj: ProjectRef,
     saved: Mapping[str, Any],
@@ -2838,6 +2866,7 @@ def recheck(
         code_order=opts.code_order,
     )
     fresh = make_plan(proj, again, read_receipts=read_receipts, check_box=check_box)
+    _absorb_migration(proj.cx, saved, fresh)
     fresh["stale"] = stale_reasons(saved, fresh)
     decide(fresh)
     return fresh
@@ -2871,6 +2900,7 @@ def recheck_env(
     fresh = make_env_plan(
         cx, again, ats=ats, cwd=cwd, read_receipts=read_receipts, check_box=check_box
     )
+    _absorb_migration(cx, saved, fresh)
     fresh["stale"] = stale_reasons(saved, fresh)
     decide(fresh)
     return fresh

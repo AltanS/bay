@@ -127,6 +127,33 @@ def is_ancestor(repo: Path, older: str, newer: str) -> bool | None:
     return proc.returncode == 0
 
 
+def diff_name_status(repo: Path, old: str, new: str) -> list[list[str]] | None:
+    """``git diff --name-status -M old..new`` as one list of fields per changed path.
+
+    A rename is ``["R100", old_path, new_path]``, anything else
+    ``[status, path]``. None when git cannot tell (an unknown commit).
+    """
+    out = _out(repo, "-c", "core.quotepath=off", "diff", "--name-status", "-M", f"{old}..{new}")
+    if out is None:
+        return None
+    return [line.split("\t") for line in out.splitlines() if line]
+
+
+def diff_changed_lines(repo: Path, old: str, new: str, rel: str) -> list[str] | None:
+    """The added and removed lines of ``rel`` between two commits, ``+``/``-`` kept.
+
+    No context lines and no file headers. None when git cannot tell.
+    """
+    out = _out(repo, "diff", "--unified=0", "--no-color", f"{old}..{new}", "--", rel)
+    if out is None:
+        return None
+    return [
+        line
+        for line in out.splitlines()
+        if line[:1] in "+-" and not line.startswith(("+++", "---"))
+    ]
+
+
 def last_change(repo: Path, rel: str | Sequence[str], ref: str = "HEAD") -> str | None:
     """The newest commit at or before ``ref`` that touched ``rel``, or None.
 

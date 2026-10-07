@@ -4090,3 +4090,112 @@ def test_remove_refuses_rig_and_resources(world: dict[str, Path], box: FakeBox) 
     assert not list((world["fleet"] / "plans").glob("*.json")) if (
         world["fleet"] / "plans"
     ).exists() else True
+
+
+def test_up_plan_id_survives_lock_migration(world: dict[str, Path], box: FakeBox) -> None:
+    """A plan saved while the lock move was pending still applies: the move is not an input."""
+    do_up(world)
+    fleet = _flat_fleet(world)
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    saved = make(world)
+    planmod.save(cx_of(world), saved)
+    assert saved["verdict"] == "auto"
+    before = git(fleet, "rev-parse", "HEAD")
+    assert saved["fleet"]["commit"] == before
+
+    up = do_up(world, plan_id=saved["plan_id"])
+    assert up["result"] == "ok", up
+    assert up["plan_id"] == saved["plan_id"]
+    record = json.loads((fleet / "plans" / f"{saved['plan_id']}.json").read_text())
+    assert planmod.MIGRATION_NOTE in record["notes"]
+    assert record["fleet"]["commit"] == before
+    assert up["notes"][0].startswith("fleet layout: moved projects/webapp.lock")
+    log = git(fleet, "log", "--format=%s", f"{before}..HEAD").splitlines()
+    assert "bay: move locks into project folders" in log
+    assert (fleet / "projects" / "webapp" / "bay.lock").is_file()
+
+    # Through the CLI as well: exit 0, not 30.
+    _flat_fleet(world)
+    edit_app(world, 'LOG_LEVEL = "debug"', 'LOG_LEVEL = "info"')
+    again = json.loads(cli(world, "plan", "--json").stdout)
+    result = cli(world, "up", "--plan-id", again["plan_id"], "--json")
+    assert result.exit_code == 0, result.output
+
+
+def test_up_plan_id_still_stale_after_another_fleet_change(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    do_up(world)
+    fleet = _flat_fleet(world)
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
+    saved = make(world)
+    planmod.save(cx_of(world), saved)
+    (fleet / "note.txt").write_text("another change\n")
+    commit_all(fleet, "an unrelated fleet change")
+    with pytest.raises(applymod.Refused) as info:
+        do_up(world, plan_id=saved["plan_id"])
+    assert info.value.exit_code == 30
+
+
+def _migration_repo(tmp_path: Path) -> tuple[Path, str]:
+    repo = tmp_path / "migration-repo"
+    repo.mkdir(parents=True)
+    git(repo, "init", "-q", "-b", "main")
+    (repo / "projects").mkdir()
+    (repo / "projects" / "webapp.lock").write_text('{"lock_version": 1}\n')
+    (repo / "bay.fleet.toml").write_text('name = "example"\n\n[boxes.one]\nhost = "192.0.2.1"\n')
+    commit_all(repo, "a 2.0 fleet")
+    return repo, git(repo, "rev-parse", "HEAD")
+
+
+def test_migration_only_diff_detects_renames_and_format_line(tmp_path: Path) -> None:
+    from bay_cli import layout
+
+    repo, old = _migration_repo(tmp_path)
+    assert layout.migrate(repo).commit is not None
+    new = git(repo, "rev-parse", "HEAD")
+    assert layout.is_migration_only_diff(repo, old, new) is True
+    assert layout.is_migration_only_diff(repo, old, old) is False
+    assert layout.is_migration_only_diff(repo, new, old) is False  # not an ancestor
+    assert layout.is_migration_only_diff(repo, "0" * 40, new) is False
+
+    # A rename alone (format already set) counts too.
+    repo2, old2 = _migration_repo(tmp_path / "two")
+    (repo2 / "projects" / "webapp").mkdir()
+    git(repo2, "mv", "projects/webapp.lock", "projects/webapp/bay.lock")
+    commit_all(repo2, "move only")
+    assert layout.is_migration_only_diff(repo2, old2, git(repo2, "rev-parse", "HEAD")) is True
+
+
+def test_migration_only_diff_rejects_other_changes(tmp_path: Path) -> None:
+    from bay_cli import layout
+
+    # Another file changed on top of the migration.
+    repo, old = _migration_repo(tmp_path / "a")
+    layout.migrate(repo)
+    (repo / "note.txt").write_text("x\n")
+    commit_all(repo, "another file")
+    assert layout.is_migration_only_diff(repo, old, git(repo, "rev-parse", "HEAD")) is False
+
+    # bay.fleet.toml changed beyond the format line.
+    repo, old = _migration_repo(tmp_path / "b")
+    layout.migrate(repo)
+    toml = repo / "bay.fleet.toml"
+    toml.write_text(toml.read_text().replace("192.0.2.1", "192.0.2.2"))
+    commit_all(repo, "a box moved")
+    assert layout.is_migration_only_diff(repo, old, git(repo, "rev-parse", "HEAD")) is False
+
+    # The lock content changed while it moved.
+    repo, old = _migration_repo(tmp_path / "c")
+    (repo / "projects" / "webapp").mkdir()
+    git(repo, "mv", "projects/webapp.lock", "projects/webapp/bay.lock")
+    (repo / "projects" / "webapp" / "bay.lock").write_text('{"lock_version": 2}\n')
+    commit_all(repo, "move and edit")
+    assert layout.is_migration_only_diff(repo, old, git(repo, "rev-parse", "HEAD")) is False
+
+    # A lock moved to another project's folder.
+    repo, old = _migration_repo(tmp_path / "d")
+    (repo / "projects" / "other").mkdir()
+    git(repo, "mv", "projects/webapp.lock", "projects/other/bay.lock")
+    commit_all(repo, "wrong target")
+    assert layout.is_migration_only_diff(repo, old, git(repo, "rev-parse", "HEAD")) is False

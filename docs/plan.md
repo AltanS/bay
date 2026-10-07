@@ -380,6 +380,8 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
 1. Bay plans again. With `--plan-id`, Bay checks the saved plan: it is
    `stale` when the lock, the box receipt or any other plan input moved.
    `bay up --plan-id` plans again with the same box check the saved plan used.
+   The lock migration to project folders (a pure rename plus one `format` line)
+   does not make a plan stale.
 2. Bay refuses `blocked` (exit 20) and `stale` (exit 30). Bay refuses
    `approve` (exit 10) unless an approval matches. `--force --reason "<why>"`
    overrides `approve` only, never `blocked` or `stale`. The reason goes into

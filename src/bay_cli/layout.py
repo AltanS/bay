@@ -167,6 +167,48 @@ def migrate(fleet_root: Path, *, dry_run: bool = False) -> Migration:
     return done
 
 
+_FORMAT_CHANGE = re.compile(r"^[+-]format\s*=")
+
+
+def is_migration_only_diff(fleet_root: Path, old_commit: str, new_commit: str) -> bool:
+    """True when ``old_commit..new_commit`` is the lock migration and nothing else.
+
+    The move is a pure rename plus one ``format = ...`` line, so a plan saved
+    before it must not go stale because of it. The diff may hold only:
+
+    * renames ``projects/<name>.lock`` to ``projects/<name>/bay.lock``
+      (same name, content unchanged), and
+    * a change to ``bay.fleet.toml`` whose added and removed lines are all
+      ``format = ...`` lines.
+
+    Any other path, any other line, an unknown commit, or ``old_commit`` that
+    is not an ancestor of ``new_commit`` gives False.
+    """
+    if old_commit == new_commit:
+        return False
+    if gitrepo.is_ancestor(fleet_root, old_commit, new_commit) is not True:
+        return False
+    entries = gitrepo.diff_name_status(fleet_root, old_commit, new_commit)
+    if not entries:
+        return False
+    for entry in entries:
+        status, paths = entry[0], entry[1:]
+        if status == "R100" and len(paths) == 2:
+            flat = re.fullmatch(
+                rf"{re.escape(PROJECTS_DIR)}/([^/]+){re.escape(LOCK_SUFFIX)}", paths[0]
+            )
+            if flat and paths[1] == f"{PROJECTS_DIR}/{flat.group(1)}/{LOCK_FILE}":
+                continue
+            return False
+        if status == "M" and paths == [FLEET_FILE]:
+            lines = gitrepo.diff_changed_lines(fleet_root, old_commit, new_commit, FLEET_FILE)
+            if not lines or not all(_FORMAT_CHANGE.match(line) for line in lines):
+                return False
+            continue
+        return False
+    return True
+
+
 def ensure(fleet_root: Path) -> list[str]:
     """Migrate when needed. Returns one line per change, empty when there was none.
 
