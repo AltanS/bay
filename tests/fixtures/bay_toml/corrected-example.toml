@@ -15,7 +15,7 @@ memory = "512m"                # default none; swap never allowed
 update = "notify"              # notify | auto | off  (default notify)
 zero_downtime = false          # true = old and new overlap; refused if a mount is single-writer
 logs = "7d"                    # "off" | duration; log archive on the box (rotation always on, fleet cap)
-secrets = ["SESSION_SECRET"]   # names only; fleet holds values per environment
+secrets = ["SESSION_SECRET"]   # names only; the fleet holds the values, one vault file per box env
 
 # ── Needs (table form here; `needs = ["postgres", "redis"]` when no need has options) ──
 [needs.postgres]

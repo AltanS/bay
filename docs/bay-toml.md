@@ -358,7 +358,7 @@ These keys sit at the top level. Every key in this table may also be set in a
 | `update` | `notify`, `auto`, `off` | `notify` | What happens when a newer image appears. |
 | `zero_downtime` | bool | `false` | `true`: the previous container keeps running until the new one is healthy. `false`: there is a gap. |
 | `logs` | `"off"` or duration | fleet setting | How long the log archive on the box keeps logs. Rotation is always on. |
-| `secrets` | list of names | `[]` | Secret names. The values are in the vault of the box env (`group_vars/<box env>/secrets.yml`), so two deploy envs on one box env share one value per name. |
+| `secrets` | list of names | `[]` | Secret names. The values are in the encrypted secrets file of the box env (`group_vars/<box env>/secrets.yml`), so two deploy envs on one box env share one value per name. |
 
 Two more top-level keys apply to the main container. An environment cannot override
 them.
@@ -539,7 +539,7 @@ service may use that name. Container names are in rule 8.
 ### `[deploy.<env>]`
 
 One table per deploy environment. Each has its own data and container suffix. Its secret
-values come from the vault of the box env of its box (`group_vars/<box env>/secrets.yml`), so two
+values come from the encrypted secrets file of the box env of its box (`group_vars/<box env>/secrets.yml`), so two
 deploy envs on one box env share them (see
 [layout-scenarios.md](layout-scenarios.md#which-env-does-a-verb-take)). `bay plan <env>` and
 `bay up <env>` take this name.
