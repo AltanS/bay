@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/AltanS/bay/schemas/plan.schema.json",
   "title": "bay plan --json",
-  "description": "One plan: WANTED (bay.toml at a commit) against PINNED (the fleet lock and services file) and RUNNING (the box receipt). Saved as <fleet>/plans/<plan_id>.json. Version 1. Documented in docs/plan.md. A new field may appear without a version bump; readers ignore fields they do not know.",
+  "description": "One plan: WANTED (bay.toml at a commit) against PINNED (the fleet lock and services file) and RUNNING (the box receipt). Saved as <fleet>/plans/<plan_id>.json. Version 1. Documented in docs/plan.md. A plan for one project has project set; a whole-environment plan (bay plan <env> in a fleet, no --project) has project null and lists its projects in projects. A new field may appear without a version bump; readers ignore fields they do not know.",
   "type": "object",
   "required": [
     "plan_version", "plan_id", "plan_sha256", "created_at", "project", "env", "box", "box_env",
@@ -15,7 +15,64 @@
     "plan_id": { "type": "string", "pattern": "^[0-9a-f]{12}$" },
     "plan_sha256": { "$ref": "#/$defs/sha256" },
     "created_at": { "type": "string" },
-    "project": { "$ref": "#/$defs/name" },
+    "project": {
+      "description": "The planned project. null for a whole-environment plan: then projects lists every project, and wanted and pinned hold no commit.",
+      "oneOf": [{ "$ref": "#/$defs/name" }, { "type": "null" }]
+    },
+    "projects": {
+      "description": "Only in a whole-environment plan: every project with [deploy.<env>], each at its WANTED commit.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "box", "box_env", "wanted", "pinned"],
+        "properties": {
+          "name": { "$ref": "#/$defs/name" },
+          "box": { "type": ["string", "null"] },
+          "box_env": { "type": ["string", "null"] },
+          "wanted": { "$ref": "#/$defs/wanted" },
+          "pinned": { "$ref": "#/$defs/pinned" }
+        }
+      }
+    },
+    "moves": {
+      "description": "Only when a project's WANTED box (bay.toml) differs from its PINNED box (the lock). One entry per move; bay up writes the new box into the lock.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "project", "env", "from", "to", "from_box_env", "to_box_env", "containers",
+          "volumes", "databases", "risk", "data"
+        ],
+        "properties": {
+          "project": { "$ref": "#/$defs/name" },
+          "env": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "from_box_env": { "type": ["string", "null"] },
+          "to_box_env": { "type": ["string", "null"] },
+          "containers": { "type": "array", "items": { "type": "string" } },
+          "volumes": {
+            "description": "Named volumes that stay on the old box.",
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "databases": {
+            "description": "Databases that stay in the old box's resource.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "resource"],
+              "properties": { "name": { "type": "string" }, "resource": { "type": "string" } }
+            }
+          },
+          "risk": { "enum": ["shared", "destructive"] },
+          "data": { "enum": ["keep", null] }
+        }
+      }
+    },
     "env": { "type": "string", "pattern": "^[a-z][a-z0-9]*$" },
     "box": { "type": ["string", "null"] },
     "box_env": { "type": ["string", "null"] },
@@ -29,23 +86,8 @@
         "behind": { "type": ["boolean", "null"] }
       }
     },
-    "wanted": {
-      "type": "object",
-      "required": ["commit", "toml_sha256", "dirty"],
-      "properties": {
-        "commit": { "$ref": "#/$defs/commit_or_null" },
-        "toml_sha256": { "$ref": "#/$defs/sha256_or_null" },
-        "dirty": { "type": ["boolean", "null"] }
-      }
-    },
-    "pinned": {
-      "type": "object",
-      "required": ["commit", "lock_sha256"],
-      "properties": {
-        "commit": { "$ref": "#/$defs/commit_or_null" },
-        "lock_sha256": { "$ref": "#/$defs/sha256_or_null" }
-      }
-    },
+    "wanted": { "$ref": "#/$defs/wanted" },
+    "pinned": { "$ref": "#/$defs/pinned" },
     "running": {
       "type": "object",
       "required": ["checked", "receipt_sha256", "boxes"],
@@ -136,6 +178,11 @@
     "stale": { "type": "array", "items": { "type": "string" } }
   },
   "allOf": [
+    {
+      "if": { "properties": { "project": { "type": "null" } } },
+      "then": { "required": ["projects"] },
+      "else": { "not": { "required": ["projects"] } }
+    },
     { "if": { "properties": { "verdict": { "const": "auto" } } }, "then": { "properties": { "exit_code": { "const": 0 } } } },
     { "if": { "properties": { "verdict": { "const": "approve" } } }, "then": { "properties": { "exit_code": { "const": 10 } } } },
     { "if": { "properties": { "verdict": { "const": "blocked" } } }, "then": { "properties": { "exit_code": { "const": 20 } } } },
@@ -146,6 +193,23 @@
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "sha256_or_null": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
     "commit_or_null": { "type": ["string", "null"], "pattern": "^[0-9a-f]{7,64}$" },
+    "wanted": {
+      "type": "object",
+      "required": ["commit", "toml_sha256", "dirty"],
+      "properties": {
+        "commit": { "$ref": "#/$defs/commit_or_null" },
+        "toml_sha256": { "$ref": "#/$defs/sha256_or_null" },
+        "dirty": { "type": ["boolean", "null"] }
+      }
+    },
+    "pinned": {
+      "type": "object",
+      "required": ["commit", "lock_sha256"],
+      "properties": {
+        "commit": { "$ref": "#/$defs/commit_or_null" },
+        "lock_sha256": { "$ref": "#/$defs/sha256_or_null" }
+      }
+    },
     "step": {
       "type": "object",
       "additionalProperties": false,
@@ -155,11 +219,17 @@
       "properties": {
         "id": { "type": "string", "pattern": "^s[1-9][0-9]*$" },
         "kind": {
-          "enum": ["container", "volume", "database", "database_user", "secret", "resource", "tailnet", "fleet"]
+          "enum": ["container", "volume", "database", "database_user", "secret", "resource", "tailnet", "fleet", "move"]
         },
         "container": { "type": ["string", "null"] },
-        "resource": { "type": ["string", "null"] },
-        "project": { "type": ["string", "null"] },
+        "resource": {
+          "description": "For a move step: \"<from box> -> <to box>\".",
+          "type": ["string", "null"]
+        },
+        "project": {
+          "description": "The project the step belongs to. null only for a fleet-wide thing: a [resources.*] entry, the webhook, the tailnet, or a container no project owns.",
+          "type": ["string", "null"]
+        },
         "action": { "enum": ["create", "update", "remove", "rename", "move", "recreate", "start"] },
         "risk": { "enum": ["safe", "shared", "destructive"] },
         "reason": { "type": "string", "minLength": 1 },

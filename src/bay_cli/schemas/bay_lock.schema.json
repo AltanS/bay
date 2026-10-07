@@ -37,6 +37,11 @@
         "commit": { "type": "string", "pattern": "^[0-9a-f]{7,64}$" },
         "deployed_at": { "type": ["string", "null"] },
         "receipt_sha256": { "$ref": "#/$defs/sha256_or_null" },
+        "plan_id": {
+          "description": "The plan that deployed this pin. plans/ prune keeps the plan a lock names.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{12}$"
+        },
         "force_reason": { "type": "string", "minLength": 1 }
       }
     },

@@ -24,10 +24,17 @@
    ``bay: receipt <box env> (<n> projects)``.
 7. Report what the deploy did: ``applied`` lists, per box, every container
    whose receipt action is not ``noop`` (:func:`applied_from`). ``steps`` is
-   still the plan.
+   still the plan. Prune ``plans/`` to the newest records plus every record
+   a lock names (:func:`prune_plans`): ``bay: prune plans (<n> files)``.
 8. Push the fleet repo when it has a remote (not with ``--no-push``). A
    failed push is a warning. A fleet that is a subdirectory of a larger repo
    is committed but never pushed (``push_skipped`` says why).
+
+A plan with a box move (``moves``) writes the new box into the lock in step
+2. When the old box is in another box environment, step 5 deploys that one
+too, so the moved containers leave it. :func:`up_env` applies a
+whole-environment plan: every project of it is pinned in step 2, and the
+fleet commit is ``bay: up <env> (<n> projects)``.
 
 A failed deploy keeps the new pin and records ``result: failed``, so
 ``bay show`` says HALF. ``bay rollback`` runs the same steps with the
@@ -37,6 +44,7 @@ A failed deploy keeps the new pin and records ``result: failed``, so
 from __future__ import annotations
 
 import copy
+import json
 import shutil
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -130,11 +138,32 @@ def _previous_for(record: Mapping[str, Any], lock: Mapping[str, Any]) -> dict[st
     commit = record.get("commit") or lock.get("commit")
     if not commit:
         return None
-    return {
+    previous = {
         "commit": commit,
         "deployed_at": record.get("deployed_at"),
         "receipt_sha256": record.get("last_receipt_sha256"),
     }
+    if record.get("plan_id"):
+        # The plan that deployed the replaced pin; plans/ prune keeps it.
+        previous["plan_id"] = record["plan_id"]
+    return previous
+
+
+def _gate(plan: dict[str, Any], force: bool, reason: str | None, say: Echo) -> bool:
+    """Refuse blocked, stale and unapproved plans. True when ``--force`` overrode approve."""
+    verdict = plan["verdict"]
+    if verdict == "blocked":
+        raise Refused(plan, "the plan is blocked: " + "; ".join(plan["blockers"]))
+    if verdict == "stale":
+        raise Refused(plan, "the plan is stale: " + "; ".join(plan["stale"]))
+    if verdict == "approve":
+        if not force:
+            raise Refused(
+                plan, f"plan {plan['plan_id']} has destructive or shared steps and no approval"
+            )
+        say(f"forced without approval: {reason}")
+        return True
+    return False
 
 
 def up(
@@ -170,56 +199,144 @@ def up(
     else:
         plan = planmod.make_plan(proj, opts, read_receipts=read_receipts)
     planmod.save(cx, plan)
+    forced = _gate(plan, force, reason, say)
+    commit = str(plan["wanted"]["commit"])
+    return _apply_plan(
+        cx,
+        plan,
+        [(proj, commit)],
+        forced=forced,
+        reason=reason,
+        message=f"bay: {action} {proj.name} {plan['env']} {commit[:12]}",
+        action=action,
+        read_receipts=read_receipts,
+        deploy=deploy,
+        say=say,
+        push=push,
+    )
 
-    verdict = plan["verdict"]
-    forced = False
-    if verdict == "blocked":
-        raise Refused(plan, "the plan is blocked: " + "; ".join(plan["blockers"]))
-    if verdict == "stale":
-        raise Refused(plan, "the plan is stale: " + "; ".join(plan["stale"]))
-    if verdict == "approve":
-        if not force:
-            raise Refused(
-                plan, f"plan {plan['plan_id']} has destructive or shared steps and no approval"
-            )
-        forced = True
-        say(f"forced without approval: {reason}")
 
+def up_env(
+    cx: Context,
+    opts: planmod.PlanOptions,
+    *,
+    plan_id: str | None = None,
+    force: bool = False,
+    reason: str | None = None,
+    cwd: Path | None = None,
+    read_receipts: planmod.ReceiptReader | None = None,
+    check_box: planmod.BoxCheck | None = None,
+    deploy: Deployer | None = None,
+    echo: Echo | None = None,
+    push: bool = True,
+) -> dict[str, Any]:
+    """Apply a whole-environment plan (``bay up <env>`` in a fleet, no ``--project``).
+
+    Every project of the plan is pinned to its WANTED commit, then the box
+    environment is deployed once, as :func:`up` does for one project.
+    """
+    say = echo or (lambda _msg: None)
+    if force and not (reason and reason.strip()):
+        raise BayError("--force needs --reason", hint='Pass --reason "<why>".')
+    if plan_id:
+        saved = planmod.load_saved(cx, plan_id)
+        plan = planmod.recheck_env(
+            cx, saved, opts, cwd=cwd, read_receipts=read_receipts, check_box=check_box
+        )
+    else:
+        plan = planmod.make_env_plan(cx, opts, cwd=cwd, read_receipts=read_receipts)
+    planmod.save(cx, plan)
+    if not plan["projects"]:
+        raise BayError(
+            f"no project has [deploy.{plan['env']}], so there is nothing to deploy",
+            code=ErrorCode.NOT_FOUND,
+        )
+    forced = _gate(plan, force, reason, say)
+    members = [
+        (planmod.load_project(cx, p["name"], cwd=cwd, fetch=False), str(p["wanted"]["commit"]))
+        for p in plan["projects"]
+    ]
+    return _apply_plan(
+        cx,
+        plan,
+        members,
+        forced=forced,
+        reason=reason,
+        message=f"bay: up {plan['env']} ({len(members)} projects)",
+        action="up",
+        read_receipts=read_receipts,
+        deploy=deploy,
+        say=say,
+        push=push,
+    )
+
+
+def _apply_plan(
+    cx: Context,
+    plan: dict[str, Any],
+    members: list[tuple[planmod.ProjectRef, str]],
+    *,
+    forced: bool,
+    reason: str | None,
+    message: str,
+    action: str,
+    read_receipts: planmod.ReceiptReader | None,
+    deploy: Deployer | None,
+    say: Echo,
+    push: bool,
+) -> dict[str, Any]:
+    """Steps 2 to 8 of ``bay up`` for the projects of an accepted plan."""
     env = str(plan["env"])
     box_env = str(plan["box_env"])
-    commit = str(plan["wanted"]["commit"])
-    short = commit[:12]
-    on_remote = planmod.commit_on_remote(proj, commit)
-    if on_remote is not True:
-        why = "is not" if on_remote is False else "cannot be checked to be"
-        raise Refused(
-            plan,
-            f"commit {short} of {proj.name} {why} on a branch of {proj.repo}; push first",
-        )
+    for proj, commit in members:
+        on_remote = planmod.commit_on_remote(proj, commit)
+        if on_remote is not True:
+            why = "is not" if on_remote is False else "cannot be checked to be"
+            raise Refused(
+                plan,
+                f"commit {commit[:12]} of {proj.name} {why} on a branch of {proj.repo}; "
+                "push first",
+            )
+    moves = {m["project"]: m for m in plan.get("moves") or [] if m["env"] == env}
 
-    # 2. the lock
-    lock = copy.deepcopy(proj.lock)
-    envs = lock.setdefault("envs", {})
-    record = dict(envs.get(env, {}))
-    old_pin = lockfile.env_pin(proj.lock, env)
-    previous = record.get("previous")
-    if old_pin and old_pin != commit:
-        previous = _previous_for(record, proj.lock)
-    if forced and previous is not None:
-        previous = {**previous, "force_reason": str(reason).strip()}
-    lock["commit"] = commit
-    if not record.get("box") and plan.get("box"):
-        record["box"] = plan["box"]
-    record.update({"commit": commit, "result": "pending", "plan_id": plan["plan_id"]})
-    if previous is not None:
-        record["previous"] = previous
-    envs[env] = record
-    lockfile.write(proj.lock_file, lock)
+    # 2. the locks
+    locks: dict[str, dict[str, Any]] = {}
+    previous_by: dict[str, dict[str, Any] | None] = {}
+    for proj, commit in members:
+        lock = copy.deepcopy(proj.lock)
+        envs = lock.setdefault("envs", {})
+        record = dict(envs.get(env, {}))
+        old_pin = lockfile.env_pin(proj.lock, env)
+        previous = record.get("previous")
+        if old_pin and old_pin != commit:
+            previous = _previous_for(record, proj.lock)
+        if forced and previous is not None:
+            previous = {**previous, "force_reason": str(reason).strip()}
+        lock["commit"] = commit
+        move = moves.get(proj.name)
+        if move is not None:
+            # The plan moved the project: the lock now pins the new box.
+            record["box"] = move["to"]
+        elif not record.get("box"):
+            box = next(
+                (p["box"] for p in plan.get("projects") or [] if p["name"] == proj.name),
+                plan.get("box"),
+            )
+            if box:
+                record["box"] = box
+        record.update({"commit": commit, "result": "pending", "plan_id": plan["plan_id"]})
+        if previous is not None:
+            record["previous"] = previous
+        envs[env] = record
+        lockfile.write(proj.lock_file, lock)
+        locks[proj.name] = lock
+        previous_by[proj.name] = previous
 
     # 3. compile into the fleet. The scratch fleet stays until the deploy
     # has finished: the deploy copies config files from its files/.
     failure: str | None = None
-    with planmod.compiled_fleet(cx, cwd=proj.cwd) as comp:
+    first = members[0][0]
+    with planmod.compiled_fleet(cx, cwd=first.cwd) as comp:
         if comp.result is None:
             raise BayError(
                 "compile failed after the lock was written:\n  " + "\n  ".join(comp.errors)
@@ -229,41 +346,41 @@ def up(
         left_out = list(comp.unpinned)
 
         # 4. commit
-        paths = [proj.lock_file, services, planmod.plan_file(cx, plan["plan_id"])]
+        paths = [p.lock_file for p, _ in members]
+        paths += [services, planmod.plan_file(cx, plan["plan_id"])]
         approval = planmod.approval_file(cx, plan["plan_id"])
         if approval.is_file():
             paths.append(approval)
         try:
-            fleet_commit = gitrepo.commit_paths(
-                cx.fleet_root, paths, f"bay: {action} {proj.name} {env} {short}"
-            )
+            fleet_commit = gitrepo.commit_paths(cx.fleet_root, paths, message)
         except gitrepo.GitError as exc:
             raise BayError(f"cannot commit the fleet repo: {exc}") from None
         say(f"fleet commit {fleet_commit}")
 
-        # 5. deploy
-        try:
-            (deploy or default_deploy)(cx, box_env, config_files_root=comp.files_root)
-        except (BayError, OSError) as exc:
-            failure = str(exc) or type(exc).__name__
-        except SystemExit as exc:
-            failure = f"deploy exited with {exc.code}"
+        # 5. deploy. A move to a box of another box environment also deploys
+        # the old one, so its reconciler removes the moved containers there.
+        targets = [box_env] + sorted(
+            {
+                str(m["from_box_env"])
+                for m in moves.values()
+                if m.get("from_box_env") and m["from_box_env"] != box_env
+            }
+        )
+        for target in targets:
+            try:
+                (deploy or default_deploy)(cx, target, config_files_root=comp.files_root)
+            except (BayError, OSError) as exc:
+                failure = failure or str(exc) or type(exc).__name__
+            except SystemExit as exc:
+                failure = failure or f"deploy exited with {exc.code}"
 
     # 6. receipt
     reader = read_receipts or planmod.default_receipt_reader
-    names = set(
-        planmod.project_containers(
-            proj.name, planmod.doc_at(proj, commit) or {}, lock, proj.primary_env
-        )
-        .get(env, {})
-        .values()
-    )
     entries: list[dict[str, Any]] = []
     try:
         entries = reader(cx, box_env)
     except (BayError, OSError) as exc:
         say(f"cannot read the receipt: {exc}")
-    slice_ = planmod.running_slice(entries, names)
     receipt_failed = any(
         isinstance(e.get("receipt"), Mapping) and e["receipt"].get("result") == "failed"
         for e in entries
@@ -272,17 +389,29 @@ def up(
         failure = "the box receipt says the deploy failed"
     word = "failed" if failure else "ok"
     deployed_at = planmod._now()
-    record = dict(lock["envs"][env])
-    record["result"] = word
-    record["deployed_at"] = deployed_at
-    record["last_receipt_sha256"] = slice_["receipt_sha256"]
-    lock["envs"][env] = record
-    lockfile.write(proj.lock_file, lock)
-    pinned = [{"project": proj.name, "env": env, "commit": commit, "result": word}]
-    lock_files = [proj.lock_file]
+    pinned: list[dict[str, Any]] = []
+    lock_files: list[Path] = []
+    for proj, commit in members:
+        lock = locks[proj.name]
+        names = set(
+            planmod.project_containers(
+                proj.name, planmod.doc_at(proj, commit) or {}, lock, proj.primary_env
+            )
+            .get(env, {})
+            .values()
+        )
+        slice_ = planmod.running_slice(entries, names)
+        record = dict(lock["envs"][env])
+        record["result"] = word
+        record["deployed_at"] = deployed_at
+        record["last_receipt_sha256"] = slice_["receipt_sha256"]
+        lock["envs"][env] = record
+        lockfile.write(proj.lock_file, lock)
+        pinned.append({"project": proj.name, "env": env, "commit": commit, "result": word})
+        lock_files.append(proj.lock_file)
     more_files, more_rows = _pin_deployed(
         cx,
-        skip=proj.name,
+        skip={p.name for p, _ in members},
         box_env=box_env,
         commits=compiled_commits,
         entries=entries,
@@ -299,6 +428,8 @@ def up(
         f"box {b}: the receipt is not from this deploy, so `applied` leaves it out"
         for b in stale_boxes
     ]
+    for move in moves.values():
+        notes.extend(planmod.move_notes(move))
     for note in notes:
         say(f"note: {note}")
     try:
@@ -308,19 +439,33 @@ def up(
     except gitrepo.GitError as exc:
         raise BayError(f"cannot commit the fleet repo: {exc}") from None
 
+    # 7. plans/ prune: the newest records plus every record a lock names.
+    pruned: list[str] = []
+    try:
+        pruned = prune_plans(cx)
+    except gitrepo.GitError as exc:
+        say(f"warning: plans/ was not pruned: {exc}")
+    if pruned:
+        say(f"pruned {len(pruned)} old plan file(s) from {planmod.PLANS_DIR}/")
+
+    single = plan.get("project") is not None
+    commit0 = members[0][1]
     result = {
-        "project": proj.name,
+        "project": plan.get("project"),
+        "projects": [p.name for p, _ in members],
         "env": env,
         "box_env": box_env,
         "action": action,
         "plan_id": plan["plan_id"],
-        "verdict": verdict,
+        "verdict": plan["verdict"],
         "forced": forced,
-        "commit": commit,
-        "previous_commit": (previous or {}).get("commit"),
+        "commit": commit0 if single else None,
+        "previous_commit": (previous_by[members[0][0].name] or {}).get("commit")
+        if single
+        else None,
         "fleet_commit": fleet_commit,
         "receipt_commit": receipt_commit,
-        "result": record["result"],
+        "result": word,
         "error": failure,
         "pushed": False,
         "push_error": None,
@@ -328,6 +473,7 @@ def up(
         "steps": plan["steps"],
         "applied": applied,
         "pinned": pinned,
+        "pruned": pruned,
         "notes": notes,
     }
     if push and not gitrepo.is_toplevel(cx.fleet_root):
@@ -350,6 +496,67 @@ def up(
     if failure:
         raise DeployFailed(result)
     return result
+
+
+#: ``plans/`` keeps this many of the newest plan records, plus every record a
+#: lock names.
+PLANS_KEEP = 50
+
+
+def _plan_time(path: Path) -> str:
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return ""
+    return str(data.get("created_at") or "") if isinstance(data, dict) else ""
+
+
+def _lock_plan_ids(cx: Context) -> set[str]:
+    """Every plan id a lock of the fleet names: ``envs.*.plan_id`` and ``previous.plan_id``."""
+    out: set[str] = set()
+    for name in planmod.fleet_projects(cx):
+        try:
+            raw = lockfile.read(lockfile.lock_path(cx.fleet_root, name))
+        except ValueError:
+            continue
+        for record in ((raw or {}).get("envs") or {}).values():
+            if not isinstance(record, Mapping):
+                continue
+            if record.get("plan_id"):
+                out.add(str(record["plan_id"]))
+            previous = record.get("previous")
+            if isinstance(previous, Mapping) and previous.get("plan_id"):
+                out.add(str(previous["plan_id"]))
+    return out
+
+
+def prune_plans(cx: Context, *, keep: int = PLANS_KEEP) -> list[str]:
+    """Remove old committed plan records from ``plans/`` in one commit. Returns the paths.
+
+    Keeps the ``keep`` newest records (by ``created_at``) and every record a
+    lock still names. A record's approval (``<id>.approved``) goes with it.
+    Only files git tracks are removed, with ``git rm`` and the commit
+    ``bay: prune plans``; an untracked plan (a ``bay plan`` that was never
+    applied) is never touched.
+    """
+    rel_dir = planmod.PLANS_DIR
+    tracked = set(gitrepo.tracked_files(cx.fleet_root, rel_dir))
+    records = sorted(
+        (rel for rel in tracked if rel.endswith(".json")),
+        key=lambda rel: (_plan_time(cx.fleet_root / rel), rel),
+        reverse=True,
+    )
+    named = _lock_plan_ids(cx)
+    kept = {Path(rel).stem for rel in records[:keep]} | named
+    gone: list[str] = []
+    for rel in tracked:
+        stem = Path(rel).name.split(".", 1)[0]
+        if rel.endswith((".json", planmod.APPROVED_SUFFIX)) and stem not in kept:
+            gone.append(rel)
+    gone.sort()
+    if gone:
+        gitrepo.remove_and_commit(cx.fleet_root, gone, f"bay: prune plans ({len(gone)} files)")
+    return gone
 
 
 def applied_from(
@@ -392,7 +599,7 @@ def applied_from(
 def _pin_deployed(
     cx: Context,
     *,
-    skip: str,
+    skip: set[str],
     box_env: str,
     commits: Mapping[str, str],
     entries: list[dict[str, Any]],
@@ -419,7 +626,7 @@ def _pin_deployed(
     files: list[Path] = []
     rows: list[dict[str, Any]] = []
     for name in sorted(commits):
-        if name == skip:
+        if name in skip:
             continue
         try:
             other = planmod.load_project(cx, name, fetch=False)

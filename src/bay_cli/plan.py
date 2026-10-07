@@ -273,14 +273,35 @@ def resolve_box(
     """``(box, box_env)``: the lock's box wins, then bay.toml, then the fleet default.
 
     ``box_env`` is the box's ``env`` in bay.fleet.toml: the group a deploy targets.
+    The compiler uses the same order, so an edit of ``deploy.<env>.box`` never
+    moves a workload by itself: the plan shows it as a ``move`` step
+    (:func:`move_record`) and ``bay up`` writes the new box into the lock.
     """
     record = (proj.lock.get("envs") or {}).get(env, {})
     deploy = ((doc or {}).get("deploy") or {}).get(env, {})
     box = record.get("box") or deploy.get("box") or proj.fleet.get("default_box")
-    boxes = proj.fleet.get("boxes") or {}
+    return box_and_env(proj.fleet, box)
+
+
+def box_and_env(fleet: Mapping[str, Any], box: Any) -> tuple[str | None, str | None]:
+    """``(box, box_env)``; ``box_env`` is None when the fleet has no such box."""
+    boxes = fleet.get("boxes") or {}
     if not box or box not in boxes:
         return (str(box) if box else None), None
     return str(box), str(boxes[box]["env"])
+
+
+def wanted_box(fleet: Mapping[str, Any], doc: Mapping[str, Any] | None, env: str) -> str | None:
+    """WANTED box: ``deploy.<env>.box`` in bay.toml, else the fleet's default box."""
+    deploy = ((doc or {}).get("deploy") or {}).get(env) or {}
+    box = deploy.get("box") or fleet.get("default_box")
+    return str(box) if box else None
+
+
+def pinned_box(lock: Mapping[str, Any], env: str) -> str | None:
+    """PINNED box: the box the lock records for ``env``, or None before the first ``bay up``."""
+    box = ((lock.get("envs") or {}).get(env) or {}).get("box")
+    return str(box) if box else None
 
 
 # ── Reading WANTED ──────────────────────────────────────────────────────────
@@ -408,6 +429,8 @@ class Compiled:
     unpinned: list[str] = field(default_factory=list)
     #: Uncommitted fleet files that are not deployed (see :func:`uncommitted_notes`).
     uncommitted: list[str] = field(default_factory=list)
+    #: ``{container: project}`` for every container a project of the compile owns.
+    owners: dict[str, str] = field(default_factory=dict)
 
     @property
     def files_root(self) -> Path:
@@ -712,14 +735,53 @@ def uncommitted_notes(fleet_root: Path) -> list[str]:
     ]
 
 
+def _override_boxes(root: Path, boxes: Mapping[str, Mapping[str, str]]) -> None:
+    """Set the box of some ``{project: {env: box}}`` in the scratch locks.
+
+    A plan with a ``move`` step compiles the project on its WANTED box; the
+    fleet's own lock is never touched.
+    """
+    for name, envs in boxes.items():
+        path = root / PROJECTS_DIR / name / LOCK_FILE
+        try:
+            raw = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        for env, box in envs.items():
+            raw.setdefault("envs", {}).setdefault(env, {})["box"] = box
+        path.write_text(json.dumps(raw, indent=2) + "\n")
+
+
+def _owners(inputs: Any) -> dict[str, str]:
+    """``{container: project}`` for every project the compile read."""
+    primary = str(inputs.fleet.get("primary_env", "production"))
+    out: dict[str, str] = {}
+    for name, project in sorted(inputs.projects.items()):
+        raw = {
+            "envs": {
+                env: {"adopted": {"containers": dict(project.lock_env(env).containers)}}
+                for env in project.doc.get("deploy") or {}
+            }
+        }
+        for names in project_containers(name, project.doc, raw, primary).values():
+            for container in names.values():
+                out.setdefault(container, name)
+    return out
+
+
 @contextmanager
 def compiled_fleet(
-    cx: Context, pins: Mapping[str, str] | None = None, *, cwd: Path | None = None
+    cx: Context,
+    pins: Mapping[str, str] | None = None,
+    *,
+    cwd: Path | None = None,
+    boxes: Mapping[str, Mapping[str, str]] | None = None,
 ) -> Iterator[Compiled]:
     """Compile the fleet with every project at its pin (``pins`` overrides some).
 
     ``cwd`` is where the command ran: a repo project whose checkout is there
-    is read from it, the others from the fleet's repo cache.
+    is read from it, the others from the fleet's repo cache. ``boxes``
+    (``{project: {env: box}}``) places a moving project on its new box.
     """
     from bay_cli import compiler
     from bay_cli.fleet import FleetError, load_inputs
@@ -728,12 +790,17 @@ def compiled_fleet(
     with tempfile.TemporaryDirectory(prefix="bay-plan-") as tmp:
         work = Path(tmp)
         made = _materialize(cx, work, pins or {}, cwd=cwd)
+        if boxes:
+            _override_boxes(made.root, boxes)
         errors = list(made.problems)
         notes = [f"fleet layout: {line}" for line in moved] + list(made.notes)
         result = None
+        owners: dict[str, str] = {}
         if not errors:
             try:
-                result = compiler.compile_fleet(load_inputs(made.root, checkouts=made.checkouts))
+                inputs = load_inputs(made.root, checkouts=made.checkouts)
+                result = compiler.compile_fleet(inputs)
+                owners = _owners(inputs)
             except (FleetError, compiler.CompileError) as exc:
                 errors.extend(exc.lines)
         if result is not None:
@@ -751,6 +818,7 @@ def compiled_fleet(
             commits=dict(made.commits),
             unpinned=list(made.unpinned),
             uncommitted=uncommitted_notes(cx.fleet_root) if gitrepo.head(cx.fleet_root) else [],
+            owners=owners,
         )
 
 
@@ -852,7 +920,7 @@ def _container_steps(
     old: dict[str, Any] | None,
     new: dict[str, Any] | None,
     *,
-    project: str,
+    project: str | None,
     running: set[str] | None,
 ) -> list[dict[str, Any]]:
     if old is None and new is not None:
@@ -1026,12 +1094,24 @@ def diff_steps(
     current: Mapping[str, Any],
     wanted: Mapping[str, Any],
     *,
-    project: str,
+    project: str | None,
     mine: set[str],
     resources: set[str],
     running: set[str] | None,
+    owners: Mapping[str, str] | None = None,
+    running_scope: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Steps that turn the fleet's services file into the wanted one."""
+    """Steps that turn the fleet's services file into the wanted one.
+
+    ``mine`` are the containers of ``project``. A container in ``owners``
+    (``{container: project}``) belongs to that project: its steps carry that
+    project and keep their own risk, so a safe change of another project is
+    safe here too. ``running`` names the containers that run, and is only
+    known for the names in ``running_scope`` (the planned projects); for any
+    other container it counts as not read. Only a container that no project
+    owns is ``shared``: a change to it cannot be traced to one bay.toml.
+    """
+    owners = owners or {}
     old_all, new_all = _entries(current), _entries(wanted)
     steps: list[dict[str, Any]] = []
     for name in sorted(set(old_all) | set(new_all)):
@@ -1065,6 +1145,9 @@ def diff_steps(
                 )
         elif name in mine:
             steps.extend(_container_steps(name, old, new, project=project, running=running))
+        elif name in owners:
+            seen = running if running_scope is not None and name in running_scope else None
+            steps.extend(_container_steps(name, old, new, project=owners[name], running=seen))
         else:
             if new is None:
                 steps.append(
@@ -1072,8 +1155,7 @@ def diff_steps(
                         "container",
                         "remove",
                         "destructive",
-                        f"container of another project removed; bay up for "
-                        f"{project} would write that too",
+                        "container that no project owns is removed; bay up writes that too",
                         container=name,
                     )
                 )
@@ -1084,8 +1166,7 @@ def diff_steps(
                         "container",
                         action,
                         "shared",
-                        f"container of another project changes; bay up for "
-                        f"{project} would write that too",
+                        "container that no project owns changes; bay up writes that too",
                         container=name,
                     )
                 )
@@ -1308,8 +1389,9 @@ def box_steps(
     prediction: Mapping[str, Any],
     explained: set[str],
     *,
-    project: str,
+    project: str | None,
     mine: set[str],
+    owners: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Steps for what the box will change that the compile diff does not explain.
 
@@ -1331,11 +1413,161 @@ def box_steps(
                 risk,
                 f"box {c['box']} predicts {c['action']}: {why}",
                 container=c["name"],
-                project=project if c["name"] in mine else None,
+                project=project if c["name"] in mine else (owners or {}).get(c["name"]),
                 source="box",
             )
         )
     return steps
+
+
+# ── Box move ────────────────────────────────────────────────────────────────
+
+
+#: ``--data`` values. ``move`` is named so it can be refused with a reason.
+DATA_KEEP = "keep"
+DATA_MOVE = "move"
+DATA_MOVE_REFUSED = (
+    "--data move is deferred: Bay does not copy volumes or databases between boxes yet; "
+    "see docs/plan.md (Box move)"
+)
+
+
+def check_data_mode(data: str | None) -> None:
+    """Refuse ``--data move`` (deferred) and any value but ``keep``."""
+    if data is None or data == DATA_KEEP:
+        return
+    if data == DATA_MOVE:
+        raise BayError(DATA_MOVE_REFUSED, hint="Pass --data keep, or keep the box.")
+    raise BayError(f"--data {data} is not known", hint="The only value today is --data keep.")
+
+
+def _data_of(names: set[str], *datas: Mapping[str, Any]) -> tuple[list[str], list[dict[str, str]]]:
+    """Named volumes and databases of the containers ``names`` in the services files."""
+    volumes: set[str] = set()
+    databases: dict[str, str] = {}
+    for data in datas:
+        entries = _entries(data)
+        for name in names:
+            entry = entries.get(name)
+            if not entry:
+                continue
+            volumes |= set(_named_volumes(entry))
+            db = entry.get("database")
+            if isinstance(db, Mapping) and db.get("name"):
+                databases[str(db["name"])] = str(db.get("accessory") or "")
+    return sorted(volumes), [{"name": k, "resource": v} for k, v in sorted(databases.items())]
+
+
+def move_record(
+    fleet: Mapping[str, Any],
+    project: str,
+    env: str,
+    pinned: str | None,
+    wanted: str | None,
+    names: set[str],
+    *datas: Mapping[str, Any],
+    data: str | None = None,
+) -> dict[str, Any] | None:
+    """The plan's record of a box move, or None when WANTED and PINNED box agree.
+
+    PINNED is the lock's box (None before the first ``bay up``: then there is
+    nothing to move). The risk is ``destructive`` when the project's
+    containers mount a named volume or use a database, else ``shared``.
+    """
+    if not pinned or not wanted or pinned == wanted:
+        return None
+    volumes, databases = _data_of(names, *datas)
+    return {
+        "project": project,
+        "env": env,
+        "from": pinned,
+        "to": wanted,
+        "from_box_env": box_and_env(fleet, pinned)[1],
+        "to_box_env": box_and_env(fleet, wanted)[1],
+        "containers": sorted(n for n in names if any(n in _entries(d) for d in datas)),
+        "volumes": volumes,
+        "databases": databases,
+        "risk": "destructive" if volumes or databases else "shared",
+        "data": data,
+    }
+
+
+def _left_behind(move: Mapping[str, Any]) -> str:
+    parts = []
+    if move["volumes"]:
+        parts.append("volumes " + ", ".join(move["volumes"]))
+    if move["databases"]:
+        parts.append("database " + ", ".join(d["name"] for d in move["databases"]))
+    return " and ".join(parts)
+
+
+def move_steps(move: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The ``move`` step, then per container a remove on the old box and a create on the new."""
+    a, b, who, risk = move["from"], move["to"], move["project"], move["risk"]
+    left = _left_behind(move)
+    reason = f"{who} moves from box {a} to box {b}"
+    reason += (
+        f"; {left} stay on box {a}, and the new box starts empty"
+        if left
+        else "; it has no volume and no database"
+    )
+    steps = [_step("move", "move", risk, reason, resource=f"{a} -> {b}", project=who)]
+    for name in move["containers"]:
+        steps.append(
+            _step(
+                "container",
+                "remove",
+                risk,
+                f"moves to box {b}; the container on box {a} is removed"
+                + (f"; {left} stay on box {a}" if left else ""),
+                container=name,
+                project=who,
+            )
+        )
+        steps.append(
+            _step(
+                "container",
+                "create",
+                "safe",
+                f"starts on box {b}" + ("; its volumes and database start empty" if left else ""),
+                container=name,
+                project=who,
+            )
+        )
+    return steps
+
+
+def move_blocker(move: Mapping[str, Any]) -> str | None:
+    """A destructive move is blocked until ``--data keep``."""
+    if move["risk"] != "destructive" or move.get("data") == DATA_KEEP:
+        return None
+    return (
+        f"{move['project']} moves from box {move['from']} to box {move['to']}, and its data "
+        f"does not move with it: {_left_behind(move)}. Pass --data keep to start empty on "
+        f"box {move['to']} and leave the data untouched on box {move['from']}, or set "
+        f"deploy.{move['env']}.box back to {move['from']}"
+    )
+
+
+def move_notes(move: Mapping[str, Any]) -> list[str]:
+    """With ``--data keep``: what stays on the old box, and how to remove it later by hand."""
+    if move.get("data") != DATA_KEEP or move["risk"] != "destructive":
+        return []
+    out = [
+        f"after the move, {_left_behind(move)} of {move['project']} stay on box "
+        f"{move['from']}; Bay never removes them"
+    ]
+    if move["volumes"]:
+        out.append(
+            f"to remove them later on box {move['from']}: docker volume rm "
+            + " ".join(move["volumes"])
+        )
+    for db in move["databases"]:
+        out.append(
+            f"to remove it later on box {move['from']}: DROP DATABASE {db['name']}; "
+            f"(in resource {db['resource']})"
+        )
+    return out
 
 
 # ── Plan ────────────────────────────────────────────────────────────────────
@@ -1349,6 +1581,9 @@ class PlanOptions:
     box_check: bool = False
     allow_unsupported: bool = False
     cwd_repo: Path | None = None
+    #: ``--data``: ``keep`` lets a box move with data start empty on the new
+    #: box and leave the data on the old one (:func:`move_blocker`).
+    data: str | None = None
 
 
 # ``notes`` is text for the reader (a missing --remote hint, the directory the
@@ -1375,6 +1610,235 @@ def _now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+@dataclass
+class _FleetState:
+    is_git: bool
+    head: str | None
+    dirty: bool | None
+    behind: bool | None
+    blockers: list[str]
+
+
+def _fleet_state(cx: Context) -> _FleetState:
+    is_git = gitrepo.is_repo(cx.fleet_root)
+    head = gitrepo.head(cx.fleet_root) if is_git else None
+    dirty = gitrepo.dirty(cx.fleet_root, exclude=(PLANS_DIR,)) if is_git else None
+    behind: bool | None = None
+    blockers: list[str] = []
+    if not is_git or head is None:
+        blockers.append(f"the fleet {cx.fleet_root} is not a git repo with a commit")
+    else:
+        behind, problem = gitrepo.behind_remote(cx.fleet_root)
+        if problem:
+            blockers.append(problem)
+        elif behind:
+            blockers.append("the fleet repo is behind its remote; pull it first")
+    return _FleetState(is_git, head, dirty, behind, blockers)
+
+
+def _env_names(proj: ProjectRef, docs: list[dict[str, Any] | None]) -> dict[str, dict[str, str]]:
+    names_by_env: dict[str, dict[str, str]] = {}
+    for doc in docs:
+        if doc:
+            for e, names in project_containers(proj.name, doc, proj.lock, proj.primary_env).items():
+                names_by_env.setdefault(e, {}).update(names)
+    return names_by_env
+
+
+def _check_wanted_doc(proj: ProjectRef, wanted: Wanted, env: str, blockers: list[str]) -> None:
+    if wanted.doc is None:
+        return
+    from bay_cli import bay_toml
+
+    for v in bay_toml.validate(wanted.doc):
+        blockers.append(f"{proj.toml_path}: {v}")
+    if wanted.doc.get("name") != proj.name:
+        blockers.append(
+            f"{proj.toml_path}: name is {wanted.doc.get('name')}, "
+            f"but the fleet knows the project as {proj.name}"
+        )
+    if env not in (wanted.doc.get("deploy") or {}):
+        blockers.append(f"{proj.toml_path} has no [deploy.{env}]")
+
+
+@dataclass
+class _Placement:
+    """Where one project of a plan deploys, and whether that is a box move."""
+
+    box: str | None
+    box_env: str | None
+    #: ``(from, to)`` when the WANTED box differs from the PINNED box.
+    move: tuple[str, str] | None = None
+
+
+def _placement(
+    proj: ProjectRef, env: str, doc: Mapping[str, Any] | None, blockers: list[str], label: str = ""
+) -> _Placement:
+    """The box a plan deploys ``proj`` to: the WANTED box when it differs from the pin."""
+    box, box_env = resolve_box(proj, env, doc)
+    move = None
+    if doc is not None and env in (doc.get("deploy") or {}):
+        to_box, from_box = wanted_box(proj.fleet, doc, env), pinned_box(proj.lock, env)
+        if from_box and to_box and from_box != to_box:
+            if box_and_env(proj.fleet, to_box)[1] is None:
+                blockers.append(f"{label}box {to_box} is not in bay.fleet.toml [boxes]")
+            else:
+                box, box_env = box_and_env(proj.fleet, to_box)
+                move = (from_box, to_box)
+    if box_env is None:
+        blockers.append(f"{label}box {box} is not in bay.fleet.toml [boxes]")
+    return _Placement(box, box_env, move)
+
+
+@dataclass
+class _Diff:
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    unsupported: list[str] = field(default_factory=list)
+    missing: list[dict[str, Any]] = field(default_factory=list)
+    box_checked: bool = False
+    prediction: dict[str, Any] = field(
+        default_factory=lambda: {"checked": False, "containers": [], "errors": []}
+    )
+    wanted_data: dict[str, Any] = field(default_factory=dict)
+
+
+def _compile_and_diff(
+    cx: Context,
+    opts: PlanOptions,
+    *,
+    pins: Mapping[str, str],
+    boxes: Mapping[str, Mapping[str, str]],
+    cwd: Path | None,
+    current: Mapping[str, Any],
+    project: str | None,
+    mine: set[str],
+    names: set[str],
+    resources: set[str],
+    box_env: str | None,
+    running: Mapping[str, Any],
+    blockers: list[str],
+    notes: list[str],
+    check_box: BoxCheck | None,
+) -> _Diff:
+    """Compile the fleet copy, diff it against PINNED, check secrets and (``--remote``) the box.
+
+    ``names`` are the containers of the planned project(s) in the env.
+    """
+    from bay_cli import secrets_check
+
+    out = _Diff()
+    with compiled_fleet(cx, pins, cwd=cwd, boxes=boxes) as comp:
+        blockers.extend(comp.errors)
+        notes.extend(comp.notes)
+        notes.extend(comp.uncommitted)
+        if comp.result is None:
+            return out
+        out.unsupported = [str(u) for u in comp.result.unsupported]
+        if out.unsupported and not opts.allow_unsupported:
+            blockers.append(
+                f"{len(out.unsupported)} bay.toml feature(s) cannot be deployed yet "
+                "(see unsupported); remove them or pass --allow-unsupported"
+            )
+        out.wanted_data = comp.result.data()
+        out.steps = diff_steps(
+            current,
+            out.wanted_data,
+            project=project,
+            mine=mine,
+            resources=resources,
+            running=_running_names(running),
+            owners=comp.owners,
+            running_scope=names,
+        )
+        if box_env is not None:
+            out.missing, problem = _missing_secrets(
+                cx, box_env, out.wanted_data, names, secrets_check
+            )
+            if problem:
+                blockers.append(problem)
+            for m in out.missing:
+                blockers.append(
+                    f"secret {m['name']} is missing in the fleet for "
+                    f"{box_env} (used by {', '.join(m['used_by'])})"
+                )
+        if opts.box_check and box_env is not None and not blockers:
+            services_file = comp.services_file()
+            assert services_file is not None
+            checker = check_box or partial(default_box_check, config_files_root=comp.files_root)
+            try:
+                entries = checker(cx, box_env, services_file)
+                out.box_checked = True
+            except (BayError, OSError, SystemExit) as exc:
+                blockers.append(f"the check on the box failed: {exc}")
+            else:
+                out.prediction = box_prediction(entries)
+                blockers.extend(
+                    f"the check on the box gave no prediction: {e}"
+                    for e in out.prediction["errors"]
+                )
+                if not out.prediction["containers"] and not out.prediction["errors"]:
+                    blockers.append("the check on the box gave no prediction")
+                explained = {str(s["container"]) for s in out.steps if s["container"]}
+                out.steps.extend(
+                    box_steps(
+                        out.prediction, explained, project=project, mine=mine, owners=comp.owners
+                    )
+                )
+    return out
+
+
+def _finish(
+    cx: Context,
+    plan: dict[str, Any],
+    state: _FleetState,
+    fleet_doc: Mapping[str, Any],
+    box_checked: bool,
+    box_env: str | None,
+) -> dict[str, Any]:
+    """The tail both plan kinds share: tailnet step, ids, notes, dirty gate, id, verdict."""
+    steps, blockers, notes = plan["steps"], plan["blockers"], plan["notes"]
+    if state.is_git:
+        t_step = tailnet_step(cx, fleet_doc)
+        if t_step is not None:
+            steps.append(t_step)
+    for i, step in enumerate(steps, start=1):
+        step["id"] = f"s{i}"
+    if not box_checked:
+        notes.append(
+            "the steps come from the compiled files alone; pass --remote to check them on the box"
+        )
+    if box_env is not None:
+        notes.append(UNPLANNED_NOTE.format(box_env=box_env))
+    if state.dirty and any(s["risk"] == "destructive" for s in steps):
+        blockers.append(
+            "the fleet repo has uncommitted changes and a step is destructive; "
+            "commit or drop the changes first"
+        )
+    sha = body_sha256(plan)
+    plan["plan_sha256"] = sha
+    plan["plan_id"] = sha[:12]
+    plan["approval"] = find_approval(cx, plan)
+    decide(plan)
+    return plan
+
+
+def _apply_moves(
+    plan_moves: list[dict[str, Any]],
+    steps: list[dict[str, Any]],
+    blockers: list[str],
+    notes: list[str],
+) -> list[dict[str, Any]]:
+    """Put each move's steps first; a destructive move without ``--data keep`` blocks."""
+    lead: list[dict[str, Any]] = []
+    for move in plan_moves:
+        lead.extend(move_steps(move))
+        blocker = move_blocker(move)
+        if blocker:
+            blockers.append(blocker)
+        notes.extend(move_notes(move))
+    return lead + steps
+
+
 def make_plan(
     proj: ProjectRef,
     opts: PlanOptions,
@@ -1383,28 +1847,12 @@ def make_plan(
     check_box: BoxCheck | None = None,
 ) -> dict[str, Any]:
     """Build the plan body, then its id, approval and verdict. Does not save it."""
-    from bay_cli import secrets_check
-
+    check_data_mode(opts.data)
     cx = proj.cx
     env = opts.env or proj.primary_env
-    blockers: list[str] = []
-    notes: list[str] = []
-
-    # Fleet
-    fleet_is_git = gitrepo.is_repo(cx.fleet_root)
-    fleet_head = gitrepo.head(cx.fleet_root) if fleet_is_git else None
-    fleet_dirty = gitrepo.dirty(cx.fleet_root, exclude=(PLANS_DIR,)) if fleet_is_git else None
-    behind: bool | None = None
-    if not fleet_is_git or fleet_head is None:
-        blockers.append(f"the fleet {cx.fleet_root} is not a git repo with a commit")
-    else:
-        behind, problem = gitrepo.behind_remote(cx.fleet_root)
-        if problem:
-            blockers.append(problem)
-        elif behind:
-            blockers.append("the fleet repo is behind its remote; pull it first")
-
-    notes.extend(proj.notes)
+    state = _fleet_state(cx)
+    blockers: list[str] = list(state.blockers)
+    notes: list[str] = list(proj.notes)
 
     # WANTED
     wanted = read_wanted(proj, opts.at)
@@ -1428,137 +1876,59 @@ def make_plan(
         notes.append(
             f"this command ran in {opts.cwd_repo}, but the fleet reads the project from {where}"
         )
-    if wanted.doc is not None:
-        from bay_cli import bay_toml
-
-        for v in bay_toml.validate(wanted.doc):
-            blockers.append(f"{proj.toml_path}: {v}")
-        if wanted.doc.get("name") != proj.name:
-            blockers.append(
-                f"{proj.toml_path}: name is {wanted.doc.get('name')}, "
-                f"but the fleet knows the project as {proj.name}"
-            )
-        if env not in (wanted.doc.get("deploy") or {}):
-            blockers.append(f"{proj.toml_path} has no [deploy.{env}]")
-
-    box, box_env = resolve_box(proj, env, wanted.doc)
-    if box_env is None:
-        blockers.append(f"box {box} is not in bay.fleet.toml [boxes]")
-    wanted_box = ((wanted.doc or {}).get("deploy") or {}).get(env, {}).get("box")
-    if wanted_box and box and wanted_box != box:
-        notes.append(
-            f"bay.toml asks for box {wanted_box}, but the fleet pins box {box}; the fleet decides"
-        )
+    _check_wanted_doc(proj, wanted, env, blockers)
+    place = _placement(proj, env, wanted.doc, blockers)
 
     # PINNED
     lock_sha = lockfile.sha256_of(proj.lock_file)
     pinned_commit = lockfile.env_pin(proj.lock, env)
     pinned_doc = doc_at(proj, proj.lock.get("commit"))
-    current, state = current_services(cx)
-    if state == "foreign":
-        blockers.append("the fleet's services file was not written by bay; run `bay import` first")
-    elif state == "edited":
-        blockers.append(
-            "the fleet's services file was edited by hand since the last compile; "
-            "move the change into bay.toml or bay.fleet.toml"
-        )
+    current, services_state = current_services(cx)
+    _services_blockers(services_state, blockers)
 
-    names_by_env: dict[str, dict[str, str]] = {}
-    for doc in (pinned_doc, wanted.doc):
-        if doc:
-            for e, names in project_containers(proj.name, doc, proj.lock, proj.primary_env).items():
-                names_by_env.setdefault(e, {}).update(names)
+    names_by_env = _env_names(proj, [pinned_doc, wanted.doc])
     mine = {n for names in names_by_env.values() for n in names.values()}
     env_names = set(names_by_env.get(env, {}).values())
 
     # RUNNING
-    running: dict[str, Any] = {"checked": False, "receipt_sha256": None, "boxes": []}
-    if opts.read_running and box_env is not None:
-        reader = read_receipts or default_receipt_reader
-        running = running_slice(reader(cx, box_env), env_names)
-        for b in running["boxes"]:
-            if b.get("error"):
-                notes.append(f"box {b.get('box') or box_env}: {b['error']}")
-    elif not opts.read_running:
-        notes.append("the box receipt was not read (--no-remote)")
+    running = _read_running(cx, opts, place.box_env, env_names, notes, read_receipts)
 
     # Compile WANTED and diff
-    steps: list[dict[str, Any]] = []
-    unsupported: list[str] = []
-    missing: list[dict[str, Any]] = []
-    box_checked = False
-    prediction: dict[str, Any] = {"checked": False, "containers": [], "errors": []}
-    pins = {proj.name: wanted.commit} if wanted.commit else {}
+    diff = _Diff()
     if wanted.doc is not None and not wanted.problems:
-        with compiled_fleet(cx, pins, cwd=proj.cwd) as comp:
-            blockers.extend(comp.errors)
-            notes.extend(comp.notes)
-            notes.extend(comp.uncommitted)
-            if comp.result is not None:
-                unsupported = [str(u) for u in comp.result.unsupported]
-                if unsupported and not opts.allow_unsupported:
-                    blockers.append(
-                        f"{len(unsupported)} bay.toml feature(s) cannot be deployed yet "
-                        "(see unsupported); remove them or pass --allow-unsupported"
-                    )
-                wanted_data = comp.result.data()
-                steps = diff_steps(
-                    current,
-                    wanted_data,
-                    project=proj.name,
-                    mine=mine,
-                    resources=set((proj.fleet.get("resources") or {}).keys()),
-                    running=_running_names(running),
-                )
-                if box_env is not None:
-                    missing, problem = _missing_secrets(
-                        cx, box_env, wanted_data, env_names, secrets_check
-                    )
-                    if problem:
-                        blockers.append(problem)
-                    for m in missing:
-                        blockers.append(
-                            f"secret {m['name']} is missing in the fleet for "
-                            f"{box_env} (used by {', '.join(m['used_by'])})"
-                        )
-                if opts.box_check and box_env is not None and not blockers:
-                    services_file = comp.services_file()
-                    assert services_file is not None
-                    checker = check_box or partial(
-                        default_box_check, config_files_root=comp.files_root
-                    )
-                    try:
-                        entries = checker(cx, box_env, services_file)
-                        box_checked = True
-                    except (BayError, OSError, SystemExit) as exc:
-                        blockers.append(f"the check on the box failed: {exc}")
-                    else:
-                        prediction = box_prediction(entries)
-                        blockers.extend(
-                            f"the check on the box gave no prediction: {e}"
-                            for e in prediction["errors"]
-                        )
-                        if not prediction["containers"] and not prediction["errors"]:
-                            blockers.append("the check on the box gave no prediction")
-                        explained = {str(s["container"]) for s in steps if s["container"]}
-                        steps.extend(box_steps(prediction, explained, project=proj.name, mine=mine))
-    if fleet_is_git:
-        t_step = tailnet_step(cx, proj.fleet)
-        if t_step is not None:
-            steps.append(t_step)
-    for i, step in enumerate(steps, start=1):
-        step["id"] = f"s{i}"
-    if not box_checked:
-        notes.append(
-            "the steps come from the compiled files alone; pass --remote to check them on the box"
+        diff = _compile_and_diff(
+            cx,
+            opts,
+            pins={proj.name: wanted.commit} if wanted.commit else {},
+            boxes={proj.name: {env: place.move[1]}} if place.move else {},
+            cwd=proj.cwd,
+            current=current,
+            project=proj.name,
+            mine=mine,
+            names=env_names,
+            resources=set((proj.fleet.get("resources") or {}).keys()),
+            box_env=place.box_env,
+            running=running,
+            blockers=blockers,
+            notes=notes,
+            check_box=check_box,
         )
-    if box_env is not None:
-        notes.append(UNPLANNED_NOTE.format(box_env=box_env))
-    if fleet_dirty and any(s["risk"] == "destructive" for s in steps):
-        blockers.append(
-            "the fleet repo has uncommitted changes and a step is destructive; "
-            "commit or drop the changes first"
+    moves: list[dict[str, Any]] = []
+    if place.move:
+        move = move_record(
+            proj.fleet,
+            proj.name,
+            env,
+            place.move[0],
+            place.move[1],
+            env_names,
+            current,
+            diff.wanted_data,
+            data=opts.data,
         )
+        if move is not None:
+            moves.append(move)
+    steps = _apply_moves(moves, diff.steps, blockers, notes)
 
     plan: dict[str, Any] = {
         "plan_version": PLAN_VERSION,
@@ -1567,13 +1937,13 @@ def make_plan(
         "created_at": _now(),
         "project": proj.name,
         "env": env,
-        "box": box,
-        "box_env": box_env,
+        "box": place.box,
+        "box_env": place.box_env,
         "fleet": {
             "name": proj.fleet.get("name"),
-            "commit": fleet_head,
-            "dirty": fleet_dirty,
-            "behind": behind,
+            "commit": state.head,
+            "dirty": state.dirty,
+            "behind": state.behind,
         },
         "wanted": {
             "commit": wanted.commit,
@@ -1582,11 +1952,11 @@ def make_plan(
         },
         "pinned": {"commit": pinned_commit, "lock_sha256": lock_sha},
         "running": running,
-        "box_checked": box_checked,
-        "box_prediction": prediction,
+        "box_checked": diff.box_checked,
+        "box_prediction": diff.prediction,
         "steps": steps,
-        "unsupported": unsupported,
-        "missing_secrets": missing,
+        "unsupported": diff.unsupported,
+        "missing_secrets": diff.missing,
         "blockers": blockers,
         "notes": notes,
         "verdict": "",
@@ -1594,12 +1964,234 @@ def make_plan(
         "approval": None,
         "stale": [],
     }
-    sha = body_sha256(plan)
-    plan["plan_sha256"] = sha
-    plan["plan_id"] = sha[:12]
-    plan["approval"] = find_approval(cx, plan)
-    decide(plan)
-    return plan
+    # Only a plan with a box move carries ``moves``: an older plan without the
+    # key keeps its id.
+    if moves:
+        plan["moves"] = moves
+    return _finish(cx, plan, state, proj.fleet, diff.box_checked, place.box_env)
+
+
+def _services_blockers(state: str, blockers: list[str]) -> None:
+    if state == "foreign":
+        blockers.append("the fleet's services file was not written by bay; run `bay import` first")
+    elif state == "edited":
+        blockers.append(
+            "the fleet's services file was edited by hand since the last compile; "
+            "move the change into bay.toml or bay.fleet.toml"
+        )
+
+
+def _read_running(
+    cx: Context,
+    opts: PlanOptions,
+    box_env: str | None,
+    names: set[str],
+    notes: list[str],
+    read_receipts: ReceiptReader | None,
+) -> dict[str, Any]:
+    running: dict[str, Any] = {"checked": False, "receipt_sha256": None, "boxes": []}
+    if opts.read_running and box_env is not None:
+        reader = read_receipts or default_receipt_reader
+        running = running_slice(reader(cx, box_env), names)
+        for b in running["boxes"]:
+            if b.get("error"):
+                notes.append(f"box {b.get('box') or box_env}: {b['error']}")
+    elif not opts.read_running:
+        notes.append("the box receipt was not read (--no-remote)")
+    return running
+
+
+# ── The whole environment ───────────────────────────────────────────────────
+
+
+def fleet_projects(cx: Context) -> list[str]:
+    """Every project folder of the fleet: ``projects/<name>/`` with a lock or a bay.toml."""
+    root = cx.fleet_root / PROJECTS_DIR
+    if not root.is_dir():
+        return []
+    return sorted(
+        p.name
+        for p in root.iterdir()
+        if p.is_dir() and ((p / LOCK_FILE).is_file() or (p / "bay.toml").is_file())
+    )
+
+
+def make_env_plan(
+    cx: Context,
+    opts: PlanOptions,
+    *,
+    ats: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+    read_receipts: ReceiptReader | None = None,
+    check_box: BoxCheck | None = None,
+) -> dict[str, Any]:
+    """One plan for every project that has ``[deploy.<env>]``: ``bay plan <env>`` in a fleet.
+
+    Each project is read at its WANTED commit (``ats`` overrides some, for a
+    recheck), the fleet is compiled once, and every step carries the project
+    it belongs to. The record has ``project: null`` and lists the projects in
+    ``projects``. Verdict and exit code as for one project.
+    """
+    check_data_mode(opts.data)
+    moved = layout.ensure(cx.fleet_root)
+    fleet_doc = load_fleet_doc(cx)
+    env = opts.env or str(fleet_doc.get("primary_env", "production"))
+    state = _fleet_state(cx)
+    blockers: list[str] = list(state.blockers)
+    notes: list[str] = [f"fleet layout: {line}" for line in moved]
+
+    members: list[tuple[ProjectRef, Wanted]] = []
+    for name in fleet_projects(cx):
+        try:
+            proj = load_project(cx, name, cwd=cwd)
+        except BayError as exc:
+            blockers.append(f"{name}: {exc}")
+            continue
+        notes.extend(f"{name}: {n}" for n in proj.notes if not n.startswith("fleet layout"))
+        wanted = read_wanted(proj, (ats or {}).get(name))
+        if wanted.doc is None:
+            blockers.extend(f"{name}: {p}" for p in wanted.problems)
+            continue
+        if env not in (wanted.doc.get("deploy") or {}):
+            continue
+        blockers.extend(f"{name}: {p}" for p in wanted.problems)
+        _check_wanted_doc(proj, wanted, env, blockers)
+        if wanted.commit and commit_on_remote(proj, wanted.commit) is not True:
+            notes.append(
+                f"{name}: commit {wanted.commit[:12]} is not on a branch of {proj.repo}; "
+                "bay up refuses it: push first"
+            )
+        if wanted.dirty:
+            notes.append(
+                f"{name} has uncommitted changes; the plan uses commit "
+                f"{(wanted.commit or '')[:12]} and ignores them"
+            )
+        members.append((proj, wanted))
+
+    current, services_state = current_services(cx)
+    _services_blockers(services_state, blockers)
+
+    projects: list[dict[str, Any]] = []
+    placements: dict[str, _Placement] = {}
+    env_names: dict[str, set[str]] = {}
+    by_box_env: dict[str, list[str]] = {}
+    for proj, wanted in members:
+        place = _placement(proj, env, wanted.doc, blockers, label=f"{proj.name}: ")
+        placements[proj.name] = place
+        if place.box_env is not None:
+            by_box_env.setdefault(place.box_env, []).append(proj.name)
+        pinned_doc = doc_at(proj, proj.lock.get("commit"))
+        env_names[proj.name] = set(
+            _env_names(proj, [pinned_doc, wanted.doc]).get(env, {}).values()
+        )
+        projects.append(
+            {
+                "name": proj.name,
+                "box": place.box,
+                "box_env": place.box_env,
+                "wanted": {
+                    "commit": wanted.commit,
+                    "toml_sha256": wanted.toml_sha256,
+                    "dirty": wanted.dirty,
+                },
+                "pinned": {
+                    "commit": lockfile.env_pin(proj.lock, env),
+                    "lock_sha256": lockfile.sha256_of(proj.lock_file),
+                },
+            }
+        )
+    if not members:
+        notes.append(f"no project of fleet {fleet_doc.get('name')} has [deploy.{env}]")
+    if len(by_box_env) > 1:
+        blockers.append(
+            f"the projects of {env} sit on boxes of more than one box environment ("
+            + "; ".join(f"{e}: {', '.join(n)}" for e, n in sorted(by_box_env.items()))
+            + "); plan them one at a time with --project"
+        )
+    box_env = next(iter(by_box_env)) if len(by_box_env) == 1 else None
+    boxes_used = {p["box"] for p in projects}
+    box = next(iter(boxes_used)) if len(boxes_used) == 1 else None
+    all_names = set().union(*env_names.values()) if env_names else set()
+
+    running = _read_running(cx, opts, box_env, all_names, notes, read_receipts)
+
+    diff = _Diff()
+    if members and not any(w.problems for _, w in members):
+        diff = _compile_and_diff(
+            cx,
+            opts,
+            pins={p.name: w.commit for p, w in members if w.commit},
+            boxes={n: {env: pl.move[1]} for n, pl in placements.items() if pl.move},
+            cwd=cwd,
+            current=current,
+            project=None,
+            mine=set(),
+            names=all_names,
+            resources=set((fleet_doc.get("resources") or {}).keys()),
+            box_env=box_env,
+            running=running,
+            blockers=blockers,
+            notes=notes,
+            check_box=check_box,
+        )
+    moves: list[dict[str, Any]] = []
+    for proj, _ in members:
+        place = placements[proj.name]
+        if not place.move:
+            continue
+        move = move_record(
+            fleet_doc,
+            proj.name,
+            env,
+            place.move[0],
+            place.move[1],
+            env_names[proj.name],
+            current,
+            diff.wanted_data,
+            data=opts.data,
+        )
+        if move is not None:
+            moves.append(move)
+    steps = _apply_moves(moves, diff.steps, blockers, notes)
+
+    plan: dict[str, Any] = {
+        "plan_version": PLAN_VERSION,
+        "plan_id": "",
+        "plan_sha256": "",
+        "created_at": _now(),
+        "project": None,
+        "projects": projects,
+        "env": env,
+        "box": box,
+        "box_env": box_env,
+        "fleet": {
+            "name": fleet_doc.get("name"),
+            "commit": state.head,
+            "dirty": state.dirty,
+            "behind": state.behind,
+        },
+        "wanted": {
+            "commit": None,
+            "toml_sha256": None,
+            "dirty": any(bool(w.dirty) for _, w in members),
+        },
+        "pinned": {"commit": None, "lock_sha256": None},
+        "running": running,
+        "box_checked": diff.box_checked,
+        "box_prediction": diff.prediction,
+        "steps": steps,
+        "unsupported": diff.unsupported,
+        "missing_secrets": diff.missing,
+        "blockers": blockers,
+        "notes": notes,
+        "verdict": "",
+        "exit_code": 0,
+        "approval": None,
+        "stale": [],
+    }
+    if moves:
+        plan["moves"] = moves
+    return _finish(cx, plan, state, fleet_doc, diff.box_checked, box_env)
 
 
 def _missing_secrets(
@@ -1721,13 +2313,22 @@ def approve(cx: Context, plan_id: str, reason: str) -> Path:
     return path
 
 
+def _lock_shas(plan: Mapping[str, Any]) -> dict[str, Any]:
+    """``{project: lock sha256}`` of every project a plan covers."""
+    if plan.get("projects") is not None:
+        return {p["name"]: p["pinned"]["lock_sha256"] for p in plan["projects"]}
+    return {plan["project"]: plan["pinned"]["lock_sha256"]}
+
+
 def stale_reasons(saved: Mapping[str, Any], fresh: Mapping[str, Any]) -> list[str]:
     """Why a saved plan no longer holds. Empty when it still does."""
     reasons: list[str] = []
-    if saved["pinned"]["lock_sha256"] != fresh["pinned"]["lock_sha256"]:
-        reasons.append(
-            f"the pin moved: {PROJECTS_DIR}/{saved['project']}/{LOCK_FILE} changed since the plan"
-        )
+    before, after = _lock_shas(saved), _lock_shas(fresh)
+    for name in sorted(set(before) & set(after)):
+        if before[name] != after[name]:
+            reasons.append(
+                f"the pin moved: {PROJECTS_DIR}/{name}/{LOCK_FILE} changed since the plan"
+            )
     s_run, f_run = saved["running"], fresh["running"]
     if (
         s_run.get("checked")
@@ -1743,6 +2344,12 @@ def stale_reasons(saved: Mapping[str, Any], fresh: Mapping[str, Any]) -> list[st
         else:
             reasons.append("plan id differs but no input changed")
     return reasons
+
+
+def saved_data_mode(saved: Mapping[str, Any]) -> str | None:
+    """The ``--data`` a saved plan was made with (read from its moves)."""
+    modes = {m.get("data") for m in saved.get("moves") or []}
+    return DATA_KEEP if DATA_KEEP in modes else None
 
 
 def recheck(
@@ -1770,8 +2377,41 @@ def recheck(
         box_check=opts.box_check or bool(saved.get("box_checked")),
         allow_unsupported=opts.allow_unsupported,
         cwd_repo=opts.cwd_repo,
+        data=opts.data or saved_data_mode(saved),
     )
     fresh = make_plan(proj, again, read_receipts=read_receipts, check_box=check_box)
+    fresh["stale"] = stale_reasons(saved, fresh)
+    decide(fresh)
+    return fresh
+
+
+def recheck_env(
+    cx: Context,
+    saved: Mapping[str, Any],
+    opts: PlanOptions,
+    *,
+    cwd: Path | None = None,
+    read_receipts: ReceiptReader | None = None,
+    check_box: BoxCheck | None = None,
+) -> dict[str, Any]:
+    """:func:`recheck` for a whole-environment plan: each project at its saved commit."""
+    if saved.get("project") is not None or saved.get("projects") is None:
+        raise BayError(
+            f"plan {saved.get('plan_id')} is for project {saved.get('project')}, "
+            "not for a whole environment",
+            hint="Pass --project with that name.",
+        )
+    again = PlanOptions(
+        env=str(saved["env"]),
+        read_running=opts.read_running or bool(saved["running"].get("checked")),
+        box_check=opts.box_check or bool(saved.get("box_checked")),
+        allow_unsupported=opts.allow_unsupported,
+        data=opts.data or saved_data_mode(saved),
+    )
+    ats = {p["name"]: p["wanted"]["commit"] for p in saved["projects"] if p["wanted"]["commit"]}
+    fresh = make_env_plan(
+        cx, again, ats=ats, cwd=cwd, read_receipts=read_receipts, check_box=check_box
+    )
     fresh["stale"] = stale_reasons(saved, fresh)
     decide(fresh)
     return fresh
@@ -1785,34 +2425,57 @@ def render(plan: Mapping[str, Any]) -> str:
         return str(sha)[:12] if sha else "none"
 
     w, p, r = plan["wanted"], plan["pinned"], plan["running"]
-    lines = [
-        f"plan {plan['plan_id']}  {plan['project']} {plan['env']} -> box {plan['box']} "
-        f"({plan['box_env']})",
-        f"  WANTED  {short(w['commit'])}{' (uncommitted changes ignored)' if w['dirty'] else ''}",
-        f"  PINNED  {short(p['commit'])}",
-        "  RUNNING "
-        + (
-            f"receipt {short(r['receipt_sha256'])}"
-            if r["checked"] and r["receipt_sha256"]
-            else "no receipt"
-            if r["checked"]
-            else "not read"
-        ),
-        "",
-    ]
+    running = "  RUNNING " + (
+        f"receipt {short(r['receipt_sha256'])}"
+        if r["checked"] and r["receipt_sha256"]
+        else "no receipt"
+        if r["checked"]
+        else "not read"
+    )
+    if plan.get("projects") is not None:
+        lines = [
+            f"plan {plan['plan_id']}  {plan['env']} (whole environment, "
+            f"{len(plan['projects'])} projects) -> box environment {plan['box_env']}",
+        ]
+        for proj in plan["projects"]:
+            pw = proj["wanted"]
+            lines.append(
+                f"  {proj['name']}: WANTED {short(pw['commit'])}"
+                f"{' (uncommitted changes ignored)' if pw['dirty'] else ''}, "
+                f"PINNED {short(proj['pinned']['commit'])}, box {proj['box']}"
+            )
+        lines += [running, ""]
+    else:
+        lines = [
+            f"plan {plan['plan_id']}  {plan['project']} {plan['env']} -> box {plan['box']} "
+            f"({plan['box_env']})",
+            f"  WANTED  {short(w['commit'])}"
+            f"{' (uncommitted changes ignored)' if w['dirty'] else ''}",
+            f"  PINNED  {short(p['commit'])}",
+            running,
+            "",
+        ]
     if plan["steps"]:
-        rows = [("STEP", "FROM", "RISK", "ACTION", "WHAT", "WHY")]
+        rows = [("STEP", "FROM", "RISK", "ACTION", "PROJECT", "WHAT", "WHY")]
         for s in plan["steps"]:
             what = s["kind"] + " " + (s["resource"] or s["container"] or "")
             if s["kind"] in ("volume", "database", "database_user", "secret") and s["container"]:
                 what += f" ({s['container']})"
             rows.append(
-                (s["id"], s.get("source", "compile"), s["risk"], s["action"], what, s["reason"])
+                (
+                    s["id"],
+                    s.get("source", "compile"),
+                    s["risk"],
+                    s["action"],
+                    s.get("project") or "-",
+                    what,
+                    s["reason"],
+                )
             )
-        widths = [max(len(row[i]) for row in rows) for i in range(5)]
+        widths = [max(len(row[i]) for row in rows) for i in range(6)]
         for row in rows:
             lines.append(
-                "  " + "  ".join(row[i].ljust(widths[i]) for i in range(5)) + "  " + row[5]
+                "  " + "  ".join(row[i].ljust(widths[i]) for i in range(6)) + "  " + row[6]
             )
     else:
         lines.append("  no changes")

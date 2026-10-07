@@ -210,6 +210,20 @@ def is_tracked(repo: Path, rel: str) -> bool:
     return proc is not None and proc.returncode == 0
 
 
+def tracked_files(repo: Path, rel: str) -> list[str]:
+    """Paths git tracks under ``rel``, relative to ``repo``. Empty when git cannot tell."""
+    out = _out(repo, "ls-files", "--", rel)
+    return [line for line in (out or "").splitlines() if line]
+
+
+def remove_and_commit(repo: Path, rels: Sequence[str], message: str) -> str:
+    """``git rm`` the tracked ``rels`` and commit only that removal. Return the new HEAD."""
+    done = _run(repo, "rm", "--quiet", "--", *rels)
+    if done is None or done.returncode != 0:
+        raise GitError(_last_line(str(done.stderr)) if done is not None else "git rm failed")
+    return commit_staged(repo, rels, message)
+
+
 def move(repo: Path, old: str, new: str) -> None:
     """``git mv old new``. Raises GitError."""
     proc = _run(repo, "mv", "--", old, new)

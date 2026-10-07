@@ -8,6 +8,10 @@ Which project and which fleet:
   verb) or ``BAY_FLEET`` names a directory.
 * ``--project <name>`` works from anywhere; the fleet then comes from
   ``--fleet``, ``BAY_FLEET`` or ``BAY_FLEET_NAME``.
+* With no ``bay.toml`` here or above and no ``--project``, ``bay plan <env>``
+  and ``bay up <env>`` cover the whole environment of the fleet: the one
+  ``--fleet``, ``BAY_FLEET`` or ``BAY_FLEET_NAME`` names, or the fleet
+  directory you stand in (a ``bay.fleet.toml`` here or above).
 
 No verb asks a question. Secrets never travel on the command line.
 Plan exit codes: 0 auto, 10 approve, 20 blocked, 30 stale.
@@ -27,7 +31,14 @@ from typing import IO, Annotated, Any
 import typer
 
 from bay_cli import console
-from bay_cli.context import FLEET_ENV, FLEET_NAME_ENV, Context, GlobalOptions, context_from
+from bay_cli.context import (
+    FLEET_ENV,
+    FLEET_NAME_ENV,
+    SOURCE_CWD,
+    Context,
+    GlobalOptions,
+    context_from,
+)
 from bay_cli.errors import BayError
 
 _ProjectOpt = Annotated[
@@ -45,6 +56,14 @@ _LogOpt = Annotated[
 ]
 _NoPushOpt = Annotated[
     bool, typer.Option("--no-push", help="Do not push the fleet repo after the last commit.")
+]
+_DataOpt = Annotated[
+    str | None,
+    typer.Option(
+        "--data",
+        help="For a box move of a project with volumes or a database. keep: the new box "
+        "starts empty and the data stays untouched on the old box. move is deferred.",
+    ),
 ]
 _AllowUnsupportedOpt = Annotated[
     bool,
@@ -75,9 +94,21 @@ def _read_identity(path: Path) -> tuple[str | None, str | None]:
     return (name if isinstance(name, str) else None, fleet if isinstance(fleet, str) else None)
 
 
-def fleet_context(ctx: typer.Context, fleet_name: str | None) -> Context:
+def fleet_dir_above(start: Path) -> Path | None:
+    """The nearest directory at or above ``start`` that holds a ``bay.fleet.toml``."""
+    from bay_cli.fleet import FLEET_FILE
+
+    for directory in [start, *start.parents]:
+        if (directory / FLEET_FILE).is_file():
+            return directory
+    return None
+
+
+def fleet_context(
+    ctx: typer.Context, fleet_name: str | None, *, allow_cwd: bool = False
+) -> Context:
     """``--fleet <path>``, then ``BAY_FLEET``, then the fleet named in bay.toml, then
-    ``BAY_FLEET_NAME``."""
+    ``BAY_FLEET_NAME``, then (with ``allow_cwd``) the fleet directory you stand in."""
     obj = ctx.find_root().obj
     if isinstance(obj, Context):
         return obj
@@ -87,6 +118,10 @@ def fleet_context(ctx: typer.Context, fleet_name: str | None) -> Context:
         return Context.for_fleet_name(fleet_name)
     if os.environ.get(FLEET_NAME_ENV):
         return context_from(ctx)
+    if allow_cwd:
+        found = fleet_dir_above(Path.cwd())
+        if found is not None:
+            return Context._from_fleet_path(found, SOURCE_CWD)
     raise BayError(
         "no fleet found",
         hint="Run inside an app repo whose bay.toml names its fleet, pass --fleet <path> "
@@ -107,11 +142,43 @@ def resolve(ctx: typer.Context, project: str | None) -> tuple[Any, Path | None]:
                 hint="Run inside the app repo, or pass --project <name>.",
             )
         project = name
-    cx = fleet_context(ctx, fleet_name)
+    cx = fleet_context(ctx, fleet_name, allow_cwd=True)
     proj = planmod.load_project(
         cx, project, expect_fleet=fleet_name if name == project else None, cwd=Path.cwd()
     )
     return proj, (here.parent if here and name == project else None)
+
+
+def whole_env_fleet(
+    ctx: typer.Context, project: str | None, at: str | None = None
+) -> Context | None:
+    """The fleet for a whole-environment ``plan`` or ``up``, or None for one project.
+
+    One project when ``--project`` is given or a bay.toml with a ``name`` is
+    here or above (an app repo, or a project folder of a fleet). Otherwise
+    the fleet must be known: ``--fleet``, ``BAY_FLEET``, ``BAY_FLEET_NAME`` or
+    the fleet directory you stand in.
+    """
+    if project is not None:
+        return None
+    here = find_bay_toml(Path.cwd())
+    if here is not None and _read_identity(here)[0] is not None:
+        return None
+    try:
+        cx = fleet_context(ctx, None, allow_cwd=True)
+    except BayError:
+        raise BayError(
+            "no bay.toml here or above, and no fleet",
+            hint="Run inside the app repo, pass --project <name>, or pass --fleet <path> "
+            "(or stand in the fleet directory) to plan the whole environment.",
+        ) from None
+    if at is not None:
+        raise BayError(
+            "--at names one project's commit; a whole-environment plan reads each "
+            "project at its own WANTED commit",
+            hint="Pass --project <name> with --at.",
+        )
+    return cx
 
 
 def _echo_json(doc: Any) -> None:
@@ -254,6 +321,7 @@ def plan(
     ] = False,
     no_remote: _NoRemoteOpt = False,
     allow_unsupported: _AllowUnsupportedOpt = False,
+    data: _DataOpt = None,
     log: _LogOpt = None,
 ) -> None:
     """Compare WANTED (bay.toml at HEAD), PINNED (the lock) and RUNNING (the box).
@@ -262,30 +330,55 @@ def plan(
     <fleet>/plans/<plan-id>.json. Exit code: 0 auto, 10 approve, 20 blocked,
     30 stale.
 
+    In a fleet directory (or with --fleet and no bay.toml here), with no
+    --project, the plan covers every project of the environment.
+
     Examples:
 
         bay plan
         bay plan staging --json
         bay plan --plan-id 3f2a9c0d1e2b
+        bay --fleet ~/fleets/prod plan production
     """
     from bay_cli import plan as planmod
 
     try:
+        planmod.check_data_mode(data)
         with routed_output(as_json, log):
-            proj, cwd_repo = resolve(ctx, project)
-            opts = planmod.PlanOptions(
-                env=env,
-                at=at,
-                read_running=not no_remote,
-                box_check=remote,
-                allow_unsupported=allow_unsupported,
-                cwd_repo=cwd_repo,
-            )
-            if plan_id:
-                result = planmod.recheck(proj, planmod.load_saved(proj.cx, plan_id), opts)
+            env_cx = whole_env_fleet(ctx, project, at)
+            saved = planmod.load_saved(env_cx, plan_id) if env_cx and plan_id else None
+            if env_cx is not None and saved is not None and saved.get("project"):
+                project = str(saved["project"])  # a one-project plan, checked from the fleet
+                env_cx = None
+            if env_cx is not None:
+                opts = planmod.PlanOptions(
+                    env=env,
+                    read_running=not no_remote,
+                    box_check=remote,
+                    allow_unsupported=allow_unsupported,
+                    data=data,
+                )
+                if saved is not None:
+                    result = planmod.recheck_env(env_cx, saved, opts, cwd=Path.cwd())
+                else:
+                    result = planmod.make_env_plan(env_cx, opts, cwd=Path.cwd())
+                planmod.save(env_cx, result)
             else:
-                result = planmod.make_plan(proj, opts)
-            planmod.save(proj.cx, result)
+                proj, cwd_repo = resolve(ctx, project)
+                opts = planmod.PlanOptions(
+                    env=env,
+                    at=at,
+                    read_running=not no_remote,
+                    box_check=remote,
+                    allow_unsupported=allow_unsupported,
+                    cwd_repo=cwd_repo,
+                    data=data,
+                )
+                if plan_id:
+                    result = planmod.recheck(proj, planmod.load_saved(proj.cx, plan_id), opts)
+                else:
+                    result = planmod.make_plan(proj, opts)
+                planmod.save(proj.cx, result)
     except BayError as exc:
         if not as_json:
             raise
@@ -315,7 +408,7 @@ def approve(
 
     here = find_bay_toml(Path.cwd())
     _, fleet_name = _read_identity(here) if here else (None, None)
-    cx = fleet_context(ctx, fleet_name)
+    cx = fleet_context(ctx, fleet_name, allow_cwd=True)
     path = planmod.approve(cx, plan_id, reason)
     console.success(f"approved plan {plan_id} ({path.name})")
 
@@ -333,21 +426,40 @@ def _apply(
     as_json: bool,
     push: bool,
     log: Path | None,
+    data: str | None = None,
 ) -> None:
     from bay_cli import apply as applymod
     from bay_cli import plan as planmod
 
     try:
+        planmod.check_data_mode(data)
         with routed_output(as_json, log) as say:
-            proj, cwd_repo = resolve(ctx, project)
-            opts = planmod.PlanOptions(
-                env=env, at=at, allow_unsupported=allow_unsupported, cwd_repo=cwd_repo
-            )
             common: dict[str, Any] = {"force": force, "reason": reason, "echo": say, "push": push}
-            if which == "rollback":
-                result = applymod.rollback(proj, opts, **common)
+            env_cx = whole_env_fleet(ctx, project, at) if which == "up" else None
+            if env_cx is not None and plan_id:
+                saved = planmod.load_saved(env_cx, plan_id)
+                if saved.get("project"):
+                    project, env_cx = str(saved["project"]), None
+            if env_cx is not None:
+                opts = planmod.PlanOptions(
+                    env=env, allow_unsupported=allow_unsupported, data=data
+                )
+                result = applymod.up_env(
+                    env_cx, opts, plan_id=plan_id, cwd=Path.cwd(), **common
+                )
             else:
-                result = applymod.up(proj, opts, plan_id=plan_id, **common)
+                proj, cwd_repo = resolve(ctx, project)
+                opts = planmod.PlanOptions(
+                    env=env,
+                    at=at,
+                    allow_unsupported=allow_unsupported,
+                    cwd_repo=cwd_repo,
+                    data=data,
+                )
+                if which == "rollback":
+                    result = applymod.rollback(proj, opts, **common)
+                else:
+                    result = applymod.up(proj, opts, plan_id=plan_id, **common)
     except BayError as exc:
         if not as_json:
             raise
@@ -363,23 +475,31 @@ def _apply(
         if as_json:
             _echo_json(exc.result)
         else:
-            console.error(
-                f"{exc}. The fleet pins {exc.result['commit'][:12]}; bay show says "
-                "HALF until a deploy succeeds."
+            pins = (
+                f"the fleet pins {exc.result['commit'][:12]}"
+                if exc.result.get("commit")
+                else f"the fleet pins the planned commits of {len(exc.result['projects'])} projects"
             )
+            console.error(f"{exc}. {pins}; bay show says HALF until a deploy succeeds.")
         raise typer.Exit(1) from None
     if as_json:
         _echo_json(result)
         return
     previous = result["previous_commit"]
+    what = (
+        f"{result['project']} {result['env']}: "
+        f"{(previous or 'none')[:12]} -> {result['commit'][:12]}"
+        if result.get("project")
+        else f"{result['env']} (whole environment, {len(result['projects'])} projects)"
+    )
     console.success(
-        f"{result['action']} {result['project']} {result['env']}: "
-        f"{(previous or 'none')[:12]} -> {result['commit'][:12]}, "
+        f"{result['action']} {what}, "
         f"{len(result['steps'])} step(s) planned, {len(result.get('applied') or [])} "
         f"container change(s) applied, fleet commit {result['receipt_commit'][:12]}"
         + (", pushed" if result["pushed"] else "")
     )
-    others = [r for r in result.get("pinned") or [] if r["project"] != result["project"]]
+    planned = set(result.get("projects") or [result["project"]])
+    others = [r for r in result.get("pinned") or [] if r["project"] not in planned]
     if others:
         console.info(
             f"also pinned {len(others)} other project env(s) on {result['box_env']}: "
@@ -409,6 +529,7 @@ def up(
     ] = False,
     reason: Annotated[str | None, typer.Option("--reason", help="Why --force.")] = None,
     allow_unsupported: _AllowUnsupportedOpt = False,
+    data: _DataOpt = None,
     as_json: _JsonOpt = False,
     no_push: _NoPushOpt = False,
     log: _LogOpt = None,
@@ -417,14 +538,20 @@ def up(
 
     Plans first and refuses a blocked (exit 20) or stale (exit 30) plan, and
     an approve plan (exit 10) without `bay approve`. Then writes the lock,
-    compiles, commits the fleet repo, deploys, records the receipt and pushes
-    the fleet repo (not with --no-push; a failed push is only a warning).
+    compiles, commits the fleet repo, deploys, records the receipt, prunes
+    old records from plans/ and pushes the fleet repo (not with --no-push; a
+    failed push is only a warning).
+
+    In a fleet directory (or with --fleet and no bay.toml here), with no
+    --project, it applies a whole-environment plan: every project of the
+    environment at its WANTED commit.
 
     Examples:
 
         bay up
         bay up staging --at 1a2b3c4
         bay up --plan-id 3f2a9c0d1e2b
+        bay up production --data keep
     """
     _apply(
         ctx,
@@ -439,6 +566,7 @@ def up(
         as_json,
         not no_push,
         log,
+        data,
     )
 
 
@@ -453,6 +581,7 @@ def rollback(
     ] = False,
     reason: Annotated[str | None, typer.Option("--reason", help="Why --force.")] = None,
     allow_unsupported: _AllowUnsupportedOpt = False,
+    data: _DataOpt = None,
     as_json: _JsonOpt = False,
     no_push: _NoPushOpt = False,
     log: _LogOpt = None,
@@ -476,6 +605,7 @@ def rollback(
         as_json,
         not no_push,
         log,
+        data,
     )
 
 
