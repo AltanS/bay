@@ -25,8 +25,8 @@
         "root": {"type": "string"},
         "source": {
           "type": "string",
-          "enum": ["--fleet", "BAY_FLEET", "bay.toml", "~/.config/bay/fleets", "cwd"],
-          "description": "How Bay found the fleet: the --fleet option, the BAY_FLEET variable, the fleet named in bay.toml, BAY_FLEET_NAME (a fleet under ~/.config/bay/fleets), or the working directory."
+          "enum": ["--fleet", "BAY_FLEET", "bay.toml", "~/.config/bay/fleets"],
+          "description": "How Bay found the fleet: the --fleet option, the BAY_FLEET variable, the fleet named in bay.toml, or BAY_FLEET_NAME (a fleet under ~/.config/bay/fleets)."
         },
         "commit": {"type": ["string", "null"], "description": "Full SHA of the fleet repo HEAD; null outside git."},
         "dirty": {"type": ["boolean", "null"], "description": "Uncommitted changes under the fleet root; null outside git."}
@@ -94,6 +94,10 @@
               },
               "config_hash": {"type": ["string", "null"]},
               "action": {"enum": ["noop", "create", "recreate", "start", "remove", null]},
+              "failed": {
+                "type": "boolean",
+                "description": "True when the reconciler reported this container's action as failed. Absent in receipts written before 2.2."
+              },
               "healthy": {"type": ["boolean", "null"]}
             }
           }

@@ -16,7 +16,8 @@ Inputs:
 * ``--bundle``: the reconcile bundle. It holds resolved env (secrets), so only
   ``name``, ``image`` and ``config_hash`` are ever read out of it.
 * stdin: the reconciler's JSON report, or nothing when it crashed. Its
-  ``state`` gives each container's health, ``commit`` and resolved ``image``.
+  ``state`` gives each container's health, ``commit`` and resolved ``image``;
+  a result with ``status: failed`` sets the container's ``failed``.
 
 ``python -m bay_reconcile.receipt stamp ...`` (:func:`stamp_main`) updates one
 container's ``commit`` and ``image`` after a webhook build recreated it.
@@ -109,6 +110,7 @@ def build_receipt(
     ok = rc == 0 and report is not None and report.get("ok") is True
 
     actions: dict[str, str] = {}
+    failed: set[str] = set()
     removed: list[str] = []
     for result in (report or {}).get("results", []) or []:
         if not isinstance(result, Mapping):
@@ -118,6 +120,8 @@ def build_receipt(
         if not name or kind not in _ACTIONS:
             continue
         actions[name] = _ACTIONS[kind]
+        if result.get("status") == "failed":
+            failed.add(name)
         if kind == "Remove":
             removed.append(name)
 
@@ -145,6 +149,8 @@ def build_receipt(
                 "commit": _commit_or_none(seen.get("commit")),
                 "config_hash": entry.get("config_hash"),
                 "action": actions.get(name),
+                # The reconciler reported this container's action as failed.
+                "failed": name in failed,
                 "healthy": _healthy(state.get(name)),
             }
         )
@@ -157,6 +163,7 @@ def build_receipt(
                 "commit": None,
                 "config_hash": None,
                 "action": "remove",
+                "failed": name in failed,
                 "healthy": None,
             }
         )

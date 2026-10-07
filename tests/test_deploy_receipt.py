@@ -147,6 +147,7 @@ def test_deploy_receipt_roundtrip(tmp_path: Path) -> None:
         "commit": None,
         "config_hash": "h-web",
         "action": "recreate",
+        "failed": False,
         "healthy": True,
     }
     assert by_name["postgres"]["action"] == "noop" and by_name["postgres"]["healthy"] is None
@@ -197,6 +198,42 @@ def test_receipt_after_a_crash_is_failed_with_unknown_actions() -> None:
     jsonschema.validate(receipt, _RECEIPT_SCHEMA)
     assert receipt["result"] == "failed"
     assert {c["action"] for c in receipt["containers"]} == {None}
+    assert {c["failed"] for c in receipt["containers"]} == {False}
+
+
+def test_receipt_marks_the_failed_action() -> None:
+    """M118/01: a result with status failed sets the container's `failed` (exit 40 reads it)."""
+    report = {
+        **_REPORT,
+        "ok": False,
+        "results": [
+            {"kind": "NoOp", "name": "postgres", "status": "skipped", "detail": ""},
+            {"kind": "Create", "name": "web", "status": "failed", "detail": "No such image"},
+        ],
+    }
+    receipt = box_receipt.build_receipt(
+        meta={**_META, "reconcile_rc": 1}, bundle=_BUNDLE, report=report
+    )
+    jsonschema.validate(receipt, _RECEIPT_SCHEMA)
+    by_name = {c["name"]: c for c in receipt["containers"]}
+    assert (by_name["web"]["action"], by_name["web"]["failed"]) == ("create", True)
+    assert by_name["postgres"]["failed"] is False
+
+
+def test_status_schema_fleet_source_values() -> None:
+    """M118/01 gap 26: fleet.source lists exactly the sources Context.resolve sets."""
+    import inspect
+    import re
+
+    from bay_cli import context
+
+    used = set(re.findall(r"\bSOURCE_[A-Z_]+\b", inspect.getsource(context.Context.resolve)))
+    assert used, "Context.resolve names no SOURCE_* constant"
+    expected = {getattr(context, name) for name in used}
+    enum = _SCHEMA["properties"]["fleet"]["properties"]["source"]["enum"]
+    assert sorted(enum) == sorted(expected) and len(enum) == len(expected)
+    description = _SCHEMA["properties"]["fleet"]["properties"]["source"]["description"]
+    assert "working directory" not in description
 
 
 def test_receipt_rejects_an_env_that_would_leave_the_directory(tmp_path: Path) -> None:
