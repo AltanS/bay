@@ -142,8 +142,12 @@ def test_webhook_remote_build_pushes_from_buildx():
     ), block
     assert block.count("--push") == 1
     assert "--load" not in block
-    assert '-t "${IMAGE_REPO}:${SHA}"' in block
-    assert '-t "${IMAGE_REF}"' in block
+    # M117/05: the commit tag always, the moving tag only when the build is not
+    # held (tests/test_track_mode.py runs the hold guard).
+    assert '"${PUSH_TAGS[@]}"' in block
+    rendered = _render_rebuild(registry_cache=False)
+    assert 'PUSH_TAGS=(-t "${IMAGE_REPO}:${SHA}")' in rendered
+    assert '[[ -z "${HOLD_REASON}" ]] && PUSH_TAGS+=(-t "${IMAGE_REF}")' in rendered
 
 
 def test_webhook_remote_path_has_no_separate_docker_push():

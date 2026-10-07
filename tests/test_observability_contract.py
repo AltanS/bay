@@ -395,7 +395,8 @@ def test_exit_path_map_rows_all_carry_an_alert_id_cell():
         for ln in lines
         if re.match(r"^\|\s*\d+\s*\|\s*(?:\d+|ERR trap)\s*\|", ln)
     ]
-    assert len(rows) == 17, f"Expected 17 exit-path rows, found {len(rows)}"
+    # 17, plus M117/05's hold exit (row 18) and registry-retag exit (row 19).
+    assert len(rows) == 19, f"Expected 19 exit-path rows, found {len(rows)}"
 
     malformed: list[str] = []
     for row in rows:

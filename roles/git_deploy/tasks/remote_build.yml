@@ -207,6 +207,8 @@
           {% endif %}
           -t {{ _image_repo }}:{{ _remote_sha.stdout }}
           -t {{ _image_ref }}
+          --label org.opencontainers.image.revision={{ _remote_sha.stdout }}
+          --label com.bay.commit={{ _remote_sha.stdout }}
           -f {{ _dockerfile }}
           {% for key, value in (_build.args | default({})).items() %}
           --build-arg {{ key }}={{ value }}

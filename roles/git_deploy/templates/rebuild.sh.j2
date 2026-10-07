@@ -51,6 +51,13 @@ WEBHOOK_HMAC_KEY_FILE="{{ stack_dir }}/webhook/hmac.key"
 STATE_FILE="${STATE_DIR}/${SERVICE}.json"
 CB_MAX_FAILURES={{ git_deploy_cb_max_failures }}
 HEALTH_CHECK_TIMEOUT={{ git_deploy_health_check_timeout }}
+# The bay_reconcile package every deploy ships to the box (container_lifecycle
+# reconcile.yml). The hold guard hashes bay.toml with it, and the receipt stamp
+# below writes through it, so the box and the CLI share one implementation.
+RECONCILE_PYTHONPATH="${STACK_DIR}/.reconcile"
+# The env whose receipt (/var/lib/bay/receipts/<env>.json) this box writes.
+# Same expression as the receipt task in container_lifecycle reconcile.yml.
+RECEIPT_ENV={{ (target_host | default(group_names | default([]) | reject('equalto', 'all') | first | default('default'))) | string | quote }}
 
 BAY_ALERT_HEADER={{ docker_monitor_alert_header | to_json }}
 
@@ -58,8 +65,11 @@ BAY_ALERT_HEADER={{ docker_monitor_alert_header | to_json }}
 BAY_ALERT_FAILURE_LOG="${STATE_DIR}/telegram-failures.log"
 BAY_ALERT_FAILURE_CONTEXT="service=${SERVICE} host=${HOSTNAME}"
 
-# Commit SHA — set later per strategy, used for notification dedup
+# Commit SHA — set later per strategy, used for notification dedup. Always the
+# 12-character commit: it is also the image's commit tag.
 SHA=""
+# Extra `docker run` labels for a webhook recreate (the carried config hash).
+EXTRA_LABELS=()
 
 {% include '_notify.sh.j2' %}
 HOSTNAME="${BAY_HOST}"
@@ -304,6 +314,97 @@ _record_failure() {
 # missing file emits the same clean-state defaults.
 _reset_cb() {
   _clean_state_json | _write_state
+}
+
+# ── Hold guard (docs/build-pipeline.md, "Track, hold and freeze") ──
+# Every build is tagged <image>:<commit12>. `:latest` moves, and the container
+# is recreated, only when the push may deploy. This prints WHY it may not, or
+# nothing when it may:
+#   - TRACK=pin: a push only builds; `bay up` deploys.
+#   - FROZEN: `bay rollback` froze the env; a push only builds until the next
+#     `bay up` to a newer commit.
+#   - BAY_TOML_PATH + PINNED_TOML_HASH (only when bay.toml lives in the app
+#     repo): the canonical hash of bay.toml at the pushed commit differs from
+#     the pinned one, so the push changes config that only `bay up` can deploy.
+#     A hash that cannot be computed holds too: never deploy blind.
+#   $1  the checkout at the pushed commit
+_hold_reason() {
+  local repo_dir="$1" have
+  if [[ "${TRACK:-branch}" == "pin" ]]; then
+    printf 'track = pin: a push only builds, bay up deploys'
+    return 0
+  fi
+  if [[ -n "${FROZEN:-}" ]]; then
+    printf 'frozen by bay rollback: a push only builds until the next bay up'
+    return 0
+  fi
+  if [[ -z "${BAY_TOML_PATH:-}" || -z "${PINNED_TOML_HASH:-}" ]]; then
+    return 0
+  fi
+  if [[ ! -f "${repo_dir}/${BAY_TOML_PATH}" ]]; then
+    printf 'config changed: %s is gone at this commit' "${BAY_TOML_PATH}"
+    return 0
+  fi
+  if ! have=$(PYTHONPATH="${RECONCILE_PYTHONPATH}" python3 -m bay_reconcile.tomlhash "${repo_dir}/${BAY_TOML_PATH}" 2>&1); then
+    printf 'config not checked (%s)' "${have}"
+    return 0
+  fi
+  if [[ "${have}" != "${PINNED_TOML_HASH}" ]]; then
+    printf 'config changed: %s differs from the pinned one' "${BAY_TOML_PATH}"
+  fi
+  return 0
+}
+
+# A held build is not a failure. The image stays under its commit tag, `:latest`
+# and the running container are not touched, the circuit breaker is not touched
+# (no _record_failure, no _reset_cb), and the trigger was consumed at the start
+# of the run. One build.held alert says what to do. Always exits 0.
+#   $1  the reason _hold_reason printed   $2  the image ref the build left
+_hold_build() {
+  local reason="$1" image="$2" todo
+  trap - ERR
+  case "${reason}" in
+    "config not checked"*) todo="config not checked, run bay up" ;;
+    config*) todo="config changed, run bay up" ;;
+    track*)  todo="track = pin, run bay up to deploy it" ;;
+    *)       todo="frozen by bay rollback, run bay up to deploy it" ;;
+  esac
+  _log "HOLD ${SERVICE} at ${SHA:-unknown}: ${reason}; image ${image}, :latest not moved, container not recreated"
+  notify_build build.held "$(printf '⏸️ <b>Build held</b>\n\n▸ Host:       <code>%s</code>\n▸ Service:    <code>%s</code>\n▸ Commit:     <code>%s</code>\n▸ Image:      <code>%s</code>\n▸ Reason:     %s\n▸ Time:       %s\n\n%s' \
+    "${HOSTNAME}" "${SERVICE}" "${SHA:-unknown}" "${image}" "$(bay_html_escape "${reason}")" "$(format_timestamp)" "${todo}")"
+  exit 0
+}
+
+# Move `:latest` to this commit's image and keep the old one as `:previous` for
+# the health-check rollback. Only called once the hold guard let the push deploy.
+#   $1  image repo (no tag)   $2  commit tag
+_promote_latest() {
+  local repo="$1" sha="$2"
+  docker tag "${repo}:latest" "${repo}:previous" 2>/dev/null || true
+  docker tag "${repo}:${sha}" "${repo}:latest"
+}
+
+# The config hash the last deploy stamped on the running container, or nothing.
+# The webhook recreate runs the config of that deploy, so it carries the label
+# over: the next `bay up` then plans a noop, not a recreate for
+# `no config-hash label`.
+_config_hash_of() {
+  local h
+  h=$(docker inspect --format '{% raw %}{{index .Config.Labels "com.bay.config-hash"}}{% endraw %}' "$1" 2>/dev/null || true)
+  [[ "${h}" == "<no value>" ]] && h=""
+  printf '%s' "${h}"
+}
+
+# Record in this env's receipt which commit and image the container runs now
+# (`bay status`, `bay plan`). A failure is a log line, never a failed deploy:
+# the container is already running.
+#   $1  container   $2  commit (may be empty)   $3  image ref
+_stamp_receipt() {
+  if ! PYTHONPATH="${RECONCILE_PYTHONPATH}" python3 -m bay_reconcile.receipt stamp \
+      --env "${RECEIPT_ENV}" --name "$1" --commit "$2" --image "$3" >/dev/null 2>&1; then
+    _log "receipt not stamped for $1 (no receipt for ${RECEIPT_ENV} yet, or no write access)"
+  fi
+  return 0
 }
 
 # Poll container health after restart. Returns 0 if healthy, 1 if failed.
@@ -601,6 +702,11 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   PRIMARY_IMAGE=""
 {% endif %}
   BUILD_STRATEGY="{{ dq(strategy) }}"
+  # Hold guard inputs, compiled from bay.toml and the lock (docs/build-pipeline.md).
+  TRACK="{{ dq(build.track | default('branch')) }}"
+  FROZEN="{{ 'true' if (build.frozen | default(false)) else '' }}"
+  BAY_TOML_PATH="{{ dq(build.bay_toml_path | default('')) }}"
+  PINNED_TOML_HASH="{{ dq(build.bay_toml_hash | default('')) }}"
 {#
   The three command strings below are handed to `eval`, so every consumer
   value in them is referenced as an ESCAPED parameter expansion — `\"\${BRANCH}\"`
@@ -658,6 +764,10 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   IMAGE_REPO="{{ svc.image | regex_replace(':.*$', '') }}"
   IMAGE_NAME=""
   BUILD_STRATEGY="pull_only"
+  TRACK="branch"
+  FROZEN=""
+  BAY_TOML_PATH=""
+  PINNED_TOML_HASH=""
   PRIMARY_IMAGE=""
   BUILD_ARGS=()
   declare -A BUILD_SECRETS=()
@@ -755,12 +865,31 @@ _log "Lock acquired (waited ${_lock_waited}s)"
 # Triggered by the build server after a successful remote build+push.
 # Skips the build entirely — just pull the new image and restart.
 if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
+  SHA="${EXPECTED_REVISION}"
+  # Pin and freeze are this box's own config: the build server's copy may be
+  # older. A held pull fetches the image by its commit tag only (so `bay up`
+  # and `bay rollback --to` find it here) and never moves the local `:latest`.
+  # The config-hash check ran on the build server, which has the checkout.
+  HOLD_REASON=""
+  if [[ "${TRACK}" == "pin" || -n "${FROZEN}" ]]; then
+    HOLD_REASON=$(_hold_reason "")
+  fi
+  if [[ -n "${HOLD_REASON}" ]]; then
+    [[ -z "${EXPECTED_REVISION}" ]] \
+      || docker pull "${IMAGE_REPO}:${EXPECTED_REVISION}" >/dev/null 2>&1 \
+      || _log "Could not pull ${IMAGE_REPO}:${EXPECTED_REVISION}; bay up will pull it"
+    _hold_build "${HOLD_REASON}" "${IMAGE_REPO}:${EXPECTED_REVISION:-unknown}"
+  fi
+
   _log "Pulling ${IMAGE_REF} from registry"
   if ! docker pull "${IMAGE_REF}"; then
     _record_failure "" "Image pull"
     trap - ERR
     exit 1
   fi
+  # Keep the pulled image under its commit tag too, for `bay rollback --to`.
+  [[ -z "${EXPECTED_REVISION}" ]] \
+    || docker tag "${IMAGE_REF}" "${IMAGE_REPO}:${EXPECTED_REVISION}" 2>/dev/null || true
 
   # Tag running container's image as :previous for rollback
   _PREV_DIGEST=$(docker inspect --format '{% raw %}{{.Image}}{% endraw %}' "${SERVICE}" 2>/dev/null || true)
@@ -768,6 +897,11 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
     docker tag "${_PREV_DIGEST}" "${IMAGE_REPO}:previous" 2>/dev/null || true
     _log "Tagged running image as ${IMAGE_REPO}:previous for rollback"
   fi
+
+  # Carry the deploy's config-hash label over to the recreated container.
+  EXTRA_LABELS=()
+  _CARRIED_HASH=$(_config_hash_of "${SERVICE}")
+  [[ -n "${_CARRIED_HASH}" ]] && EXTRA_LABELS+=(-l "com.bay.config-hash=${_CARRIED_HASH}")
 
   # Restart container with the new image
   docker stop "${SERVICE}" 2>/dev/null || true
@@ -830,6 +964,7 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
 {% for k, v in _wt_labels.items() %}
       -l '{{ k }}={{ v }}' \
 {% endfor %}
+      "${EXTRA_LABELS[@]}" \
       "${IMAGE_REF}"{{ ' ' ~ svc.command if svc.command is defined else '' }}
   }
 {% set _pull_ns.first = false %}
@@ -878,6 +1013,12 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
     fi
   fi
 
+  # The receipt names the commit tag when the trigger carried a revision.
+  if [[ -z "${EXPECTED_REVISION}" ]]; then
+    _stamp_receipt "${SERVICE}" "" "${IMAGE_REF}"
+  else
+    _stamp_receipt "${SERVICE}" "${EXPECTED_REVISION}" "${IMAGE_REPO}:${EXPECTED_REVISION}"
+  fi
   _reset_cb
 
   _log "Pull deploy complete for ${SERVICE} at $(date -Iseconds)"
@@ -1025,9 +1166,21 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
   # Get commit SHA (12-char for registry tags, matching remote_build.yml)
   SHA=$(git rev-parse --short=12 HEAD)
 
+  # Hold guard, on the checkout of the pushed commit. A held build pushes only
+  # the commit tag: the moving tag (IMAGE_REF) stays, and no box is told to pull.
+  HOLD_REASON=$(_hold_reason "${REPO_DIR}")
+  PUSH_TAGS=(-t "${IMAGE_REPO}:${SHA}")
+  [[ -z "${HOLD_REASON}" ]] && PUSH_TAGS+=(-t "${IMAGE_REF}")
+
   # Check if image already exists in registry for this SHA
-  if docker manifest inspect "${IMAGE_REPO}:${SHA}" &>/dev/null && docker manifest inspect "${IMAGE_REF}" &>/dev/null; then
-    _log "Image ${IMAGE_REPO}:${SHA} and ${IMAGE_REF} already in registry, skipping build"
+  if docker manifest inspect "${IMAGE_REPO}:${SHA}" &>/dev/null; then
+    _log "Image ${IMAGE_REPO}:${SHA} already in registry, skipping build"
+    # Point the moving tag at it (registry side, no pull), unless held.
+    if [[ -z "${HOLD_REASON}" ]] && ! docker buildx imagetools create -t "${IMAGE_REF}" "${IMAGE_REPO}:${SHA}" >/dev/null 2>&1; then
+      _record_failure "${SHA}" "Registry retag" "could not point ${IMAGE_REF} at ${IMAGE_REPO}:${SHA}"
+      trap - ERR
+      exit 1
+    fi
   else
     # Write build secrets to temp files
     SECRETS_DIR="${REMOTE_BUILD_DIR}/.secrets"
@@ -1056,9 +1209,9 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
         --cache-from "type=registry,ref=${IMAGE_REPO}:buildcache" \
         --cache-to "type=registry,ref=${IMAGE_REPO}:buildcache,mode=max" \
 {% endif %}
-        -t "${IMAGE_REPO}:${SHA}" \
-        -t "${IMAGE_REF}" \
+        "${PUSH_TAGS[@]}" \
         --label "org.opencontainers.image.revision=${SHA}" \
+        --label "com.bay.commit=${SHA}" \
         --build-arg "BAY_GIT_SHA=${SHA}" \
         -f "${DOCKERFILE}" \
         "${BUILD_ARGS[@]}" \
@@ -1080,7 +1233,7 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
 
     # buildx exported both tags straight to the registry above, so there is
     # no separate push step and no image left in the local daemon store.
-    _log "Pushed ${IMAGE_REPO}:${SHA} and ${IMAGE_REF} to registry"
+    _log "Pushed ${IMAGE_REPO}:${SHA} to registry${HOLD_REASON:+ (held: ${IMAGE_REF} not moved)}"
 
     # Trim old local content-hash tags left behind by earlier releases
     # (which exported the image into the local daemon) so
@@ -1135,6 +1288,11 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
 
   # Release repo lock
   exec 200>&-
+
+  # Held: the commit tag is in the registry, nothing else moved, no fan-out.
+  if [[ -n "${HOLD_REASON}" ]]; then
+    _hold_build "${HOLD_REASON}" "${IMAGE_REPO}:${SHA}"
+  fi
 
   _reset_cb
   # Build finished (or was skipped: image already in the registry).
@@ -1220,8 +1378,8 @@ _log "Acquired repo lock for ${SERVICE}"
 cd "${REPO_DIR}"
 eval "${PULL_CMD}"
 
-# ── Get new commit SHA ──
-SHA=$(git rev-parse --short HEAD)
+# ── Get new commit SHA (12 characters: the image's commit tag) ──
+SHA=$(git rev-parse --short=12 HEAD)
 
 # ── Check if image already exists for this SHA ──
 if docker image inspect "${IMAGE_NAME}:${SHA}" &>/dev/null; then
@@ -1229,7 +1387,6 @@ if docker image inspect "${IMAGE_NAME}:${SHA}" &>/dev/null; then
 elif [[ -n "${PRIMARY_IMAGE}" ]] && docker image inspect "${PRIMARY_IMAGE}:${SHA}" &>/dev/null; then
   _log "Re-tagging from primary ${PRIMARY_IMAGE}:${SHA} (build dedup)"
   docker tag "${PRIMARY_IMAGE}:${SHA}" "${IMAGE_NAME}:${SHA}"
-  docker tag "${IMAGE_NAME}:${SHA}" "${IMAGE_NAME}:latest"
 else
   # Write build secrets to temp files
   SECRET_FLAGS=""
@@ -1240,10 +1397,7 @@ else
     SECRET_FLAGS="${SECRET_FLAGS} --secret id=${key},src=${TMPFILE}"
   done
 
-  # Re-tag current :latest as :previous (ignore if no :latest)
-  docker tag "${IMAGE_NAME}:latest" "${IMAGE_NAME}:previous" 2>/dev/null || true
-
-  # Build
+  # Build. Only the commit tag: `:latest` moves after the hold guard below.
   _log "Building ${IMAGE_NAME}:${SHA} (CONTEXT=${CONTEXT} REPO_DIR=${REPO_DIR} PWD=$(pwd))"
   ls -la "${CONTEXT}" 2>&1 | head -5 || _log "WARNING: build context '${CONTEXT}' not found"
   BUILD_OUTPUT=$(mktemp)
@@ -1253,6 +1407,8 @@ else
       --builder "$1" \
       --load \
       -t "${IMAGE_NAME}:${SHA}" \
+      --label "org.opencontainers.image.revision=${SHA}" \
+      --label "com.bay.commit=${SHA}" \
       -f "${DOCKERFILE}" \
       "${BUILD_ARGS[@]}" \
       ${SECRET_FLAGS} \
@@ -1272,22 +1428,34 @@ else
   fi
   rm -f "${BUILD_OUTPUT}"
 
-  # Tag as :latest
-  docker tag "${IMAGE_NAME}:${SHA}" "${IMAGE_NAME}:latest"
-
   # Clean up secret temp files
   for key in "${!BUILD_SECRETS[@]}"; do
     rm -f "/tmp/build-secret-${SERVICE}-${key}"
   done
 fi
 
+# ── Hold guard, on the checkout of the pushed commit (still under the lock) ──
+HOLD_REASON=$(_hold_reason "${REPO_DIR}")
+
 # ── Release repo lock before restart ──
 exec 200>&-
+
+# Held: the image stays under its commit tag; nothing else moves.
+if [[ -n "${HOLD_REASON}" ]]; then
+  _hold_build "${HOLD_REASON}" "${IMAGE_NAME}:${SHA}"
+fi
+
+# ── The push may deploy: move :latest to this commit ──
+_promote_latest "${IMAGE_NAME}" "${SHA}"
 
 # ── Restart with new image ──
 # Stop and remove old container, then recreate directly.
 # Brief downtime is acceptable for developer-triggered rebuilds.
 # The next Ansible deploy will manage the container via container_lifecycle.
+# Carry the deploy's config-hash label over, so that deploy plans a noop.
+EXTRA_LABELS=()
+_CARRIED_HASH=$(_config_hash_of "${SERVICE}")
+[[ -n "${_CARRIED_HASH}" ]] && EXTRA_LABELS+=(-l "com.bay.config-hash=${_CARRIED_HASH}")
 docker stop "${SERVICE}" 2>/dev/null || true
 docker rm "${SERVICE}"   2>/dev/null || true
 
@@ -1339,6 +1507,7 @@ docker rm "${SERVICE}"   2>/dev/null || true
 {% for k, v in _wt_labels.items() %}
       -l '{{ k }}={{ v }}' \
 {% endfor %}
+      "${EXTRA_LABELS[@]}" \
       "${IMAGE_NAME}:latest"{{ ' ' ~ svc.command if svc.command is defined else '' }}
   }
 {% endfor %}
@@ -1352,6 +1521,7 @@ if ! _wait_healthy "${SERVICE}" "${HEALTH_CHECK_TIMEOUT}"; then
   _handle_rollback "${SERVICE}" "${IMAGE_NAME}:previous" "${IMAGE_NAME}:latest"
 fi
 
+_stamp_receipt "${SERVICE}" "${SHA}" "${IMAGE_NAME}:${SHA}"
 _reset_cb
 
 # ── Fan-out: trigger alias rebuilds for dedup groups ──
@@ -1384,6 +1554,6 @@ fi
 {% endfor %}
 
 _log "Completed rebuild for ${SERVICE} at $(date -Iseconds)"
-notify_build deploy.webhook_complete "$(printf '\u2705 <b>Webhook deploy complete</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Commit:     <code>%s</code>\n\u25b8 Image:      <code>%s:latest</code>\n\u25b8 Duration:   %s\n\u25b8 Time:       %s' \
-  "${HOSTNAME}" "${SERVICE}" "${SHA}" "${IMAGE_NAME}" "$(format_duration)" "$(format_timestamp)")"
+notify_build deploy.webhook_complete "$(printf '\u2705 <b>Webhook deploy complete</b>\n\n\u25b8 Host:       <code>%s</code>\n\u25b8 Service:    <code>%s</code>\n\u25b8 Commit:     <code>%s</code>\n\u25b8 Image:      <code>%s:%s</code>\n\u25b8 Duration:   %s\n\u25b8 Time:       %s' \
+  "${HOSTNAME}" "${SERVICE}" "${SHA}" "${IMAGE_NAME}" "${SHA}" "$(format_duration)" "$(format_timestamp)")"
 exit 0

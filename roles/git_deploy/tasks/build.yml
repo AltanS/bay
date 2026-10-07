@@ -13,9 +13,10 @@
     _dockerfile: "{{ services[_svc_name].build.dockerfile | default('Dockerfile') }}"
     _context: "{{ services[_svc_name].build.context | default('.') }}"
 
+# 12 characters: the commit tag every build carries (rebuild.sh, remote_build.yml).
 - name: "{{ _svc_name }} — Get current commit SHA"
   ansible.builtin.command:
-    cmd: git rev-parse --short HEAD
+    cmd: git rev-parse --short=12 HEAD
     chdir: "{{ _repo_dir }}"
   register: _git_sha
   changed_when: false
@@ -75,6 +76,8 @@
           --builder {{ bay_buildx_builder }}
           --load
           -t {{ _image_name }}:{{ _git_sha.stdout }}
+          --label org.opencontainers.image.revision={{ _git_sha.stdout }}
+          --label com.bay.commit={{ _git_sha.stdout }}
           -f {{ _dockerfile }}
           {% for key in (_build.args | default({})).keys() %}
           --build-arg {{ key }}

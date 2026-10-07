@@ -192,6 +192,18 @@ def test_every_declared_id_is_emitted(registry):
     )
 
 
+def test_build_held(registry):
+    """M117/05: a held build alerts once, from rebuild.sh, with a literal ID."""
+    entry = registry["build.held"]
+    assert entry["level"] in _LADDER and entry["level"] == "warn"
+    assert entry["source"] == "git_deploy/rebuild.sh.j2"
+    assert entry["enabled_by_default"] is True
+    assert _emitted_ids()["build.held"] == ["roles/git_deploy/templates/rebuild.sh.j2"]
+    text = (_ROLES / "git_deploy" / "templates" / "rebuild.sh.j2").read_text()
+    assert "notify_build build.held " in text
+    assert "`build.held`" in (_REPO_ROOT / "docs" / "alerting.md").read_text()
+
+
 # ── The invariant the drift check depends on ─────────────────────────────────
 
 
