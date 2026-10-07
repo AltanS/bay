@@ -340,22 +340,15 @@ A plan is **blocked** when:
 
 The validator accepts some `bay.toml` keys that the compiler cannot deploy yet. `bay plan`
 (and `bay compile`) blocks and lists each one in `unsupported`. `--allow-unsupported` plans
-and applies anyway, and the container then runs without that feature (a service with `path`
-and an internal container that builds from source are left out altogether). The Keys tables of
+and applies anyway, and the container then runs without that feature (an internal container
+that builds from source is left out altogether). The Keys tables of
 [bay-toml.md](bay-toml.md#keys) tag each such key `(validated, not deployed yet)`. These are the
-unsupported cases of 2.1:
+unsupported cases of 2.3:
 
-- `release` (a command before traffic moves, at the top level or in `[deploy.<env>]`) and
-  `[[jobs]]` (scheduled jobs).
-- A project `[backup]` schedule, the mount option `owner` of a volume, and the mount option
-  `backup` of a volume left at its default `true`. Every volume mount needs `backup = false`
-  to deploy today.
-- `path` on a service (routing it by path on the main domain).
-- A service that shares the build of the project (the project builds from source and the
-  service has no `image` and no own `build`).
-- An internal container (no `domain`, no `path`) that builds from source, has a database
-  (`needs.postgres`), has a health path other than `/`, or sets `replicas` other than 1 or
-  `zero_downtime`.
+- The mount option `owner` of a volume.
+- An internal container (no `domain`, no `path`) that builds from source, or that takes the
+  image of the project's own build, has a database (`needs.postgres`), has a health path
+  other than `/`, or sets `replicas` other than 1 or `zero_downtime`.
 - `needs.postgres` with `extensions`, and a build `memory` cap that differs from the fleet's.
 - `aliases` with the default redirect (the aliases are served instead of redirecting). With
   `redirect = false` they deploy.
@@ -368,8 +361,13 @@ unsupported cases of 2.1:
   [layout-scenarios.md](layout-scenarios.md#5-several-boxes-shared-resources-mixed-apps)).
 
 The list follows the compiler, not this page: the `unsupported` field of the plan is the
-truth for one file. One case has no tag and no blocker (a gap): `access` keys such as `open`,
-`locked`, `limits` and `password` on an internal container are accepted and are not emitted.
+truth for one file.
+
+Since 2.3 these deploy: `release`, scheduled tasks (see the Risk table), a routed service that takes the
+image of the project's build, a service routed by `path` on the main domain, volume backups
+(the mount option `backup`, with the project `[backup]` schedule) and the fleet
+`[tailnet] allowlist`. An `access` key other than `mode` on a main container that is internal
+in an environment is a validation error, not a silent drop.
 
 ### Risk
 
@@ -391,6 +389,8 @@ Risk is set by the data that a step touches.
 | Tailnet allowlist in `bay.fleet.toml` changed since the last fleet commit (see [the allowlist key](tailnet-ingress.md#the-route-keys)) | shared |
 | Tailnet route added, changed or removed (`kind: route`, see [tailnet-ingress.md](tailnet-ingress.md#routes-in-bayfleettoml-21)) | shared |
 | Deploy webhook changed | shared |
+| Scheduled job added, changed or removed (`kind: job`) | safe |
+| Volume backup added, changed or removed (`kind: backup`, action `update`; `bay up` then also runs the `backup` tag) | safe |
 | Container of another project changed or removed | that project's own risk, by the rows above |
 | Container that no project owns changed | shared |
 | Container that no project owns removed | destructive |
@@ -1311,8 +1311,10 @@ know.
   The image is the reference the deploy asked for (`image_ref`), so a webhook
   build that stamps a new commit into the receipt is not drift either.
 - `kind` is one of `container`, `volume`, `database`, `database_user`,
-  `secret`, `resource`, `tailnet`, `route`, `fleet`, `image` (the code moves,
-  see "Code and config"). `action` is one of `create`,
+  `secret`, `resource`, `tailnet`, `route`, `fleet`, `job`, `backup`, `image`
+  (the code moves, see "Code and config"). A `job` step names the job
+  container in `container`. A `backup` step names the container that mounts
+  the volume; its reason names the volume. `action` is one of `create`,
   `update`, `remove`, `rename`, `move`, and for a box step also `recreate`
   and `start`. A `route` step has `route_added`, `route_changed` or
   `route_removed`, and names the route in `resource`.

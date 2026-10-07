@@ -139,6 +139,35 @@ backup:
   source_path: /data
 ```
 
+## Volume backups
+
+A `bay.toml` volume mount with `backup` true, which is the default, is backed up too. `bay
+compile` writes each one to `volume_backups:` in `services.yml` (see
+[services.md](services.md#volume_backups)). The backup role then adds one `file` target per
+volume whose container runs on the host:
+
+- The target name is the Docker volume name, `<stack_name>_<volume>`, for example
+  `bay_myapp-data`. The script is `backup-<target>.sh` and the repo ends in `/<target>/`.
+- The script reads the mount path out of the container through the Docker daemon
+  (`docker cp <container>:<path> - | restic backup --stdin`). The unit runs as the app user,
+  which cannot read the Docker data root itself.
+- The project `[backup]` table, then `[defaults.backup]` in `bay.fleet.toml`, set the hour
+  (UTC) and `keep` (whole days). Without either, `backup_schedule` and `backup_retain` apply.
+- Nothing runs while `backup_enabled` is false. The plan says so: `volume backups are
+  compiled, but backup_enabled is false: no backup runs`.
+- A new or changed volume backup is a plan step of kind `backup`. `bay up` deploys the whole
+  box environment, and with such a step it also runs the `backup` tag, so the script and the
+  timer are installed in the same deploy.
+- Like an accessory, a volume that is gone keeps its timer and its repo. Remove them by hand.
+- `backup = false` on the mount leaves the volume out. A volume from `bay import` carries it,
+  because the old YAML fleet backed up no volume. Drop it to start the backups.
+
+Restore a volume with `bay backup restore <env> <stack_name>_<volume>`. The restore stops the
+container, reads the volume's mountpoint with `docker volume inspect`, extracts the snapshot
+there as root (over the files that are there, it does not empty the volume first) and starts
+the container again, also after a failure. The pre-restore backup runs first, as for an
+accessory. Hosts that do not run the container are skipped.
+
 ## Rig infrastructure: Headscale
 
 The accessory loop above only covers things declared in `services.yml`. **Headscale**

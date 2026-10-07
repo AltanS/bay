@@ -137,16 +137,20 @@ Data names and volumes:
 - A volume name is shared by the whole project. Two services that mount the same volume
   name share one volume.
 
-Jobs and release (both are validated, not deployed yet: this is the behaviour they are meant to have):
+Jobs and release:
 
 - Jobs run as one-shot containers named `<name>-job-<job>` in the primary environment
   and `<name>-<env>-job-<job>` in the others.
 - A job gets the image, env, secrets, `fleet_secrets`, needs and mounts of the main
-  container.
-- A job may set `memory`.
+  container. It runs the image the main container runs at that time.
+- A job may set `memory`. Without it, the job gets the memory cap of the main container.
+- A systemd timer on the box of the main container starts the job, in UTC. A run that is
+  still busy is not started a second time. A missed run is not made up.
 - A failed `release` aborts the deploy before traffic moves.
 - `release` runs once per environment per deploy, inside a one-shot container of the new
-  image.
+  image. It runs only when the main container is created or recreated, and a push build
+  runs it before it swaps the container. It has the env, secrets, network and mounts of
+  the main container, and a time limit (`bay_release_timeout`, 600 seconds by default).
 
 Health and deploy:
 
@@ -202,9 +206,9 @@ Secrets:
 This is the corrected v3 example. It passes `bay toml validate`. The test suite checks
 that this block and `tests/fixtures/bay_toml/corrected-example.toml` stay identical. It is a
 schema example, not a file to deploy as it stands: it uses keys that carry the tag
-`(validated, not deployed yet)` in the Keys tables (`release`, `[backup]`, `[[jobs]]`,
-`aliases`, `owner`, `backup`, `extensions`, a service `path`, `[access.identity]`, a build
-`memory` and `open` beside a password), so `bay plan` blocks it without `--allow-unsupported`.
+`(validated, not deployed yet)` in the Keys tables (`aliases`, `owner`, `extensions`,
+`[access.identity]`, a build `memory` and `open` beside a password), so `bay plan` blocks it
+without `--allow-unsupported`.
 
 <!-- corrected-example -->
 ```toml
@@ -369,7 +373,7 @@ These keys sit at the top level. Every key in this table may also be set in a
 | `image` | string | none | Pull this image instead of building. Not together with `[build]`. |
 | `port` | integer 1-65535 | none | Container port that receives traffic. |
 | `command` | string | image CMD | Command to run. |
-| `release` | string | none | (validated, not deployed yet) Runs once per environment per deploy, in a one-shot container of the new image, before traffic moves. A failure stops the deploy and the old container stays. |
+| `release` | string | none | Runs once per environment per deploy, in a one-shot container of the new image, before traffic moves. A failure stops the deploy and the old container stays. |
 | `health` | string | `"/"` when there is a port, else `"none"` | Health check path, or `"none"`. Bay probes it on the container, not through the route. A failed check removes the new container and starts the previous one again. A path other than `/` on an internal container (no `domain`, no `path`) is (validated, not deployed yet). |
 | `replicas` | integer >= 1 | `1` | Number of containers. More than 1 on an internal container is (validated, not deployed yet). |
 | `memory` | size | none | Memory limit. Bay sets `mem_limit` and `memswap_limit` to this one value, so the container gets no swap (a `docker run --memory-swap` equal to `--memory`). A container that ran with `mem_limit` alone is recreated once by the first deploy of the compiled file, and the box prediction names it as `memory: memswap_limit <now> -> <memory>` (see [plan.md](plan.md#the-box-prediction---remote)). |
@@ -461,11 +465,11 @@ A service with no `domain` and no `path` is internal whatever the project mode i
 
 Each mount sets `path` and exactly one of `volume` or `from`.
 
-**Write `backup = false` on every volume mount today.** `backup` defaults to `true`, and volume
-backups are (validated, not deployed yet). So `bay toml validate` accepts a volume mount without
-the key, but `bay plan` lists it in `unsupported` (`mounts[<n>].backup`, "volume backups") and
-blocks. With `--allow-unsupported` the volume is mounted and not backed up. A `from` mount has no
-backup and is not affected.
+**Volume mounts are backed up by default.** `backup` defaults to `true`. Each such volume gets
+a daily restic backup on the box of its container, when the box env sets `backup_enabled`
+(see [backups.md](backups.md#volume-backups)). The project `[backup]` table sets the hour and
+how long backups are kept. `backup = false` leaves a volume out, for example a cache. A `from`
+mount has no backup.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
@@ -473,7 +477,7 @@ backup and is not affected.
 | `volume` | name | none | A named volume that Bay manages. It survives recreation. |
 | `from` | path | none | A file or directory relative to the directory of this `bay.toml`, read-only. A change recreates the container. No leading `/` and no `..`. `fleet:<path>` mounts the shared fleet file `files/<path>` instead. |
 | `owner` | `uid` or `uid:gid` | root | (validated, not deployed yet) Volume mounts only. |
-| `backup` | bool | `true` | Volume mounts only. Every volume mount with `backup` true, which is the default, is (validated, not deployed yet): write `backup = false` to deploy it. |
+| `backup` | bool | `true` | Volume mounts only. `true`: the volume gets a daily backup. `false`: it gets none. |
 | `mode` | octal string | `"0600"` | `from` mounts only. |
 
 Two mounts in one container may not use the same `path`. A volume name is shared by the
@@ -532,18 +536,20 @@ to that commit finds its image, also with `track = "pin"`. Run `bay up` to deplo
 
 ### `[backup]`
 
-The whole table is (validated, not deployed yet).
+The schedule of the volume backups of this project (the volume mounts with `backup` true).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `keep` | duration | fleet setting | How long backups are kept. |
+| `keep` | duration | fleet setting | How long backups are kept. Bay keeps whole days: `36h` keeps 2 days, `2w` keeps 14. |
 | `hour` | integer 0-23 | fleet setting | Hour of the daily backup, UTC. |
 
-Databases follow the fleet backup policy.
+The fleet setting is `[defaults.backup]` in `bay.fleet.toml`, per key. Without either, the
+fleet variables `backup_schedule` and `backup_retain` apply (the schedule in box time). Databases
+follow the fleet backup policy.
 
 ### `[[jobs]]`
 
-The whole table is (validated, not deployed yet).
+Scheduled one-shot runs of the main container's image.
 
 | Key | Type | Meaning |
 |-----|------|---------|
@@ -555,6 +561,8 @@ The whole table is (validated, not deployed yet).
 `name`, `schedule` and `command` are required. A job runs as a one-shot container named
 `<name>-job-<job>` in the primary environment and `<name>-<env>-job-<job>` in the others.
 It gets the image, env, secrets, `fleet_secrets`, needs and mounts of the main container.
+A systemd timer starts it in UTC. A cron line that sets both the day of the month and the day
+of the week is a compile error, because a timer cannot run it as cron does.
 
 ### `[services.<name>]`
 
@@ -562,14 +570,17 @@ An extra container in the same project. The main container is not a `[services.*
 service may use that name. Container names are in rule 8.
 
 - Inherited by default: `image` or `[build]`, `env`, `secrets`, `fleet_secrets`, `needs`.
-  `inherit = false` starts the service empty. A service with neither `image` nor its own
-  `build` shares the project's build, and that is (validated, not deployed yet).
+  `inherit = false` starts the service empty. A routed service with neither `image` nor its
+  own `build` shares the project's build: the main container builds, and the service runs
+  the same image. An internal service that does this is (validated, not deployed yet).
 - The service inherits `update` and `logs` from the project. `replicas` defaults to `1`
   and `zero_downtime` to `false`.
 - The service may set its own: `command`, `port`, `health`, `memory`, `replicas`,
   `zero_downtime`, `update`, `logs`, `log_rotation`, `access`, `mounts`, `env`,
   `secrets`, `fleet_secrets`, `needs`, `image` or `build`.
-- Routing: `path = "/api"` routes a prefix of the main domain (`path` is (validated, not deployed yet)).  `domain = "..."` gives
+- Routing: `path = "/api"` routes a prefix of the main domain, on a segment boundary
+  (`/api` and `/api/x`, not `/apiary`). The prefix is not stripped: the app sees the full
+  path. The router of the service outranks the main container's router.  `domain = "..."` gives
   the service its own domain. Set one of them, or neither. With neither, the service is
   internal and may not set `access`.
 - A routed service takes the project's `access.mode` unless it sets its own. Password

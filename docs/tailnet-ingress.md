@@ -201,12 +201,17 @@ label. To read the exact name of a node, run `tailscale status --json` on a peer
 `DNSName` of the node (drop the trailing dot), or build it from `bay gateway nodes` and the
 variable.
 
-**The allowlist key.** `[tailnet] allowlist` is an optional list of IPs or CIDRs. Today no
-compile step writes it into services.yml or into Traefik. Bay only tracks it: a change since
-the last fleet commit is a plan step of kind `tailnet`, risk `shared`. The list that Traefik's
-`vpn-only` middleware enforces for tailnet-mode services and routes comes from the variable
-`vpn_allowed_ips` in group_vars (the access gateway adds the Headscale tailnet range). So
-the key marks a fleet-wide change for the plan. It does not itself open or close access.
+**The allowlist key.** `[tailnet] allowlist` is an optional list of IPs or CIDRs. It is
+enforced. `bay compile` writes it as `tailnet_allowlist:` into `group_vars/all/services.yml`.
+On every deploy, with or without the rig roles, the access gateway task
+`roles/access_gateway/tasks/allowlist.yml` makes it `vpn_allowed_ips`, the list that Traefik's
+`vpn-only` middleware enforces for tailnet-mode services and routes. It replaces the
+`vpn_allowed_ips` of group_vars. `127.0.0.1` and `::1` always stay, for health checks from the
+box itself, and the access gateway still appends the Headscale tailnet range. `bay validate`
+warns `[tailnet] allowlist replaces vpn_allowed_ips from group_vars` while group_vars still
+sets the old list. `bay doctor` and `bay gateway` show the list the box enforces. Without the
+key nothing changes: `vpn_allowed_ips` from group_vars is the list. A change since the last
+fleet commit is a plan step of kind `tailnet`, risk `shared`.
 
 `bay compile` writes the routes as `tailnet_proxies:` into `group_vars/all/services.yml`,
 with the keys the Traefik, Headscale and CrowdSec templates read. A key at its default is

@@ -333,9 +333,11 @@ def restore(
 
     Streams the snapshot into the container and validates afterwards
     (postgres: table count > 0, redis: PONG). A safety snapshot tagged
-    `pre-restore` is taken first. File-method targets — including the
-    automatic headscale state backup — cannot be restored by this command;
-    see docs/backups.md for the manual restic procedure.
+    `pre-restore` is taken first. A volume backup target
+    (`<stack_name>_<volume>`) is extracted into the volume with its
+    container stopped. The automatic headscale state backup cannot be
+    restored by this command; see docs/backups.md for the manual restic
+    procedure.
 
     Examples:
 

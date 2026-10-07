@@ -28,6 +28,7 @@ services:
       secrets:                   # Docker build secrets (optional, BuildKit)
         npmrc: "{{ vault_npmrc }}"  # id → vault value, mounted via --secret
       token: "{{ secrets.GIT_TOKEN }}"   # Access token for private repos (optional)
+      shared_from: myapp         # This service shares the build of container myapp (set by the compile)
       paths:                         # Path filtering for webhook triggers (optional)
         exclude:                     # Skip rebuild if ALL changed files match
           - "*.md"
@@ -35,6 +36,7 @@ services:
           - ".github/**"
     domains:                         # Domains routed to this service
       - app.example.com
+    path: /api                       # Route only this prefix of domains (bay.toml service path)
     ports:
       internal: <port>               # Container port Traefik routes to
 
@@ -102,6 +104,7 @@ services:
     zero_downtime: true              # Enable canary zero-downtime deploy (default: false)
     replicas: 1                      # Container replicas (default: 1)
     command: <override>              # Override container CMD
+    release: <command>               # Run once in a one-shot container of the new image before create/recreate
 
     middleware:                       # Per-service middleware config
       security_headers: true         #   Opt-out of global headers (default: true)
@@ -239,6 +242,82 @@ accessories:
       schedule: "0 3 * * *"          #   Cron schedule
       retain: 7                      #   Days to keep
 ```
+
+### `release`
+
+`release` is a shell command (`sh -c`). The compile writes it on the main container from
+`bay.toml` `release` (the env value wins). The reconciler runs it once in a one-shot
+container `<name>-release` of the new image, with the env, network, mounts and user of the
+container, before it creates or recreates the container. A non-zero exit or a timeout
+(`bay_release_timeout`, default 600 seconds) fails that container's action: the old
+container keeps running and the receipt says `failed`. A push build (`rebuild.sh`) runs it
+before it swaps the container, and on a failure leaves `:latest` where it was and raises
+`build.failed`. A change of `release` alone recreates nothing.
+
+### `path`
+
+A service with `path` shares the main container's `domains`. Its router matches the domains
+and the path on a segment boundary: ``Host(...) && (Path(`/api`) || PathPrefix(`/api/`))``.
+The router has an explicit priority, the length of its rule, so it outranks every router of
+the main container. A longer path outranks a shorter one. The prefix is not stripped. A
+`healthcheck_path` outside `path` gets no health router, because that path belongs to the
+main container.
+
+### `build.shared_from`
+
+A routed `bay.toml` service with neither `image` nor its own `build` gets a copy of the main
+container's `build` plus `shared_from: <main container>`. The main container is then the
+primary of the build group (`bay_build_dedup_map`), so it builds. The service re-tags the
+same image. A registry build also writes the main container's `image` on the service, so a
+push pulls it there too.
+
+## Top-level keys besides services
+
+Each key below is written only when it has entries, so a fleet without the feature compiles
+to the same bytes as before.
+
+### `jobs`
+
+```yaml
+jobs:
+  myapp-job-cleanup:                 # <name>-job-<job>, <name>-<env>-job-<job> outside the primary env
+    of: myapp                        # the main container
+    schedule: "0 2 * * *"            # cron line from bay.toml, UTC
+    on_calendar: "*-*-* 02:00:00 UTC"  # the same, as a systemd OnCalendar expression
+    command: node dist/cleanup.js
+    memory: 256m                     # optional; default: the main container's mem_limit
+```
+
+`deploy_stack` installs, on the box that runs `of`, the script `<stack_dir>/jobs/<job>.sh`, the
+shared one-shot unit `bay-job@.service` (runs as the app user) and the timer
+`bay-job@<job>.timer`. The script runs `docker run --rm` with the image that `of` runs at that
+moment, its env file, network and mounts. A job that is gone loses its timer and script on
+the next deploy.
+
+### `volume_backups`
+
+```yaml
+volume_backups:
+  myapp-data:                        # the volume name in services.yml
+    container: myapp                 # the container that mounts it
+    path: /app/data                  # where it is mounted
+    schedule: "0 3 * * *"            # optional; [backup] hour, UTC
+    retain: 30                       # optional; [backup] keep, in days
+```
+
+The backup role adds one restic `file` target `<stack_name>_<volume>` per entry whose
+container runs on the host. See [backups.md](backups.md#volume-backups).
+
+### `tailnet_allowlist`
+
+```yaml
+tailnet_allowlist:
+  - 100.64.0.0/10
+```
+
+From `bay.fleet.toml` `[tailnet] allowlist`. On every deploy it replaces `vpn_allowed_ips`
+(the `vpn-only` IPAllowList), with `127.0.0.1` and `::1` kept. The Headscale range is appended
+after it. See [tailnet-ingress.md](tailnet-ingress.md).
 
 ## Build from Source
 
