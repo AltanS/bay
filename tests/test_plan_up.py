@@ -1647,10 +1647,15 @@ def test_up_deploy_reports_go_to_a_temp_dir_never_cwd(
     assert list(cwd.iterdir()) == []
 
 
-def test_up_deploy_runs_deploy_stack_and_git_deploy_tags(
+def test_up_and_plan_run_the_same_deploy_tag(
     world: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``git_deploy`` renders rebuild.sh; ``bay up`` must run it with ``deploy_stack``."""
+    """Plan must equal up: both run ``deploy_stack`` only.
+
+rebuild.sh is rendered under that tag by the git_deploy role (see
+tests/test_git_deploy_rebuild_render.py), so up needs no ``git_deploy`` tag,
+which would also clone, build and pull.
+"""
     from types import SimpleNamespace
 
     from bay_cli.commands import ops, validate
@@ -1670,8 +1675,16 @@ def test_up_deploy_runs_deploy_stack_and_git_deploy_tags(
     _REAL_DEFAULT_DEPLOY(cx_of(world), "production")
 
     assert seen["playbook"] == "deploy"
-    assert seen["tags"] == "deploy_stack,git_deploy"
-    assert sorted(seen["tags"].split(",")) == ["deploy_stack", "git_deploy"]
+    assert seen["tags"] == "deploy_stack" == applymod.UP_DEPLOY_TAGS
+
+    plan_tags: list[Any] = []
+
+    def fake_plan_run(cx: Context, playbook: str, env: str, tags: Any, extra: list[str]) -> None:
+        plan_tags.append(tags)
+
+    monkeypatch.setattr(ops, "_run_playbook", fake_plan_run)
+    planmod.default_box_check(cx_of(world), "production", world["fleet"] / "x.yml")
+    assert plan_tags == [seen["tags"]]
 
 
 def test_the_report_hand_off_honours_the_report_dir_var() -> None:

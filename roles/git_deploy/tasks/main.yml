@@ -27,6 +27,18 @@
       tags: [deploy_stack, build, git_deploy]
   tags: [deploy_stack, build, git_deploy]
 
+# rebuild.sh holds a frozen copy of each container's labels, ports and mounts.
+# Render it under deploy_stack too, so `bay up` (which runs deploy_stack only)
+# does not leave the next webhook build with the old values. Render only: no
+# clone, build or pull. Needs the facts render_image_map.yml resolves, so it
+# must stay right after it.
+- name: Re-render rebuild.sh (runs under deploy_stack too)
+  ansible.builtin.include_tasks:
+    file: render_rebuild_script.yml
+    apply:
+      tags: [deploy_stack, build, git_deploy]
+  tags: [deploy_stack, build, git_deploy]
+
 - name: Resolve all build services
   ansible.builtin.set_fact:
     _all_build_services: >-

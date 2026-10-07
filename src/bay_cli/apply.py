@@ -10,7 +10,7 @@
    record gets ``result: pending`` and ``previous`` (the pin it replaces).
 3. Compile the fleet into its services file (hash header).
 4. Commit the fleet repo: ``bay: up <name> <env> <short sha>``.
-5. Run today's deploy for the box env, limited to the ``deploy_stack`` and ``git_deploy`` tags.
+5. Run today's deploy for the box env, limited to the ``deploy_stack`` tag.
 6. Read the receipt back. The deploy covered the whole box env, so every
    project the compile read that has a ``[deploy.<env>]`` on that box env is
    pinned (:func:`_pin_deployed`): ``commit``, ``result``, ``deployed_at``,
@@ -56,16 +56,15 @@ class Refused(Exception):
         self.exit_code = int(plan["exit_code"]) or 1
 
 
-#: The tags ``bay up`` runs. ``git_deploy`` renders ``rebuild.sh``, which holds a
-#: frozen copy of each container's labels, ports and mounts. Without it, the next
-#: webhook build would recreate a container with the values from before this up.
-#: ``bay plan``'s box check runs ``deploy_stack`` only: it asks the reconciler
-#: what it would do, and ``git_deploy`` has no part in that answer.
-UP_DEPLOY_TAGS = "deploy_stack,git_deploy"
+#: The tags ``bay up`` runs. They are the tags ``bay plan``'s box check runs, so
+#: the plan and the apply do the same work. The ``git_deploy`` role tags its
+#: render tasks (rebuild.sh, image-map.json) with ``deploy_stack``, so a ``bay up``
+#: re-renders the webhook rebuild script without cloning, building or pulling.
+UP_DEPLOY_TAGS = "deploy_stack"
 
 
 def default_deploy(cx: Context, box_env: str) -> None:
-    """Today's ``bay deploy <env> --tags deploy_stack,git_deploy``, without the prompts and the banner."""
+    """Today's ``bay deploy <env> --tags deploy_stack``, without the prompts and the banner."""
     from bay_cli.commands import ops
     from bay_cli.commands.validate import run_validation
     from bay_cli.healthcheck import new_report_dir, report_dir_vars

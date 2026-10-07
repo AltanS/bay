@@ -12,12 +12,12 @@ needing manual action is called out under **Upgrade notes**. Entries for
 
 ### Fixed
 
-- `bay up` now runs the deploy with the tags `deploy_stack,git_deploy`. Before,
-  it ran `deploy_stack` only, so `rebuild.sh` kept a frozen copy of each
-  container's labels, ports and mounts from before the `up`. The next webhook
-  build then recreated the container with the old values. `bay plan`'s box
-  check still runs `deploy_stack` only: it asks the reconciler, and
-  `git_deploy` has no part in that answer.
+- `bay up` now re-renders `rebuild.sh`. It kept a frozen copy of each
+  container's labels, ports and mounts from before the `up`, so the next webhook
+  build recreated the container with the old values. The `git_deploy` role now
+  renders the script under the `deploy_stack` tag too, as it already did for
+  `image-map.json`. `bay up` and `bay plan` still run `deploy_stack` only, so
+  they do the same work, and nothing clones, builds or pulls.
 - The plan no longer shows a false `volumes` reason when the box reports a
   mount with Docker's default `:rw` suffix. A missing mode now equals `rw`,
   and the order of mode flags does not matter.
@@ -28,10 +28,8 @@ needing manual action is called out under **Upgrade notes**. Entries for
 
 ### Upgrade notes
 
-- The first `bay up` after this release runs the `git_deploy` role, as a full
-  `bay deploy` does. It renders `rebuild.sh`, the webhook units and the image
-  map, and it can clone and build images for services with a local build
-  strategy. Expect this first `up` to take longer on a box with such services.
+- The first `bay up` after this release rewrites `rebuild.sh` on each box that
+  has webhook builds. Nothing else changes on the box.
 - The next compile changes the `port` line of each loopback resource in
   `group_vars/all/services.yml`. Commit it. The containers do not recreate.
 

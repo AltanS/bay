@@ -1,0 +1,45 @@
+---
+# Render rebuild.sh under the deploy_stack tag too.
+#
+# rebuild.sh holds a frozen copy of every container's labels, ports and
+# mounts (it is what a webhook build runs). The role itself is tagged only
+# [build, git_deploy], so a `--tags deploy_stack` run (which is what `bay up`
+# and `bay plan` run) left it stale: the next webhook build recreated the
+# container with the values from before the deploy.
+#
+# Same approach as render_image_map.yml, which this file runs right after:
+# that file resolves every fact rebuild.sh.j2 reads (git_deploy_services,
+# git_deploy_rebuild_services, _is_build_server) with `is not defined` guards,
+# so they exist here whatever tags are selected. Include this file only after
+# render_image_map.yml.
+#
+# Only the render is tagged. Clone, build, pull, builder setup, deploy keys,
+# systemd units and the webhook receiver stay under [build, git_deploy].
+# systemd.yml still renders the same file in a full run; the second render
+# changes nothing.
+#
+# The `when` mirrors the guards of the "Deploy webhook infrastructure" blocks
+# in main.yml, which wrap the rebuild.sh render in a full run.
+
+- name: Render rebuild.sh (runs under deploy_stack too)
+  when:
+    - webhook is defined
+    - git_deploy_rebuild_services | default([]) | length > 0
+    - (_all_build_services | default([]) | length > 0)
+      or (_is_build_server | bool and (_global_remote_build_services | default([]) | length > 0))
+  block:
+    - name: Ensure bin directory exists for rebuild.sh
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/bin"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        # 0750 app_user, same as every other "Ensure bin directory exists".
+        mode: "0750"
+
+    - name: Deploy rebuild script
+      ansible.builtin.template:
+        src: rebuild.sh.j2
+        dest: "{{ stack_dir }}/bin/rebuild.sh"
+        owner: "{{ app_user }}"
+        mode: "0700"
