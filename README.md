@@ -10,7 +10,9 @@
 
 [![CI](https://github.com/AltanS/bay/actions/workflows/ci.yml/badge.svg)](https://github.com/AltanS/bay/actions/workflows/ci.yml)
 
-Ansible framework for provisioning hardened Docker servers with VPN-aware reverse proxy and declarative service deployment.
+Bay is a command-line tool and an Ansible framework. It provisions hardened Docker servers with a VPN-aware reverse proxy and deploys your apps to them from a declared config.
+
+Two files are the source of truth. An app says what it is and where it deploys in its `bay.toml`. A fleet (the repo that holds your boxes, secrets and shared resources) says what the boxes are in its `bay.fleet.toml`. The daily flow is `bay plan`, `bay approve` and `bay up`. Bay compiles the two files into `group_vars/all/services.yml`. That file is generated and never hand-edited. `bay deploy` and `bay provision` are for rig work (the proxy, the firewall, a new box). Where each file lives: [docs/layout-scenarios.md](docs/layout-scenarios.md).
 
 > **[docs/features.md](docs/features.md)** -- full feature overview and competitive advantages.
 
@@ -22,7 +24,7 @@ Ansible framework for provisioning hardened Docker servers with VPN-aware revers
 - **Monitors** container images for updates with [Watchtower](https://github.com/nicholas-fedor/watchtower) — notify-by-default with opt-in auto-update per service
 - **Alerts** on crashes, build failures, deploy outcomes, disk pressure and backup failures — to Telegram and/or any webhook sink (Campfire, Slack, plain text)
 
-Everything is driven by a single `services.yml` file — define your services and accessories there, and the roles generate Traefik labels, Compose files, env files, and access control automatically.
+Everything the boxes run comes from `bay.toml` and `bay.fleet.toml`. `bay up` compiles them, and the roles generate the Traefik labels, the container settings, the env files and the access control from the result.
 
 ## Documentation
 
@@ -33,7 +35,10 @@ Full reference lives in **[docs/](docs/README.md)** — the docs index links eve
 | What changed between releases | [CHANGELOG.md](CHANGELOG.md) |
 | Feature overview & comparison | [docs/features.md](docs/features.md) |
 | First project walkthrough | [docs/onboarding.md](docs/onboarding.md) |
-| `services.yml` schema (the core config) | [docs/services.md](docs/services.md) |
+| Where every file lives, 15 scenarios | [docs/layout-scenarios.md](docs/layout-scenarios.md) |
+| `bay.toml` reference (the app config) | [docs/bay-toml.md](docs/bay-toml.md) |
+| plan, approve, up, rollback, adopt, remove | [docs/plan.md](docs/plan.md) |
+| Compiled `services.yml` schema (generated, never hand-edited) | [docs/services.md](docs/services.md) |
 | Access gateways (none / WireGuard / Headscale) | [docs/access-gateways.md](docs/access-gateways.md) |
 | Tailnet HTTPS ingress, ACL & identity | [docs/tailnet-ingress.md](docs/tailnet-ingress.md) |
 | Build → deploy pipeline | [docs/build-pipeline.md](docs/build-pipeline.md) · [docs/build-strategies.md](docs/build-strategies.md) |
@@ -65,16 +70,21 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 Install Bay once per machine. Make a fleet. Then set up an app repo.
 
 ```bash
-git clone https://github.com/AltanS/bay ~/.local/share/bay/framework && ~/.local/share/bay/framework/bootstrap.sh
+git clone https://github.com/AltanS/bay ~/.local/share/bay/framework
+~/.local/share/bay/framework/bootstrap.sh
 bay fleet init prod
 cd my-app && bay init --fleet prod
 ```
 
+Here `--fleet prod` after `init` is the fleet name, the folder `~/.config/bay/fleets/prod`. It is not the global `--fleet <path>` option, which goes before the verb. `bay init` writes `fleet = "prod"` into the `bay.toml` it drafts, and later commands in this repo find the fleet from that line.
+
 Read **[docs/install.md](docs/install.md)** for the install steps, updates and how Bay picks a fleet. Read **[docs/onboarding.md](docs/onboarding.md)** for the first project, step by step.
 
-`bay init` writes a `bay.toml` in your app repo. Then `bay plan` shows what will change, and `bay up` pins the commit and deploys it.
+`bay init` writes a `bay.toml` in your app repo. Then `bay plan` shows what will change, and `bay up` pins the commit and deploys the whole box environment.
 
-#### Pre-flight check and deploy
+#### Pre-flight check, provision and rig deploy
+
+This is the rig side: a new box, the firewall, the proxy. App changes go through `bay plan` and `bay up` ([docs/plan.md](docs/plan.md)).
 
 ```bash
 # Validate DNS, SSH, vault password, gateway config
@@ -92,88 +102,80 @@ bay provision production -- -u root
 bay deploy production
 ```
 
-`bay doctor` checks your **environment** (DNS resolution, SSH reachability,
+`bay doctor` checks your **environment** (the fleet it picked, DNS resolution, SSH reachability,
 vault password present). `bay validate` checks your **config** (YAML
-syntax, the services schema, inventory, vault keys) and also runs
+syntax, the compiled services schema, inventory, vault keys) and also runs
 automatically before every deploy, so running it here is optional — useful
 for iterating on config without waiting for a full deploy.
 
 ## Project structure
 
+The framework checkout (the code that `bay` runs):
+
 ```
 bay/
   bootstrap.sh                 # Installs the bay command on this machine
   version.yml                  # Framework version declaration (bay_version)
-  ansible.cfg                  # Ansible settings (inventory, vault, roles path)
+  ansible.cfg                  # Ansible settings (inventory, roles path)
   provision.yml                # Server hardening playbook
   deploy.yml                   # Service deployment playbook (two-phase)
   webhook.yml                  # Webhook setup playbook (deploy keys + receiver)
   restore.yml                  # Backup restore playbook
   requirements.yml             # External Galaxy role dependencies
   pyproject.toml               # Python deps (Typer, Rich, Ansible)
-  src/bay_cli/                # Python CLI package
+  src/bay_cli/                 # The CLI (Typer + Rich)
     cli.py                     # Typer app, command registration, entry point
-    runner.py                  # Subprocess runner with Rich spinners
-    git.py                     # Git operations (fetch, checkout, tags)
-    ansible.py                 # Ansible operations (galaxy, playbooks, vault)
-    guards.py                  # Pre-flight checks (version drift, git health)
-    paths.py                   # Path resolution (framework checkout, fleet)
-    console/                   # Rich output, banner, theme
-    commands/                  # Subcommand modules
-      framework.py             # status
-      ops.py                   # deploy, provision, restore
-      vault.py                 # vault edit/view/encrypt/decrypt
-      secret.py                # secret generation and password hashing
-      backup.py                # backup list/run/restore/status/check
-      test.py                  # infrastructure tests
-      webhook.py               # webhook setup and GitHub instructions
-      self_cmd.py              # self update, self version
-      fleet_cmd.py             # fleet init, fleet ls
+    bay_toml.py                # bay.toml validator
+    fleet.py                   # bay.fleet.toml reader
+    compiler.py                # bay.toml + bay.fleet.toml -> group_vars/all/services.yml
+    plan.py, apply.py          # bay plan, bay up
+    lockfile.py                # projects/<name>/bay.lock
+    adopt.py, remove.py        # bay adopt, bay remove
+    routes.py                  # tailnet routes
+    importer.py                # bay import (old YAML fleet -> new layout)
+    commands/                  # One module per verb group (doctor, route, fleet, self, vault, ...)
+  src/bay_reconcile/           # Container reconciler (ships to the boxes)
+  roles/                       # Ansible roles (below)
+  docs/                        # Full documentation, see docs/README.md
   example/                     # Example fleet files (reference only)
-    hosts/
-      production               # Example production inventory
-    group_vars/
-      all/
-        main.yml               # Core config (users, docker, project identity)
-        security.yml           # Firewall, CrowdSec, SSH hardening
-        services.yml           # Service and accessory definitions (the key file)
-        users.yml              # User accounts and SSH keys
-        vpn_access.yml         # VPN IP whitelist
-      production/
-        main.yml               # Production-specific overrides
-        domains.yml            # Domain names, Let's Encrypt email
-        secrets.yml            # Vault-encrypted credentials
-  roles/
-    common/                    # System baseline (apt packages, swap, unattended upgrades)
-    users/                     # User and SSH key management
-    sshd_hardening/            # SSH drop-in hardening (MaxStartups, LoginGraceTime)
-    nftables/                  # Firewall rules
-    traefik/                   # Reverse proxy, SSL, routing labels
-    deploy_stack/              # Stack deployment orchestration (env, config, containers, db)
-    build_image/               # Image build strategies (registry, local, cloud)
-    git_deploy/                # Git clone, Docker build, deploy keys, webhook receiver
-    backup/                    # Restic backups (pg_dump, mysql, redis, file → S3)
-    watchtower/                # Container image update monitoring and auto-update
-    access_gateway/            # VPN backend orchestration (wireguard or headscale)
-    headscale/                 # Headscale coordination server (self-hosted Tailscale)
-    tailscale_node/            # Tailscale daemon — VPS joins its own tailnet
-    docker_monitor/            # Container crash monitor (systemd service)
-    cronjobs/                  # Maintenance cron jobs
-  docs/                        # Full documentation — see docs/README.md for the index
-    README.md                  # Docs hub: every guide grouped by topic
-    features.md                # Feature overview and competitive advantages
-    services.md                # services.yml schema reference (the core config)
-    onboarding.md              # First project walkthrough
-    access-gateways.md         # VPN gateways (WireGuard vs Headscale)
-    tailnet-ingress.md         # Tailnet HTTPS ingress, ACL, identity
-    build-pipeline.md          # Webhook → build → deploy reference
-    backups.md                 # Backup setup, S3 config, retention, restore
-    multi-region.md            # Multi-region deployment guide
-    crowdsec.md                # CrowdSec IDS/IPS
-    reconciler.md              # Server-side deploy reconciler
-    adr/                       # Architecture Decision Records
-    ...                        # + more — see docs/README.md
   vendor/roles/                # External Galaxy roles (gitignored)
+```
+
+A fleet (the repo you own, at `~/.config/bay/fleets/<name>`):
+
+```
+my-fleet/
+  bay.fleet.toml               # Boxes, domains, shared resources (hand-edited)
+  projects/<name>/bay.toml     # An app that has no repo of its own (hand-edited)
+  projects/<name>/bay.lock     # CLI-owned pin and deploy record, one per project
+  plans/                       # Plan records, committed by bay up
+  hosts/                       # Ansible inventory (hand-edited)
+  group_vars/all/services.yml  # GENERATED by bay compile, never edit
+  group_vars/<env>/secrets.yml # ansible-vault, edited with bay vault edit
+  .vault_pass                  # the vault password, out of git
+```
+
+An app that has its own repo keeps its `bay.toml` there. The fleet holds only its lock.
+
+The roles:
+
+```
+roles/
+  common/                    # System baseline (apt packages, swap, unattended upgrades)
+  users/                     # User and SSH key management
+  sshd_hardening/            # SSH drop-in hardening (MaxStartups, LoginGraceTime)
+  nftables/                  # Firewall rules
+  traefik/                   # Reverse proxy, SSL, routing labels
+  deploy_stack/              # Stack deployment orchestration (env, config, containers, db)
+  build_image/               # Image build strategies (registry, local, cloud)
+  git_deploy/                # Git clone, Docker build, deploy keys, webhook receiver
+  backup/                    # Restic backups (pg_dump, mysql, redis, file -> S3)
+  watchtower/                # Container image update monitoring and auto-update
+  access_gateway/            # VPN backend orchestration (wireguard or headscale)
+  headscale/                 # Headscale coordination server (self-hosted Tailscale)
+  tailscale_node/            # Tailscale daemon, the VPS joins its own tailnet
+  docker_monitor/            # Container crash monitor (systemd service)
+  cronjobs/                  # Maintenance cron jobs
 ```
 
 ## Playbooks
@@ -210,23 +212,22 @@ The deploy playbook runs in three phases to minimize root usage:
 
 This reduces blast radius if a container is compromised — the deploy pipeline never runs as root except for directory creation and system service setup.
 
-## Services and accessories
+## Apps and shared resources
 
-Everything is defined in a single `group_vars/all/services.yml` — it drives Traefik labels, Compose generation, env files, access control, backups, and update policies.
+- **An app** is a `bay.toml`: what it is (image or build, port, health, needs, secrets, mounts) and where it deploys (`[deploy.<env>]`). The app gets Traefik routing, SSL and access control. An app with a repo keeps the file in that repo. An app with no repo is `projects/<name>/bay.toml` in the fleet.
+- **A shared resource** (a Postgres, a Redis) is a `[resources.*]` table in `bay.fleet.toml`. An app asks for it with `needs`.
+- **`services.yml` is compiled.** `bay up` (and `bay compile`) write `group_vars/all/services.yml` from the fleet and the pinned `bay.toml` files. It has a hash header. A hand edit makes the next compile refuse.
 
-- **Services** are app containers that get Traefik routing, SSL, and access control
-- **Accessories** are infrastructure (databases, caches) deployed alongside services
-
-See **[docs/services.md](docs/services.md)** for the full schema reference, access modes, environment variables, basic auth, and middleware options.
+See **[docs/bay-toml.md](docs/bay-toml.md)** for the app schema, access modes, env, secrets and mounts, and **[docs/services.md](docs/services.md)** for the compiled form. The sections below that show `services.yml` keys describe that compiled form: the same setting comes from `bay.toml` or `bay.fleet.toml`.
 
 ## Secrets management
 
 Secrets are managed with `ansible-vault`. The setup:
 
 1. **`group_vars/production/secrets.yml`** (in your fleet) holds all secret values under a `secrets:` dict
-2. Services reference secrets by name in `services.yml` → `env.secret: [DB_PASSWORD, ...]`
+2. An app lists secret names in `bay.toml` (`secrets = ["DB_PASSWORD"]`). The compiled `services.yml` carries the names as `env.secret`. Values are never in either file.
 3. At deploy time, the `deploy_stack` role resolves secrets and writes per-service `.env` files
-4. The vault password lives in `.vault_pass` (gitignored), configured in `ansible.cfg`
+4. The vault password lives in `.vault_pass` in the fleet root. Keep it out of git: add it to the fleet's `.gitignore`. Bay reads exactly that file. See [docs/install.md](docs/install.md#the-vault-password).
 
 Manage secrets with `bay vault` (edit, view, encrypt, decrypt, set) and generate values with `bay secret` — see `bay vault --help` and `bay secret --help` for examples and the secrets key-casing convention.
 
@@ -243,7 +244,7 @@ Bay is a command you install once per machine. It does not live inside your proj
 └── hosts/                   # Real inventory
 ```
 
-Pick the fleet with `bay --fleet <path> <command>`, with `BAY_FLEET=<path>`, with `BAY_FLEET_NAME=<name>`, or by running inside an app repo whose `bay.toml` names `fleet = "<name>"`. With none of these, the command stops and lists them. To try a change to the framework or to a fleet without a release, point `--fleet` at it: `bay --fleet ./my-fleet deploy production`. See [docs/install.md](docs/install.md).
+Bay picks the fleet in one fixed order: `--fleet <path>`, `BAY_FLEET`, the `fleet =` line of the `bay.toml` you stand in, `BAY_FLEET_NAME`, and for `plan`, `up`, `approve`, `rollback`, `remove` and `doctor` the fleet directory you stand in. With none of these, the command stops and lists them. The full rule is in [docs/install.md](docs/install.md#pick-a-fleet).
 
 [SKILL.md](SKILL.md) is the framework's orientation document for an AI agent working in a fleet: the rules that bite, the whole command inventory (compiled from the CLI itself), and the doc map. `bay --skill` prints it raw for piping anywhere else.
 
@@ -259,7 +260,7 @@ bay self version
 bay self update
 
 # Move to one given release
-bay self update --to v2.0.0
+bay self update --to v2.1.0
 
 # See the version, the fleet and the feature flags
 bay status

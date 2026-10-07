@@ -14,9 +14,10 @@ checkout at `~/.local/share/bay/framework` (see `docs/install.md`). A *fleet* is
 the repo that holds your boxes and the apps on them. It keeps `group_vars/`,
 `hosts/` and `bay.fleet.toml`, at `~/.config/bay/fleets/<name>`. An app repo
 holds a `bay.toml` that names its fleet. The framework owns roles, playbooks and
-the CLI. Pick the fleet with `bay --fleet <path>`, `BAY_FLEET=<path>`,
-`BAY_FLEET_NAME=<name>`, or by running inside an app repo whose `bay.toml` names
-`fleet = "<name>"`.
+the CLI. The fleet is picked in one order (`docs/install.md`, "Pick a fleet"):
+`bay --fleet <path>`, `BAY_FLEET=<path>`, the `fleet = "<name>"` line of the `bay.toml` you
+are in, `BAY_FLEET_NAME=<name>`, and for `plan`, `up`, `approve`, `rollback` and `remove`
+the fleet directory you stand in.
 
 ```
 ~/.local/share/bay/framework/   # the framework checkout (bay self update)

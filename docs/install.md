@@ -11,38 +11,50 @@ Bay is a command you install once per machine. It is not a clone inside your pro
 
 ```bash
 git clone https://github.com/AltanS/bay ~/.local/share/bay/framework
-uv tool install --editable ~/.local/share/bay/framework
-```
-
-The checkout at `~/.local/share/bay/framework` is the framework. The `bay` command runs
-from it. The deploy commands also read the Ansible files in it.
-
-The checkout also needs its Python and Ansible dependencies. The script
-`bootstrap.sh` in the checkout does all of it in one go, and it is safe to run again:
-
-```bash
-git clone https://github.com/AltanS/bay ~/.local/share/bay/framework
 ~/.local/share/bay/framework/bootstrap.sh
 ```
 
+This is the whole install. It is safe to run again. `bootstrap.sh` does three things:
+
+1. `uv sync` in the checkout: the Python packages and `ansible-core`.
+2. `ansible-galaxy install` of the roles and the collections that `requirements.yml` lists,
+   into `vendor/roles` and `vendor/collections` of the checkout.
+3. `uv tool install --editable` of the checkout: the `bay` command.
+
+It writes no fleet and no config.
+
+The checkout at `~/.local/share/bay/framework` is the framework. The `bay` command runs
+from it, and the deploy commands read the Ansible files in it. `uv tool install --editable`
+alone is not enough to deploy: the roles and collections in `vendor/` are not in git, so
+without step 2 `bay plan --remote`, `bay up` and `bay deploy` stop on a missing role.
+`bay self update` runs steps 1 to 3 again. `bay doctor` does not check them.
+
 If your shell cannot find `bay`, run `uv tool update-shell` and open a new shell.
+
+A fresh clone is the default branch. For a fixed release, run `bay self update --to v2.1.0`
+after the install. A fleet with `format = 2` in `bay.fleet.toml` needs Bay 2.1 or newer: a
+Bay 2.0 command refuses it. Run `bay self update` on every machine that uses such a fleet.
 
 ## Update
 
 ```bash
 bay self update              # newest release
-bay self update --to v2.0.0  # one given tag
+bay self update --to v2.1.0  # one given tag
 bay self version             # what is installed, and where
 ```
 
-`bay self update` fetches the tags, checks out the tag, syncs the dependencies,
-installs the command again and prints the old and the new version. It stops when
-the checkout has uncommitted changes.
+`bay self update` fetches the tags, checks out the tag (detached), syncs the Python
+packages, the roles and the collections, installs the command again and prints the old
+and the new version. With no `--to` it takes the newest tag by version. It stops when
+the checkout has uncommitted changes. It works on the checkout that the running `bay`
+came from, wherever that is.
 
 ## Development mode: the editable install
 
 `uv tool install --editable <checkout>` makes `bay` run the checkout live. This is the
-install above. It is an editable install: the command is the code on disk, not a copy.
+install that `bootstrap.sh` makes. It is an editable install: the command is the code on
+disk, not a copy. Bay has no other install: the command needs the Ansible files and the
+`vendor/` folder of the checkout, so a copy of the Python package alone cannot deploy.
 
 - `bay self version` prints the checkout path, so you see which code runs.
 - A framework edit in the checkout takes effect at once. There is no tag to cut and no
@@ -65,16 +77,57 @@ bay fleet init prod --from git@example.com:me/fleet.git   # or clone one you alr
 bay fleet ls                                              # list the fleets on this machine
 ```
 
+### The vault password
+
+The secret values of a fleet are in `group_vars/<env>/secrets.yml`, encrypted with
+`ansible-vault`. Bay reads the password from one file: `.vault_pass` in the root of the
+fleet, next to `bay.fleet.toml`. It is one line, and the same file serves every environment
+of that fleet. Bay never writes it and no repo holds it. The operator gives it to you, out of
+band. `bay fleet init` does not add `.vault_pass` to the `.gitignore` of the fleet: add the
+line yourself, and keep the file out of git.
+
+Without the file, `bay doctor` fails its Vault check, `bay vault edit`, `bay plan` with a
+secret check and every deploy cannot open the secrets, and `bay secret missing` and
+`bay validate` skip the check with a warning. The deploy hands the file to Ansible. If you
+set `ANSIBLE_VAULT_PASSWORD_FILE` yourself, Bay replaces it with `.vault_pass` when that file
+exists.
+
+### The three names of a fleet
+
+| Where | Key | What it does |
+|---|---|---|
+| Folder | `~/.config/bay/fleets/<name>` | The key that Bay looks up. `fleet = "<name>"` in a `bay.toml` and `BAY_FLEET_NAME=<name>` both mean this folder. |
+| `bay.fleet.toml` | `name = "<name>"` | The label that Bay prints on the `fleet:` line. `bay init` copies it into the `fleet =` line of the `bay.toml` it drafts. |
+| `bay.toml` | `fleet = "<name>"` | Names the fleet folder. For a project that lives in the fleet, Bay also checks that it equals `name` in `bay.fleet.toml`, and stops on a difference. |
+
+The three must be equal. `bay fleet init <name>` makes the folder and the `name` line equal. `bay fleet init
+<name> --from <url>` only clones into the folder `<name>`. It does not read or change the `name`
+of the repo. If you clone with another folder name than the `name` in `bay.fleet.toml`, then `bay init` writes
+`fleet = "<name in the file>"`, and the lookup of that name fails with "fleet not found". Use the same name in
+the folder, or reach the fleet with `--fleet <path>` or `BAY_FLEET=<path>`, which skip the folder lookup.
+`bay fleet ls` prints the folders, never the `name` lines.
+
 ## Pick a fleet
 
-A command that works on a fleet finds it in this order:
+A command that works on a fleet finds it in this order. The first rule that applies wins.
 
-1. `--fleet <path>`, before the command: `bay --fleet ./my-fleet deploy production`
-2. `BAY_FLEET=<path>` in the environment.
-3. The fleet that the `bay.toml` of the app repo you are in names (`fleet = "prod"`).
+1. `--fleet <path>`, before the verb: `bay --fleet ./my-fleet deploy production`
+2. `BAY_FLEET=<path>` in the environment. A stray `BAY_FLEET` in a shell profile beats rule 3.
+3. The fleet that the `bay.toml` of the app repo you are in names (`fleet = "prod"`). Bay
+   looks in the working directory and above it.
 4. `BAY_FLEET_NAME=<name>`, a fleet in `~/.config/bay/fleets`.
+5. The fleet directory you stand in: the nearest directory at or above the working directory that has
+   a `bay.fleet.toml`. Only `bay plan`, `bay up`, `bay approve`, `bay rollback`, `bay remove` and
+   `bay doctor` use rule 5. Every other verb (`init`, `adopt`, `show`, `deploy`, `provision`, `vault`, `secret`,
+   `status`, `route` and the rest) skips it: from inside a fleet directory, pass `--fleet <path>` or
+   set `BAY_FLEET`.
 
 With none of these, the command stops and lists the ways to pick one.
+
+`bay init` and `bay adopt` run in an app repo that has no `bay.toml` yet, so rule 3 has nothing
+to read. They use rules 1, 2 and 4. `bay init` also takes its own `--fleet <name>` (a folder name, not
+a path, and not the global option), which stands in the place of rule 3. `bay adopt` has no such option:
+use the global `--fleet <path>`, `BAY_FLEET` or `BAY_FLEET_NAME`.
 
 `--fleet <path>` is also how you try a fleet that is not under `~/.config/bay/fleets`.
 It works from any directory.
@@ -98,7 +151,8 @@ neither place is an error that names the project.
 
 **Push first.** `bay up` refuses a commit that is on no branch of the remote. The box
 builds from the remote, so it cannot run a commit that only your machine has. `bay plan`
-says so in a note. `bay up` deploys the whole box environment, not one project. Other projects deploy at their own pin.
+says so in a note. `bay up` deploys the whole box environment, not one project. Which pins it
+moves depends on where you run it (see [plan.md](plan.md#every-deployed-project-is-pinned)).
 
 ## Caches
 
