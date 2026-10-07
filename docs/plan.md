@@ -81,10 +81,11 @@ With `--json`, stdout holds exactly one JSON document, also for an error
 prints, Ansible included, go to stderr. With `--log <path>`, they are
 appended to that file instead, with or without `--json`.
 
-The pin is a config pin. Bay compiles `bay.toml` at the pinned commit, but a
-container that builds from source still builds the head of its `branch` on
-the box. The `image` in the box receipt shows what really runs. A code pin
-(build exactly the pinned commit) is 2.x work.
+The pin is a config pin. Bay compiles `bay.toml` at the pinned commit. The
+code is a separate thing: `[deploy.<env>] track` decides whether a push moves
+it, and `bay up` and `bay rollback` can move it too (see
+[Code and config](#code-and-config)). The `image` in the box receipt shows what
+really runs.
 
 ### bay init
 
@@ -320,7 +321,7 @@ knows it on the old box, `<stack_name>_<volume>`: `stack_name` from
 `group_vars/<box env>/`, else `group_vars/all/`, else `bay`. The `volumes`
 list in `moves` keeps the bare name.
 
-**`--data move` is deferred.** Bay does not copy volumes or databases between
+**`--data move` (planned) is deferred.** Bay does not copy volumes or databases between
 boxes yet, and refuses the flag. Copy the data yourself (backup on the old
 box, restore on the new) after a `--data keep` move, or keep the box.
 
@@ -952,5 +953,6 @@ and the next write stores version 2.
 - `frozen` and `frozen_commit` are written by `bay rollback` and removed by
   the next `bay up` to a newer commit. While `frozen` is true, the compile
   writes `build.frozen: true`, and a push builds without deploying.
-- `box` is written by the first `bay up`. After that the fleet decides: a new
-  `box` in `bay.toml` gives a note, not a move.
+- `box` is written by the first `bay up`. The compiler uses it. A different
+  `box` in `bay.toml` gives a `move` step in the plan (see [Box move](#box-move)),
+  and `bay up` writes the new box here.
