@@ -208,15 +208,18 @@
 # the container) and out of the rendered docker-compose.yml.
 #
 # zot runs before deploy_stack in deploy.yml, so {{ stack_dir }}/env may
-# not exist yet on a fresh host — create it idempotently here.
+# not exist yet on a fresh host — create it idempotently here. The owner, group
+# and mode must match deploy_stack and traefik, which set the same directory:
+# three modes made every deploy flip it (tests/test_env_dir_mode.py). Docker
+# reads the env file as root, so 0750 is enough for the container.
 
 - name: Ensure stack env directory exists (S3 driver)
   ansible.builtin.file:
     path: "{{ stack_dir }}/env"
     state: directory
     owner: "{{ app_user }}"
-    group: "{{ app_user }}"
-    mode: "0755"
+    group: docker
+    mode: "0750"
   become: true
   become_user: root
   when: zot_storage_driver == 's3'
