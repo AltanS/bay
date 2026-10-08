@@ -1562,6 +1562,61 @@ def running_commits(entries: list[dict[str, Any]], names: set[str]) -> dict[str,
     return out
 
 
+def running_sources(entries: list[dict[str, Any]], names: set[str]) -> dict[str, str | None]:
+    """``{container: "label" | "tag" | None}``: where each receipt commit came from.
+
+    ``label``: the image's commit label. ``tag``: the image's single commit
+    tag (the container has no commit label). None: no commit. A receipt from
+    before 2.5.0 has no ``commit_source``; a commit there came from a label.
+    Same row choice as :func:`running_commits`.
+    """
+    out: dict[str, str | None] = {}
+    for entry in entries:
+        receipt = entry.get("receipt")
+        if not isinstance(receipt, Mapping):
+            continue
+        for c in receipt.get("containers") or []:
+            if isinstance(c, Mapping) and c.get("name") in names:
+                source = c.get("commit_source") or "label"
+                out[str(c["name"])] = str(source) if c.get("commit") else None
+    return out
+
+
+def unknown_code(entries: list[dict[str, Any]], names: set[str]) -> list[tuple[str, str]]:
+    """``(container, box)`` for each of ``names`` that a receipt lists with no commit.
+
+    The box runs it, but its image has no commit label and not exactly one
+    commit tag, so Bay cannot say which code runs there.
+    """
+    out: set[tuple[str, str]] = set()
+    for entry in entries:
+        receipt = entry.get("receipt")
+        if not isinstance(receipt, Mapping):
+            continue
+        box = str(entry.get("box") or receipt.get("box") or "?")
+        for c in receipt.get("containers") or []:
+            if (
+                isinstance(c, Mapping)
+                and c.get("name") in names
+                and c.get("action") != "remove"
+                and not c.get("commit")
+            ):
+                out.add((str(c["name"]), box))
+    return sorted(out)
+
+
+def unknown_code_note(name: str, box: str, target: str | None) -> str:
+    """The plan note for a build container whose running code is unknown.
+
+    ``target``: the commit ``bay up`` will point ``:latest`` at, or None when
+    it sends no code target (a project in the fleet, the adopt commit).
+    """
+    line = f"code of {name} on {box} is unknown (no commit label or tag)"
+    if target:
+        line += f"; up will try to pin it to {target[:12]}"
+    return line
+
+
 #: ``(pin, running) -> "same" | "newer" | "older" | "unknown"``: where the
 #: running commit stands against the pin. See :func:`code_order`.
 CodeOrder = Callable[[str, str], str]
@@ -1777,8 +1832,9 @@ def running_code(
 def running_detail(entries: list[dict[str, Any]], names: set[str]) -> list[dict[str, Any]]:
     """For ``bay show``: per box the receipt result, time and this project's containers.
 
-    Each container keeps ``commit`` (the code it runs, or None), so ``bay
-    show`` can name the running code.
+    Each container keeps ``commit`` (the code it runs, or None) and
+    ``commit_source`` (``label``, ``tag``, or None), so ``bay show`` can name
+    the running code.
     """
     out: list[dict[str, Any]] = []
     for entry in entries:
@@ -1791,7 +1847,10 @@ def running_detail(entries: list[dict[str, Any]], names: set[str]) -> list[dict[
                 "deployed_at": receipt.get("deployed_at") if receipt else None,
                 "fleet_commit": receipt.get("fleet_commit") if receipt else None,
                 "containers": [
-                    {k: c.get(k) for k in ("name", "image", "commit", "action", "healthy")}
+                    {
+                        k: c.get(k)
+                        for k in ("name", "image", "commit", "commit_source", "action", "healthy")
+                    }
                     for c in (receipt.get("containers") or [] if receipt else [])
                     if isinstance(c, Mapping) and c.get("name") in names
                 ],
@@ -2625,6 +2684,15 @@ def project_code(
     explained = {str(s["container"]) for s in diff.steps if s["container"]}
     diff.steps.extend(
         s for s in code.steps if s["risk"] == "destructive" or s["container"] not in explained
+    )
+    # A build container the box runs with no known commit: no step (there is
+    # nothing to compare), but the plan names it. bay up sends a code target
+    # for it exactly when it sends one for any build container of the project
+    # (apply._code_targets): an app-repo project, not the adopt commit.
+    sends = not proj.in_fleet and not adopt_pending(proj, env, wanted.commit)
+    code.info.extend(
+        unknown_code_note(name, box, wanted.commit if sends else None)
+        for name, box in unknown_code(receipt_entries, built)
     )
     return code
 

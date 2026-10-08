@@ -1588,6 +1588,7 @@ def show(
         running = None
         detail: list[dict[str, Any]] = []
         code: dict[str, str | None] = {}
+        code_source: dict[str, str | None] = {}
         if remote and box_env is not None:
             if box_env not in cache:
                 try:
@@ -1603,6 +1604,11 @@ def show(
             code = {
                 n: c
                 for n, c in planmod.running_commits(cache[box_env], built).items()
+                if n in built
+            }
+            code_source = {
+                n: c
+                for n, c in planmod.running_sources(cache[box_env], built).items()
                 if n in built
             }
         status, why = env_status(
@@ -1627,6 +1633,9 @@ def show(
                     "receipt_sha256": (running or {}).get("receipt_sha256"),
                     # Build container -> the commit it runs (null: the receipt names none).
                     "code": dict(sorted(code.items())),
+                    # Build container -> where its commit came from: "label" (the
+                    # image's commit label), "tag" (its single commit tag), null.
+                    "code_source": dict(sorted(code_source.items())),
                     "boxes": detail,
                 },
             }
@@ -1677,8 +1686,11 @@ def render_show(doc: Mapping[str, Any]) -> str:
         else:
             names = [c["name"] for b in run["boxes"] for c in b["containers"]]
             running = f"{len(names)} container(s), receipt {short(run['receipt_sha256'])}"
+            sources = run.get("code_source") or {}
             for name, commit in (run.get("code") or {}).items():
                 running += f", {name} code {str(commit)[:12] if commit else '?'}"
+                if commit and sources.get(name) == "tag":
+                    running += " (tag)"
         lines.append(
             f"  {row['env']:<12} {row['status']:<8} box {row['box']}  pinned "
             f"{short(row['pinned']['commit'])}  RUNNING {running}"

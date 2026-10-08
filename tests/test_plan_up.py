@@ -8,6 +8,7 @@ skips unless BAY_LIVE_E2E=1.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -449,6 +450,12 @@ def test_rollback_lists_code_it_kept(
 
         def commit_tags(self, repo: str) -> list[str]:
             return []
+
+        def container_image(self, name: str) -> str | None:
+            return None
+
+        def image_meta(self, ref: str) -> tuple[dict[str, str], list[str]]:
+            return {}, []
 
     old_prev = {"containers": [{"name": "webapp", "image": "bay-testfleet-webapp:latest"}]}
 
@@ -3255,10 +3262,22 @@ def _stamp(box: FakeBox, name: str, commit: str) -> None:
 
 
 class _Images:
-    """A box's local images for bay_reconcile.codepin: ref -> image id."""
+    """A box's local images for bay_reconcile.codepin: ref -> image id.
 
-    def __init__(self, ids: dict[str, str]) -> None:
+    ``labels``: image id -> its labels. ``containers``: container -> the image
+    id it runs (none by default: the box runs nothing codepin can read).
+    """
+
+    def __init__(
+        self,
+        ids: dict[str, str],
+        *,
+        labels: dict[str, dict[str, str]] | None = None,
+        containers: dict[str, str] | None = None,
+    ) -> None:
         self.ids = dict(ids)
+        self.labels = dict(labels or {})
+        self.containers = dict(containers or {})
 
     def image_id(self, ref: str) -> str | None:
         return self.ids.get(ref)
@@ -3267,11 +3286,22 @@ class _Images:
         return False
 
     def tag(self, source: str, target: str) -> None:
-        self.ids[target] = self.ids[source]
+        self.ids[target] = self.ids.get(source, source)
 
     def commit_tags(self, repo: str) -> list[str]:
         tags = (r.rsplit(":", 1)[1] for r in self.ids if r.startswith(repo + ":"))
         return sorted(t for t in tags if t not in ("latest", "previous"))
+
+    def container_image(self, name: str) -> str | None:
+        return self.containers.get(name)
+
+    def image_meta(self, ref: str) -> tuple[dict[str, str], list[str]]:
+        image = self.ids.get(ref, ref)
+        if image not in self.ids.values() and image not in self.labels:
+            return {}, []
+        return dict(self.labels.get(image, {})), sorted(
+            r for r, i in self.ids.items() if i == image
+        )
 
 
 def test_up_releases_hold_and_retags_latest(
@@ -4614,6 +4644,14 @@ def test_show_prints_running_commit(
     assert re.search(r"code [0-9a-f?]", line)
     # An image-only container carries no code: no `code` part for it.
     assert "postgres code" not in line
+    assert run["code_source"] == {"webapp": "label"}
+    assert "(tag)" not in line
+
+    # M120/03: no commit label, but the image has exactly one commit tag.
+    box.container("webapp")["commit_source"] = "tag"
+    shown = json.loads(cli(world, "show", "--json").stdout)
+    assert shown["envs"][0]["running"]["code_source"] == {"webapp": "tag"}
+    assert f"webapp code {first[:12]} (tag)" in applymod.render_show(shown)
 
 
 def test_show_ahead_when_box_runs_wanted(
@@ -4914,6 +4952,88 @@ def test_failed_route_only_up_names_the_deploy_retry(
     text = " ".join(out.output.split())
     assert "bay deploy production --tags deploy_stack,headscale,traefik" in text
     assert "run bay up production again" not in text
+
+
+def test_plan_names_every_code_move(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M120/03: every code move bay up sends is a plan step or a plan note.
+
+    One fixture receipt per case goes through `bay plan` and then through the
+    `bay up` code-target path. A target is a move when the receipt does not
+    say the container already runs that commit; each move must be a step of
+    the plan that names the container, or the plan's note for unknown running
+    code.
+    """
+    seen = _code_deploys(monkeypatch, box)
+    first = _build_app(world)
+    assert do_up(world)["result"] == "ok"
+
+    def check(running: str | None, *, expect: str) -> dict[str, Any]:
+        row = box.container("webapp")
+        row["commit"] = running[:12] if running else None
+        row["image_ref"] = row["image"]
+        receipt = copy.deepcopy(box.receipts["production"])
+        plan = make(world)
+        up = do_up(world)
+        assert up["result"] == "ok", up
+        targets = seen[-1] or {}
+        assert targets == up["code_targets"]
+        commits = planmod.running_commits([{"box": "box-1", "receipt": receipt}], set(targets))
+        # A step that names the container: the code step, or another step of
+        # it that already says the container changes (docs/plan.md).
+        stepped = {s["container"] for s in plan["steps"] if s["container"]}
+        moves = []
+        for name, target in targets.items():
+            pin = str(target["commit"])[:12]
+            if commits.get(name) == pin:
+                continue  # the box already runs it: codepin answers noop
+            moves.append(name)
+            note = planmod.unknown_code_note(name, "box-1", pin)
+            assert name in stepped or note in plan["notes"], (name, plan)
+        by = {"step": stepped & set(moves), "note": set(moves) - stepped}
+        assert moves and by[expect] == set(moves), (expect, plan)
+        return plan
+
+    # Unknown: no commit label and no single commit tag. A note, not a step.
+    plan = check(None, expect="note")
+    assert (
+        f"code of webapp on box-1 is unknown (no commit label or tag); up will try to pin "
+        f"it to {first[:12]}" in plan["notes"]
+    )
+    assert plan["steps"] == []
+    # Older than WANTED (a held build): a step.
+    _push_code(world, "v2")
+    check(first, expect="step")
+    # Pin mode: another commit than the pin is a step; unknown is still a note.
+    edit_app(world, "[deploy.production]\n", '[deploy.production]\ntrack = "pin"\n')
+    check("abcdef0123456789", expect="step")
+    check(None, expect="note")
+    # Config unchanged now: the step is the code step itself.
+    plan = check("abcdef0123456789", expect="step")
+    assert [(s["kind"], s["container"]) for s in plan["steps"]] == [("image", "webapp")]
+    # The box runs the pin: no move, no step, no note.
+    _stamp(box, "webapp", lock_of(world)["envs"]["production"]["commit"])
+    plan = make(world)
+    assert plan["steps"] == []
+    assert not any(n.startswith("code of webapp") for n in plan["notes"])
+
+
+def test_unknown_code_note_without_a_code_target() -> None:
+    """A project in the fleet (or the adopt commit) gets no code target: the note says less."""
+    assert planmod.unknown_code_note("web", "box-1", None) == (
+        "code of web on box-1 is unknown (no commit label or tag)"
+    )
+    entries = [
+        {"box": "box-1", "receipt": {"containers": [
+            {"name": "web", "commit": None, "action": "noop"},
+            {"name": "api", "commit": "abcdef012345", "action": "noop"},
+            {"name": "gone", "commit": None, "action": "remove"},
+            {"name": "other", "commit": None, "action": "noop"},
+        ]}},
+        {"box": "box-2", "receipt": None, "error": "unreachable"},
+    ]
+    assert planmod.unknown_code(entries, {"web", "api", "gone"}) == [("web", "box-1")]
 
 
 def test_up_results_carry_the_tags_the_deploy_used(world: dict[str, Path], box: FakeBox) -> None:
