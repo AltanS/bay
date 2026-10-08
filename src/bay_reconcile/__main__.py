@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from .bundle import Bundle, load_bundle
 from .docker_client import DockerClient
 from .executor import execute
-from .images import commit_from_labels, resolved_image
+from .images import commit_from_labels, commit_from_tags, resolved_image
 from .planner import describe, plan
 
 
@@ -51,28 +51,46 @@ def _state_after(bundle: Bundle, client: DockerClient) -> dict[str, dict[str, st
 
     One more batched observe, read only. The deploy receipt
     (``bay_reconcile.receipt``) turns it into each container's ``healthy``,
-    ``commit`` and ``image`` fields. ``commit`` comes from the container's
-    labels (``images.commit_from_labels``); ``image`` is ``<repo>:<commit12>``
-    when that tag resolves to the image the container runs, else the spec's
-    reference. A failed read is reported as no state, never as a failed
-    deploy: the containers are already in place by now.
+    ``commit``, ``commit_source`` and ``image`` fields. ``commit`` comes from
+    the container's labels (``images.commit_from_labels``, source ``label``).
+    A container with no commit label falls back to the repo tags of the image
+    it runs: exactly one commit tag (12 hex characters) names its commit
+    (``images.commit_from_tags``, source ``tag``); none or several name none.
+    ``image`` is ``<repo>:<commit12>`` when that tag resolves to the image the
+    container runs, else the spec's reference. A failed read is reported as
+    no state, never as a failed deploy: the containers are already in place
+    by now.
     """
     try:
         observed = client.observe(bundle.managed_label)
     except Exception:  # noqa: BLE001 - a status read must not fail the deploy
         return {}
     lookup = getattr(client, "image_id", None)
+    tags_of = getattr(client, "image_tags", None)
     out: dict[str, dict[str, str | None]] = {}
     for spec in bundle.containers:
         current = observed.get(spec.name)
-        if current is not None and current.exists:
-            commit = commit_from_labels(current.labels)
-            out[spec.name] = {
-                "status": current.status,
-                "health": current.health,
-                "commit": commit,
-                "image": resolved_image(spec.image, commit, current.image_id, lookup),
-            }
+        if current is None or not current.exists:
+            continue
+        commit = commit_from_labels(current.labels)
+        source: str | None = "label" if commit else None
+        image = resolved_image(spec.image, commit, current.image_id, lookup)
+        if commit is None and tags_of is not None and current.image_id:
+            try:
+                tagged = commit_from_tags(tags_of(current.image_id), prefer=spec.image)
+            except Exception:  # noqa: BLE001 - a status read never fails the deploy
+                tagged = None
+            if tagged is not None:
+                # The tag is on the very image the container runs.
+                commit, image = tagged
+                source = "tag"
+        out[spec.name] = {
+            "status": current.status,
+            "health": current.health,
+            "commit": commit,
+            "commit_source": source,
+            "image": image,
+        }
     return out
 
 

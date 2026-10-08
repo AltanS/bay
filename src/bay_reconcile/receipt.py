@@ -155,6 +155,9 @@ def build_receipt(
                 # `image` and `commit` (stamp_receipt) is not drift.
                 "image_ref": entry.get("image"),
                 "commit": _commit_or_none(seen.get("commit")),
+                # Where the commit came from: the image's commit label, or its
+                # single commit tag. Null when there is no commit.
+                "commit_source": _source_or_none(seen.get("commit"), seen.get("commit_source")),
                 "config_hash": entry.get("config_hash"),
                 "action": actions.get(name),
                 # The reconciler reported this container's action as failed.
@@ -169,6 +172,7 @@ def build_receipt(
                 "image": None,
                 "image_ref": None,
                 "commit": None,
+                "commit_source": None,
                 "config_hash": None,
                 "action": "remove",
                 "failed": name in failed,
@@ -220,6 +224,17 @@ def _commit_or_none(value: object) -> str | None:
     return short(str(value)) if is_commit(value) else None
 
 
+#: Values of a container's ``commit_source``.
+COMMIT_SOURCES = ("label", "tag")
+
+
+def _source_or_none(commit: object, source: object) -> str | None:
+    """``label`` or ``tag`` for a container with a commit; None otherwise."""
+    if not is_commit(commit):
+        return None
+    return str(source) if source in COMMIT_SOURCES else "label"
+
+
 def stamp_receipt(
     receipt: Mapping[str, Any], *, name: str, commit: str | None, image: str
 ) -> dict[str, Any] | None:
@@ -227,7 +242,8 @@ def stamp_receipt(
 
     ``rebuild.sh`` calls this after a webhook build recreated the container,
     so ``bay status`` and ``bay plan`` see the code the box runs now. Only
-    those two fields move: ``image_ref``, ``config_hash``, ``action`` and the
+    those two fields move, and ``commit_source`` with them (``label``: every
+    build labels its image with its commit): ``image_ref``, ``config_hash``, ``action`` and the
     deploy fields stay what the last deploy wrote. None when the receipt does
     not list the container (nothing to stamp).
     """
@@ -239,6 +255,7 @@ def stamp_receipt(
             row.setdefault("image_ref", row.get("image"))
             row["image"] = image
             row["commit"] = _commit_or_none(commit)
+            row["commit_source"] = _source_or_none(commit, "label")
             hit = True
     if not hit:
         return None

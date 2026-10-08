@@ -106,6 +106,18 @@ class SdkDockerClient:
         """The local image id of ``reference``, or None (read by the receipt state)."""
         return self._image_id(reference)
 
+    def image_tags(self, reference: str) -> list[str]:
+        """The repo tags of the image ``reference`` names (an id works), or ``[]``.
+
+        Read by the receipt state: a container with no commit label takes its
+        commit from the image's single commit tag.
+        """
+        try:
+            image = self._c.images.get(reference)
+        except (docker.errors.ImageNotFound, docker.errors.APIError):
+            return []
+        return [str(t) for t in (getattr(image, "tags", None) or [])]
+
     def _image_id(self, reference: str) -> str | None:
         try:
             image = self._c.images.get(reference)

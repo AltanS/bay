@@ -145,6 +145,7 @@ def test_deploy_receipt_roundtrip(tmp_path: Path) -> None:
         "image": "acme/web:1",
         "image_ref": "acme/web:1",
         "commit": None,
+        "commit_source": None,
         "config_hash": "h-web",
         "action": "recreate",
         "failed": False,
@@ -377,7 +378,13 @@ def test_reconciler_report_carries_post_pass_state() -> None:
     code, out = reconcile(bundle, Fake())
     assert code == 0
     assert out["state"] == {
-        "web": {"status": "running", "health": "healthy", "commit": None, "image": "acme/web:1"}
+        "web": {
+            "status": "running",
+            "health": "healthy",
+            "commit": None,
+            "commit_source": None,
+            "image": "acme/web:1",
+        }
     }
 
 
@@ -444,6 +451,7 @@ def test_receipt_records_commit_and_image_per_container(tmp_path: Path) -> None:
     jsonschema.validate(receipt, _RECEIPT_SCHEMA)
     rows = {c["name"]: c for c in receipt["containers"]}
     assert rows["web"]["commit"] == commit[:12]
+    assert rows["web"]["commit_source"] == "label"
     assert rows["web"]["image"] == f"acme/web:{commit[:12]}"
     assert rows["web"]["image_ref"] == "acme/web:latest"
     # A commit tag that is not provably the running image is not claimed.
@@ -466,6 +474,7 @@ def test_receipt_records_commit_and_image_per_container(tmp_path: Path) -> None:
     jsonschema.validate(stamped, _RECEIPT_SCHEMA)
     web = next(c for c in stamped["containers"] if c["name"] == "web")
     assert (web["commit"], web["image"], web["image_ref"]) == (new, f"acme/web:{new}", "acme/web:latest")
+    assert web["commit_source"] == "label"
     assert web["config_hash"] == "h-web" and stamped["deployed_at"] == receipt["deployed_at"]
     assert not box_receipt.previous_path(path).exists(), "a stamp is not a deploy"
     # The plan's drift hash reads image_ref, so the stamp is not drift.
@@ -505,6 +514,98 @@ def test_receipt_records_commit_and_image_per_container(tmp_path: Path) -> None:
     args = ["--commit", new, "--image", "x:1", "--dir", str(tmp_path)]
     assert box_receipt.main(["stamp", "--env", "production", "--name", "nope", *args]) == 1
     assert box_receipt.main(["stamp", "--env", "staging", "--name", "web", *args]) == 1
+
+
+def test_receipt_commit_from_single_tag() -> None:
+    """M120/03: no commit label, so the image's single commit tag names the commit."""
+    from bay_reconcile.images import commit_from_tags
+
+    tag = "157b8d58661b"
+
+    def running(name: str, image_id: str, labels: dict[str, str] | None = None) -> ContainerState:
+        return ContainerState(
+            name,
+            exists=True,
+            image=f"acme/{name}:latest",
+            config_hash=f"h-{name}",
+            managed=True,
+            status="running",
+            image_id=image_id,
+            local_image_id=image_id,
+            labels=labels or {},
+        )
+
+    class Fake:
+        def __init__(self) -> None:
+            self.state = {
+                # One commit tag, under another repo name than the spec's.
+                "web": running("web", "sha256:web"),
+                # Labelled: the label wins, the tags are not read.
+                "api": running("api", "sha256:api", {"com.bay.commit": "abcdef012345"}),
+                # Two different commit tags: no answer.
+                "two": running("two", "sha256:two"),
+                # No commit tag at all (a 12-character tag that is not hex, too).
+                "none": running("none", "sha256:none"),
+                # The same commit under two repos is one commit.
+                "same": running("same", "sha256:same"),
+            }
+            self.tags = {
+                "sha256:web": [f"acme/web-app:{tag}", "acme/web:latest"],
+                "sha256:api": ["acme/api:fedcba987654", "acme/api:latest"],
+                "sha256:two": ["acme/two:111111111111", "acme/two:222222222222"],
+                "sha256:none": ["acme/none:latest", "acme/none:release-2026", "acme/none:1a2b3c"],
+                "sha256:same": [f"acme/same:{tag}", f"mirror/same:{tag}"],
+            }
+
+        def observe(self, managed_label):
+            return dict(self.state)
+
+        def image_id(self, ref: str) -> str | None:
+            return None
+
+        def image_tags(self, ref: str) -> list[str]:
+            return self.tags.get(ref, [])
+
+    bundle_doc = {
+        "containers": [
+            {"name": n, "image": f"acme/{n}:latest", "type": "service", "config_hash": f"h-{n}"}
+            for n in ("web", "api", "two", "none", "same")
+        ]
+    }
+    code, report = reconcile(load_bundle(bundle_doc), Fake())
+    assert code == 0
+    receipt = box_receipt.build_receipt(meta=_META, bundle=bundle_doc, report=report)
+    jsonschema.validate(receipt, _RECEIPT_SCHEMA)
+    rows = {c["name"]: c for c in receipt["containers"]}
+    assert (rows["web"]["commit"], rows["web"]["commit_source"]) == (tag, "tag")
+    # The tag is on the image the container runs: the receipt names it.
+    assert rows["web"]["image"] == f"acme/web-app:{tag}"
+    assert rows["web"]["image_ref"] == "acme/web:latest"
+    assert (rows["api"]["commit"], rows["api"]["commit_source"]) == ("abcdef012345", "label")
+    assert (rows["two"]["commit"], rows["two"]["commit_source"]) == (None, None)
+    assert rows["two"]["image"] == "acme/two:latest"
+    assert (rows["none"]["commit"], rows["none"]["commit_source"]) == (None, None)
+    # Same commit, two repos: the spec's repo is preferred.
+    assert (rows["same"]["commit"], rows["same"]["commit_source"]) == (tag, "tag")
+    assert rows["same"]["image"] == f"acme/same:{tag}"
+
+    # The pure rule, and a client that cannot list tags (an older fake): no fallback.
+    assert commit_from_tags([f"a:{tag}", "a:LATEST", "a:ABCDEF012345"]) == (tag, f"a:{tag}")
+    assert commit_from_tags(["a:0123456789abc"]) is None  # 13 characters
+    del Fake.image_tags
+    _, report = reconcile(load_bundle(bundle_doc), Fake())
+    assert report["state"]["web"]["commit"] is None
+
+    # bay plan and bay show read the source; a receipt from before 2.5 means label.
+    from bay_cli import plan as planmod
+
+    entries = [{"box": "app-1", "receipt": receipt}]
+    names = {"web", "api", "two"}
+    assert planmod.running_sources(entries, names) == {"web": "tag", "api": "label", "two": None}
+    old = {"containers": [{"name": "web", "commit": "abcdef012345"}]}
+    assert planmod.running_sources([{"box": "app-1", "receipt": old}], {"web"}) == {
+        "web": "label"
+    }
 
 
 # ── the Ansible wiring ───────────────────────────────────────────────────

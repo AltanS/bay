@@ -92,6 +92,10 @@
                 "pattern": "^[0-9a-f]{12}$",
                 "description": "The 12-character commit the running image was built from (label com.bay.commit), or null. A webhook build updates it in place."
               },
+              "commit_source": {
+                "enum": ["label", "tag", null],
+                "description": "Where commit came from: label (the image's commit label), tag (the single 12-hex commit tag of an image with no commit label), or null when there is no commit. Absent in receipts written before 2.5."
+              },
               "config_hash": {"type": ["string", "null"]},
               "action": {"enum": ["noop", "create", "recreate", "start", "remove", null]},
               "failed": {
