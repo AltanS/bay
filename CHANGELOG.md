@@ -14,7 +14,7 @@ Every key the validator accepts now deploys or is an error. The receipt lists ro
 
 Spec 04: the compiler deploys what it validates
 
-- `release`: the compile writes it on the main container (the env value wins). The reconciler runs it once in a one-shot container `<name>-release` of the new image, before it creates or recreates the container. A non-zero exit or a timeout (`bay_release_timeout`, 600 s) fails that action, and the old container keeps running. A push build runs it before the swap. On a failure `:latest` stays where it was, and `build.failed` fires. A change of `release` alone recreates nothing.
+- `release`: the compile writes it on the main container (the env value wins). The reconciler runs it once in a one-shot container `<name>-release` of the new image, before it creates or recreates the container. A non-zero exit or a timeout (`bay_release_timeout`, 600 s) fails that action, and the old container keeps running. A push build runs it before the swap. On a failure `build.failed` fires and the old container keeps running. For a local build `:latest` stays where it was. For a remote build the build server has already pushed `:latest` to the registry, and that stays moved: the box pulls the image, runs the release with it, and on a failure points its local `:latest` tag back at the running image. A change of `release` alone recreates nothing.
 - `[[jobs]]`: compiled to a top-level `jobs:` map (`of`, `schedule`, `on_calendar`, `command`, `memory`). `deploy_stack` installs a script, the one-shot `bay-job@.service` and a UTC `bay-job@<job>.timer` on the box of the main container. The job runs the main container's current image, env file, network and mounts. A job that is gone loses its timer and script. A cron line that sets both the day of the month and the day of the week is a compile error. A job change is a safe plan step of kind `job`.
 - A routed service with neither `image` nor its own `build` shares the project build. It gets a copy of the main build plus `build.shared_from`. `bay_build_dedup_map` makes the member without `shared_from` the primary, so the main container builds and the service re-tags its image. An internal service that does this stays unsupported.
 - Service `path`: the service gets the main domains and a `Host(...) && (Path(p) || PathPrefix(p/))` router. Its priority is the rule length, so it outranks the main container's router in every shape. The prefix is not stripped. `bay validate` checks (domain, path) pairs for collisions.
@@ -22,6 +22,20 @@ Spec 04: the compiler deploys what it validates
 - `access` keys other than `mode` on a main container that is internal in an environment are a validation error. Before, the compiler dropped them silently.
 - `[tailnet] allowlist`: compiled to a top-level `tailnet_allowlist:` list. On every deploy it becomes `vpn_allowed_ips`, with `127.0.0.1` and `::1` kept, before the Headscale range is appended. `bay validate` warns while group_vars also sets `vpn_allowed_ips`. `bay gateway status` prints the enforced list, and `bay doctor` fails when it is empty.
 - Docs: plan.md, bay-toml.md, services.md, tailnet-ingress.md and backups.md describe the keys above as deployed.
+
+Pre-release review fixes (specs 04 and 05)
+
+- `-release` is a reserved service suffix, like `-vpn`, `-public`, `-health` and `-new`. A service key that would collide with the one-shot `<name>-release` container is a compile error and a `bay validate` error. A failed push build removes a leftover `<name>-release` container only when its `com.bay.release-of` label names the service.
+- The reconciler no longer force-removes a running `<name>-release` container. It removes a leftover only when it is created, exited or dead, and fails the release with a message that names the container when one is still running (a migration that a webhook build started).
+- `release` together with `update = "auto"` is a bay.toml validation error, for the project and per environment. Watchtower recreates the container without running the release.
+- `path = "/"` on a service is a validation error: it would take every request of the domain. `/api` and `/api/` are one route. Two services whose paths differ only by the slash collide in `bay toml validate` and in the `bay validate` domain check. The match stays case-sensitive, unlike `vpn_routes`; docs/bay-toml.md says why.
+- `bay backup restore` of a volume stops every running container that mounts the volume, not only the owner, and starts that same set afterwards (also after a failure). When no targeted box runs the container of the volume, the restore fails and names the container. Before, every box ended and the command printed "Restore complete".
+- A failed `bay up` that ran extra tags (`backup`, or `headscale,traefik` for a route) prints the retry: `bay deploy <env> --tags <the tags that up used>`. The failed up has already committed `services.yml`, so a second `bay up` plans no step and would skip those tags. The JSON result has `deploy_tags`.
+- A cron step as wide as its field (`0 */24 * * *`, `*/60 * * * *`) compiles to the first value of the field. It became `00/24`, which systemd rejects.
+- The receipt no longer crashes on a route file that is not valid UTF-8: `routes` is `[]`.
+- The container monitor skips containers with the `com.bay.job-of` label in the restart-loop check. A job that runs every few minutes raised `container.restart_loop`. A failing job still raises `container.crash`.
+- The job script scan on the box no longer warns about a missing `jobs/` directory on every deploy of a box that has no jobs.
+- Docs: layout-scenarios.md and the README say that path, jobs, volume backups and routes deploy since 2.3.0. tailnet-ingress.md and this entry say that `bay doctor` fails on an empty allowlist, not that it shows it (`bay gateway status` prints it). plan.md says what a route-only up records as `receipt_commit`. build-strategies.md says that `bay up` deploys the whole box environment, and a test keeps that sentence in every doc that names `bay up`.
 
 Spec 05: routes, boxes and validator checks
 
@@ -45,6 +59,9 @@ Docs fix
 - A `bay up <ingress box env>` with no project on that env now deploys (route-only) instead of stopping with "nothing to deploy". Read its plan first: it deploys the whole box environment.
 - `bay validate` (and the pre-deploy gate of `bay deploy` and `bay up`) can now fail on a fleet whose `ingress_box` is not the Headscale host, whose hosts file has no group named after the box env, or whose box `group` is missing from the hosts file. Fix the fleet file or the hosts file.
 - `bay doctor` on a fleet with no `group_vars/all/access_gateway.yml` now reports `wireguard` (what the boxes deploy), not "no access gateway".
+- A bay.toml with `release` and `update = "auto"` (project or environment) now fails `bay validate` and `bay toml validate`. Set `update = "notify"` or `"off"`, or drop `release`. A service with `path = "/"` fails too: write a prefix. Rename a service key that ends in `-release`.
+- `bay backup restore` of a volume now stops every container that mounts the volume for the length of the extract. Plan for the downtime of each of them.
+- After a failed `bay up` with a route or a backup step, do not run `bay up` again to retry. Run the `bay deploy <env> --tags ...` line that the error prints.
 
 ## [2.2.0] - 2026-10-08
 
