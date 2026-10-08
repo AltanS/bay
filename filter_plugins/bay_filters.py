@@ -217,6 +217,7 @@ class FilterModule:
             "bay_image_consumers": bay_image_consumers,
             "bay_image_region_map": bay_image_region_map,
             "bay_spec_hash": bay_spec_hash,
+            "bay_tree_hash": bay_tree_hash,
             "bay_port_binding_tuple": bay_port_binding_tuple,
             "bay_port_spec_tuple": bay_port_spec_tuple,
             "bay_alert_body": bay_alert_body,
@@ -1409,6 +1410,58 @@ def bay_spec_hash(spec, env_digest=None):
 
     serialised = json.dumps(stable, sort_keys=True, default=str)
     return hashlib.sha256(serialised.encode()).hexdigest()
+
+
+# ── Build context hash (the webhook receiver) ─────────────────────────
+
+
+#: Never part of a build context: Python bytecode that a test run or an import
+#: on the control node leaves beside the sources. The receiver's Dockerfile
+#: copies named files only, so these never reach the image.
+_TREE_HASH_SKIP_DIRS = frozenset({"__pycache__"})
+_TREE_HASH_SKIP_SUFFIXES = (".pyc", ".pyo")
+_FRAMEWORK_ROOT = Path(__file__).resolve().parent.parent
+
+
+def bay_tree_hash(path):
+    """``sha256:<hex>`` over the contents of every file under ``path``.
+
+    The receiver label ``com.bay.receiver-hash`` (git_deploy render_webhook.yml
+    and the ``bay-webhook`` spec in container_lifecycle build_specs.yml). Runs
+    on the control node, where the role's files are, so a check-mode run can
+    compare it with the running container without building the image.
+
+    Deterministic: the files are taken in sorted order of their relative POSIX
+    path, and each one adds its path and the sha256 of its bytes. Modes,
+    owners and mtimes are not read. A symlinked file counts as its target's
+    bytes (``copy`` ships the target too). ``__pycache__`` and ``*.pyc`` are
+    left out. A missing directory is an error, never an empty hash.
+
+    A relative ``path`` is read from the framework checkout that holds this
+    file (the directory above ``filter_plugins/``), so the same expression
+    works inside a role, in a task file included by path (``bay import
+    --check`` and the tests run build_specs.yml that way, with no
+    ``role_path``) and on any machine.
+    """
+    root = Path(str(path))
+    if not root.is_absolute():
+        root = _FRAMEWORK_ROOT / root
+    if not root.is_dir():
+        raise ValueError(f"bay_tree_hash: {root} is not a directory")
+    files = []
+    for item in root.rglob("*"):
+        rel = item.relative_to(root)
+        if _TREE_HASH_SKIP_DIRS & set(rel.parts) or item.name.endswith(_TREE_HASH_SKIP_SUFFIXES):
+            continue
+        if item.is_file():
+            files.append((rel.as_posix(), item))
+    digest = hashlib.sha256()
+    for rel, item in sorted(files, key=lambda pair: pair[0]):
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(item.read_bytes()).hexdigest().encode("ascii"))
+        digest.update(b"\n")
+    return "sha256:" + digest.hexdigest()
 
 
 # ── Access-gateway adapter: cross-host bind-IP resolver ──────────────────

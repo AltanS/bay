@@ -15,7 +15,9 @@
 # webhook.yml, on the full-deploy path. Under `bay up` the deploy_stack
 # container pass creates or recreates `bay-webhook` itself: it compares the
 # running image ID with `bay-webhook:latest`, and a new build service changes
-# the receiver's SERVICE_BRANCHES env.
+# the receiver's SERVICE_BRANCHES env. Since 2.4.0 the spec also carries the
+# label `com.bay.receiver-hash` (the hash of the receiver files, see below),
+# so the check-mode plan predicts that recreate before the image is built.
 #
 # The receiver reads config.json once, at start (app.py `_load_config`), from
 # a single-file bind mount. So the render notifies `Restart bay-webhook`. The
@@ -138,13 +140,32 @@
         mode: "0644"
       register: _webhook_files
 
+    # The receiver's identity: a hash of its build context (the files the
+    # copy above ships, the Dockerfile among them), computed on the control
+    # node from the role's own files (filter_plugins bay_filters.py,
+    # bay_tree_hash). It labels the image here and the container in the
+    # reconciler spec (container_lifecycle build_specs.yml), so check mode can
+    # see a receiver change without building: the container's label differs.
+    - name: Compute the webhook receiver content hash
+      ansible.builtin.set_fact:
+        _webhook_receiver_hash: "{{ 'roles/git_deploy/files/webhook' | bay_tree_hash }}"
+
     # The image can be missing while the files are unchanged (pruned, or a
     # host that has the files from an earlier deploy but never built). Build
     # then too. A first build app on a box needs the image here, before the
-    # deploy_stack container pass creates `bay-webhook`.
+    # deploy_stack container pass creates `bay-webhook`. The inspect prints
+    # the image's receiver hash label, so an image that an earlier run left
+    # stale (files copied, build failed) is rebuilt as well. An image from
+    # before 2.4.0 has no label and is rebuilt once.
     - name: Check whether the webhook receiver image exists
       ansible.builtin.command:
-        cmd: docker image inspect bay-webhook:latest
+        argv:
+          - docker
+          - image
+          - inspect
+          - --format
+          - '{% raw %}{{ index .Config.Labels "com.bay.receiver-hash" }}{% endraw %}'
+          - bay-webhook:latest
       register: _webhook_image_inspect
       changed_when: false
       failed_when: false
@@ -154,7 +175,12 @@
     # rc 0, so the inspect result is read only when it really ran.
     - name: Build webhook receiver image
       ansible.builtin.command:
-        cmd: "docker build -t bay-webhook:latest {{ git_deploy_build_dir }}/webhook/"
+        cmd: >-
+          docker build -t bay-webhook:latest
+          --label com.bay.receiver-hash={{ _webhook_receiver_hash }}
+          {{ git_deploy_build_dir }}/webhook/
       when: >-
         _webhook_files.changed
         or (_webhook_image_inspect is not skipped and _webhook_image_inspect.rc != 0)
+        or (_webhook_image_inspect is not skipped
+            and (_webhook_image_inspect.stdout | default('') | trim) != _webhook_receiver_hash)

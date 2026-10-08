@@ -403,6 +403,15 @@
         traefik.http.routers.bay-webhook.middlewares: public-chain,bay-webhook-ratelimit
         traefik.http.services.bay-webhook.loadbalancer.server.port: "9000"
         com.centurylinklabs.watchtower.enable: "false"
+        # The receiver's build context hash, the same value that labels the
+        # image (git_deploy render_webhook.yml). The image is rebuilt under the
+        # same reference, so the config hash alone cannot see new receiver
+        # code. With the hash in the spec it can: in check mode too, where the
+        # build is skipped and the image ID still matches. `bay plan --remote`
+        # then predicts the recreate. Read from the role's files on the
+        # control node; same files, same hash, so a run without a receiver
+        # change stays a NoOp.
+        com.bay.receiver-hash: "{{ 'roles/git_deploy/files/webhook' | bay_tree_hash }}"
 
 - name: Build zot registry container spec
   ansible.builtin.set_fact:

@@ -247,6 +247,13 @@ Check mode changes nothing live. It writes only to temporary places:
   `docker image inspect bay-webhook:latest` on each box with a build app. They
   change nothing. The receiver image build and the trigger unit changes are
   only predicted.
+- The webhook receiver change is predicted without the build. Bay hashes the
+  receiver's files on this machine (sha256 over the file contents, in sorted
+  path order) and puts the hash on the `bay-webhook` container as the label
+  `com.bay.receiver-hash`. When the running container has another hash, or no
+  such label, the box predicts `recreate` for `bay-webhook`, with the reason
+  `labels: differ for com.bay.receiver-hash`. With the same receiver files it
+  predicts `noop`.
 - On this machine, each box writes its report into a temporary directory
   outside every working tree. Bay reads it and removes it.
 
@@ -582,8 +589,10 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    - the receiver config (its list of build containers) and its image map. A
      change restarts the receiver at the end of the run;
    - the receiver image. Bay builds `bay-webhook:latest` when the receiver
-     files changed or the image is missing. The container pass then creates
-     or recreates `bay-webhook`;
+     files changed, the image is missing, or the image's `com.bay.receiver-hash`
+     label is not the hash of the receiver files. The container pass then
+     creates or recreates `bay-webhook`. The container carries the same label,
+     so the plan predicts that recreate (see the check mode list above);
    - the build trigger units. Bay enables `bay-build@<container>.path` for
      each build container, and stops and disables the unit of a container that
      left the box.

@@ -516,10 +516,16 @@ the receiver's in-memory `IMAGE_MAP` table on process start
   of build containers) changes, because the receiver reads it once at start
   too. The handler only restarts. A new receiver *image* is applied
   separately: `roles/git_deploy/tasks/render_webhook.yml` builds
-  `bay-webhook:latest` when the receiver files changed or the image is
-  missing. That file runs under `deploy_stack` too, so `bay up` builds it.
-  Under `bay up`, the `deploy_stack` container pass recreates the receiver
-  when its image ID differs from `bay-webhook:latest`. A `--tags git_deploy`
+  `bay-webhook:latest` when the receiver files changed, the image is
+  missing, or the image's `com.bay.receiver-hash` label differs from the
+  hash of the receiver files (`bay_tree_hash` in
+  `filter_plugins/bay_filters.py`: sha256 over the file contents in sorted
+  path order, `__pycache__` left out). That file runs under `deploy_stack`
+  too, so `bay up` builds it. The container spec carries the same label, so
+  a receiver change changes the container's config hash: `bay plan --remote`
+  predicts the recreate, although check mode builds nothing. Under `bay up`,
+  the `deploy_stack` container pass recreates the receiver when the label or
+  its image ID differs from `bay-webhook:latest`. A `--tags git_deploy`
   run reconciles the receiver alone (`roles/git_deploy/tasks/webhook.yml`)
   through the same spec and reconciler, so it is enough after a release that
   changed the receiver. That reconcile waits for the receiver env file that

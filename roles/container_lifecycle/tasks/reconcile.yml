@@ -410,7 +410,9 @@
     # What the plan does NOT see: images are read as they are on the host now.
     # Builds and pulls are skipped in check mode, so a pending rebuild shows as
     # NoOp. An env file that a rig role writes (outside deploy_stack) is read
-    # live.
+    # live. The webhook receiver is the exception to the image rule: its spec
+    # carries `com.bay.receiver-hash` (build_specs.yml), so a receiver change
+    # is a config change and plans as a recreate without the build.
     #
     # `changed` is true when the plan holds any action other than NoOp, so the
     # --check recap counts the containers a real deploy would touch.

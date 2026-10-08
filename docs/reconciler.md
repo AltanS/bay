@@ -126,7 +126,10 @@ Limits of the dry run:
 
 - **Images and env files are read as they are on the host now.** Check mode
   skips builds, pulls and env-file renders. A pending rebuild, a new image
-  under the same tag, or an undeployed secret change shows as `NoOp`.
+  under the same tag, or an undeployed secret change shows as `NoOp`. The
+  webhook receiver is the exception: its container carries the hash of the
+  receiver files (`com.bay.receiver-hash`), so a receiver change shows as a
+  recreate before the image is built.
 - **The plan lists action kinds, not container names.** The plan-only report
   has counts and action types only.
 - **No CLI hand-off.** The touched-container report for the post-deploy
