@@ -40,6 +40,24 @@ jobs:
       - name: Install Galaxy dependencies
         run: make install
 
+      # The backup tests also run the script against the real restic that the
+      # backup role installs. Version and sha256 come from the role defaults, so
+      # CI tests the binary the boxes get. The download is verified before use,
+      # and only the CI step (not the tests) touches the network.
+      - name: Install restic for the backup tests
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^backup_restic_version: "\(.*\)"$/\1/p' roles/backup/defaults/main.yml)
+          sha=$(sed -n 's/^backup_restic_checksum: "\(.*\)"$/\1/p' roles/backup/defaults/main.yml)
+          dest=$(mktemp -d)
+          curl -fsSL -o "${dest}/restic.bz2" \
+            "https://github.com/restic/restic/releases/download/v${version}/restic_${version}_linux_amd64.bz2"
+          echo "${sha}  ${dest}/restic.bz2" | sha256sum --check -
+          bunzip2 -c "${dest}/restic.bz2" > "${dest}/restic"
+          chmod 0755 "${dest}/restic"
+          "${dest}/restic" version
+          echo "BAY_TEST_RESTIC=${dest}/restic" >> "${GITHUB_ENV}"
+
       - name: Python tests
         run: make test-python
 
