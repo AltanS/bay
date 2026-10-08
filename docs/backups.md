@@ -6,10 +6,14 @@ Bay uses [restic](https://restic.net/) for deduplicated, encrypted backups to S3
 
 1. **Per-accessory scripts** — the backup role generates a `backup-<name>.sh` script for each accessory
 2. **Stdin piping** — dump commands pipe directly into `restic backup --stdin` (no intermediate files on disk)
+
+   The `file` method is different: restic runs `docker cp` itself (`restic backup --stdin-from-command`) and stores no snapshot when `docker cp` fails, so a cut-off tar never becomes a snapshot. This needs restic 0.17.0 or newer, and the role stops when the box has an older one.
 3. **Systemd timers** — replace cron with `Persistent=true` (catch up after downtime) and staggered scheduling
 4. **Retention** — `restic forget --prune` runs after each backup to enforce retention policies
 5. **Weekly maintenance** — `restic check` verifies repository integrity, `restic cache --cleanup` removes stale cache
 6. **Deploy coordination** — backup scripts create lock files; deploys wait for active backups to finish before restarting containers
+
+   The deploy waits for accessory backups and for volume backups (lock `<stack_name>_<volume>.lock`), up to 300 seconds each, then goes on.
 
 ## Enabling backups
 
@@ -153,8 +157,13 @@ volume whose container runs on the host:
 - The target name is the Docker volume name, `<stack_name>_<volume>`, for example
   `bay_myapp-data`. The script is `backup-<target>.sh` and the repo ends in `/<target>/`.
 - The script reads the mount path out of the container through the Docker daemon
-  (`docker cp <container>:<path> - | restic backup --stdin`). The unit runs as the app user,
-  which cannot read the Docker data root itself.
+  (`restic backup --stdin-from-command -- docker cp <container>:<path> -`). The unit runs as
+  the app user, which cannot read the Docker data root itself.
+- When `docker cp` fails, also in the middle of the copy, restic stores no snapshot. The
+  script exits 1 and sends the `backup.failed` alert, and the newest snapshot stays the last
+  good one.
+- A deploy waits for a running volume backup before it recreates containers, like for an
+  accessory backup: it waits for the lock `<stack_name>_<volume>.lock` up to 300 seconds.
 - The project `[backup]` table, then `[defaults.backup]` in `bay.fleet.toml`, set the hour
   (UTC) and `keep` (whole days). Without either, `backup_schedule` and `backup_retain` apply.
 - Nothing runs while `backup_enabled` is false. The plan says so: `volume backups are
@@ -193,8 +202,8 @@ identity, every node's assigned IP, and the keys. The config dir (`/etc/headscal
 `config.yaml` + `extra-records.json`) is re-rendered on every deploy and is intentionally
 **not** backed up.
 
-It uses the same `file` method as any volume backup (`docker cp headscale:/var/lib/headscale
-| restic backup --stdin`), so it gets its own repo, systemd timer, retention, maintenance,
+It uses the same `file` method as any volume backup (`restic backup --stdin-from-command --
+docker cp headscale:/var/lib/headscale -`), so it gets its own repo, systemd timer, retention, maintenance,
 and Telegram alerting like every other target. Tune via `backup_headscale_*` (see Defaults),
 or disable with `backup_headscale_state: false`.
 
@@ -291,7 +300,7 @@ This provides independent locking, independent retention, and failure isolation 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `backup_enabled` | `false` | Master switch — set to `true` in group_vars to enable |
-| `backup_restic_version` | `0.17.3` | Restic binary version |
+| `backup_restic_version` | `0.17.3` | Restic binary version. The role installs it only when `backup_restic_bin` is missing, and stops when the binary there is older than 0.17.0 |
 | `backup_s3_endpoint` | `{{ secrets.backup_s3_endpoint \| default(S3_ENDPOINT) }}` | Set in `secrets:` dict; falls back to shared `S3_ENDPOINT` var |
 | `backup_s3_bucket` | `{{ secrets.backup_s3_bucket \| default(S3_BUCKET) }}` | Set in `secrets:` dict; falls back to shared `S3_BUCKET` var |
 | `backup_s3_access_key_id` | `{{ secrets.backup_s3_access_key_id \| default(S3_ACCESS_KEY_ID) }}` | Set in `secrets:` dict; falls back to shared `S3_ACCESS_KEY_ID` var |

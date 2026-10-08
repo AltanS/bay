@@ -5,6 +5,10 @@ backup_enabled: false
 # the upstream release SHA256SUMS file:
 #   https://github.com/restic/restic/releases/download/v0.17.3/SHA256SUMS
 # Overriding the version without the checksum fails the download on purpose.
+# The backup scripts need 0.17.0 or newer (backup --stdin-from-command; the
+# install tasks stop on an older binary). Before a move to 0.19: restic 0.19.0
+# prints a progress line on stdout ahead of the JSON of `stats --json`, which
+# the script's snapshot size check reads with jq.
 backup_restic_version: "0.17.3"
 backup_restic_checksum: "5097faeda6aa13167aae6e36efdba636637f8741fed89bbf015678334632d4d3"
 backup_restic_bin: /usr/local/bin/restic
@@ -38,8 +42,8 @@ backup_lock_dir: "{{ stack_dir }}/backup/locks"
 # /var/lib/headscale (bind-mounted from /opt/headscale/data on the host). Losing it
 # loses the tailnet identity, every node's IP assignment, and the keys.
 #
-# We capture it through the existing restic 'file' method (docker cp → restic
-# --stdin), which reads via the docker daemon and so sidesteps the root-owned
+# We capture it through the existing restic 'file' method (restic backup
+# --stdin-from-command -- docker cp), which reads via the docker daemon and so sidesteps the root-owned
 # on-disk DB/key permissions. It is gated to the control-region host (the only host
 # running the headscale container). The config dir (/etc/headscale) is re-rendered
 # on every deploy and is intentionally NOT backed up.

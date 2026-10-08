@@ -203,15 +203,28 @@
 
     # ── Wait for Active Backups ─────────────────────────────────────────
 
+    # One task for accessory and volume backups, so both wait with the same
+    # timeout. A volume backup target is named like the Docker volume,
+    # `<stack_name>_<volume>` (see the backup role), and its lock file too.
+    # Only volumes whose container runs on this host have a backup here.
     - name: Wait for active backups to complete before deploy
       ansible.builtin.wait_for:
-        path: "{{ backup_lock_dir | default(stack_dir + '/backup/locks') }}/{{ item.key }}.lock"
+        path: "{{ backup_lock_dir | default(stack_dir + '/backup/locks') }}/{{ item }}.lock"
         state: absent
         timeout: 300
-      loop: "{{ active_accessories | dict2items }}"
-      loop_control:
-        label: "{{ item.key }}"
-      when: item.value.backup is defined
+      loop: "{{ _accessory_backup_locks + _volume_backup_locks }}"
+      vars:
+        _accessory_backup_locks: >-
+          {{ active_accessories | default({}) | dict2items
+             | selectattr('value.backup', 'defined') | map(attribute='key') | list }}
+        _volume_backup_locks: >-
+          {{ [stack_name ~ '_']
+             | product(volume_backups | default({}) | dict2items
+                       | selectattr('value.container', 'in',
+                                    (active_services | default({}) | list)
+                                    + (active_accessories | default({}) | list))
+                       | map(attribute='key') | list)
+             | map('join') | list }}
       ignore_errors: true
 
     # ── log_retention boundary (pre) ──────────────────────────────────

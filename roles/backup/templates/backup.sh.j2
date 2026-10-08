@@ -142,20 +142,21 @@ SOURCE_PATH={{ accessory_config.backup.source_path | default('/data') | quote }}
 # Docker data root, wherever it is.
 CONTAINER={{ backup_container | default(accessory_name) | quote }}
 echo "[$(date -Iseconds)] Starting file backup for ${ACCESSORY}..."
+# restic runs docker cp itself (--stdin-from-command, restic 0.17.0 or newer)
+# and stores no snapshot when docker cp exits non-zero. Do not turn this back
+# into `docker cp ... | restic backup --stdin`: a docker cp that dies
+# mid-stream closes the pipe like a finished one, and restic then stores the
+# cut-off tar as the newest snapshot.
 set +e
-docker cp "${CONTAINER}:${SOURCE_PATH}" - | \
-  "$RESTIC" backup \
-    --stdin \
-    --stdin-filename "${ACCESSORY}.tar" \
-    --tag "${HOST_TAG}" \
-    --tag "${ACCESSORY}" \
-    --tag "${METHOD}" \
-    ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
-    --retry-lock 15m
-
-_pipestatus=("${PIPESTATUS[@]}")
-DUMP_EXIT=${_pipestatus[0]}
-RESTIC_EXIT=${_pipestatus[1]}
+"$RESTIC" backup \
+  --stdin-filename "${ACCESSORY}.tar" \
+  --tag "${HOST_TAG}" \
+  --tag "${ACCESSORY}" \
+  --tag "${METHOD}" \
+  ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
+  --retry-lock 15m \
+  --stdin-from-command -- docker cp "${CONTAINER}:${SOURCE_PATH}" -
+RESTIC_EXIT=$?
 set -e
 {% endif %}
 
