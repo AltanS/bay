@@ -153,7 +153,10 @@ Jobs and release:
   command: it runs as `/bin/sh -c`, with the image entrypoint overridden. A list keeps the
   image ENTRYPOINT and is passed to it as the arguments, so `release = ["bin/migrate", "up"]`
   on an image with `ENTRYPOINT ["node"]` runs `node bin/migrate up`. Write a list when the
-  image has an exec-form ENTRYPOINT that the command must go through.
+  image has an exec-form ENTRYPOINT that the command must go through. A string never runs
+  the image ENTRYPOINT at all: a wrapper entrypoint (a script that sets things up and ends in
+  `exec "$@"`) does not run for a string `command`. Use the list form for an image that needs
+  its entrypoint.
 - `release` runs once per environment per deploy, inside a one-shot container of the new
   image. It runs only when the main container is created or recreated, and a push build
   runs it before it swaps the container. It has the env, secrets, network and mounts of
@@ -571,7 +574,7 @@ Scheduled one-shot runs of the main container's image.
 |-----|------|---------|
 | `name` | name | Unique among jobs, and not the name of a service. |
 | `schedule` | five-field cron, UTC | When the job runs, for example `"0 2 * * *"`. |
-| `command` | string or list of strings | What to run. A string runs as `/bin/sh -c` with the image entrypoint overridden. A list keeps the image ENTRYPOINT and is passed to it as the arguments. |
+| `command` | string or list of strings | What to run. A string runs as `/bin/sh -c` and bypasses the image ENTRYPOINT entirely (a wrapper entrypoint ending in `exec "$@"` does not run). A list keeps the image ENTRYPOINT and is passed to it as the arguments; use it for an image that needs its entrypoint. |
 | `memory` | size | Optional memory limit for the job container. |
 | `timeout` | integer >= 1 | Optional. Seconds a run may take before it is stopped. Default 3600. |
 
