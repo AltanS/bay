@@ -5007,7 +5007,9 @@ def test_plan_names_every_code_move(
             if commits.get(name) == pin:
                 continue  # the box already runs it: codepin answers noop
             moves.append(name)
-            note = planmod.unknown_code_note(name, "box-1", pin)
+            note = planmod.unknown_code_note(
+                name, "box-1", pin, strict=bool(target.get("strict"))
+            )
             assert name in stepped or note in plan["notes"], (name, plan)
         by = {"step": stepped & set(moves), "note": set(moves) - stepped}
         assert moves and by[expect] == set(moves), (expect, plan)
@@ -5026,7 +5028,14 @@ def test_plan_names_every_code_move(
     # Pin mode: another commit than the pin is a step; unknown is still a note.
     edit_app(world, "[deploy.production]\n", '[deploy.production]\ntrack = "pin"\n')
     check("abcdef0123456789", expect="step")
-    check(None, expect="note")
+    plan = check(None, expect="note")
+    # Pin mode sends a strict target: the note says up may stop, not "try".
+    wanted12 = lock_of(world)["envs"]["production"]["commit"][:12]
+    assert (
+        f"code of webapp on box-1 is unknown (no commit label or tag); up will stop unless "
+        f"box-1 has or can pull an image tagged {wanted12} (track pin)" in plan["notes"]
+    )
+    assert not any("up will try to pin" in n for n in plan["notes"])
     # Config unchanged now: the step is the code step itself.
     plan = check("abcdef0123456789", expect="step")
     assert [(s["kind"], s["container"]) for s in plan["steps"]] == [("image", "webapp")]

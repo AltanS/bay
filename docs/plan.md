@@ -1162,7 +1162,11 @@ gave the running image a second tag, and the image is still the pin's
 without the pin among its commit tags, gets no step, because there is
 nothing to compare. The plan names it in a note instead: `code of
 <container> on <box> is unknown (no commit label or tag); up will try to pin
-it to <commit12>`. The note is not a step and
+it to <commit12>`. In `track = "pin"` the code target is strict, so the note
+reads `...; up will stop unless <box> has or can pull an image tagged
+<commit12> (track pin)`. The plan reads the receipt, not the images on the
+box, so it cannot tell whether that image is there (a push in pin mode
+builds and tags it): the note is not a block. The note is not a step and
 does not change the exit code. A project in the fleet, and the `bay adopt`
 commit, pass no code target, so for them the note ends after `(no commit
 label or tag)`. So every code move that `bay up` sends is a plan step for

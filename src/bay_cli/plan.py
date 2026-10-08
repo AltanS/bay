@@ -1633,14 +1633,24 @@ def unknown_code(
     return sorted(out)
 
 
-def unknown_code_note(name: str, box: str, target: str | None) -> str:
+def unknown_code_note(name: str, box: str, target: str | None, *, strict: bool = False) -> str:
     """The plan note for a build container whose running code is unknown.
 
     ``target``: the commit ``bay up`` will point ``:latest`` at, or None when
     it sends no code target (a project in the fleet, the adopt commit).
+    ``strict``: the target is strict (``track = "pin"``). Then codepin stops
+    the deploy when the image ``<repo>:<target12>`` is neither on the box nor
+    pullable, and the running image cannot show that it already is the
+    target. The plan reads only the receipt, not the box's images, so it
+    cannot know which case holds: a note, not a block.
     """
     line = f"code of {name} on {box} is unknown (no commit label or tag)"
-    if target:
+    if target and strict:
+        line += (
+            f"; up will stop unless {box} has or can pull an image tagged "
+            f"{target[:12]} (track pin)"
+        )
+    elif target:
         line += f"; up will try to pin it to {target[:12]}"
     return line
 
@@ -2724,10 +2734,13 @@ def project_code(
     # A build container the box runs with no known commit: no step (there is
     # nothing to compare), but the plan names it. bay up sends a code target
     # for it exactly when it sends one for any build container of the project
-    # (apply._code_targets): an app-repo project, not the adopt commit.
+    # (apply._code_targets): an app-repo project, not the adopt commit. In
+    # track pin that target is strict, and the note says up may stop.
     sends = not proj.in_fleet and not adopt_pending(proj, env, wanted.commit)
     code.info.extend(
-        unknown_code_note(name, box, wanted.commit if sends else None)
+        unknown_code_note(
+            name, box, wanted.commit if sends else None, strict=sends and track == "pin"
+        )
         for name, box in unknown_code(receipt_entries, built, pin=code_pin)
     )
     return code
