@@ -634,6 +634,78 @@ def test_show_routes_wanted_vs_running(world: dict[str, Path], box: FakeBox) -> 
     assert "WANTED   notes.ts.example.com -> " + NOTES["upstream"] in result.stdout
 
 
+def _statuses(world: dict[str, Path]) -> dict[str, str]:
+    doc = json.loads(cli(world, "show", "--routes", "--json").stdout)
+    return {r["name"]: r["status"] for r in doc["routes"]}
+
+
+def test_route_status_unknown_after_partial_deploy(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt that cannot speak for the pin reads unknown, never drift."""
+    import copy
+
+    from bay_cli import gitrepo
+
+    assert add_route(world, "notes", **NOTES).exit_code == 0
+    do_up(world)
+    first = copy.deepcopy(box.receipts["production"])
+
+    # A receipt that speaks and matches: ok.
+    assert _statuses(world) == {"notes": "ok"}
+
+    # A receipt that speaks and differs: drift.
+    box.receipts["production"]["routes"][0]["upstream"] = "http://laptop:9"
+    assert _statuses(world) == {"notes": "drift"}
+    box.receipts["production"] = copy.deepcopy(first)
+
+    # A receipt without a routes key: unknown.
+    del box.receipts["production"]["routes"]
+    assert _statuses(world) == {"notes": "unknown"}
+
+    # The pin moves (a second route, deployed), then the box falls back to the
+    # old receipt: it lists one route and the pin has two. That is a box that
+    # has not deployed since the pin, not a drift.
+    assert (
+        add_route(
+            world, "nas", domain="nas.ts.example.com", upstream="http://laptop:5000"
+        ).exit_code
+        == 0
+    )
+    do_up(world)
+    assert _statuses(world) == {"nas": "ok", "notes": "ok"}
+    box.receipts["production"] = copy.deepcopy(first)
+    assert _statuses(world) == {"nas": "unknown", "notes": "unknown"}
+    text = cli(world, "show", "--routes").stdout
+    assert "the receipt is older than the last change of the routes" in text
+
+    # A receipt of a commit the local clone does not know, or with none: unknown.
+    box.receipts["production"] = copy.deepcopy(first)
+    box.receipts["production"]["fleet_commit"] = "0" * 40
+    assert _statuses(world) == {"nas": "unknown", "notes": "unknown"}
+    del box.receipts["production"]["fleet_commit"]
+    assert _statuses(world) == {"nas": "unknown", "notes": "unknown"}
+
+    # A deploy after the pin that changes nothing about the routes (a later
+    # commit): the receipt speaks again, so a real difference is drift.
+    do_up(world)
+    assert _statuses(world) == {"nas": "ok", "notes": "ok"}
+    box.receipts["production"]["routes"] = box.receipts["production"]["routes"][:1]
+    assert _statuses(world) == {"nas": "ok", "notes": "drift"}
+
+    # One git log for the whole table, not one per route.
+    calls: list[tuple[str, ...]] = []
+    real = gitrepo._run
+
+    def spy(repo: Path, *args: str, **kw: Any) -> Any:
+        calls.append(args)
+        return real(repo, *args, **kw)
+
+    monkeypatch.setattr(gitrepo, "_run", spy)
+    _statuses(world)
+    assert sum(1 for a in calls if a and a[0] == "log") == 1, calls
+
+
 # ── the verbs ───────────────────────────────────────────────────────────────
 
 
@@ -812,3 +884,123 @@ def test_route_import_json(world: dict[str, Path], box: FakeBox) -> None:
     assert doc["deleted"] == str(old.resolve())
     assert doc["cert_domain"] == tomllib.loads(fleet_text(world))["tailnet"]["cert_domain"]
     assert not old.exists()
+
+
+# ── the last route leaves Traefik ───────────────────────────────────────────
+
+TRAEFIK_TASKS = ROOT / "roles" / "traefik" / "tasks" / "main.yml"
+
+
+def _route_file_tasks(tmp_path: Path) -> list[dict[str, Any]]:
+    """The two route-file tasks of the traefik role, as written there.
+
+    Only paths the test machine cannot satisfy change: the template source
+    becomes absolute and the group is the caller's own.
+    """
+    import grp
+
+    tasks = yaml.safe_load(TRAEFIK_TASKS.read_text())
+    picked = [
+        t
+        for t in tasks
+        if t["name"].startswith(("Render tailnet-proxy dynamic routes", "Remove the tailnet-proxy"))
+    ]
+    assert len(picked) == 2, [t["name"] for t in picked]
+    render = picked[0]["ansible.builtin.template"]
+    render["src"] = str(TRAEFIK_TEMPLATES / render["src"])
+    render["group"] = grp.getgrgid(os.getgid()).gr_name
+    return picked
+
+
+def _run_route_tasks(
+    tmp_path: Path, variables: dict[str, Any], *, check: bool = False
+) -> dict[str, str]:
+    """Run the route-file tasks on localhost; ``changed``, ``ok`` or ``skipping`` per task."""
+    import getpass
+    import sys
+
+    play = [
+        {
+            "hosts": "localhost",
+            "connection": "local",
+            "gather_facts": False,
+            "vars": {
+                "stack_dir": str(tmp_path / "stack"),
+                "app_user": getpass.getuser(),
+                "ansible_managed": "test",
+                "traefik_dns_resolver_name": "letsencrypt_dns",
+                **variables,
+            },
+            "tasks": _route_file_tasks(tmp_path),
+        }
+    ]
+    (tmp_path / "play.yml").write_text(yaml.safe_dump(play))
+    (tmp_path / "ansible.cfg").write_text("[defaults]\n")
+    env = {
+        **os.environ,
+        "ANSIBLE_CONFIG": str(tmp_path / "ansible.cfg"),
+        "ANSIBLE_NOCOLOR": "1",
+        "ANSIBLE_LOCALHOST_WARNING": "0",
+        "ANSIBLE_INVENTORY_UNPARSED_WARNING": "0",
+        "ANSIBLE_PYTHON_INTERPRETER": sys.executable,
+    }
+    cmd = [sys.executable, "-m", "ansible.cli.playbook", "-i", "localhost,", "play.yml"]
+    if check:
+        cmd.append("--check")
+    proc = subprocess.run(cmd, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    # The default callback prints "TASK [name]" then "changed|ok|skipping: [localhost]".
+    outcome: dict[str, str] = {}
+    for block in proc.stdout.split("\nTASK [")[1:]:
+        name, _, rest = block.partition("]")
+        match = re.search(r"^(changed|ok|skipping): \[localhost\]", rest, re.M)
+        assert match, block
+        outcome[name] = match.group(1)
+    render = next(v for k, v in outcome.items() if k.startswith("Render"))
+    remove = next(v for k, v in outcome.items() if k.startswith("Remove"))
+    return {"render": render, "remove": remove}
+
+
+def test_last_route_removed_from_traefik(tmp_path: Path) -> None:
+    route_file = tmp_path / "stack" / "dynamic" / "tailnet-proxies.yml"
+    route_file.parent.mkdir(parents=True)
+    on = {
+        "traefik_dns_challenge_enabled": True,
+        "tailnet_proxies": OLD_MAP,
+        # What render_traefik() sets by default, so both renders see one context.
+        "tailnet_ingress_cert_domain": "*.ts.example.com",
+        "traefik_split_entrypoints": True,
+        "tailnet_identity_enabled": True,
+        "tailnet_identity_port": 9200,
+        "tailnet_identity_device_header": "X-Tailnet-Device",
+        "tailnet_identity_device_id_header": "X-Tailnet-Device-Id",
+    }
+
+    # Routes exist: the file is rendered as before, byte for byte, and the
+    # remove task skips.
+    assert _run_route_tasks(tmp_path, on) == {"render": "changed", "remove": "skipping"}
+    assert route_file.read_text() == render_traefik(dict(sorted(OLD_MAP.items())))
+    assert [r["name"] for r in box_routes.rendered_routes(tmp_path / "stack")] == [
+        "nas",
+        "notes",
+        "notes-next",
+    ]
+    # A second run changes nothing (a fleet with routes stays idempotent).
+    assert _run_route_tasks(tmp_path, on) == {"render": "ok", "remove": "skipping"}
+
+    # No route left: check mode predicts the removal and leaves the file.
+    off = {"traefik_dns_challenge_enabled": True, "tailnet_proxies": {}}
+    assert _run_route_tasks(tmp_path, off, check=True) == {
+        "render": "skipping",
+        "remove": "changed",
+    }
+    assert route_file.exists()
+
+    # The real run removes it; the receipt then lists no routes.
+    assert _run_route_tasks(tmp_path, off) == {"render": "skipping", "remove": "changed"}
+    assert not route_file.exists()
+    assert box_routes.rendered_routes(tmp_path / "stack") == []
+
+    # Converged: a second run changes nothing, also with the tailnet map unset.
+    assert _run_route_tasks(tmp_path, off)["remove"] == "ok"
+    assert _run_route_tasks(tmp_path, {})["remove"] == "ok"

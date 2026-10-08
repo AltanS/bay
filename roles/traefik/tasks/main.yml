@@ -104,3 +104,13 @@
   when:
     - traefik_dns_challenge_enabled | default(false)
     - tailnet_proxies | default({}) | length > 0
+
+# The last route removed from the fleet: the file would stay, and Traefik would
+# keep serving it (and the receipt keep listing it) for good. The file provider
+# watches the directory, so deleting the file drops the routers. `absent` on a
+# missing file changes nothing; in check mode an existing file reports changed.
+- name: Remove the tailnet-proxy dynamic routes when no route is left
+  ansible.builtin.file:
+    path: "{{ stack_dir }}/dynamic/tailnet-proxies.yml"
+    state: absent
+  when: tailnet_proxies | default({}) | length == 0

@@ -838,7 +838,7 @@ def _show_routes(ctx: typer.Context, as_json: bool, no_remote: bool) -> None:
                 entries = planmod.default_receipt_reader(cx, env)
             except (BayError, OSError) as exc:
                 console.warning(f"cannot read the receipt of {env}: {exc}")
-        doc = routes.show_routes(fleet, pinned, entries)
+        doc = routes.show_routes(fleet, pinned, entries, cx.fleet_root)
     except BayError as exc:
         if not as_json:
             raise

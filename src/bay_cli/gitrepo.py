@@ -162,6 +162,19 @@ def last_change(repo: Path, rel: str | Sequence[str], ref: str = "HEAD") -> str 
     return _out(repo, "log", "-1", "--format=%H", ref, "--", *_specs(rel)) or None
 
 
+def last_change_matching(
+    repo: Path, rel: str | Sequence[str], pattern: str, ref: str = "HEAD"
+) -> str | None:
+    """The newest commit at or before ``ref`` whose diff of ``rel`` adds or drops a line
+    that matches the extended regular expression ``pattern`` (``git log -E -G``), or None.
+
+    One git call, however many lines match.
+    """
+    return _out(
+        repo, "log", "-1", "--format=%H", "-E", "-G", pattern, ref, "--", *_specs(rel)
+    ) or None
+
+
 def path_dirty(repo: Path, rel: str | Sequence[str]) -> bool | None:
     """True when ``rel`` differs from HEAD in the work tree (untracked files count)."""
     out = _out(repo, "status", "--porcelain", "--untracked-files=normal", "--", *_specs(rel))
