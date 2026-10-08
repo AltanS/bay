@@ -509,20 +509,28 @@ _config_only_source() {
   printf '%s' "${id}"
 }
 
-# End a config-only push: no build, no :latest move, no recreate, no alert, the
-# circuit breaker untouched; the trigger was consumed at the start of the run.
-# The code is the previous commit's, so its image also gets this commit's tag
-# (a tag, never a build): `bay up` (and track = "pin") then finds <image>:<commit12>.
-# When the image came from :latest (_config_only_source), it also gets
-# <image>:<prev12>, so the next push finds the previous commit by its tag.
+# End a config-only or a no-input-change push: no build, no :latest move, no
+# recreate, no alert, the circuit breaker untouched; the trigger was consumed at
+# the start of the run. The code is the previous commit's, so its image also
+# gets this commit's tag (a tag, never a build): `bay up` (and track = "pin")
+# then finds <image>:<commit12>. When the image came from :latest
+# (_config_only_source), it also gets <image>:<prev12>, so the next push finds
+# the previous commit by its tag. When the source already is <image>:<commit12>
+# (the previous commit is the pushed one), there is nothing to tag.
 # Returns 1, before it changes anything, when there is no image of the previous
-# commit: the caller then runs the normal path.
+# commit: the caller then runs the normal path. A no-input-change push also
+# returns 1 when it has no image repo or previous commit to tag from.
 #   $1  image repo (no tag; may be empty)   $2  the previous commit
+#   $3  config-only (default) or no-input-change: the log lines and the stage
 _config_only_push() {
-  local repo="$1" prev="$2" src=""
+  local repo="$1" prev="$2" kind="${3:-config-only}" src="" stage="Config-only tag"
+  [[ "${kind}" == "no-input-change" ]] && stage="No-input-change tag"
   if [[ -n "${repo}" && -n "${prev}" ]]; then
     src=$(_config_only_source "${repo}" "${prev}" "${SERVICE}") || return 1
+  elif [[ "${kind}" == "no-input-change" ]]; then
+    return 1
   fi
+  [[ "${src}" == "${repo}:${SHA}" ]] && src=""
   trap - ERR
   if [[ -n "${src}" ]]; then
     local tag_err="" tag_ok=1 out
@@ -541,13 +549,85 @@ _config_only_push() {
     # A tag that was not made leaves `bay up` without <image>:<commit12>: this
     # is a failed push, not a config-only one. Nothing is built.
     if [[ "${tag_ok}" == "0" ]]; then
-      _log "config-only push ${SHA}: tag failed"
-      _record_failure "${SHA}" "Config-only tag" "tagging ${src} as ${repo}:${SHA} failed: $(printf '%s' "${tag_err}" | tail -c 400)"
+      _log "${kind} push ${SHA}: tag failed"
+      _record_failure "${SHA}" "${stage}" "tagging ${src} as ${repo}:${SHA} failed: $(printf '%s' "${tag_err}" | tail -c 400)"
       exit 1
     fi
   fi
+  if [[ "${kind}" == "no-input-change" ]]; then
+    echo "[rebuild] [${CORR_ID:-no-corr}] no-input-change push ${SHA}: tagged, run bay up"
+    exit 0
+  fi
   echo "[rebuild] [${CORR_ID:-no-corr}] config-only push ${SHA}: run bay up"
   exit 0
+}
+
+# ── No-input-change push (docs/build-pipeline.md, "No-input-change push") ──
+# The receiver writes the trigger marker no_input_change for a push that changes
+# none of this project's build inputs: its `watch` (else its build context, when
+# that is narrower than the repo), minus its `ignore`, plus its own bay.toml and
+# mounted files. `bay up` pins every project of the repo at its head, so this
+# image needs the pushed commit's tag too. The marker is never trusted: this
+# check diffs the previous commit against HEAD of the checkout itself. True (0)
+# when no changed file is the project's own bay.toml or a mounted file
+# (BAY_TOML_PATH, BAY_TOML_FILES: the config-only rule and the build decide
+# those), no other changed file is a build input (bay_reconcile.pushinputs with
+# INPUT_ARGS; the bay.toml of another project of the repo, SHARED_TOML_PATHS,
+# never is), and, for a bay.toml in the app repo, the [build] hash at HEAD is the
+# pinned one. An empty diff is true too: HEAD is the previous commit. False when
+# no previous commit is known or found, or when anything cannot be checked.
+#   $1  the checkout at the pushed commit   $2  the previous commit (may be empty)
+_no_input_change() {
+  local repo_dir="$1" prev="$2" files f p rest="" inputs have
+  [[ -n "${prev}" ]] || return 1
+  git -C "${repo_dir}" cat-file -e "${prev}^{commit}" 2>/dev/null || return 1
+  files=$(git -C "${repo_dir}" diff --name-only "${prev}" HEAD 2>/dev/null) || return 1
+  while IFS= read -r f; do
+    [[ -z "${f}" ]] && continue
+    for p in "${BAY_TOML_PATH:-}" "${BAY_TOML_FILES[@]}"; do
+      [[ -n "${p}" ]] || continue
+      if [[ "${f}" == "${p}" || "${f}" == "${p}"/* ]]; then
+        return 1
+      fi
+    done
+    for p in "${SHARED_TOML_PATHS[@]}"; do
+      if [[ "${f}" == "${p}" ]]; then
+        continue 2
+      fi
+    done
+    rest+="${f}"$'\n'
+  done <<< "${files}"
+  if [[ -n "${rest}" ]]; then
+    inputs=$(printf '%s' "${rest}" | PYTHONPATH="${RECONCILE_PYTHONPATH}" python3 -m bay_reconcile.pushinputs "${INPUT_ARGS[@]}" 2>/dev/null) || return 1
+    [[ -z "${inputs}" ]] || return 1
+  fi
+  if [[ -n "${BAY_TOML_PATH:-}" ]]; then
+    [[ -n "${PINNED_BUILD_HASH:-}" ]] || return 1
+    have=$(PYTHONPATH="${RECONCILE_PYTHONPATH}" python3 -m bay_reconcile.tomlhash --section build "${repo_dir}/${BAY_TOML_PATH}" 2>/dev/null) || return 1
+    [[ "${have}" == "${PINNED_BUILD_HASH}" ]] || return 1
+  fi
+  return 0
+}
+
+# The no-input-change decision site of both strategies, after the config-only
+# one. When _no_input_change agrees, _config_only_push tags the previous
+# commit's image with this commit and ends the run. Else this logs why and
+# returns, and the caller builds: the receiver's view was stale (a trigger can
+# cover several pushes) or no image holds the previous commit.
+#   $1  the checkout at the pushed commit   $2  image repo (no tag)
+#   $3  the previous commit (may be empty)
+_no_input_change_push() {
+  local repo_dir="$1" repo="$2" prev="$3"
+  if [[ -z "${prev}" ]]; then
+    _log "no-input-change push ${SHA}: no previous commit known, building"
+    return 0
+  fi
+  if ! _no_input_change "${repo_dir}" "${prev}"; then
+    _log "no-input-change push ${SHA}: an input changed since ${prev:0:12}, building"
+    return 0
+  fi
+  _config_only_push "${repo}" "${prev}" no-input-change \
+    || _log "no-input-change push ${SHA}: no image known to hold ${prev:0:12}, building"
 }
 
 # A held build is not a failure. The image stays under its commit tag, `:latest`
@@ -890,6 +970,9 @@ TRIGGER_FILE="${STACK_DIR}/triggers/${SERVICE}.trigger"
 RUNNING_FILE="${TRIGGER_FILE}.running"
 CORR_ID="unknown"
 PULL_SIGNAL=0
+# Line 2 "no_input_change": the receiver saw no build input of this project in
+# the push (docs/build-pipeline.md, "No-input-change push").
+NO_INPUT_CHANGE=0
 EXPECTED_REVISION=""
 BUILT_AT=""
 if [[ -f "${TRIGGER_FILE}" ]] && mv -f "${TRIGGER_FILE}" "${RUNNING_FILE}" 2>/dev/null; then
@@ -909,6 +992,9 @@ if [[ -f "${TRIGGER_FILE}" ]] && mv -f "${TRIGGER_FILE}" "${RUNNING_FILE}" 2>/de
   if [[ "${PULL_SIGNAL_RAW}" == "pull" ]]; then
     PULL_SIGNAL=1
     echo "[rebuild] [${CORR_ID}] Pull signal detected for ${SERVICE}"
+  elif [[ "${PULL_SIGNAL_RAW}" == "no_input_change" ]]; then
+    NO_INPUT_CHANGE=1
+    echo "[rebuild] [${CORR_ID}] No-input-change trigger for ${SERVICE}: checking the diff"
   fi
 else
   # No trigger file — manually invoked rebuild
@@ -1020,6 +1106,21 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   BAY_TOML_FILES=({% for f in build.bay_toml_files | default([]) %}"{{ dq(f) }}"{% if not loop.last %} {% endif %}{% endfor %})
   # The bay.toml files of the other projects that build from this repo and branch.
   SHARED_TOML_PATHS=({% for f in services | bay_shared_toml_paths(svc_name) %}"{{ dq(f) }}"{% if not loop.last %} {% endif %}{% endfor %})
+{% set _paths = build.paths | default({}) %}
+{% set _input_args = [] %}
+{% for p in _paths.include | default([]) %}
+{% set _ = _input_args.extend(['--include', p]) %}
+{% endfor %}
+{% for p in _paths.exclude | default([]) %}
+{% set _ = _input_args.extend(['--exclude', p]) %}
+{% endfor %}
+{% set _input_context = build | bay_build_context %}
+{% if _input_context %}
+{% set _ = _input_args.extend(['--context', _input_context, '--dockerfile', dockerfile]) %}
+{% endif %}
+  # The build inputs a no-input-change push is checked against: `watch`, else a
+  # narrower build context, then `ignore` (bay_reconcile.pushinputs).
+  INPUT_ARGS=({% for a in _input_args %}"{{ dq(a) }}"{% if not loop.last %} {% endif %}{% endfor %})
 {% set _checkout = [] %}
 {% if strategy != 'remote' %}
 {% for _other in _build_services %}
@@ -1096,6 +1197,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   PINNED_BUILD_HASH=""
   BAY_TOML_FILES=()
   SHARED_TOML_PATHS=()
+  INPUT_ARGS=()
   CHECKOUT_SERVICES=()
   PRIMARY_IMAGE=""
   BUILD_ARGS=()
@@ -1542,6 +1644,11 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
     _config_only_push "${IMAGE_REPO}" "${PREV_COMMIT}" \
       || _log "config-only push ${SHA}: no image of ${PREV_COMMIT:0:12} in the registry, building"
   fi
+  # No-input-change push: the receiver saw no build input of this project; the
+  # registry image of the previous commit gets this commit's tag, else it builds.
+  if [[ "${NO_INPUT_CHANGE}" == "1" ]]; then
+    _no_input_change_push "${REPO_DIR}" "${IMAGE_REPO}" "${PREV_COMMIT}"
+  fi
 
   # Hold guard, on the checkout of the pushed commit. A held build pushes only
   # the commit tag: the moving tag (IMAGE_REF) stays, and no box is told to pull.
@@ -1771,6 +1878,10 @@ PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")
 if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then
   _config_only_push "${IMAGE_NAME}" "${PREV_COMMIT}" \
     || _log "config-only push ${SHA}: no image known to hold ${PREV_COMMIT:0:12}, building"
+fi
+# ── No-input-change push: same place, same tag path ──
+if [[ "${NO_INPUT_CHANGE}" == "1" ]]; then
+  _no_input_change_push "${REPO_DIR}" "${IMAGE_NAME}" "${PREV_COMMIT}"
 fi
 
 # ── Check if image already exists for this SHA ──

@@ -201,17 +201,14 @@ push of one `bay.toml` therefore tags the image of every project of that repo
 and branch, on every box that builds it (local builds) or in the registry
 (remote builds; the box pulls `<image>:<commit12>` at `bay up`).
 
-The receiver lets a sibling's `bay.toml` push pass only when it carries no code
-for the other project. If the same push also changes other files, each must be a
-`bay.toml` or a file this project's mounts read, or match this project's
-`watch`. A push of the sibling's `bay.toml` plus the sibling's code, outside
-this project's `watch`, is skipped for this project: `rebuild.sh` would not call
-it config only and would build and recreate this project. A skipped push can still end
-in a build later. The diff that `rebuild.sh` checks covers the whole range from
-the commit the box last saw to the pushed head, so a later push of only a
-sibling's `bay.toml` has the skipped push's code in its range. That range is
-not config only, so this project builds. This is safe: the build is of the
-real head, and the cost is one build that the `watch` list would have avoided.
+The receiver lets a sibling's `bay.toml` push pass as a config-only candidate
+only when it carries no code for the other project. If the same push also
+changes other files, each must be a `bay.toml` or a file this project's mounts
+read, or match this project's `watch`. A push of the sibling's `bay.toml` plus
+the sibling's code, outside this project's `watch`, is not config only, but it
+changes no build input of this project either: since 2.5.1 it is a
+no-input-change push for this project (next section), so this image gets the
+commit tag too, with no build.
 
 The previous commit is the `com.bay.commit` label of the running container.
 A container created before 2.1.0 has no such label (and on a build server
@@ -290,6 +287,84 @@ push, `bay up`" is the clean flow: the push does nothing on the box, and
 once `bay up` has written the new script: run `bay up` before `git push`
 (docs/plan.md, "bay adopt").
 
+### No-input-change push
+
+`bay up` pins every project of a repo at the repo's head. So every project that
+builds from the pushed repo and branch needs an image tagged with the pushed
+commit, also when the push changed nothing it is built from. Before 2.5.1 the
+receiver skipped such a push, the project had no `<image>:<commit12>` for the
+head, and every `bay up` noted `code: kept <project>` (gap 39).
+
+The build inputs of a project are:
+
+- its `watch` patterns (`build.paths.include`), else its `[build]` context when
+  that is a subdirectory of the repo (then the files under it, the Dockerfile
+  and `<Dockerfile>.dockerignore` count), else every file;
+- minus its `ignore` patterns (`build.paths.exclude`);
+- plus its own `bay.toml` and the files its mounts read (the config-only rule
+  decides those).
+
+The `bay.toml` of another project of the repo is never an input.
+
+**Receiver.** A push on the deploy branch that changes none of these files is
+not skipped any more. The receiver writes the trigger with line 2
+`no_input_change` (line 1 is the correlation ID), logs
+`no input change for <svc>: tag only (<reason>; files: [...])`, answers HTTP 200
+with `"status": "triggered", "mode": "no_input_change"`, and sends no
+`webhook.received` alert. A trigger that is already waiting is never replaced
+by the marker: it is a normal push or a manual rebuild, and its build covers
+this push. A force push or a push of 20 or more commits is always a normal
+trigger.
+
+**`rebuild.sh` checks, it never trusts the marker.** One trigger can cover
+several pushes, so the receiver's view can be stale. Right after the
+config-only check (same place, both strategies, before the build and the hold
+guard), a run with the marker diffs the previous commit (the same one the
+config-only check uses) against the pushed head itself:
+
+1. A changed file that is the project's own `bay.toml` or a file its mounts
+   read: an input. A `bay.toml` of another project of the repo
+   (`SHARED_TOML_PATHS`): never an input.
+2. The other changed files go through `python3 -m bay_reconcile.pushinputs`
+   with the project's `watch`, `ignore` and narrower context (`INPUT_ARGS` in
+   the script). It is a stdlib port of the receiver's `pathspec` gitignore
+   matching (`tests/test_no_input_change.py` checks both give the same
+   answers). A pattern it cannot read counts as an input change.
+3. For a `bay.toml` in the app repo, the `[build]` hash at the head must be the
+   pinned `bay_build_hash`, as for a config-only push.
+
+No input changed: the run takes the config-only tag path (`_config_only_push`):
+the same source image rules (`<image>:<prev12>`, else a `:latest` that holds
+the previous commit), the same carbon copy (`docker tag` on the box,
+`docker buildx imagetools create --prefer-index=false` in the registry). It logs
+`no-input-change push <commit12>: tagged, run bay up` and exits 0: no build, no
+`:latest` move, no recreate, no alert, the circuit breaker untouched. When the
+previous commit is the pushed one (a redelivered push), there is nothing to tag.
+A failed tag command is a failed push, as for config only:
+`no-input-change push <commit12>: tag failed`, stage `No-input-change tag`,
+`build.failed`, exit 1.
+
+It falls back to a normal build, logged, when:
+
+- its own diff finds an input change:
+  `no-input-change push <commit12>: an input changed since <prev12>, building`;
+- no image holds the previous commit:
+  `no-input-change push <commit12>: no image known to hold <prev12>, building`;
+- no previous commit is known:
+  `no-input-change push <commit12>: no previous commit known, building`.
+
+The build is of the real head, so a fallback is always safe. The hold guard
+still decides whether it deploys.
+
+A project with no `watch` and no narrower context counts every file, so every
+push builds it, as before. A project with only `ignore` gets the tag for a
+push of only ignored files. A project in the fleet gets the tag too: it has no
+`bay.toml` in the app repo, so there is no `[build]` hash to compare.
+
+A `rebuild.sh` from before 2.5.1 reads any line 2 but `pull` as a normal
+push, so a new receiver in front of an old script builds such a push. An old
+receiver never writes the marker.
+
 ### Order of the guards on a push
 
 A push meets these checks in this order. The first one that applies decides.
@@ -305,9 +380,11 @@ In the webhook receiver, before any trigger file exists:
    `config file changed: <files>` and writes the trigger, so the config-only check (7) and the
    hold guard (9) decide. A project in the fleet has no such paths.
 3. The `[build] watch` and `ignore` lists (compiled to the include and exclude path
-   filters, gitignore syntax) filter the other pushed files. A push that fails the filter
-   returns 200 "skipped" and writes no trigger: nothing is built, no commit tag exists, no
-   alert goes out. A force push, or a push of 20 or more commits, skips both checks.
+   filters, gitignore syntax), or the build context when there is no `watch`, filter the
+   other pushed files. A push that fails the filter changes no build input: the receiver
+   writes the trigger with the marker `no_input_change` (see "No-input-change push"), logs
+   `no input change for <svc>: tag only`, and sends no alert. A force push, or a push of 20
+   or more commits, skips both checks and writes a normal trigger.
 
 In `rebuild.sh`, for a trigger that got through:
 
@@ -321,6 +398,8 @@ In `rebuild.sh`, for a trigger that got through:
    and the `[build]` hash is the same. Tag the previous commit's image (its commit
    tag, else a `:latest` that holds it) with the commit, exit 0.
    A project in the fleet never gets the keys for this, so every push of it builds.
+   With the `no_input_change` marker, the no-input-change check runs next (see
+   "No-input-change push"): no input in the diff, tag and exit 0; else build.
 8. Build `<image>:<commit12>`, unless that image already exists.
 9. Hold guard `_hold_reason`, in this order: `track = "pin"`, frozen, `bay.toml` missing at
    the commit, `bay.toml` hash unreadable, `bay.toml` hash differs from the pinned one. A hold

@@ -439,11 +439,11 @@ lockfile (see Behavior).
 |-----|------|---------|---------|
 | `repo` | string | none | The git URL that the box clones to build. Only for an app in the fleet (`projects/<name>/bay.toml`); an app repo uses its own origin, and a different `repo` there is a compile error. Without it, the compile takes `repo` from `bay.lock`. With neither, the compile stops and names both places. `bay adopt` moves it into the lock. |
 | `dockerfile` | string | `Dockerfile` | Path to the Dockerfile, relative to the repo root (not to this `bay.toml`). |
-| `context` | string | `.` | Build context, relative to the repo root. |
+| `context` | string | `.` | Build context, relative to the repo root. Without `watch`, a context narrower than the repo root is the set of build inputs: a push that changes no file under it (and not the Dockerfile) only tags the image (see "No-input-change push" in [build-pipeline.md](build-pipeline.md#no-input-change-push)). |
 | `strategy` | `local`, `remote`, `registry` | fleet setting | Where the image is built. |
 | `memory` | size | fleet setting | Build memory cap. (validated, not deployed yet) when it differs from the fleet's build memory. |
-| `watch` | list of globs | everything | A push that touches none of these files does not rebuild. This filter runs first, before the config-only and hold checks (see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push)). Bay passes a push that changes `bay.toml` or a file its mounts read, or the `bay.toml` of another project that builds from the same repo, whatever `watch` says, so you do not list them here (see "Config-only push" under `[[mounts]]` below). |
-| `ignore` | list of globs | none | Files that never trigger a rebuild. Applied after `watch`. |
+| `watch` | list of globs | everything | A push that touches none of these files does not rebuild. It only tags the current image with the pushed commit, so `bay up` finds an image for the repo's head (a no-input-change push, see [build-pipeline.md](build-pipeline.md#no-input-change-push)). This filter runs first, before the config-only and hold checks (see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push)). Bay passes a push that changes `bay.toml` or a file its mounts read, or the `bay.toml` of another project that builds from the same repo, whatever `watch` says, so you do not list them here (see "Config-only push" under `[[mounts]]` below). |
+| `ignore` | list of globs | none | Files that never trigger a rebuild. Applied after `watch`. A push of only such files tags the image, as for `watch`. |
 | `[build.args]` | table of strings | none | Build arguments. |
 | `[build.secrets]` | table | none | BuildKit secret id = fleet secret name. |
 
@@ -552,6 +552,12 @@ to that commit finds its image, also with `track = "pin"`. Run `bay up` to deplo
   pins both at the repo's head, so the image of each gets the pushed commit's tag. The receiver
   passes that push for both, whatever their `watch` says. Only the other project's `bay.toml`
   counts, not the files its mounts read.
+- **The other project's code.** A push that changes only the other project's code (outside this
+  project's `watch`) is no config-only push, but it changes none of this project's build inputs
+  either. Since 2.5.1 it tags this project's image with the pushed commit too, with no build and no
+  recreate: a no-input-change push (see
+  [build-pipeline.md](build-pipeline.md#no-input-change-push)). The build log has the line
+  `no-input-change push <commit12>: tagged, run bay up`.
 
 ### `[backup]`
 
@@ -643,7 +649,8 @@ deploy envs on one box env share them (see
 Every push that passes the guards before the build builds an image and tags it with its
 commit, `<image>:<commit12>` (the first 12 characters of the commit). Those guards run first,
 in a fixed order: the `watch` filter, then the config-only rule. A push that fails the filter
-or is config-only builds nothing. The order is in
+or is config-only builds nothing; it only tags the image of the previous commit with the pushed
+one. The order is in
 [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push). The image moves to `:latest`, and the
 container starts, only when the push may deploy. The pinned config (the
 `bay.toml` that `bay up` compiled) always decides the config.

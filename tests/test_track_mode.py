@@ -193,6 +193,7 @@ SERVICE="svc"
 HOSTNAME="testhost"
 SHA="0123456789ab"
 SHARED_TOML_PATHS=()
+INPUT_ARGS=()
 CHECKOUT_SERVICES=()
 RECONCILE_PYTHONPATH={str(shipped)!r}
 FAILED_COMMITS_DIR={str(tmp_path / "failed-commits")!r}
@@ -214,6 +215,8 @@ format_timestamp() {{ echo "Jan 01, 00:00 UTC"; }}
             _extract_helper(rendered, "_same_commit"),
             _extract_helper(rendered, "_config_only_source"),
             _extract_helper(rendered, "_config_only_push"),
+            _extract_helper(rendered, "_no_input_change"),
+            _extract_helper(rendered, "_no_input_change_push"),
             _extract_helper(rendered, "_forget_failed_build"),
             _extract_helper(rendered, "_clear_failed_commit"),
             _extract_helper(rendered, "_seen_head"),
@@ -1363,7 +1366,7 @@ ADMIN_TOML = WEB_TOML.replace('"web"', '"admin"').replace("apps/web", "apps/admi
 _CONFIG_KEYS = (
     "BUILD_STRATEGY", "IMAGE_NAME", "IMAGE_REPO", "TRACK", "FROZEN", "BAY_TOML_PATH",
     "PINNED_TOML_HASH", "PINNED_BUILD_HASH", "BAY_TOML_FILES", "SHARED_TOML_PATHS",
-    "CHECKOUT_SERVICES",
+    "INPUT_ARGS", "CHECKOUT_SERVICES",
 )
 
 

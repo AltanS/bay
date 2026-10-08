@@ -36,6 +36,16 @@
 {% if _shared %}
 {% set _ = entry.update({"shared_toml_paths": _shared}) %}
 {% endif %}
+{#
+  A project without `watch` whose build context is narrower than the repo:
+  only the files under it (and its Dockerfile) are build inputs, so a push
+  outside it is a no-input-change push (app.py `input_filter`). Absent for
+  every other project, whose config stays as before.
+#}
+{% set _context = build | bay_build_context %}
+{% if _context %}
+{% set _ = entry.update({"context": _context, "dockerfile": build.dockerfile | default("Dockerfile")}) %}
+{% endif %}
 {% set _ = entry.update({"regions": svc.regions | default([])}) %}
 {% set _ = entry.update({"peer_urls": git_deploy_peer_webhook_urls | default({})}) %}
 {% set _ = entry.update({"strategy": build.strategy | default(git_deploy_build_strategy | default('local'))}) %}

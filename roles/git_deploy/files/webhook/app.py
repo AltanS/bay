@@ -52,6 +52,12 @@ PULL_SIGNAL_HEADER = "X-Bay-Pull-Signal"
 # A build server still on the pre-1.0 rebuild.sh sends the old header.
 LEGACY_PULL_SIGNAL_HEADER = "X-Argo-Pull-Signal"  # kept-argo: dual-read, remove in a future major release
 
+# Line 2 of a trigger for a push that changes none of the project's build
+# inputs (push_filter). rebuild.sh re-checks the diff and, when it agrees,
+# tags the previous commit's image with the pushed commit instead of building.
+# A rebuild.sh from before 2.5.1 reads any line 2 but "pull" as a normal push.
+NO_INPUT_CHANGE = "no_input_change"
+
 CONFIG_FILE = Path(os.environ.get("CONFIG_FILE", "/config/services.json"))
 IMAGE_MAP_FILE = Path(os.environ.get("IMAGE_MAP_FILE", "/config/image-map.json"))
 ALERT_WEBHOOK_URL = os.environ.get("ALERT_WEBHOOK_URL", "")
@@ -262,7 +268,12 @@ def config_files_changed(changed_files: set[str], svc_config: dict | None) -> li
 
 
 def push_filter(changed_files: set[str], svc_config: dict | None) -> tuple[bool, str]:
-    """Decide whether a (not forced, not truncated) push writes a trigger.
+    """Decide whether a (not forced, not truncated) push changes a build input.
+
+    True: the push writes a normal trigger. False: it changes none of the
+    project's build inputs, and the receiver writes a `no_input_change`
+    trigger instead (`do_POST`), so rebuild.sh tags the image of the previous
+    commit with the pushed one (gap 39). The reason says why either way.
 
     A push that changes the project's own bay.toml or a mounted file always
     passes, whatever `watch` (`paths.include`) and `ignore` (`paths.exclude`)
@@ -270,11 +281,9 @@ def push_filter(changed_files: set[str], svc_config: dict | None) -> tuple[bool,
     and branch) passes when every other file it changes is also a config file
     or counts for this project's `watch`. `rebuild.sh` then sees a config-only
     push and tags the image. With sibling code outside this project's `watch`
-    in the same push, rebuild.sh would not call it config only and would build
-    this project, so the push is skipped, as without shared paths. Every other
-    push goes through `should_rebuild`.
+    in the same push, it changes no input of this project. Every other push
+    goes through `input_filter`.
     """
-    paths = (svc_config or {}).get("paths")
     if svc_config and changed_files:
         own = _own_config_files(changed_files, svc_config)
         shared = _matching(changed_files, svc_config.get("shared_toml_paths"))
@@ -284,12 +293,52 @@ def push_filter(changed_files: set[str], svc_config: dict | None) -> tuple[bool,
             others = changed_files - set(shared)
             if not others:
                 return True, f"config file changed: {', '.join(shared)}"
-            ok, reason = should_rebuild(others, paths)
+            ok, reason = input_filter(others, svc_config)
             if ok:
                 return True, f"config file changed: {', '.join(shared)}; {reason}"
             return False, (
                 f"bay.toml of another project changed with files outside the watch: {reason}"
             )
+    return input_filter(changed_files, svc_config)
+
+
+def _clean_dir(path) -> str:
+    """A repo-relative directory without `./` and slashes at the ends; "" is the root."""
+    path = (path if isinstance(path, str) else "").strip()
+    while path.startswith("./"):
+        path = path[2:]
+    path = path.strip("/")
+    return "" if path == "." else path
+
+
+def input_filter(changed_files: set[str], svc_config: dict | None) -> tuple[bool, str]:
+    """`should_rebuild`, with the build context as the input set when there is no `watch`.
+
+    The receiver config carries `context` and `dockerfile` only for a project
+    whose `[build]` context is narrower than the repo root and that has no
+    `watch` (bay_filters `bay_build_context`). Then a file counts when it is
+    under the context, or is the Dockerfile or its `<Dockerfile>.dockerignore`;
+    `ignore` drops files after that. A project with neither `watch` nor a
+    narrower context counts every file, as before. Same rule as
+    `bay_reconcile.pushinputs`, which rebuild.sh runs to check the push itself.
+    """
+    cfg = svc_config or {}
+    paths = cfg.get("paths")
+    ctx = _clean_dir(cfg.get("context"))
+    if ctx and not (paths or {}).get("include"):
+        dockerfile = _clean_dir(cfg.get("dockerfile"))
+        own = {dockerfile, f"{dockerfile}.dockerignore"} if dockerfile else set()
+        inside = {
+            f for f in changed_files
+            if f == ctx or f.startswith(ctx + "/") or f in own
+        }
+        if not inside:
+            return False, (
+                f"0/{len(changed_files)} file(s) under the build context {ctx}"
+            )
+        if not (paths or {}).get("exclude"):
+            return True, f"{len(inside)} file(s) under the build context {ctx}"
+        return should_rebuild(inside, paths)
     return should_rebuild(changed_files, paths)
 
 
@@ -612,24 +661,25 @@ class WebhookHandler(BaseHTTPRequestHandler):
 
         # Path filtering (skip if force_rebuild is set). A push of the
         # bay.toml or a mounted file passes before the filter (push_filter).
+        # A push that changes no build input of this project is not skipped:
+        # `bay up` pins every project of the repo at its head, so this
+        # project's image needs the pushed commit's tag too (gap 39). It gets
+        # a trigger with the NO_INPUT_CHANGE marker; rebuild.sh checks the
+        # diff itself and tags the previous image, or builds when it finds an
+        # input change after all.
         changed_files = _extract_changed_files(payload)
+        mode = ""
 
         if not force_rebuild:
             rebuild, reason = push_filter(changed_files, svc_config)
             if not rebuild:
+                mode = NO_INPUT_CHANGE
                 print(
-                    f"[webhook] Skipping {service}: {reason} "
-                    f"(files: {sorted(changed_files)})",
+                    f"[webhook] no input change for {service}: tag only ({reason}; "
+                    f"files: {sorted(changed_files)})",
                     flush=True,
                 )
-                self._respond_json(200, {
-                    "status": "skipped",
-                    "reason": reason,
-                    "service": service,
-                    "files_changed": len(changed_files),
-                })
-                return
-            if reason.startswith("config file changed"):
+            elif reason.startswith("config file changed"):
                 print(f"[webhook] {service}: {reason}", flush=True)
         else:
             reason = force_reason
@@ -675,7 +725,28 @@ class WebhookHandler(BaseHTTPRequestHandler):
         pusher = payload.get("pusher", {}).get("name", "unknown")
         repo = payload.get("repository", {}).get("full_name", "unknown")
 
-        if write_local:
+        if write_local and mode:
+            # Tag only: no build and no recreate follow, so no alert either.
+            # A trigger that is already waiting is never replaced: it is a
+            # normal push (or a manual rebuild) whose build covers this one,
+            # or a tag-only one that rebuild.sh checks over the same range.
+            TRIGGER_DIR.mkdir(parents=True, exist_ok=True)
+            trigger_path = TRIGGER_DIR / f"{service}.trigger"
+            try:
+                with trigger_path.open("x") as fh:
+                    fh.write(f"{corr_id}\n{mode}")
+                print(
+                    f"[webhook] [{corr_id}] Triggered {mode} for {service} "
+                    f"(branch: {expected_branch}, files: {len(changed_files)})",
+                    flush=True,
+                )
+            except FileExistsError:
+                print(
+                    f"[webhook] [{corr_id}] {service}: a trigger is already waiting; "
+                    f"kept it, {mode} not written",
+                    flush=True,
+                )
+        elif write_local:
             TRIGGER_DIR.mkdir(parents=True, exist_ok=True)
             trigger_path = TRIGGER_DIR / f"{service}.trigger"
             trigger_path.write_text(f"{corr_id}\n")
@@ -751,7 +822,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         else:
             status = "forward_failed"
 
-        self._respond_json(200, {
+        response = {
             "status": status,
             "service": service,
             "corr_id": corr_id,
@@ -759,7 +830,11 @@ class WebhookHandler(BaseHTTPRequestHandler):
             "local": write_local,
             "forwarded": forwarded_ok,
             "forward_failures": forwarded_fail,
-        })
+        }
+        if mode:
+            response["mode"] = mode
+            response["reason"] = reason
+        self._respond_json(200, response)
 
     def _handle_pull_image(self):
         """Handle image-level pull signal at /webhook/pull-image.

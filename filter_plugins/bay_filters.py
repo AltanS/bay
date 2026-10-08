@@ -211,6 +211,7 @@ class FilterModule:
             "bay_repo_slug": bay_repo_slug,
             "bay_repo_groups": bay_repo_groups,
             "bay_shared_toml_paths": bay_shared_toml_paths,
+            "bay_build_context": bay_build_context,
             "bay_build_dedup_map": bay_build_dedup_map,
             "bay_token_url": bay_token_url,
             "bay_hexkey": bay_hexkey,
@@ -1171,6 +1172,27 @@ def bay_shared_toml_paths(services, svc_name):
         if _repo_slug(build["repo"], build.get("branch", "main")) == slug:
             paths.add(path)
     return sorted(paths)
+
+
+def bay_build_context(build):
+    """The build context as a no-input-change push reads it, or "" when it does not narrow.
+
+    A project without ``watch`` (``paths.include``) whose ``[build]`` context is
+    a subdirectory of the repo counts only the files under that directory, its
+    Dockerfile and ``<Dockerfile>.dockerignore`` as build inputs (webhook
+    receiver ``input_filter``, ``bay_reconcile.pushinputs``). Returns that
+    directory, repo-relative, without ``./`` and slashes at the ends. Returns
+    "" when ``watch`` decides instead, or when the context is the repo root:
+    then every file counts, as before.
+    """
+    build = build or {}
+    if (build.get("paths") or {}).get("include"):
+        return ""
+    ctx = str(build.get("context") or "").strip()
+    while ctx.startswith("./"):
+        ctx = ctx[2:]
+    ctx = ctx.strip("/")
+    return "" if ctx == "." else ctx
 
 
 def bay_repo_groups(services, service_names):

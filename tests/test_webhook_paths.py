@@ -667,9 +667,11 @@ class TestConfigFilesPassTheFilter:
         answer, triggers = _post_push(_WATCHED_CONFIG, ["apps/shop/bay.toml"], tmp_path / "a", monkeypatch)
         assert answer["status"] == "triggered", answer
         assert (triggers / "shop.trigger").exists()
+        # Outside `watch`: no build input changed. Since 2.5.1 that is no skip
+        # but a tag-only trigger (gap 39, tests/test_no_input_change.py).
         answer, triggers = _post_push(_WATCHED_CONFIG, ["docs/guide.txt"], tmp_path / "b", monkeypatch)
-        assert answer["status"] == "skipped", answer
-        assert not (triggers / "shop.trigger").exists()
+        assert answer["status"] == "triggered" and answer["mode"] == "no_input_change", answer
+        assert (triggers / "shop.trigger").read_text().splitlines()[1] == "no_input_change"
 
     def test_in_fleet_project_without_hold_keys_is_unchanged(self):
         """An in-fleet project gets no hold keys: the filter decides as before."""

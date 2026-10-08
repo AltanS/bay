@@ -46,6 +46,8 @@ def _alert_filters() -> dict:
             # rebuild.sh and the webhook receiver config: config-only pushes
             # of projects that share one app repo.
             "bay_shared_toml_paths",
+            # no-input-change pushes: the build context as an input set.
+            "bay_build_context",
             # provision-db.sql.j2: the role password verifier to compare.
             "bay_db_password_verifier",
         )
