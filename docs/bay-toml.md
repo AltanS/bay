@@ -557,7 +557,8 @@ to that commit finds its image, also with `track = "pin"`. Run `bay up` to deplo
   either. Since 2.5.1 it tags this project's image with the pushed commit too, with no build and no
   recreate: a no-input-change push (see
   [build-pipeline.md](build-pipeline.md#no-input-change-push)). The build log has the line
-  `no-input-change push <commit12>: tagged, run bay up`.
+  `no-input-change push <commit12>: tagged, run bay up`. When no image holds the previous
+  commit, the push is skipped as before (`... skipped (as before)`): nothing is built.
 
 ### `[backup]`
 

@@ -398,8 +398,8 @@ def test_exit_path_map_rows_all_carry_an_alert_id_cell():
     # 17, plus M117/05's hold exit (row 18) and registry-retag exit (row 19),
     # plus M117/06's config-only exit (row 20), plus M118/04's release exit (row 21),
     # plus the config-only tag failure exit (row 22), plus M121/01's
-    # no-input-change exit (row 23).
-    assert len(rows) == 23, f"Expected 23 exit-path rows, found {len(rows)}"
+    # no-input-change exits (rows 23 and 24).
+    assert len(rows) == 24, f"Expected 24 exit-path rows, found {len(rows)}"
 
     malformed: list[str] = []
     for row in rows:

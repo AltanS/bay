@@ -344,17 +344,21 @@ A failed tag command is a failed push, as for config only:
 `no-input-change push <commit12>: tag failed`, stage `No-input-change tag`,
 `build.failed`, exit 1.
 
-It falls back to a normal build, logged, when:
+It builds, logged, only when its own diff finds an input change (the
+receiver's view was stale) or cannot read a pattern or the `[build]` hash:
+`no-input-change push <commit12>: an input changed since <prev12>, building`.
+The build is of the real head, and the hold guard still decides whether it
+deploys.
 
-- its own diff finds an input change:
-  `no-input-change push <commit12>: an input changed since <prev12>, building`;
-- no image holds the previous commit:
-  `no-input-change push <commit12>: no image known to hold <prev12>, building`;
-- no previous commit is known:
-  `no-input-change push <commit12>: no previous commit known, building`.
-
-The build is of the real head, so a fallback is always safe. The hold guard
-still decides whether it deploys.
+It skips the push, as the receiver did before 2.5.1, when there is no previous
+commit to diff from (none is known, or the checkout does not have it) or no
+image holds the previous commit. It logs one line and exits 0, with no build,
+no tag, no recreate and no alert:
+`no-input-change push <commit12>: no previous commit known, skipped (as before)`
+or `no-input-change push <commit12>: no image for the previous commit <prev12>, skipped (as before)`.
+Building there would start builds and restarts for pushes that change nothing
+the project uses. The project then has no image for that head, as before; the
+next push that changes one of its inputs builds it.
 
 A project with no `watch` and no narrower context counts every file, so every
 push builds it, as before. A project with only `ignore` gets the tag for a
@@ -399,7 +403,8 @@ In `rebuild.sh`, for a trigger that got through:
    tag, else a `:latest` that holds it) with the commit, exit 0.
    A project in the fleet never gets the keys for this, so every push of it builds.
    With the `no_input_change` marker, the no-input-change check runs next (see
-   "No-input-change push"): no input in the diff, tag and exit 0; else build.
+   "No-input-change push"): no input in the diff, tag and exit 0; no previous commit
+   or no source image, skip and exit 0; an input in the diff, build.
 8. Build `<image>:<commit12>`, unless that image already exists.
 9. Hold guard `_hold_reason`, in this order: `track = "pin"`, frozen, `bay.toml` missing at
    the commit, `bay.toml` hash unreadable, `bay.toml` hash differs from the pinned one. A hold

@@ -574,14 +574,16 @@ _config_only_push() {
 # those), no other changed file is a build input (bay_reconcile.pushinputs with
 # INPUT_ARGS; the bay.toml of another project of the repo, SHARED_TOML_PATHS,
 # never is), and, for a bay.toml in the app repo, the [build] hash at HEAD is the
-# pinned one. An empty diff is true too: HEAD is the previous commit. False when
-# no previous commit is known or found, or when anything cannot be checked.
+# pinned one. An empty diff is true too: HEAD is the previous commit.
+# Returns 0 no input changed; 1 an input changed, or a pattern or the [build]
+# hash cannot be read (the push builds); 2 there is no range to check: no
+# previous commit, or one the checkout does not have (the push is skipped).
 #   $1  the checkout at the pushed commit   $2  the previous commit (may be empty)
 _no_input_change() {
   local repo_dir="$1" prev="$2" files f p rest="" inputs have
-  [[ -n "${prev}" ]] || return 1
-  git -C "${repo_dir}" cat-file -e "${prev}^{commit}" 2>/dev/null || return 1
-  files=$(git -C "${repo_dir}" diff --name-only "${prev}" HEAD 2>/dev/null) || return 1
+  [[ -n "${prev}" ]] || return 2
+  git -C "${repo_dir}" cat-file -e "${prev}^{commit}" 2>/dev/null || return 2
+  files=$(git -C "${repo_dir}" diff --name-only "${prev}" HEAD 2>/dev/null) || return 2
   while IFS= read -r f; do
     [[ -z "${f}" ]] && continue
     for p in "${BAY_TOML_PATH:-}" "${BAY_TOML_FILES[@]}"; do
@@ -611,23 +613,29 @@ _no_input_change() {
 
 # The no-input-change decision site of both strategies, after the config-only
 # one. When _no_input_change agrees, _config_only_push tags the previous
-# commit's image with this commit and ends the run. Else this logs why and
-# returns, and the caller builds: the receiver's view was stale (a trigger can
-# cover several pushes) or no image holds the previous commit.
+# commit's image with this commit and ends the run. When its own diff finds an
+# input change (the receiver's view was stale: a trigger can cover several
+# pushes) or cannot read a pattern, this logs why and returns: the caller
+# builds. With no previous commit to diff from, or no image that holds the
+# previous commit, the push is skipped, as the receiver skipped it before
+# 2.5.1: one log line, exit 0, no build, no recreate, no alert.
 #   $1  the checkout at the pushed commit   $2  image repo (no tag)
 #   $3  the previous commit (may be empty)
 _no_input_change_push() {
-  local repo_dir="$1" repo="$2" prev="$3"
-  if [[ -z "${prev}" ]]; then
-    _log "no-input-change push ${SHA}: no previous commit known, building"
-    return 0
-  fi
-  if ! _no_input_change "${repo_dir}" "${prev}"; then
+  local repo_dir="$1" repo="$2" prev="$3" rc=0 why
+  _no_input_change "${repo_dir}" "${prev}" || rc=$?
+  if [[ "${rc}" == "1" ]]; then
     _log "no-input-change push ${SHA}: an input changed since ${prev:0:12}, building"
     return 0
   fi
-  _config_only_push "${repo}" "${prev}" no-input-change \
-    || _log "no-input-change push ${SHA}: no image known to hold ${prev:0:12}, building"
+  why="no previous commit known"
+  if [[ "${rc}" == "0" ]]; then
+    _config_only_push "${repo}" "${prev}" no-input-change || true
+    why="no image for the previous commit ${prev:0:12}"
+  fi
+  trap - ERR
+  echo "[rebuild] [${CORR_ID:-no-corr}] no-input-change push ${SHA}: ${why}, skipped (as before)"
+  exit 0
 }
 
 # A held build is not a failure. The image stays under its commit tag, `:latest`

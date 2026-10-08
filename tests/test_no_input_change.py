@@ -266,12 +266,12 @@ def _fallback_case(strategy: str, tmp: Path) -> None:
     assert f"no-input-change push {moved}: an input changed since {own}" in out
     assert "BUILD web" in out and _tags(_calls(tmp)) == []
 
-    # No image holds the previous commit: the normal path builds it.
+    # (No image holds `moved`: the next push is a skip, see the skip test.)
+    refs.write_text(refs.read_text() + f"{repo}:{moved}\n")
     nxt = _commit(origin, {"apps/admin/main.js": "admin(5)\n"})
     out = run()
-    assert f"no-input-change push {nxt}: no image known to hold {moved}, building" in out
-    assert "BUILD web" in out and _tags(_calls(tmp)) == []
-    refs.write_text(refs.read_text() + f"{repo}:{nxt}\n")
+    assert f"no-input-change push {nxt}{TAGGED}" in out
+    _calls(tmp)
 
     # A pattern the box cannot read counts as an input change.
     bad = _commit(origin, {"apps/admin/main.js": "admin(6)\n"})
@@ -285,6 +285,49 @@ def _fallback_case(strategy: str, tmp: Path) -> None:
     out = run()
     assert f"no-input-change push {good}{TAGGED}" in out and "BUILD" not in out
     assert len(_tags(_calls(tmp))) == 1
+
+
+def test_no_input_change_push_skips_without_a_source(tmp_path: Path) -> None:
+    """No image holds the previous commit, or there is no previous commit to diff
+    from: the push is skipped, as the receiver skipped it before 2.5.1. One log
+    line, exit 0, no build, no tag, no alert. Remote and local strategy."""
+    for strategy in ("remote", "local"):
+        tmp = tmp_path / strategy
+        tmp.mkdir()
+        rendered = _render(strategy)
+        origin, first = _shared_repo(tmp)
+        checkout = tmp / "checkout"
+        _git(tmp, "clone", "-q", str(origin), str(checkout))
+        refs = tmp / "refs"
+        refs.write_text("")  # no image of web at all
+
+        pushed = _commit(origin, {"apps/admin/main.js": "admin(2)\n"})
+        proc = _run(rendered, strategy, "web", checkout, tmp, marker=True)
+        assert (
+            f"no-input-change push {pushed}: no image for the previous commit {first}, "
+            "skipped (as before)"
+        ) in proc.stdout, proc.stdout
+        assert "BUILD" not in proc.stdout, f"{strategy}: no build for a push that changes nothing"
+        calls = _calls(tmp)
+        assert _tags(calls) == [] and not any("buildx build" in c for c in calls)
+
+        # No previous commit known, or one the checkout does not have: skipped too.
+        for prev in ("", "deadbeef0000"):
+            nxt = _commit(origin, {"apps/admin/main.js": f"admin({prev or 'x'})\n"})
+            proc = _run(
+                rendered, strategy, "web", checkout, tmp, marker=True,
+                extra=f"_previous_commit() {{ printf '%s' {prev!r}; }}",
+            )
+            assert f"no-input-change push {nxt}: no previous commit known, skipped (as before)" in (
+                proc.stdout
+            ), proc.stdout
+            assert "BUILD" not in proc.stdout and _tags(_calls(tmp)) == []
+
+        # An input change still builds, with or without a source image.
+        code = _commit(origin, {"apps/web/main.js": "web(2)\n"})
+        proc = _run(rendered, strategy, "web", checkout, tmp, marker=True)
+        assert f"no-input-change push {code}: an input changed since" in proc.stdout
+        assert "BUILD web" in proc.stdout
 
 
 # ── the receiver ────────────────────────────────────────────────────────
