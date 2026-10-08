@@ -235,37 +235,43 @@
             - _restore_method == 'mysql'
             - _snap is defined
 
-        - name: Stop Redis container for restore
-          ansible.builtin.command:
-            cmd: "docker stop {{ accessory }}"
+        # The `<accessory>.rdb` snapshot is NOT a bare RDB file: the backup
+        # script stores the output of `docker cp <accessory>:/data/dump.rdb -`,
+        # which is a tar archive with one entry, `dump.rdb`. `docker cp -`
+        # extracts such an archive into a directory of the container, so the
+        # RDB lands at /data/dump.rdb. (Copying the file as is wrote the tar
+        # itself to /data/dump.rdb.) Redis must be stopped while the file is
+        # replaced: on shutdown it saves its own data over dump.rdb. It starts
+        # again in any case, also when the restore fails.
+        - name: Restore a Redis backup
           when:
             - _restore_method == 'redis'
             - _snap is defined
+          block:
+            - name: Stop Redis container for restore
+              ansible.builtin.command:
+                cmd: "docker stop {{ accessory }}"
 
-        - name: Restore Redis RDB file
-          ansible.builtin.shell:
-            cmd: >-
-              set -o pipefail &&
-              {{ _backup_restic_bin }} dump {{ _snap.short_id }}
-              /{{ accessory }}.rdb
-              --retry-lock 15m >
-              {{ _restore_tmp_dir }}/dump.rdb &&
-              docker
-              cp {{ _restore_tmp_dir }}/dump.rdb {{ accessory }}:/data/dump.rdb
-            executable: /bin/bash
-          environment: "{{ _restic_env }}"
-          become: true
-          become_user: root
-          when:
-            - _restore_method == 'redis'
-            - _snap is defined
-
-        - name: Start Redis container after restore
-          ansible.builtin.command:
-            cmd: "docker start {{ accessory }}"
-          when:
-            - _restore_method == 'redis'
-            - _snap is defined
+            - name: Restore Redis RDB file
+              ansible.builtin.shell:
+                cmd: >-
+                  set -o pipefail &&
+                  {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+                  /{{ accessory }}.rdb
+                  --retry-lock 15m >
+                  {{ _restore_tmp_dir }}/dump.tar &&
+                  docker
+                  cp - {{ accessory }}:/data < {{ _restore_tmp_dir }}/dump.tar
+                executable: /bin/bash
+              environment: "{{ _restic_env }}"
+              become: true
+              become_user: root
+              # Also on the block; repeated so the check-mode guard test sees it here.
+              when: _snap is defined
+          always:
+            - name: Start Redis container after restore
+              ansible.builtin.command:
+                cmd: "docker start {{ accessory }}"
 
         # A volume: the archive is `docker cp <container>:<path> -`, so its
         # top entry is the last part of the path. It is written as root into

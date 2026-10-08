@@ -129,7 +129,9 @@ Error: <code>${ERROR_MSG}</code>"
   exit 1
 fi
 
-# Copy the RDB out; restic runs the copy
+# Copy the RDB out; restic runs the copy. `docker cp ... -` writes a tar
+# archive (one entry, dump.rdb), so the `.rdb` snapshot holds that tar, not a
+# bare RDB file. restore.yml unpacks it with `docker cp - <accessory>:/data`.
 backup_from "${ACCESSORY}.rdb" \
   docker cp "${ACCESSORY}:/data/dump.rdb" -
 {% elif method == 'file' %}

@@ -272,6 +272,8 @@ Retention runs after each successful backup. If pruning fails, the backup is sti
 
 Restores stream data from restic directly into containers — no intermediate files (except Redis RDB which requires stop/copy/start).
 
+The Redis snapshot `<name>.rdb` is a tar archive, not a bare RDB file: it holds what `docker cp <name>:/data/dump.rdb -` writes, one entry named `dump.rdb`. The restore stops the container, unpacks the archive with `docker cp - <name>:/data`, and starts the container again, also when the restore fails. Redis must be stopped while `dump.rdb` is replaced, because it saves its own data over the file when it shuts down. Before 2.4.0 the restore copied the archive as is to `/data/dump.rdb`, so Redis found a tar there.
+
 Safety features:
 - **Pre-restore backup** — automatically creates a snapshot tagged `pre-restore` before restoring
 - **Confirmation required** — interactive prompt via CLI, or `-e confirm=yes` for direct ansible-playbook usage
