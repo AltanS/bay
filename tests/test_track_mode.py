@@ -611,6 +611,41 @@ cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
     assert "config-only push" in proc.stdout
 
 
+def test_config_only_push_fails_when_the_tag_command_fails(
+    local_sh: str, remote_sh: str, tmp_path: Path
+) -> None:
+    """A tag that was not made is a failed push: log, build.failed, exit 1, no build."""
+    repo, first = _app_repo(tmp_path)
+    pushed = _commit(repo, {"bay.toml": TOML_CHANGED, "conf/site.yaml": "site: 2\n"})
+    env = _pinned_env()
+    log = tmp_path / "docker.log"
+
+    def failing(strategy: str) -> str:
+        what = "buildx imagetools create" if strategy == "remote" else "tag"
+        return f"""
+docker() {{
+  printf '%s\\n' "$*" >> {str(log)!r}
+  [[ "$1" == "inspect" ]] && printf '%s' {first!r}
+  case "$*" in "{what}"*) echo "denied: registry unavailable" >&2; return 1 ;; esac
+  return 0
+}}"""
+
+    for strategy, sh in (("local", local_sh), ("remote", remote_sh)):
+        log.unlink(missing_ok=True)
+        (tmp_path / "alerts.log").unlink(missing_ok=True)
+        script = _decide(repo, first, strategy=strategy, fake=failing(strategy))
+        proc, calls, alerts = _harness(sh, script, tmp_path, env=env)
+        assert proc.returncode == 1, (strategy, proc.stdout, proc.stderr)
+        assert f"config-only push {pushed}: tag failed" in proc.stdout
+        assert "run bay up" not in proc.stdout
+        assert "BUILD" not in proc.stdout, "nothing is built after a failed tag"
+        assert len(alerts) == 1 and alerts[0].startswith("build.failed "), alerts
+        assert "denied: registry unavailable" in alerts[0]
+        state = json.loads((tmp_path / "state" / "svc.json").read_text())
+        assert state["consecutive_failures"] == 1
+        (tmp_path / "state" / "svc.json").unlink()
+
+
 def test_push_touching_code_and_toml_builds_and_holds(local_sh: str, tmp_path: Path) -> None:
     repo, first = _app_repo(tmp_path)
     _commit(repo, {"bay.toml": TOML_CHANGED, "app.js": "console.log(2)\n"})

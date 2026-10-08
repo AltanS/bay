@@ -396,8 +396,9 @@ def test_exit_path_map_rows_all_carry_an_alert_id_cell():
         if re.match(r"^\|\s*\d+\s*\|\s*(?:\d+|ERR trap)\s*\|", ln)
     ]
     # 17, plus M117/05's hold exit (row 18) and registry-retag exit (row 19),
-    # plus M117/06's config-only exit (row 20), plus M118/04's release exit (row 21).
-    assert len(rows) == 21, f"Expected 21 exit-path rows, found {len(rows)}"
+    # plus M117/06's config-only exit (row 20), plus M118/04's release exit (row 21),
+    # plus the config-only tag failure exit (row 22).
+    assert len(rows) == 22, f"Expected 22 exit-path rows, found {len(rows)}"
 
     malformed: list[str] = []
     for row in rows:

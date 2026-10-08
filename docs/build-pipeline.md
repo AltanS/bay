@@ -223,6 +223,10 @@ has no label after a config-only push. The fallback to the checkout keeps
 working, and the next build that deploys gives the container its label.
 When no previous commit is known, the commit is not in the checkout, nothing
 changed, or no image of the previous commit is found, the normal path runs.
+If a tag command fails (a registry that refuses the tag, say), the push is not
+config only. The script logs `config-only push <commit12>: tag failed`, counts
+a failure for the circuit breaker, sends `build.failed` with the output of the
+tag command, and exits 1. It builds nothing.
 
 A change of what the image is built from is never config only. `bay compile`
 writes `build.bay_build_hash` next to `bay_toml_hash`: the canonical hash of

@@ -525,17 +525,25 @@ _config_only_push() {
   fi
   trap - ERR
   if [[ -n "${src}" ]]; then
+    local tag_err="" tag_ok=1 out
     if [[ "${BUILD_STRATEGY:-local}" == "remote" ]]; then
       if [[ "${src}" == "${repo}:${prev:0:12}" ]]; then
-        docker buildx imagetools create -t "${repo}:${SHA}" "${src}" >/dev/null 2>&1 || true
+        out=$(docker buildx imagetools create -t "${repo}:${SHA}" "${src}" 2>&1 >/dev/null) || { tag_ok=0; tag_err+="${out}"; }
       else
-        docker buildx imagetools create -t "${repo}:${SHA}" -t "${repo}:${prev:0:12}" "${src}" >/dev/null 2>&1 || true
+        out=$(docker buildx imagetools create -t "${repo}:${SHA}" -t "${repo}:${prev:0:12}" "${src}" 2>&1 >/dev/null) || { tag_ok=0; tag_err+="${out}"; }
       fi
     else
-      docker tag "${src}" "${repo}:${SHA}" 2>/dev/null || true
+      out=$(docker tag "${src}" "${repo}:${SHA}" 2>&1) || { tag_ok=0; tag_err+="${out}"; }
       if [[ "${src}" != "${repo}:${prev:0:12}" ]]; then
-        docker tag "${src}" "${repo}:${prev:0:12}" 2>/dev/null || true
+        out=$(docker tag "${src}" "${repo}:${prev:0:12}" 2>&1) || { tag_ok=0; tag_err+="${out}"; }
       fi
+    fi
+    # A tag that was not made leaves `bay up` without <image>:<commit12>: this
+    # is a failed push, not a config-only one. Nothing is built.
+    if [[ "${tag_ok}" == "0" ]]; then
+      _log "config-only push ${SHA}: tag failed"
+      _record_failure "${SHA}" "Config-only tag" "tagging ${src} as ${repo}:${SHA} failed: $(printf '%s' "${tag_err}" | tail -c 400)"
+      exit 1
     fi
   fi
   echo "[rebuild] [${CORR_ID:-no-corr}] config-only push ${SHA}: run bay up"
