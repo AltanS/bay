@@ -32,6 +32,27 @@ os.environ.setdefault("_TYPER_FORCE_DISABLE_TERMINAL", "1")
 import pytest  # noqa: E402
 
 
+def _reset_console_modes() -> None:
+    from bay_cli.console import output
+
+    output.set_json_mode(False)
+    output.set_yes_mode(False)
+    output._message_buffer.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_console_state():
+    """The root Typer callback sets JSON and yes mode on module globals.
+
+    Nothing resets them after a CLI run, so a `--json` test would leak its
+    mode into the next test on the same worker. Every test starts and ends
+    with the defaults and an empty message buffer.
+    """
+    _reset_console_modes()
+    yield
+    _reset_console_modes()
+
+
 @pytest.fixture(autouse=True)
 def _unbind_fleet():
     """`Context.resolve` binds the fleet for Ansible commands (bay_cli/ansible.py).

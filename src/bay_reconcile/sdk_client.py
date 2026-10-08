@@ -29,7 +29,8 @@ from .observe import (
 )
 
 #: Container states in which nothing runs, so a leftover release container is safe to remove.
-_FINISHED = frozenset({"created", "exited", "dead"})
+#: ``removing`` is Docker already deleting it; the remove call below tolerates it being gone.
+_FINISHED = frozenset({"created", "exited", "dead", "removing"})
 
 
 def _ctr_port_key(ctr: str) -> str:
@@ -211,7 +212,15 @@ class SdkDockerClient:
                 f"release of {of} may be running; wait for it to end, or remove it with "
                 f"`docker rm -f {name}` if it is stuck"
             )
-        ctr.remove(force=True)
+        try:
+            ctr.remove(force=True)
+        except docker.errors.NotFound:
+            pass
+        except docker.errors.APIError as err:
+            # Docker answers 409 when a removal is already in progress: the
+            # container is going away, which is what this call wanted.
+            if status != "removing" or getattr(err, "status_code", None) != 409:
+                raise
 
     def stop(self, name: str, *, timeout: int = 10) -> None:
         # Absent is as stopped as it gets; an exited container answers 304,

@@ -28,7 +28,7 @@ FAKE_DOCKER = """#!/bin/bash
 echo "$(hostname -s)-${FAKE_NAME} $*" >> "$FAKE_LOG"
 case "$1" in
   container) [[ "${FAKE_HAS}" == 1 ]] || exit 1; echo "/shop" ;;
-  ps) for id in ${FAKE_PS}; do echo "$id"; done ;;
+  ps) for name in ${FAKE_PS}; do echo "$name"; done ;;
   volume) echo "/var/lib/docker/volumes/bay_shop_data/_data" ;;
 esac
 exit 0
@@ -107,13 +107,21 @@ def _run(tmp_path: Path, hosts: dict[str, dict[str, str]]) -> tuple[int, str, li
 def test_restore_stops_and_starts_every_container_on_the_volume(tmp_path: Path) -> None:
     code, out, calls = _run(tmp_path, {"h1": {"FAKE_HAS": "1", "FAKE_PS": "c1 c2 c3"}})
     assert code == 0, out
-    assert "ps -q --filter volume=bay_shop_data" in calls
+    assert "ps --format {{.Names}} --filter volume=bay_shop_data" in calls
     assert "stop c1 c2 c3" in calls and "start c1 c2 c3" in calls
     assert calls.index("stop c1 c2 c3") < calls.index("start c1 c2 c3")
 
 
+def test_restore_starts_the_owner_of_the_volume_first(tmp_path: Path) -> None:
+    # `docker ps` lists newest first, so the owner ("shop") is not first in the list.
+    code, out, calls = _run(tmp_path, {"h1": {"FAKE_HAS": "1", "FAKE_PS": "worker cron shop"}})
+    assert code == 0, out
+    assert "stop worker cron shop" in calls
+    assert "start shop worker cron" in calls
+
+
 def test_restore_starts_only_what_ran_before(tmp_path: Path) -> None:
-    # `docker ps -q` lists running containers only: nothing running, nothing to stop or start.
+    # `docker ps` lists running containers only: nothing running, nothing to stop or start.
     code, out, calls = _run(tmp_path, {"h1": {"FAKE_HAS": "1", "FAKE_PS": ""}})
     assert code == 0, out
     assert not [c for c in calls if c.startswith(("stop", "start"))]

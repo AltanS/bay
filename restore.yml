@@ -273,7 +273,8 @@
         # Docker data root still works), with every container that mounts the
         # volume stopped (a second writer would corrupt the restore), over the
         # files that are there. The containers that ran before start again in
-        # any case; one that was already stopped stays stopped.
+        # any case, the container that owns the volume first; one that was already
+        # stopped stays stopped.
         - name: Restore a volume backup
           when:
             - _is_volume | bool
@@ -281,7 +282,7 @@
           block:
             - name: List the running containers that mount the volume
               ansible.builtin.command:
-                cmd: "docker ps -q --filter volume={{ accessory }}"
+                cmd: "docker ps --format '{{ '{{' }}.Names{{ '}}' }}' --filter volume={{ accessory }}"
               register: _volume_users
               changed_when: false
 
@@ -315,7 +316,13 @@
           always:
             - name: Start the containers that ran on the volume before restore
               ansible.builtin.command:
-                cmd: "docker start {{ _volume_users.stdout_lines | join(' ') }}"
+                cmd: "docker start {{ _start_order | join(' ') }}"
+              vars:
+                # `docker ps` lists newest first. The container that owns the
+                # volume starts first, then the rest in the order docker gave.
+                _start_order: >-
+                  {{ ([_volume_backup.container] if _volume_backup.container in _volume_users.stdout_lines else [])
+                     + (_volume_users.stdout_lines | reject('equalto', _volume_backup.container) | list) }}
               changed_when: true
               when: (_volume_users.stdout_lines | default([])) | length > 0
 

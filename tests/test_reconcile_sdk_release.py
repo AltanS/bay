@@ -19,7 +19,8 @@ from bay_reconcile.sdk_client import SdkDockerClient
 
 class _Container:
     def __init__(self, *, status: str = "exited", labels: dict[str, str] | None = None,
-                 exit_code: int = 0) -> None:
+                 exit_code: int = 0, remove_error: Exception | None = None) -> None:
+        self.remove_error = remove_error
         self.status = status
         self.labels = labels or {}
         self.exit_code = exit_code
@@ -33,6 +34,8 @@ class _Container:
 
     def remove(self, force: bool = False) -> None:
         self.removed.append(force)
+        if self.remove_error is not None:
+            raise self.remove_error
 
 
 class _Containers:
@@ -76,7 +79,7 @@ def test_run_release_without_a_leftover_runs_and_cleans_up() -> None:
     assert daemon.containers.new.removed == [True]
 
 
-@pytest.mark.parametrize("status", ["created", "exited", "dead"])
+@pytest.mark.parametrize("status", ["created", "exited", "dead", "removing"])
 def test_a_finished_leftover_is_removed(status: str) -> None:
     old = _Container(status=status, labels={RELEASE_LABEL: "web"})
     client, daemon = _client({"web-release": old})
@@ -102,3 +105,31 @@ def test_a_container_of_another_owner_is_never_removed() -> None:
     with pytest.raises(RuntimeError, match="not the release container of web"):
         client.run_release(_spec(), timeout=30)
     assert other.removed == [] and daemon.containers.started == []
+
+
+def test_a_leftover_gone_before_the_remove_is_fine() -> None:
+    old = _Container(status="exited", labels={RELEASE_LABEL: "web"},
+                     remove_error=docker.errors.NotFound("gone"))
+    client, daemon = _client({"web-release": old})
+    assert client.run_release(_spec(), timeout=30)[0] == 0
+    assert len(daemon.containers.started) == 1
+
+
+def _conflict() -> docker.errors.APIError:
+    response = type("R", (), {"status_code": 409, "reason": "Conflict", "content": b"",
+                              "json": lambda self: {}})()
+    return docker.errors.APIError("removal in progress", response=response)
+
+
+def test_a_leftover_already_being_removed_is_tolerated() -> None:
+    old = _Container(status="removing", labels={RELEASE_LABEL: "web"}, remove_error=_conflict())
+    client, daemon = _client({"web-release": old})
+    assert client.run_release(_spec(), timeout=30)[0] == 0
+    assert len(daemon.containers.started) == 1
+
+
+def test_a_conflict_on_a_non_removing_leftover_still_raises() -> None:
+    old = _Container(status="exited", labels={RELEASE_LABEL: "web"}, remove_error=_conflict())
+    client, _ = _client({"web-release": old})
+    with pytest.raises(docker.errors.APIError):
+        client.run_release(_spec(), timeout=30)
