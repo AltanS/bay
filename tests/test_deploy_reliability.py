@@ -168,10 +168,12 @@ class TestRevision:
         assert m, "revision check block not found"
         script = f"""set -uo pipefail
 SERVICE=svc; IMAGE_REF=r/svc:latest; EXPECTED_REVISION={expected!r}; BUILT_AT=$(( $(date +%s) - 7 ))
+# The pulled image's ID, read once right after the pull (M121/02), not here.
+_PULLED_ID={pulled_img!r}
 _log() {{ echo "LOG: $*"; }}
 docker() {{
   case "$*" in
-    *"image inspect"*) printf '%s' {pulled_img!r} ;;
+    *"image inspect"*) printf '%s' sha256:moved-tag ;;
     *".Image}}"*) printf '%s' {live_img!r} ;;
     *) printf '%s' {live!r} ;;
   esac

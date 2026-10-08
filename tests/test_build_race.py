@@ -367,3 +367,181 @@ def test_sdk_labelled_reads_own_repo_newest_first() -> None:
     sdk._c = type("C", (), {"images": Listing()})()
     sdk._docker = None
     assert sdk.labelled("app/web") == [("id-new", {}), ("id-old", {"com.bay.commit": PIN})]
+
+
+# ── rebuild.sh: stamp what started ──────────────────────────────────────
+
+_ID_NEW = "sha256:" + "1" * 64
+_ID_OLD = "sha256:" + "2" * 64
+_ID_BARE = "sha256:" + "3" * 64
+OLD = "cccccccccccc"
+
+#: A fake docker with a tag table. ``docker stop`` (after the promotion, before
+#: the run) moves MOVE_TAG to MOVE_TO when set: the race, without any sleep.
+_FAKE_DOCKER = r"""
+declare -A TAGS=() LABELS=()
+CTR_IMAGE=""
+_resolve() {
+  if [[ -n "${TAGS[$1]:-}" ]]; then printf '%s' "${TAGS[$1]}"
+  elif [[ -n "${LABELS[$1]+x}" ]]; then printf '%s' "$1"
+  else return 1; fi
+}
+docker() {
+  local id key
+  case "$1" in
+    tag) id=$(_resolve "$2") || return 1; TAGS[$3]="$id" ;;
+    image)
+      shift 2
+      if [[ "$1" == --format ]]; then _resolve "$3"; return; fi
+      id=$(_resolve "$1") || return 1
+      printf '[{"Id":"%s","Config":{"Labels":%s}}]' "$id" "${LABELS[$id]:-null}" ;;
+    inspect)
+      if [[ "$3" == "{{.Image}}" ]]; then
+        [[ -n "${CTR_IMAGE}" ]] && printf '%s' "${CTR_IMAGE}"
+      elif [[ "$3" =~ index\ \.Config\.Labels\ \"([^\"]+)\" ]]; then
+        key="${BASH_REMATCH[1]}"
+        # A missing key of a map prints nothing; a nil map prints <no value>.
+        printf '%s' "${LABELS[${CTR_IMAGE:-none}]:-null}" \
+          | jq -r --arg k "$key" 'if . == null then "<no value>" else .[$k] // "" end'
+      fi ;;
+    stop) [[ -n "${MOVE_TO:-}" ]] && TAGS[$MOVE_TAG]="${MOVE_TO}"; return 0 ;;
+    run) printf '%s\n' "${@: -1}" >> "${OUT}"; CTR_IMAGE=$(_resolve "${@: -1}") ;;
+    *) return 0 ;;
+  esac
+}
+_wait_healthy() { [[ -z "${UNHEALTHY:-}" ]]; }
+_handle_rollback() { printf 'rollback|%s\n' "$4" >> "${OUT}"; exit 1; }
+_stamp_receipt() { printf 'stamp|%s|%s|%s\n' "$1" "$2" "$3" >> "${OUT}"; }
+_clear_failed_commit() { printf 'clear|%s|%s\n' "$1" "$2" >> "${OUT}"; }
+_record_failure() { printf 'failure|%s\n' "$2" >> "${OUT}"; }
+_reset_cb() { :; }
+notify_build() { :; }
+format_timestamp() { :; }
+format_duration() { :; }
+"""
+
+
+def _segment(rendered: str, start: str, end: str) -> str:
+    at = rendered.index(start)
+    stop = rendered.index(end, at) + len(end)
+    return rendered[at:stop]
+
+
+def _start(
+    rendered: str, segment: str, tmp_path: Path, setup: str, labels: dict[str, dict]
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    from test_cb_state_schema import _extract_helper
+
+    out = tmp_path / "out.log"
+    out.unlink(missing_ok=True)
+    helpers = "\n".join(
+        _extract_helper(rendered, f)
+        for f in ("_log", "_promote_latest", "_config_hash_of", "_started_commit")
+    )
+    table = "\n".join(f"LABELS[{i!r}]={json.dumps(lab)!r}" for i, lab in labels.items())
+    script = "\n".join(
+        [
+            f"set -uo pipefail\nOUT={str(out)!r}\nSTACK_DIR={str(tmp_path)!r}",
+            _FAKE_DOCKER,
+            helpers,
+            table,
+            setup,
+            "HEALTH_CHECK_TIMEOUT=1\nEXTRA_LABELS=()",
+            segment,
+        ]
+    )
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    return proc, out.read_text().splitlines() if out.exists() else []
+
+
+def test_rebuild_stamps_the_image_it_started(tmp_path: Path) -> None:
+    labels = {
+        _ID_NEW: {"com.bay.commit": NEW, "org.opencontainers.image.revision": NEW},
+        _ID_OLD: {"com.bay.commit": OLD, "org.opencontainers.image.revision": OLD},
+        _ID_BARE: {},
+    }
+    repo = "bay-app/localapp"
+
+    # ── local path ──
+    local = _render_rebuild_sh(_local_service(), ["localapp"], git_deploy_services=["localapp"])
+    segment = _segment(
+        local,
+        '_promote_latest "${IMAGE_NAME}" "${SHA}"\n',
+        '_clear_failed_commit "${SERVICE}" "${STARTED_COMMIT}"\n',
+    )
+    assert "\n_run_container\n_started_commit " in segment
+    base = (
+        f"SERVICE=localapp\nIMAGE_NAME={repo}\nSHA={NEW}\nMOVE_TAG={repo}:latest\n"
+        f"TAGS[{repo}:latest]={_ID_OLD}\nTAGS[{repo}:{NEW}]={_ID_NEW}\n"
+    )
+
+    # No move: the pushed commit and its tag, as before.
+    proc, out = _start(local, segment, tmp_path, base, labels)
+    assert proc.returncode == 0, proc.stderr
+    assert out == [f"{repo}:latest", f"stamp|localapp|{NEW}|{repo}:{NEW}", f"clear|localapp|{NEW}"]
+    assert "differs" not in proc.stdout
+
+    # :latest moves between the promotion and the run: the container starts the
+    # old image. One log line, and the receipt names the started image's label.
+    proc, out = _start(local, segment, tmp_path, base + f"MOVE_TO={_ID_OLD}\n", labels)
+    assert proc.returncode == 0, proc.stderr
+    assert out == [f"{repo}:latest", f"stamp|localapp|{OLD}|{repo}:latest", f"clear|localapp|{OLD}"]
+    (line,) = [x for x in proc.stdout.splitlines() if "differs" in x]
+    assert (
+        f"started image differs from promoted :latest: started {'2' * 12}, promoted {'1' * 12}"
+        in line
+    )
+
+    # The started image has no commit label: no commit, never the pushed one.
+    proc, out = _start(local, segment, tmp_path, base + f"MOVE_TO={_ID_BARE}\n", labels)
+    assert out[1:] == [f"stamp|localapp||{repo}:latest", "clear|localapp|"]
+    assert all(NEW not in x for x in out)
+
+    # Its health check fails: the pushed commit is not marked failed for it.
+    proc, out = _start(local, segment, tmp_path, base + f"MOVE_TO={_ID_OLD}\nUNHEALTHY=1\n", labels)
+    assert proc.returncode == 1 and out[-1] == "rollback|"
+    proc, out = _start(local, segment, tmp_path, base + "UNHEALTHY=1\n", labels)
+    assert out[-1] == f"rollback|{repo}:{NEW}"
+
+    # ── pull path ──
+    remote = _render_rebuild_sh(
+        {
+            "animals": {
+                **_local_service()["localapp"],
+                "image": "registry.example.com/demo/animals:latest",
+                "build": {"repo": "git@github.com:acmecorp/animals.git", "strategy": "remote"},
+            }
+        },
+        ["animals"],
+        git_deploy_services=["animals"],
+        git_deploy_build_strategy="remote",
+    )
+    segment = _segment(
+        remote,
+        "  # Restart container with the new image\n",
+        '_clear_failed_commit "${SERVICE}" "${STARTED_COMMIT}"\n',
+    )
+    ref, reg = "registry.example.com/demo/animals:latest", "registry.example.com/demo/animals"
+    pull = (
+        f"SERVICE=animals\nIMAGE_REF={ref}\nIMAGE_REPO={reg}\nBUILT_AT=\nMOVE_TAG={ref}\n"
+        f"TAGS[{ref}]={_ID_NEW}\nTAGS[{reg}:{NEW}]={_ID_NEW}\n_PULLED_ID={_ID_NEW}\n"
+    )
+    proc, out = _start(remote, segment, tmp_path, pull + f"EXPECTED_REVISION={NEW}\n", labels)
+    assert proc.returncode == 0, proc.stderr
+    assert out == [ref, f"stamp|animals|{NEW}|{reg}:{NEW}", f"clear|animals|{NEW}"]
+
+    # A trigger without a revision, and the tag moved: the started image's label.
+    proc, out = _start(
+        remote, segment, tmp_path, pull + f"EXPECTED_REVISION=\nMOVE_TO={_ID_OLD}\n", labels
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert out == [ref, f"stamp|animals|{OLD}|{ref}", f"clear|animals|{OLD}"]
+    assert "started image differs from promoted :latest" in proc.stdout
+
+    # An unlabelled image under the moved tag no longer passes the revision
+    # check as the pulled one: the ID resolved after the pull decides.
+    proc, out = _start(
+        remote, segment, tmp_path, pull + f"EXPECTED_REVISION={NEW}\nMOVE_TO={_ID_BARE}\n", labels
+    )
+    assert proc.returncode == 1 and out[-1] == "failure|Revision check"
+    assert not any(x.startswith("stamp|") for x in out)

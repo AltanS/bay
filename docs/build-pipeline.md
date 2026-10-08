@@ -146,6 +146,20 @@ notes the container as kept. The lock file is created by the app user, mode
 runs at a time on a box, so the wait can also be for a build of another
 service.
 
+**The receipt names the image that started.** The container still starts by
+tag: the reconciler finds a moved `:latest` through the reference a container
+was started with, so a start by image ID would hide every later move. Right
+after the promotion `rebuild.sh` reads the image ID of `:latest` (on the pull
+path, of the pulled image) once. After `docker run` it reads the image ID the
+container runs. When the two match, the receipt names the pushed commit, as
+before. When they differ, `rebuild.sh` logs `started image differs from
+promoted :latest: started <id12>, promoted <id12>; ...`, and the receipt names
+the commit label of the started image, or no commit when it has none. It never
+names the pushed commit for another image, and a failed health check then
+marks no commit as failed. On the pull path, an image without a revision
+label passes the revision check only when the container runs the image ID
+read after the pull.
+
 **A failed health check marks the commit.** When the container of a webhook
 deploy fails its health check, `_handle_rollback` removes the tag
 `<image>:<commit12>` of the failed build (`docker rmi` of the tag; the image

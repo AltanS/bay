@@ -1021,13 +1021,16 @@ def test_failed_health_check_untags_and_records_the_commit(
 
     # Both health-check rollbacks pass the failed build's commit tag, and a
     # deploy that passes clears the record of its commit.
-    assert '_handle_rollback "${SERVICE}" "${IMAGE_NAME}:previous" "${IMAGE_NAME}:latest" "${IMAGE_NAME}:${SHA}"' in local_sh
-    assert '"${EXPECTED_REVISION:+${IMAGE_REPO}:${EXPECTED_REVISION}}"' in remote_sh
+    # The tag is the pushed commit's only when the container runs the promoted
+    # image (_started_commit, tests/test_build_race.py).
+    assert '_handle_rollback "${SERVICE}" "${IMAGE_NAME}:previous" "${IMAGE_NAME}:latest" "${STARTED_FAILED_TAG}"' in local_sh
+    assert '"${EXPECTED_REVISION:+${IMAGE_REPO}:${EXPECTED_REVISION}}" "${IMAGE_REF}"' in remote_sh
+    assert '"${IMAGE_REF}" "${STARTED_FAILED_TAG}"' in remote_sh
     assert '_forget_failed_build "${svc}" "${failed_tag}"' in local_sh
-    assert local_sh.index('_clear_failed_commit "${SERVICE}" "${SHA}"') > local_sh.index(
+    assert local_sh.rindex('_clear_failed_commit "${SERVICE}" "${STARTED_COMMIT}"') > local_sh.index(
         '_handle_rollback "${SERVICE}" "${IMAGE_NAME}:previous"'
     )
-    assert '_clear_failed_commit "${SERVICE}" "${EXPECTED_REVISION}"' in remote_sh
+    assert remote_sh.count('_clear_failed_commit "${SERVICE}" "${STARTED_COMMIT}"') == 2
     assert 'FAILED_COMMITS_DIR="/var/lib/bay/failed-commits"' in local_sh
 
 
