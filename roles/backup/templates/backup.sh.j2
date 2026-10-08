@@ -27,6 +27,12 @@ LOCK_FILE={{ backup_lock_dir | quote }}/"${ACCESSORY}".lock
 MIN_SNAPSHOT_SIZE=100
 RESTIC={{ backup_restic_bin | quote }}
 
+# The snapshots this run made, one entry per backup_from call that stored one.
+# SNAP_IDS[i] is the id restic printed (`snapshot <id> saved`), SNAP_FILES[i]
+# the snapshot file name. The size check reads exactly these.
+SNAP_IDS=()
+SNAP_FILES=()
+
 # ── Telegram Alert ──────────────────────────────────────────────────────
 
 BAY_ALERT_HEADER={{ docker_monitor_alert_header | quote }}
@@ -49,6 +55,19 @@ mkdir -p "$RESTIC_CACHE_DIR"
 
 # ── Restic runs the dump ────────────────────────────────────────────────
 
+# restic_json <restic args...>
+#
+# Runs restic with --json and prints the JSON document alone: the last stdout
+# line that starts with `{`. restic 0.17 prints only the JSON. restic 0.19
+# prints a progress line (`[0:00] 100.00%  1 / 1 snapshots, ...`) on stdout
+# before it, also with --quiet and without a tty. Every `restic ... --json`
+# read in this script goes through here. Fails when restic fails.
+restic_json() {
+  local out
+  out=$("$RESTIC" "$@" --json --retry-lock 15m) || return $?
+  printf '%s\n' "$out" | awk '/^\{/ { line = $0 } END { print line }'
+}
+
 # backup_from <snapshot file name> <dump command...>
 #
 # restic runs the dump command itself (backup --stdin-from-command, restic
@@ -68,8 +87,12 @@ mkdir -p "$RESTIC_CACHE_DIR"
 # file. That snapshot would be the newest one and a restore would pick it. It
 # is removed here, by the id restic printed for this run (`snapshot <id>
 # saved`), so no other snapshot can be touched.
+#
+# A run that stored a snapshot adds its id and file name to SNAP_IDS and
+# SNAP_FILES, for the size check below. A run without that line adds an empty
+# id, and the size check fails on it.
 backup_from() {
-  local name="$1" rc=0 why snap
+  local name="$1" rc=0 why="" snap=""
   shift
   "$RESTIC" backup \
     --stdin-filename "$name" \
@@ -91,8 +114,13 @@ backup_from() {
       EMPTY_DUMP=1
     fi
   fi
+  # One sed, no pipe: under pipefail an early-closing reader fails the line.
+  snap=$(sed -n '/^snapshot [0-9a-f]* saved/{s/^snapshot \([0-9a-f]*\) saved.*/\1/p;q;}' "$RESTIC_OUT")
+  if [ "$rc" -eq 0 ]; then
+    SNAP_IDS+=("$snap")
+    SNAP_FILES+=("$name")
+  fi
   if [ "$rc" -ne 0 ] && [ -z "$why" ] && grep -qF 'no data read' "$RESTIC_ERR"; then
-    snap=$(sed -n '/^snapshot [0-9a-f]* saved/{s/^snapshot \([0-9a-f]*\) saved.*/\1/p;q;}' "$RESTIC_OUT")
     if [ -n "$snap" ]; then
       "$RESTIC" forget "$snap" --retry-lock 15m >&2 \
         || echo "WARNING: could not remove the empty snapshot ${snap} (${name})" >&2
@@ -188,20 +216,42 @@ fi
 
 # ── Snapshot Verification ───────────────────────────────────────────────
 
-# Verify snapshot size
+# Verify the size of every snapshot this run made, by id. A run with several
+# databases makes one snapshot per database, and `latest` would read only the
+# last one.
 echo "[$(date -Iseconds)] Verifying snapshot size..."
-SNAP_SIZE=$("$RESTIC" stats latest --json --retry-lock 15m | jq '.total_size')
-if [ "$SNAP_SIZE" -lt "$MIN_SNAPSHOT_SIZE" ]; then
-  ERROR_MSG="Snapshot suspiciously small ($SNAP_SIZE bytes)"
-  echo "ERROR: $ERROR_MSG"
-  bay_notify backup.warning "<b>Backup warning</b>
+TOTAL_SIZE=0
+for i in "${!SNAP_IDS[@]}"; do
+  snap_id=${SNAP_IDS[$i]}
+  snap_file=${SNAP_FILES[$i]}
+  SNAP_SIZE=""
+  if [ -n "$snap_id" ]; then
+    SNAP_SIZE=$(restic_json stats "$snap_id" | jq -r '.total_size // empty' 2>/dev/null) || SNAP_SIZE=""
+  fi
+  case "$SNAP_SIZE" in
+    ''|*[!0-9]*)
+      ERROR_MSG="Could not read the size of the snapshot (${snap_file})"
+      echo "ERROR: $ERROR_MSG"
+      bay_notify backup.failed "<b>Backup failed</b>
 Accessory: <code>${ACCESSORY}</code>
 Host: <code>${BAY_HOST}</code>
-Warning: <code>${ERROR_MSG}</code>"
-  exit 1
-fi
+Error: <code>$(bay_html_escape "${ERROR_MSG}")</code>"
+      exit 1
+      ;;
+  esac
+  if [ "$SNAP_SIZE" -lt "$MIN_SNAPSHOT_SIZE" ]; then
+    ERROR_MSG="Snapshot suspiciously small ($SNAP_SIZE bytes, ${snap_file})"
+    echo "ERROR: $ERROR_MSG"
+    bay_notify backup.warning "<b>Backup warning</b>
+Accessory: <code>${ACCESSORY}</code>
+Host: <code>${BAY_HOST}</code>
+Warning: <code>$(bay_html_escape "${ERROR_MSG}")</code>"
+    exit 1
+  fi
+  TOTAL_SIZE=$((TOTAL_SIZE + SNAP_SIZE))
+done
 
-echo "[$(date -Iseconds)] Backup complete for ${ACCESSORY} ($SNAP_SIZE bytes)"
+echo "[$(date -Iseconds)] Backup complete for ${ACCESSORY} ($TOTAL_SIZE bytes)"
 
 # ── Retention ─────────────────────────────────────────────────────────
 

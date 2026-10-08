@@ -56,22 +56,22 @@
 # --stdin-from-command`, which restic has since 0.17.0. The download above is
 # skipped when a binary is already there, so an older restic on the box would
 # stay. Stop here instead of writing scripts that fail on every run.
-# Restic 0.19.0 and newer are refused too: 0.19 prints a progress line on stdout
-# before the JSON of `restic stats --json`, and the snapshot size check reads
-# that JSON with jq, so every backup would fail its size check after the snapshot.
+# Restic 0.20 and newer are refused: the backup scripts are tested up to 0.19.x
+# (0.19 prints a progress line on stdout before the JSON of `restic stats
+# --json`, which the size check reads past), and an untested major line should
+# not run unattended backups.
 # `is not skipped`: under --check the command above is skipped and its stdout
 # is empty, which says nothing about the box.
-- name: Require restic 0.17 or 0.18 for the backup scripts
+- name: Require restic 0.17 to 0.19 for the backup scripts
   ansible.builtin.assert:
     that:
       - _restic_found is version('0.17.0', '>=')
-      - _restic_found is version('0.19.0', '<')
+      - _restic_found is version('0.20.0', '<')
     fail_msg: >-
       {{ backup_restic_bin }} reports '{{ _restic_version.stdout }}'. The backup
       scripts need restic 0.17.0 or newer (backup --stdin-from-command) and older
-      than 0.19.0: restic 0.19 prints a progress line before the JSON of
-      'restic stats --json', which breaks the snapshot size check. Remove the
-      binary so this role installs {{ backup_restic_version }}, then run the backup tag again.
+      than 0.20.0 (tested up to 0.19.x). Remove the binary so this role installs
+      {{ backup_restic_version }}, then run the backup tag again.
     quiet: true
   vars:
     _restic_found: "{{ (_restic_version.stdout | default('') | regex_search('restic ([0-9]+\\.[0-9]+\\.[0-9]+)', '\\1') or ['0.0.0']) | first }}"

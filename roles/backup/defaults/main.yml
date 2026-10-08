@@ -6,11 +6,10 @@ backup_enabled: false
 #   https://github.com/restic/restic/releases/download/v0.17.3/SHA256SUMS
 # Overriding the version without the checksum fails the download on purpose.
 # The backup scripts need 0.17.0 or newer (backup --stdin-from-command; the
-# install tasks stop on an older binary) and older than 0.19.0: restic 0.19.0
-# prints a progress line on stdout ahead of the JSON of `stats --json`, which
-# the script's snapshot size check reads with jq. The install tasks stop on a
-# 0.19 binary too. CI downloads the version and checksum below for the tests
-# that run the real restic.
+# install tasks stop on an older binary) and older than 0.20.0 (tested up to
+# 0.19.x). The pin stays 0.17.3: the role installs it only when the binary is
+# missing and never upgrades one that is there. CI downloads the version and
+# checksum below for the tests that run the real restic.
 backup_restic_version: "0.17.3"
 backup_restic_checksum: "5097faeda6aa13167aae6e36efdba636637f8741fed89bbf015678334632d4d3"
 backup_restic_bin: /usr/local/bin/restic

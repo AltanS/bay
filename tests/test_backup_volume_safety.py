@@ -14,7 +14,8 @@ The script is rendered from the real template and run with bash, with a fake
 file per snapshot (it follows restic's documented rules for `--stdin` and
 `--stdin-from-command`) or a real binary on a repository in a temp dir:
 `$BAY_TEST_RESTIC` when set (for example the 0.17.3 the role installs), else
-`restic` on PATH, else the real cases skip.
+`restic` on PATH, else the real cases skip. `$BAY_TEST_RESTIC_019` is a restic
+0.19.x binary for the `real019` cases (local only, they skip when it is unset).
 """
 
 from __future__ import annotations
@@ -41,7 +42,8 @@ from helpers import make_ansible_env  # noqa: E402
 # poll ends at once. Every other call is a producer: it is logged (argv, one
 # JSON line), writes 64 KiB, then fails when $FAIL_ON is one of its arguments,
 # else writes 64 KiB more. When $EMPTY_ON is one of its arguments it writes
-# nothing and exits 0.
+# nothing and exits 0. When $TINY_ON is one of its arguments it writes 10 bytes
+# and exits 0.
 FAKE_DOCKER = r"""#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
@@ -60,6 +62,10 @@ with open(os.path.join(state, "producers.log"), "a") as fh:
 out = sys.stdout.buffer
 if os.environ.get("EMPTY_ON") and os.environ["EMPTY_ON"] in args:
     sys.exit(0)  # a dump that exits 0 and writes nothing
+if os.environ.get("TINY_ON") and os.environ["TINY_ON"] in args:
+    out.write(b"tiny dump\n")
+    out.flush()
+    sys.exit(0)
 out.write(b"a" * 65536)
 out.flush()
 if os.environ.get("FAIL_ON") and os.environ["FAIL_ON"] in args:
@@ -75,8 +81,12 @@ out.write(b"b" * 65536)
 # runs cmd and stores nothing when cmd exits non-zero, with restic's own error
 # text. One data file and one metadata file per snapshot in $RESTIC_REPOSITORY.
 # FAKE_RESTIC_FAIL=1 makes `backup` fail on its own, before the command runs.
+# STATS_NO_JSON=1 makes `stats` print text and no JSON.
+# PROGRESS_LINE=1 makes `stats` print restic 0.19.0's progress line before the JSON.
+# Every `stats` call is logged to $RESTIC_CALLS.
 FAKE_RESTIC = r"""#!/usr/bin/env python3
 import json, os, subprocess, sys
+PROGRESS = "[0:00] 100.00%  1 / 1 snapshots"
 repo = os.environ["RESTIC_REPOSITORY"]
 os.makedirs(repo, exist_ok=True)
 args = sys.argv[1:]
@@ -113,12 +123,26 @@ if cmd == "backup":
     open(os.path.join(repo, snap + ".data"), "wb").write(data)
     with open(os.path.join(repo, snap + ".json"), "w") as fh:
         json.dump({"short_id": snap, "paths": ["/" + name]}, fh)
+    print("snapshot %s saved" % snap)
     sys.exit(0)
 if cmd == "snapshots":
     print(json.dumps([meta(s) for s in snaps]))
     sys.exit(0)
 if cmd == "stats":
-    print(json.dumps({"total_size": os.path.getsize(os.path.join(repo, snaps[-1] + ".data"))}))
+    # `stats <id> --json`, like the script runs it; the script never asks for `latest`.
+    with open(os.environ["RESTIC_CALLS"], "a") as fh:
+        fh.write(" ".join(args) + "\n")
+    snap = args[1]
+    if snap not in snaps:
+        sys.stderr.write("Fatal: no matching ID found for prefix %r\n" % snap)
+        sys.exit(1)
+    if os.environ.get("STATS_NO_JSON"):
+        print("repository contains 1 snapshots")
+        sys.exit(0)
+    if os.environ.get("PROGRESS_LINE"):
+        print(PROGRESS)
+    print(json.dumps({"total_size": os.path.getsize(os.path.join(repo, snap + ".data")),
+                      "snapshots_count": 1}))
     sys.exit(0)
 if cmd == "dump":
     snap = snaps[-1] if args[1] == "latest" else args[1]
@@ -133,18 +157,20 @@ if cmd == "forget":
 sys.exit(2)
 """
 
-# restic 0.19 prints a progress line on stdout before the JSON of `stats --json`
-# (0.17.3, which the role installs, does not). Only for the real binary in this
-# test, drop that line so the script's `jq` reads the JSON.
+# A pass-through for the real binary that logs every `stats` call to
+# $RESTIC_CALLS and, with PROGRESS_LINE=1, prints restic 0.19.0's progress line
+# before the real output (0.17.3 never prints it, and 0.19.1 only on a tty).
 REAL_RESTIC_WRAPPER = r"""#!/usr/bin/env bash
 if [ "$1" = stats ]; then
-  "$REAL_RESTIC" "$@" | grep '^{'
-  exit "${PIPESTATUS[0]}"
+  printf '%s\n' "$*" >> "$RESTIC_CALLS"
+  if [ -n "${PROGRESS_LINE:-}" ]; then
+    echo "[0:00] 100.00%  1 / 1 snapshots, 1 / 1 files"
+  fi
 fi
 exec "$REAL_RESTIC" "$@"
 """
 
-_RESTICS = ["fake", "real"]
+_RESTICS = ["fake", "real", "real019"]
 
 # Per method: the render variables, the snapshot file name (what restore.yml
 # dumps), the producer argv exactly as the script ran it before, and the
@@ -223,10 +249,16 @@ class Box:
         self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
                     "FAKE_DOCKER_STATE": str(state)}
         self.env.pop("RESTIC_REPOSITORY", None)
+        self.env["RESTIC_CALLS"] = str(tmp_path / "restic-calls.log")
         if which == "fake":
             restic = _exe(tmp_path / "restic", FAKE_RESTIC)
         else:
-            real = os.environ.get("BAY_TEST_RESTIC") or shutil.which("restic")
+            if which == "real019":
+                real = os.environ.get("BAY_TEST_RESTIC_019")
+                if not real:
+                    pytest.skip("BAY_TEST_RESTIC_019 is not set (a restic 0.19.x binary)")
+            else:
+                real = os.environ.get("BAY_TEST_RESTIC") or shutil.which("restic")
             if real is None:
                 pytest.skip("no restic on this machine; the fake restic covers the rule")
             restic = _exe(tmp_path / "restic", REAL_RESTIC_WRAPPER)
@@ -261,6 +293,16 @@ class Box:
     def dump(self, path: str) -> bytes:
         return subprocess.run([str(self.restic), "dump", "latest", path],
                               env=self._restic_env(), check=True, capture_output=True).stdout
+
+    def snapshot_ids(self) -> dict[str, str]:
+        """Snapshot id by file path, for every snapshot in the repo."""
+        out = subprocess.run([str(self.restic), "snapshots", "--json"], env=self._restic_env(),
+                             check=True, capture_output=True, text=True).stdout
+        return {p: s["short_id"] for s in json.loads(out) or [] for p in s["paths"]}
+
+    def stats_calls(self) -> list[list[str]]:
+        log = Path(self.env["RESTIC_CALLS"])
+        return [line.split() for line in log.read_text().splitlines()] if log.exists() else []
 
     def producers(self) -> list[list[str]]:
         log = self.state / "producers.log"
@@ -378,6 +420,68 @@ def test_pg_dump_reports_a_failed_database_when_a_later_one_succeeds(tmp_path: P
     assert [p[-1] for p in box.producers()] == ["shop", "blog"]
 
 
+TWO_DBS = {"env": {"clear": {"POSTGRES_USER": "app"}},
+           "backup": {"databases": ["shop", "blog"]}}
+
+
+@pytest.mark.parametrize("which", _RESTICS)
+@pytest.mark.parametrize("tiny", ["", "shop", "blog"])
+def test_size_check_reads_every_snapshot(tmp_path: Path, which: str, tiny: str) -> None:
+    """A run with two databases makes two snapshots and the size check reads both, by id.
+    The old `stats latest` read only the last one, so a tiny first database passed."""
+    box = Box(tmp_path, which, "pg_dump", accessory_config=TWO_DBS)
+    run = box.run(TINY_ON=tiny)
+    ids = box.snapshot_ids()
+    assert sorted(ids) == ["/postgres-blog.sql", "/postgres-shop.sql"]
+    # Every size read names a snapshot of this run by id; none asks for `latest`.
+    asked = [c[1] for c in box.stats_calls()]
+    assert all(c[0] == "stats" and "--json" in c for c in box.stats_calls())
+    if not tiny:
+        assert run.returncode == 0, run.stdout + run.stderr
+        assert sorted(asked) == sorted(ids.values())
+        # The summary adds the sizes of both snapshots (two dumps of 128 KiB).
+        assert "Backup complete for postgres (262144 bytes)" in run.stdout
+        return
+    assert run.returncode == 1, run.stdout + run.stderr
+    # The alert names the tiny snapshot's file, not the other one.
+    assert f"ERROR: Snapshot suspiciously small (10 bytes, postgres-{tiny}.sql)" in run.stdout
+    assert "Backup complete" not in run.stdout
+    assert ids[f"/postgres-{tiny}.sql"] in asked
+    assert not (tmp_path / "backup" / "locks" / "postgres.lock").exists()
+
+
+@pytest.mark.parametrize("which", _RESTICS)
+def test_size_check_parses_progress_line(tmp_path: Path, which: str) -> None:
+    """restic 0.19.0 prints a progress line on stdout before the JSON of `stats --json`."""
+    box = Box(tmp_path, which, "file")
+    ok = box.run(PROGRESS_LINE="1")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "Backup complete for bay_shop_data (131072 bytes)" in ok.stdout
+    assert len(box.stats_calls()) == 1
+    # A tiny dump behind the progress line is still caught.
+    tiny = box.run(PROGRESS_LINE="1", TINY_ON="cp")
+    assert tiny.returncode == 1, tiny.stdout + tiny.stderr
+    assert "Snapshot suspiciously small (10 bytes, bay_shop_data.tar)" in tiny.stdout
+
+
+def test_size_check_fails_closed_when_stats_has_no_json(tmp_path: Path) -> None:
+    """A stats call that prints no JSON document fails the run and names the file."""
+    box = Box(tmp_path, "fake", "file")
+    failed = box.run(STATS_NO_JSON="1")
+    assert failed.returncode == 1, failed.stdout + failed.stderr
+    assert "ERROR: Could not read the size of the snapshot (bay_shop_data.tar)" in failed.stdout
+    assert "Backup complete" not in failed.stdout
+
+
+@pytest.mark.parametrize("method", sorted(METHODS))
+def test_size_check_never_asks_for_latest(method: str) -> None:
+    """The rendered script reads sizes by snapshot id; no `stats latest` is left."""
+    script = _render(method)
+    assert "stats latest" not in script
+    assert script.count("restic_json stats ") == 1
+    assert "jq" in script and script.count('"$RESTIC" "$@" --json') == 1
+
+
 def test_restic_failure_is_not_called_a_dump_failure(tmp_path: Path) -> None:
     box = Box(tmp_path, "fake", "pg_dump")
     failed = box.run(FAKE_RESTIC_FAIL="1")
@@ -447,8 +551,11 @@ def _task(path: Path, name: str) -> dict[str, Any]:
 @pytest.mark.parametrize(("stdout", "skipped", "passes"), [
     ("restic 0.17.3 compiled with go1.23.3 on linux/amd64", False, True),
     ("restic 0.18.1 compiled with go1.24.1 on linux/amd64", False, True),
-    # 0.19 prints a progress line before the JSON of `restic stats --json`.
-    ("restic 0.19.0 compiled with go1.26.4 on linux/amd64", False, False),
+    # 0.19 prints a progress line before the JSON of `restic stats --json`; the
+    # size check reads past it.
+    ("restic 0.19.0 compiled with go1.26.4 on linux/amd64", False, True),
+    ("restic 0.19.1 compiled with go1.26.4 on linux/amd64", False, True),
+    ("restic 0.20.0 compiled with go1.27.0 on linux/amd64", False, False),
     ("restic 0.16.4 compiled with go1.21.6 on linux/amd64", False, False),
     ("restic 0.9.6 compiled with go1.13.8 on linux/amd64", False, False),
     ("not restic", False, False),
@@ -459,7 +566,7 @@ def test_role_requires_a_restic_that_runs_the_producer(
     tmp_path: Path, stdout: str, skipped: bool, passes: bool
 ) -> None:
     gate = _task(ROOT / "roles" / "backup" / "tasks" / "install.yml",
-                 "Require restic 0.17 or 0.18 for the backup scripts")
+                 "Require restic 0.17 to 0.19 for the backup scripts")
     registered: dict[str, Any] = {"stdout": stdout, "rc": 0, "changed": False}
     if skipped:
         registered = {"skipped": True, "changed": False, "stdout": "", "rc": 0}
@@ -468,7 +575,7 @@ def test_role_requires_a_restic_that_runs_the_producer(
                                     "backup_restic_version": "0.17.3"})
     assert (proc.returncode == 0) is passes, proc.stdout[-2000:]
     if not passes:
-        assert "0.17.0 or newer" in proc.stdout and "older than 0.19.0" in proc.stdout
+        assert "0.17.0 or newer" in proc.stdout and "older than 0.20.0" in proc.stdout
 
 
 # ── The deploy waits for a running volume backup ────────────────────────────
