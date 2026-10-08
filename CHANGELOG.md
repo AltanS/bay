@@ -8,6 +8,50 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.4.0] - 2026-10-08
+
+The plan predicts the receiver recreate and drops a false push note, two projects in one app repo both get commit tags, jobs get a timeout and entrypoint-safe commands, and a route of a box that has not deployed since the pin reads `unknown`.
+
+Spec 01: plan and up notes tell the truth
+
+- `bay up` no longer asks you to push a `bay adopt` commit that is already on a branch of the remote. It asks the remote first (as the plan already did). The note "is the bay adopt commit; no code moves, git push it after this bay up" now comes only when the commit is not on the remote, or when Bay cannot tell. In every case `bay up` still takes the adopt commit and moves no code for it. Before, the 2.2.0 gates printed this note for eight apps whose adopt commits were already pushed.
+- `bay plan --remote` predicts the `bay-webhook` recreate when the receiver changes. Bay hashes the receiver files on the control node (`bay_tree_hash` in `filter_plugins/bay_filters.py`: sha256 over the file contents in sorted path order, with `__pycache__` and `*.pyc` left out, and mtimes and modes not read). It puts the hash on the image and on the container as the label `com.bay.receiver-hash`. The label is part of the container spec, so a new receiver changes the config hash, also in check mode, where the image is not built. The box then predicts `recreate`, with the reason `labels: differ for com.bay.receiver-hash`. With the same receiver files it predicts `noop`. Before, the check-mode run saw the old image ID and predicted `noop`, and the real `bay up` then recreated `bay-webhook` on every box.
+- The receiver image is also rebuilt when its `com.bay.receiver-hash` label is not the hash of the receiver files. Before, an image that an earlier run left stale (files copied, build failed) stayed until the files changed again.
+- Docs: plan.md (the adopt note, the check mode list, the receiver image), build-pipeline.md and reconciler.md.
+
+Spec 02: commit tags for two projects in one app repo
+
+- A push that changes only the `bay.toml` of one project now also counts as config only for every other project that builds from the same repo and branch. `bay up` pins each project of the repo at the repo's head, so each image needs the commit tag of that push. Before, the push gave the other project no tag, and the next `bay up` kept its code (`code: kept <container> (<image>:<commit12> is not on this box)`). The second adopt commit of two projects in one repo hit this.
+- The compile adds no key. At render time, `rebuild.sh` gets `SHARED_TOML_PATHS` per service and the webhook receiver config gets `shared_toml_paths`: the `bay.toml` paths of the other projects of the same repo and branch (filter `bay_shared_toml_paths`). Only a project whose `bay.toml` is in the app repo gets them. The files that the other project's mounts read do not count, because such a file can be an input of this project's build.
+- The webhook receiver passes a push of one of those files whatever `watch` and `ignore` say, and logs `config file changed: <files>`, as it does for the project's own `bay.toml`.
+- Local builds share one checkout per repo and branch. For a container with no `com.bay.commit` label (created before 2.1.0), the second service's run read the HEAD that the first service's pull had left, saw no change, and built. Each service now keeps its own mark in the checkout, the git ref `refs/bay/seen/<service>`: the commit the checkout was at after that service's last pull. The first run after the upgrade gives every service of the checkout a mark at the current HEAD. Remote builds have one checkout per service and are unchanged.
+- A remote build still tags in the registry only. The box pulls `<image>:<commit12>` at `bay up`.
+- Docs: build-pipeline.md ("Config-only push" and the order of the guards), the observability contract (row 20, and the line numbers of every row), bay-toml.md and plan.md ("bay adopt").
+
+Spec 03: deploy idempotence, job timeouts and entrypoint-safe commands
+
+- Env directory (gap 33): the zot task that creates `<stack_dir>/env` now sets the same owner, group and mode as `deploy_stack` and `traefik` (owner app user, group `docker`, mode 0750). It set 0755 with group app user, so on a box that ran all three tasks the mode flipped on every deploy and two tasks reported changed. Docker reads the zot env file as root, so 0750 is enough. A test parses the roles and fails when the tasks disagree.
+- Jobs: a new optional job key `timeout` (integer seconds, at least 1, default 3600) becomes `TimeoutStartSec` of the job. The shared `bay-job@.service` carries the default 3600. Each job gets a drop-in `bay-job@<job>.service.d/timeout.conf` with its own value. Past the limit systemd stops the run and `ExecStopPost` removes the container. The compile writes `timeout` into `jobs:` only when the job sets it. A job that is gone loses its drop-in. The timer keeps no `Persistent=` setting, so a run missed while the box was off is not made up. The docs say so.
+- Command forms: `release` (project, per environment) and a job `command` accept a string or a non-empty list of strings. A string runs as `/bin/sh -c "<cmd>"` with the image entrypoint overridden, so an image with `ENTRYPOINT ["node"]` no longer runs `node sh -c ...`. A list keeps the image ENTRYPOINT and is passed to it as the arguments, so `release = ["bin/migrate", "up"]` runs `node bin/migrate up`. The same rule holds in the reconciler (`run_release`), in `rebuild.sh` (`_run_release`) and in the job script. In the shell templates each list element is quoted on its own, and the hostile-render test covers the new paths.
+- The compiled output of a string `release` or `command` and of a job without `timeout` is unchanged, byte for byte. The compile writes a list as a YAML list. The `services.yml` schema accepts both forms.
+- Docs: `bay-toml.md` and `services.md` describe the two command forms, `timeout` and the missed-run rule.
+
+Spec 05: route status and the last route removal
+
+- `bay show --routes` says `unknown`, not `drift`, for a route whose box has not deployed since the pin. The receipt must be at least as new as the commit that last changed the compiled routes, and it must list routes. The check costs two git calls for the whole table. `--json` has a new `running_current` field.
+- Removing the last tailnet route now removes `dynamic/tailnet-proxies.yml` from the ingress box. Traefik drops the routers, the receipt lists no routes, and the plan step converges. Check mode predicts the removal. A fleet with routes renders the file as before.
+- Docs: plan.md and tailnet-ingress.md.
+
+### Upgrade notes
+
+- `bay-webhook` is recreated once per box. The first `bay up` (or `bay deploy`) of each box env with a build app after 2.4.0 rebuilds the receiver image and recreates the container: the receiver code changed (spec 02), and the running container and its image have no `com.bay.receiver-hash` label yet (spec 01). `bay plan --remote` shows this as a `bay-webhook` recreate step with the reason `labels: differ for com.bay.receiver-hash`. It is expected, and it belongs in the 2.4.0 allowed set. The next plan predicts `noop` for `bay-webhook`.
+- Shared app repo rule: a push that changes only the `bay.toml` of one project is config only for every project that builds from the same repo and branch, so each of their images gets that commit's tag. `rebuild.sh` and the receiver config change on every box that builds a project. Only projects that share an app repo with another project get a non-empty `shared_toml_paths`. A project of a shared repo whose pinned commit has no image tag (the second adopt commit before 2.4.0) gets it from the next push that changes only a `bay.toml` of that repo, or from a redelivery of that push in the GitHub webhook settings, once 2.4.0 is deployed on the box that builds it. The build log says `config-only push <commit12>: run bay up`. Nothing builds or recreates.
+- Job timeout: every existing job gets a `timeout.conf` drop-in with the default of 3600 seconds on the next deploy. A job that ran longer than an hour is now stopped. Set `timeout` on it first. The `deploy_stack` role carries the job tasks, so a normal `bay up` installs the drop-ins. No `provision` run is needed.
+- String commands run through the absolute path `/bin/sh`: a string `release` or job `command` runs as `/bin/sh -c "<cmd>"` with the image entrypoint overridden. A release or job that ran as `sh -c "<cmd>"` on an image with an exec-form ENTRYPOINT was broken before (the entrypoint received `sh -c ...`). An image with no `/bin/sh` cannot run a string command. Use a list there, which keeps the image ENTRYPOINT.
+- The first `bay up` or `bay deploy` that touches a box with the zot S3 driver sets its `<stack_dir>/env` to 0750, group `docker`. The next one reports no change for that directory.
+- Route status `unknown` rule: `bay show --routes` reports a route as `unknown` until the ingress box has deployed at or after the fleet commit that last changed the compiled routes. Only a receipt that is not older than that commit can report `drift`. A receipt commit that the local fleet clone does not know also reads `unknown`, so pull the fleet before you read the table.
+- A fleet that removed its last route and still has the old route file on the box: the next `bay deploy <env> --tags traefik` (or any `bay up` on the ingress box env) deletes the file. Nothing changes for a fleet that still has routes.
+
 ## [2.3.0] - 2026-10-08
 
 Every key the validator accepts now deploys or is an error. The receipt lists routes, and `bay validate` checks the boxes against the inventory.
