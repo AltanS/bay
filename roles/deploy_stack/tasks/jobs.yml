@@ -81,12 +81,20 @@
     file_type: file
   register: _bay_job_timer_files
 
+# A box that never ran a job has no jobs/ directory. find warns about a missing
+# path on every deploy, so look first.
+- name: Check for the job script directory on this host
+  ansible.builtin.stat:
+    path: "{{ stack_dir }}/jobs"
+  register: _bay_job_script_dir
+
 - name: Find the job scripts on this host
   ansible.builtin.find:
     paths: "{{ stack_dir }}/jobs"
     patterns: "*.sh"
     file_type: file
   register: _bay_job_script_files
+  when: _bay_job_script_dir.stat.exists
 
 - name: Name the jobs that are gone
   ansible.builtin.set_fact:

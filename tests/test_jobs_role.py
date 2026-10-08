@@ -201,3 +201,47 @@ def test_job_units_render_and_prune(tmp_path: Path) -> None:
 def test_jobs_tasks_are_included_by_deploy_stack() -> None:
     main = (ROLE / "tasks" / "main.yml").read_text()
     assert "ansible.builtin.include_tasks: jobs.yml" in main
+
+
+def _run_script_scan(tmp_path: Path, stack_dir: Path) -> tuple[str, list[str]]:
+    """Run the real stat, find and name-the-gone tasks; return the output and the gone jobs."""
+    names = ("Check for the job script directory on this host", "Find the job scripts on this host",
+             "Name the jobs that are gone")
+    out = tmp_path / "gone.json"
+    play = [{
+        "hosts": "localhost", "connection": "local", "gather_facts": False,
+        "vars": {"stack_dir": str(stack_dir), "_bay_jobs": {"shop-job-nightly": {}},
+                 "_bay_job_timer_files": {"files": []}},
+        "tasks": [*(_task(n) for n in names), {
+            "name": "Write the result",
+            "ansible.builtin.copy": {"content": "{{ _bay_jobs_gone | to_json }}", "dest": str(out)},
+        }],
+    }]
+    (tmp_path / "play.yml").write_text(yaml.safe_dump(play))
+    (tmp_path / "ansible.cfg").write_text("[defaults]\n")
+    env = {**os.environ, "ANSIBLE_CONFIG": str(tmp_path / "ansible.cfg"), "ANSIBLE_NOCOLOR": "1",
+           "ANSIBLE_PYTHON_INTERPRETER": sys.executable, "ANSIBLE_LOCALHOST_WARNING": "0",
+           "ANSIBLE_INVENTORY_UNPARSED_WARNING": "0"}
+    proc = subprocess.run(
+        [sys.executable, "-m", "ansible.cli.playbook", "-i", "localhost,", str(tmp_path / "play.yml")],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    return proc.stdout + proc.stderr, json.loads(out.read_text())
+
+
+def test_a_box_without_a_jobs_directory_scans_quietly(tmp_path: Path) -> None:
+    """find warned on every deploy of a box that never ran a job."""
+    output, gone = _run_script_scan(tmp_path, tmp_path / "stack")
+    assert "WARNING" not in output, output
+    assert gone == []
+
+
+def test_the_scan_still_names_the_scripts_of_jobs_that_are_gone(tmp_path: Path) -> None:
+    jobs = tmp_path / "stack" / "jobs"
+    jobs.mkdir(parents=True)
+    (jobs / "shop-job-nightly.sh").write_text("#!/bin/sh\n")
+    (jobs / "shop-job-old.sh").write_text("#!/bin/sh\n")
+    output, gone = _run_script_scan(tmp_path, tmp_path / "stack")
+    assert "WARNING" not in output
+    assert gone == ["shop-job-old"]
