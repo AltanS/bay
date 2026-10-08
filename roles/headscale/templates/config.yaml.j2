@@ -47,7 +47,7 @@ derp:
 {# tailnet_proxies — remote tailnet services fronted by this control host's
    ingress (docs/tailnet-ingress.md). Route their domains to MagicDNS so the
    extra_records A entries (→ this host's tailnet IP) resolve. #}
-{% for proxy_name, proxy in (tailnet_proxies | default({})).items() %}
+{% for proxy_name, proxy in (tailnet_proxies | default({}, true)).items() %}
 {%   for domain in proxy.domains | default([]) %}
 {%     if domain not in seen_domains %}
 {%       set _ = vpn_records.append({'domain': domain, 'ip': headscale_server_tailnet_ip | default('100.64.0.1')}) %}

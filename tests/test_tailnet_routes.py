@@ -1054,3 +1054,10 @@ def test_last_route_removed_from_traefik(tmp_path: Path) -> None:
     # Converged: a second run changes nothing, also with the tailnet map unset.
     assert _run_route_tasks(tmp_path, off)["remove"] == "ok"
     assert _run_route_tasks(tmp_path, {})["remove"] == "ok"
+
+    # `tailnet_proxies:` left empty in YAML is null, not unset: `default({})`
+    # alone keeps null and `length` of it fails, so the role reads `default({}, true)`.
+    assert _run_route_tasks(tmp_path, {"tailnet_proxies": None})["remove"] == "ok"
+    assert _run_route_tasks(
+        tmp_path, {"traefik_dns_challenge_enabled": True, "tailnet_proxies": None}
+    ) == {"render": "skipping", "remove": "ok"}

@@ -8,7 +8,7 @@
 # no public socket. Generated from the `tailnet_proxies` map.
 http:
   routers:
-{% for name, proxy in (tailnet_proxies | default({})).items() %}
+{% for name, proxy in (tailnet_proxies | default({}, true)).items() %}
     {{ name }}-tailnet:
       rule: "{{ proxy.domains | map('regex_replace', '^(.+)$', 'Host(`\\1`)') | join(' || ') }}"
       entryPoints:
@@ -27,7 +27,7 @@ http:
           - main: "{{ tailnet_ingress_cert_domain | default(proxy.domains[0]) }}"
 {% endfor %}
   services:
-{% for name, proxy in (tailnet_proxies | default({})).items() %}
+{% for name, proxy in (tailnet_proxies | default({}, true)).items() %}
     {{ name }}-tailnet:
       loadBalancer:
 {% if proxy.pass_host_header is defined and not proxy.pass_host_header %}
