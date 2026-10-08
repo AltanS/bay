@@ -151,6 +151,9 @@ Jobs and release:
   image. It runs only when the main container is created or recreated, and a push build
   runs it before it swaps the container. It has the env, secrets, network and mounts of
   the main container, and a time limit (`bay_release_timeout`, 600 seconds by default).
+- `release` together with `update = "auto"` is an error, in the project or in an
+  environment. An automatic update recreates the container without running the release,
+  so a migration of the new image would not run. Use `notify` or `off`.
 
 Health and deploy:
 

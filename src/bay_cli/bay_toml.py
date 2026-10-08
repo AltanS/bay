@@ -273,6 +273,7 @@ def _file_rules(doc: dict[str, Any]) -> Iterator[Violation]:
     yield from _mount_rules(doc, services)
     yield from _access_rules(doc, services)
     yield from _deploy_rules(doc, envs, services)
+    yield from _release_update_rules(doc, envs)
     yield from _domain_rules(doc, envs, services)
 
 
@@ -587,6 +588,31 @@ def _internal_main_access(doc: dict[str, Any], top_mode: Any) -> Iterator[Violat
 
 def _str_list(value: Any) -> list[str]:
     return [x for x in value if isinstance(x, str)] if isinstance(value, list) else []
+
+
+def _release_update_rules(
+    doc: dict[str, Any], envs: dict[str, dict[str, Any]]
+) -> Iterator[Violation]:
+    """``release`` with ``update = "auto"`` is an error in any environment.
+
+    The release runs when Bay deploys. An automatic image update recreates the
+    container on its own, without running the release, so a migration that
+    belongs to the new image would not run. Only the main container has a
+    release, so only the project-level and per-environment ``update`` count.
+    """
+    for env, table in envs.items() if envs else [("", {})]:
+        has_release = "release" in table or "release" in doc
+        update = table.get("update", doc.get("update"))
+        if not has_release or update != "auto":
+            continue
+        where = f"deploy.{env}.update" if "update" in table else "update"
+        env_words = f" in the {env} environment" if env else ""
+        yield Violation(
+            where,
+            f"\"auto\" cannot be combined with release{env_words}: an automatic update "
+            "recreates the container without running the release. Use \"notify\" or "
+            "\"off\", or remove release",
+        )
 
 
 def _deploy_rules(

@@ -605,3 +605,46 @@ def test_validate_rejects_access_on_internal():
                    for p in _paths(bay_toml.validate(doc)))
     assert bay_toml.validate(_doc(access={"mode": "public", "password": password},
                                   health="/hz")) == []
+
+
+# ── release with update = "auto" ────────────────────────────────────────────
+
+def _release_doc(**top: Any) -> dict[str, Any]:
+    """A valid file with a release; ``top`` adds or overrides top-level keys."""
+    doc: dict[str, Any] = {
+        "name": "shop", "fleet": "main", "image": "shop:1", "port": 3000,
+        "release": "bin/migrate", "access": {"mode": "public"},
+        "deploy": {"production": {"domain": "a.example.com"}},
+    }
+    doc.update(top)
+    return doc
+
+
+def test_release_with_auto_update_is_an_error() -> None:
+    assert not bay_toml.validate(_release_doc())  # the default update is notify
+    for update in ("notify", "off"):
+        assert not bay_toml.validate(_release_doc(update=update))
+    found = bay_toml.validate(_release_doc(update="auto"))
+    assert [v.path for v in found] == ["update"]
+    assert "without running the release" in found[0].message
+    # No release, no problem.
+    no_release = _release_doc(update="auto")
+    del no_release["release"]
+    assert not bay_toml.validate(no_release)
+
+
+def test_release_and_auto_update_are_checked_per_environment() -> None:
+    envs = {"production": {"domain": "a.example.com", "update": "off"},
+            "staging": {"domain": "b.example.com"}}
+    # The top level says auto; production turns it off, staging keeps it: an error for staging only.
+    found = bay_toml.validate(_release_doc(update="auto", deploy=envs))
+    assert [v.path for v in found] == ["update"]
+    assert "staging" in found[0].message and "production" not in found[0].message
+    # An environment sets both.
+    doc = _release_doc(deploy={"production": {
+        "domain": "a.example.com", "update": "auto", "release": "bin/migrate"}})
+    del doc["release"]
+    assert [v.path for v in bay_toml.validate(doc)] == ["deploy.production.update"]
+    # A service's own update does not count: only the main container has a release.
+    doc = _release_doc(services={"worker": {"command": "run", "update": "auto"}})
+    assert not bay_toml.validate(doc)
