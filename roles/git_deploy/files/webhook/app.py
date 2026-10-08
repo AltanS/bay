@@ -217,6 +217,25 @@ def _extract_changed_files(payload: dict) -> set[str]:
     return changed
 
 
+def _matching(changed_files: set[str], entries: list | None) -> list[str]:
+    """The changed files that equal a listed path or sit under a listed directory."""
+    paths = [
+        e.strip("/") for e in entries or [] if isinstance(e, str) and e.strip("/")
+    ]
+    if not paths:
+        return []
+    return sorted(
+        f for f in changed_files
+        if any(f == p or f.startswith(p + "/") for p in paths)
+    )
+
+
+def _own_config_files(changed_files: set[str], svc_config: dict) -> list[str]:
+    toml_path = svc_config.get("bay_toml_path")
+    own = [toml_path] if isinstance(toml_path, str) else []
+    return _matching(changed_files, own + list(svc_config.get("bay_toml_files") or []))
+
+
 def config_files_changed(changed_files: set[str], svc_config: dict | None) -> list[str]:
     """The pushed files that are the project's bay.toml or a file its mounts read.
 
@@ -231,37 +250,47 @@ def config_files_changed(changed_files: set[str], svc_config: dict | None) -> li
     build from the same repo and branch (bay_filters `bay_shared_toml_paths`).
     `bay up` pins every project of the repo at its head, so a push of one of
     them must reach rebuild.sh for this project too: its config-only rule
-    gives this image the new commit tag.
+    gives this image the new commit tag. `push_filter` lets such a push pass
+    only when it carries no code of another project.
     """
     if not svc_config or not changed_files:
         return []
-    paths: list[str] = []
-    toml_path = svc_config.get("bay_toml_path")
-    if isinstance(toml_path, str) and toml_path.strip("/"):
-        paths.append(toml_path.strip("/"))
-    for key in ("bay_toml_files", "shared_toml_paths"):
-        for entry in svc_config.get(key) or []:
-            if isinstance(entry, str) and entry.strip("/"):
-                paths.append(entry.strip("/"))
-    if not paths:
-        return []
     return sorted(
-        f for f in changed_files
-        if any(f == p or f.startswith(p + "/") for p in paths)
+        set(_own_config_files(changed_files, svc_config))
+        | set(_matching(changed_files, svc_config.get("shared_toml_paths")))
     )
 
 
 def push_filter(changed_files: set[str], svc_config: dict | None) -> tuple[bool, str]:
     """Decide whether a (not forced, not truncated) push writes a trigger.
 
-    A push that changes the bay.toml or a mounted file always passes, whatever
-    `watch` (`paths.include`) and `ignore` (`paths.exclude`) say. Every other
+    A push that changes the project's own bay.toml or a mounted file always
+    passes, whatever `watch` (`paths.include`) and `ignore` (`paths.exclude`)
+    say. A push that changes the bay.toml of a sibling project (same app repo
+    and branch) passes when every other file it changes is also a config file
+    or counts for this project's `watch`. `rebuild.sh` then sees a config-only
+    push and tags the image. With sibling code outside this project's `watch`
+    in the same push, rebuild.sh would not call it config only and would build
+    this project, so the push is skipped, as without shared paths. Every other
     push goes through `should_rebuild`.
     """
-    config = config_files_changed(changed_files, svc_config)
-    if config:
-        return True, f"config file changed: {', '.join(config)}"
-    return should_rebuild(changed_files, (svc_config or {}).get("paths"))
+    paths = (svc_config or {}).get("paths")
+    if svc_config and changed_files:
+        own = _own_config_files(changed_files, svc_config)
+        shared = _matching(changed_files, svc_config.get("shared_toml_paths"))
+        if own:
+            return True, f"config file changed: {', '.join(sorted(set(own) | set(shared)))}"
+        if shared:
+            others = changed_files - set(shared)
+            if not others:
+                return True, f"config file changed: {', '.join(shared)}"
+            ok, reason = should_rebuild(others, paths)
+            if ok:
+                return True, f"config file changed: {', '.join(shared)}; {reason}"
+            return False, (
+                f"bay.toml of another project changed with files outside the watch: {reason}"
+            )
+    return should_rebuild(changed_files, paths)
 
 
 def should_rebuild(

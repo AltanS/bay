@@ -170,6 +170,18 @@ push of one `bay.toml` therefore tags the image of every project of that repo
 and branch, on every box that builds it (local builds) or in the registry
 (remote builds; the box pulls `<image>:<commit12>` at `bay up`).
 
+The receiver lets a sibling's `bay.toml` push pass only when it carries no code
+for the other project. If the same push also changes other files, each must be a
+`bay.toml` or a file this project's mounts read, or match this project's
+`watch`. A push of the sibling's `bay.toml` plus the sibling's code, outside
+this project's `watch`, is skipped for this project: `rebuild.sh` would not call
+it config only and would build and recreate this project. A skipped push can still end
+in a build later. The diff that `rebuild.sh` checks covers the whole range from
+the commit the box last saw to the pushed head, so a later push of only a
+sibling's `bay.toml` has the skipped push's code in its range. That range is
+not config only, so this project builds. This is safe: the build is of the
+real head, and the cost is one build that the `watch` list would have avoided.
+
 The previous commit is the `com.bay.commit` label of the running container.
 A container created before 2.1.0 has no such label (and on a build server
 there may be no container). Then the previous commit is the commit that the
@@ -239,7 +251,8 @@ In the webhook receiver, before any trigger file exists:
 2. A push that changes the project's `bay.toml` or a file its mounts read (`bay_toml_path`
    and `bay_toml_files` of the receiver config, a file under a listed directory too), or the
    `bay.toml` of another project that builds from the same repo and branch
-   (`shared_toml_paths`), passes, whatever `watch` and `ignore` say. The receiver logs
+   (`shared_toml_paths`; only when every other changed file is a config file or matches
+   `watch`), passes, whatever `watch` and `ignore` say. The receiver logs
    `config file changed: <files>` and writes the trigger, so the config-only check (7) and the
    hold guard (9) decide. A project in the fleet has no such paths.
 3. The `[build] watch` and `ignore` lists (compiled to the include and exclude path

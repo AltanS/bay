@@ -1397,6 +1397,19 @@ def test_config_only_push_tags_every_shared_repo_image(tmp_path: Path) -> None:
     assert push_filter({"bay/admin.toml"}, {**config["web"], **watched}) == (
         True, "config file changed: bay/admin.toml"
     )
+    # The sibling's bay.toml with the sibling's code is a build for the sibling only:
+    # outside web's watch the push is skipped for web, as in 2.3.0 (rebuild.sh would not
+    # call it config only and would build and recreate web).
+    sibling_code = {"bay/admin.toml", "apps/admin/main.py"}
+    ok, reason = push_filter(sibling_code, {**config["web"], **watched})
+    assert ok is False, reason
+    # With code inside web's watch, web builds anyway.
+    assert push_filter({"bay/admin.toml", "apps/web/main.py"}, {**config["web"], **watched})[0]
+    # The sibling's bay.toml with web's own bay.toml or a file its mounts read: config only.
+    own = {**config["web"], **watched, "bay_toml_path": "bay/web.toml"}
+    assert push_filter({"bay/admin.toml", "bay/web.toml", "apps/admin/main.py"}, own)[0]
+    # No watch on web: every push builds web, so the mixed push passes (as in 2.3.0).
+    assert push_filter(sibling_code, config["web"])[0] is True
     # Before 2.4.0 (no shared paths) `watch` dropped it: the second adopt commit.
     bare = {k: v for k, v in config["web"].items() if k != "shared_toml_paths"}
     assert push_filter({"bay/admin.toml"}, {**bare, **watched})[0] is False
