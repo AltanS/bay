@@ -16,9 +16,10 @@ Everything here is valid in Bay 2.1 and the files pass `bay toml validate`. A fe
 Bay does not have yet carries the tag `(planned)` on its line. Some valid keys are also not
 deployable yet: `bay plan` blocks a file that uses one (the `unsupported` list) unless you pass
 `--allow-unsupported`. The list is in [plan.md](plan.md#features-bay-cannot-deploy-yet), and
-[bay-toml.md](bay-toml.md#keys) tags each such key `(validated, not deployed yet)`. Scenarios
-3, 8 and 9 use some of those keys and say so. Scenario 5 shows the cross-box need, which is on
-the same list. Every other file in this page plans clean.
+[bay-toml.md](bay-toml.md#keys) tags each such key `(validated, not deployed yet)`. Scenario
+8 uses some of those keys and says so. Scenario 5 shows the cross-box need, which is on
+the same list. Every other file in this page plans clean. Service `path`, `[[jobs]]`, volume
+backups and tailnet routes deploy since 2.3.0.
 
 Names below are examples. `acme` is the fleet. `eu-1`, `eu-2`, `infra` and `na-1` are
 boxes. `shop` and `blog` are apps.
@@ -445,9 +446,9 @@ A service inherits these keys of the project: `image` (or the `[build]`), `env`,
 [bay-toml.md](bay-toml.md#servicesname)).
 
 Containers on the box: `blog`, `blog-worker`, `blog-api`. The fleet only gains
-`projects/blog/bay.lock`. As written, this file hits two unsupported cases of 2.1: `path = "/api"`
-and the worker that shares the build of the project. `bay plan` lists them in `unsupported` and blocks
-until you pass `--allow-unsupported` ([plan.md](plan.md#features-bay-cannot-deploy-yet)).
+`projects/blog/bay.lock`. Both special cases deploy since 2.3.0: `api` is routed under the main domain by its `path`,
+and `worker` shares the build of the project (the main container builds the image and `worker`
+re-tags it). This file plans clean.
 
 ## 4. Two environments, two boxes
 
@@ -513,7 +514,7 @@ Container names. The primary env (`production`) has no suffix. Other envs add `-
 | service `worker` | `shop-worker` | `shop-staging-worker` |
 | job `cleanup` | `shop-job-cleanup` | `shop-staging-job-cleanup` |
 
-(Only the name rule matters here: a job is `(validated, not deployed yet)`, see scenario 9.)
+(Only the name rule matters here. A job deploys since 2.3.0, see scenario 9.)
 
 Missing secrets: `bay secret missing staging` lists the names (add `--fleet <path>` when you stand in the fleet directory). It never prints a value.
 
@@ -842,13 +843,10 @@ domain = "shop.acme.example"
 - `bay secret missing production` lists `PASSWORD_STAFF` until it is in the vault.
 
 The job is a one-shot container, `shop-job-cleanup`. It gets the image, env, secrets,
-needs and mounts of the main container. In 2.1 the compiler cannot deploy `[[jobs]]` yet, and a
-service with `path` (`staff` above has `path = "/staff"`) is unsupported too: `bay plan` lists both in
-`unsupported` and blocks until you pass `--allow-unsupported`
-([plan.md](plan.md#features-bay-cannot-deploy-yet)). With the flag the job does not run and the
-`staff` service is not deployed. Give `staff` its own `domain` instead of `path` to deploy it
-(`access.open` beside a top-level `[access.password]` is unsupported as well). This doc names no
-verb to run a job once by hand or to read its last result.
+needs and mounts of the main container. Since 2.3.0 the compiler deploys `[[jobs]]`: a UTC
+systemd timer on the box of the main container starts the job on its schedule. The `staff`
+service (`path = "/staff"`) is routed under the main domain and outranks the main router.
+This doc names no verb to run a job once by hand or to read its last result.
 
 ## 10. Rollback, both track modes
 
@@ -1280,8 +1278,10 @@ is a warning, because allow-all mode is legal. If no rule lets the ingress box r
 the route answers with a 502 or a timeout, and the ACL leaves no log line.
 
 `bay show --routes` lists WANTED, PINNED and RUNNING per route. RUNNING reads the receipt of
-the ingress box. No receipt lists routes yet, so RUNNING is `unknown` today, and `bay status`
-does not show routes. See [tailnet-ingress.md](tailnet-ingress.md#routes-in-bayfleettoml-21).
+the ingress box. Since 2.3.0 that receipt lists the routes the box serves. A box env that has not
+had a `bay up` or `bay deploy` since 2.3.0 has no `routes` in its receipt, and RUNNING is `unknown`
+there. `bay status --env <env>` prints the route count per box. See
+[tailnet-ingress.md](tailnet-ingress.md#routes-in-bayfleettoml-21).
 
 ## Bay does not do
 

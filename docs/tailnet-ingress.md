@@ -209,7 +209,8 @@ On every deploy, with or without the rig roles, the access gateway task
 `vpn_allowed_ips` of group_vars. `127.0.0.1` and `::1` always stay, for health checks from the
 box itself, and the access gateway still appends the Headscale tailnet range. `bay validate`
 warns `[tailnet] allowlist replaces vpn_allowed_ips from group_vars` while group_vars still
-sets the old list. `bay doctor` and `bay gateway` show the list the box enforces. Without the
+sets the old list. `bay gateway status` prints the list the box enforces, and `bay doctor` fails
+when that list is empty (it checks that the list is not empty and does not print it). Without the
 key nothing changes: `vpn_allowed_ips` from group_vars is the list. A change since the last
 fleet commit is a plan step of kind `tailnet`, risk `shared`.
 

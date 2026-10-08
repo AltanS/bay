@@ -348,7 +348,7 @@ schedule = "0 3 * * *"    # optional, five-field cron
 retain = 7                # optional
 ```
 
-`bay compile` writes it into `services.yml` as the accessory's `backup:` block (compiled form, do not edit). Volume backups of an app (`backup` on a `[[mounts]]` volume, and the `[backup]` table of `bay.toml`) are validated, not deployed yet. `backup` defaults to `true` on a volume mount, so write `backup = false` on each one, or `bay plan` blocks: see [docs/bay-toml.md](docs/bay-toml.md#mounts).
+`bay compile` writes it into `services.yml` as the accessory's `backup:` block (compiled form, do not edit). Volume backups of an app (`backup` on a `[[mounts]]` volume, and the `[backup]` table of `bay.toml`) deploy since 2.3.0. `backup` defaults to `true` on a volume mount, so every volume mount gets a backup entry unless you write `backup = false` on it. The backup runs when `backup_enabled` is true in the box env: see [docs/bay-toml.md](docs/bay-toml.md#mounts) and [docs/backups.md](docs/backups.md).
 
 Restore one accessory with `bay backup restore production postgres`. It takes a `pre-restore` snapshot first.
 

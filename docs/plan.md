@@ -528,8 +528,8 @@ has `[deploy.<env>]` and `<env>` is the box env of `[tailnet] ingress_box`,
 `bay up <env>` applies it. It writes `services.yml`, commits
 `bay: up <env> (routes)` and deploys `<env>`, with the `headscale` and
 `traefik` tags when a route step is present. It reads the receipts and
-pushes the fleet, as every `bay up` does. It writes no lock, so there is no
-receipt commit. A route-only plan with no step still deploys, so the ingress
+pushes the fleet, as every `bay up` does. It writes no lock, so no lock holds a receipt: the
+`receipt_commit` of the result is the fleet commit `bay: up <env> (routes)`. A route-only plan with no step still deploys, so the ingress
 box writes a receipt that lists its routes. `--plan-id` and `bay approve`
 work as for any plan: a route step has risk `shared`.
 
