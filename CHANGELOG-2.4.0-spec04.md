@@ -5,6 +5,7 @@ Spec 04: volume backups that cannot be cut off
 - `pg_dump` with several databases: a failed database no longer hides behind a later one that succeeds. Before, only the exit codes of the last database were checked. Each database is still its own snapshot, the next one still runs, and the alert names the first failure.
 - The backup role stops when the restic at `backup_restic_bin` is older than 0.17.0, the first version with `--stdin-from-command`. The role still installs `backup_restic_version` (0.17.3) only when no binary is there. It does not upgrade an existing one. Under `--check` the version is not read and the check is skipped.
 - A deploy waits for a running volume backup (lock `<stack_name>_<volume>.lock`) before it recreates containers, in the same task and with the same 300 s timeout as for accessory backups. Only volumes whose container runs on the box are waited for.
+- Redis restore fix: `bay backup restore` of a `redis` accessory wrote a tar archive to `/data/dump.rdb`. The `<name>.rdb` snapshot holds the output of `docker cp <name>:/data/dump.rdb -`, a tar with one entry `dump.rdb`, and the restore copied it as a plain file. It now unpacks it with `docker cp - <name>:/data`. The backup format does not change, so existing Redis snapshots restore correctly with 2.4.0. The container is stopped while the file is replaced and now starts again also when the restore fails (before, a failed restore left it stopped).
 - Docs: backups.md describes the new command, the failure behavior and the volume lock wait.
 
 ### Upgrade notes
