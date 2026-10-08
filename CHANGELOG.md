@@ -8,6 +8,28 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.5.1] - 2026-10-08
+
+Two projects that build from one repo each get an image for every pushed commit, `bay up` no longer moves `:latest` while a webhook build runs, and a webhook deploy stamps the receipt from the image that really started.
+
+### Fixed
+
+- A push that changes none of a project's build inputs now tags that project's image with the pushed commit (gap 39). Two projects can build from one repo and branch, each with its own `watch`. A push of only one project's code was skipped for the other. The other project then had no image for the repo head, and every `bay up` noted `code: kept <project>`. The webhook receiver now writes a `no_input_change` trigger instead of skipping the push.
+- `rebuild.sh` checks the diff itself. When no input changed, it tags the previous commit's image. On the box it runs `docker tag`. In the registry it runs `imagetools create --prefer-index=false`. There is no build, no recreate and no alert. The log says `no-input-change push <commit12>: tagged, run bay up`. When its own diff finds an input change, it builds. When there is no previous commit, or no image of it, the push is skipped as before (`... skipped (as before)`).
+- Build inputs are the `watch` paths. Without `watch`, they are a `[build]` context narrower than the repo, plus the Dockerfile. `ignore` paths are removed. The project's own `bay.toml` and its mounted files are added. A project with no `watch` and the repo root as its context still builds on every push.
+- `bay up` and `bay rollback` no longer move `:latest` while a webhook build promotes and starts its image. codepin takes the build lock that `rebuild.sh` holds for its whole run (`git_deploy_build_lock_path`) before it moves `:latest` or `:previous`. It waits at most `container_lifecycle_build_lock_wait` seconds (default 300) and plans again under the lock. On a timeout, `:latest` stays, the move is `skipped` (`build running: ...`) and `bay up` notes the container as kept. A deploy that moves nothing never waits. The codepin report has a new field `build_lock`.
+- codepin finds the target image by its commit label when `<image>:<commit12>` is not on the box. It tags that image and goes on. This removes a false `kept` note for a container whose `:latest` carries the pin's label while the container runs another image.
+- A webhook deploy stamps the receipt from the image that really started. After promotion, `rebuild.sh` reads the image ID of `:latest` (or of the pulled image) once. It compares that ID with the image the container runs. When they differ, it logs `started image differs from promoted :latest: ...`. The receipt then names the commit label of the started image, or no commit. It never names the pushed commit, and the pushed commit is not marked failed. On the pull path, an image without a revision label passes the revision check only when the container runs the image ID read after the pull.
+
+### Upgrade notes
+
+- The receiver code changed. The next `bay up` recreates `bay-webhook` (receiver hash), which also clears its replay memory. The box gets the new `bay_reconcile.pushinputs` module with the reconciler package.
+- A normal `bay up` ships the new reconciler, the codepin task and `rebuild.sh`. No provision is needed.
+- A 2.5.1 receiver in front of an older `rebuild.sh` builds a no-input-change push as a normal push. The normal deploy ships both together.
+- A push that changes only `ignore`d files, or only files outside `watch`, now runs `rebuild.sh` (a fetch, then a tag or a skip). Before, the receiver skipped it. It builds only when its own diff finds an input change.
+- A container whose `:latest` or `:previous` is labelled with its pin, but which runs another image, is recreated to the pin at the next `bay up`. Before, it was kept.
+- `bay up` can wait up to 300 seconds while a build runs on the box.
+
 ## [2.5.0] - 2026-10-08
 
 A registry retag keeps the image ID, the deploy receipt names the running code of tag-only images, a backup run checks every snapshot, and the database role step stops reporting `changed` on every run.
