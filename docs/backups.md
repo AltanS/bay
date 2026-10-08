@@ -7,7 +7,9 @@ Bay uses [restic](https://restic.net/) for deduplicated, encrypted backups to S3
 1. **Per-accessory scripts** — the backup role generates a `backup-<name>.sh` script for each accessory
 2. **Stdin piping** — dump commands pipe directly into `restic backup --stdin` (no intermediate files on disk)
 
-   The `file` method is different: restic runs `docker cp` itself (`restic backup --stdin-from-command`) and stores no snapshot when `docker cp` fails, so a cut-off tar never becomes a snapshot. This needs restic 0.17.0 or newer, and the role stops when the box has an older one.
+   restic runs the dump command itself (`restic backup --stdin-from-command -- <dump command>`), for every method: `pg_dump`, `mysqldump`, the Redis `docker cp` and the `file` `docker cp`. When the dump command fails, also in the middle of the stream, restic stores no snapshot, so a cut-off dump never becomes the newest snapshot. The snapshot file names are the same as before (`<name>.sql`, `<name>-<db>.sql`, `<name>.rdb`, `<name>.tar`), so restores do not change. This needs restic 0.17.0 or newer, and the role stops when the box has an older one.
+
+   A failed dump sends `backup.failed` with `Dump command failed with exit code <n>, no snapshot stored (<file>)`. Bay reads the exit code from restic's error line (`command failed: exit status <n>`); the dump command's own error is in the journal. When restic fails for its own reason, the alert says `Restic backup failed with exit code <n> (<file>)`. With several databases, each one is its own snapshot: a failed database does not stop the next one, and the alert names the first failure.
 3. **Systemd timers** — replace cron with `Persistent=true` (catch up after downtime) and staggered scheduling
 4. **Retention** — `restic forget --prune` runs after each backup to enforce retention policies
 5. **Weekly maintenance** — `restic check` verifies repository integrity, `restic cache --cleanup` removes stale cache

@@ -1,18 +1,20 @@
-"""A volume backup never stores a cut-off snapshot, and a deploy waits for it.
+"""A backup never stores a cut-off snapshot, and a deploy waits for a volume backup.
 
-The `file` method (every volume backup, the Headscale state and any accessory
-with `method: file`) reads the data with `docker cp <container>:<path> -`. When
-that ran as the left side of a pipe into `restic backup --stdin`, a `docker cp`
-that died mid-stream still closed the pipe, restic read EOF and stored the
-partial tar as the newest snapshot. The script now hands the command to restic
+Every backup method streams a producer into restic: `pg_dump` and `mysqldump`
+through `docker exec`, and `docker cp` for `redis` and `file` (every volume
+backup, the Headscale state and any accessory with `method: file`). When the
+producer ran as the left side of a pipe into `restic backup --stdin`, one that
+died mid-stream still closed the pipe, restic read EOF and stored the partial
+dump as the newest snapshot. The script now hands the producer to restic
 (`backup --stdin-from-command`, restic 0.17.0 or newer), and restic stores no
 snapshot when the command exits non-zero.
 
 The script is rendered from the real template and run with bash, with a fake
 `docker` on PATH that fails mid-stream. restic is either a fake that keeps one
 file per snapshot (it follows restic's documented rules for `--stdin` and
-`--stdin-from-command`) or, when this machine has one, the real binary on a
-repository in a temp dir.
+`--stdin-from-command`) or a real binary on a repository in a temp dir:
+`$BAY_TEST_RESTIC` when set (for example the 0.17.3 the role installs), else
+`restic` on PATH, else the real cases skip.
 """
 
 from __future__ import annotations
@@ -35,50 +37,79 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from helpers import make_ansible_env  # noqa: E402
 
-# The producer: `docker cp` writes part of the tar, then fails (FAKE_DOCKER=fail)
-# or writes all of it (FAKE_DOCKER=ok). Any other docker call is an error.
-FAKE_DOCKER = r"""#!/usr/bin/env bash
-[ "$1" = cp ] || { echo "fake docker: unexpected call: $*" >&2; exit 97; }
-head -c 65536 /dev/zero | tr '\0' 'a'
-if [ "${FAKE_DOCKER:-ok}" = fail ]; then
-  echo "Error response from daemon: connection reset" >&2
-  exit 1
-fi
-head -c 65536 /dev/zero | tr '\0' 'b'
+# The fake docker. `redis-cli LASTSAVE/BGSAVE` keep a counter, so the BGSAVE
+# poll ends at once. Every other call is a producer: it is logged (argv, one
+# JSON line), writes 64 KiB, then fails when $FAIL_ON is one of its arguments,
+# else writes 64 KiB more.
+FAKE_DOCKER = r"""#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+state = os.environ["FAKE_DOCKER_STATE"]
+if args[:1] == ["exec"] and "redis-cli" in args:
+    path = os.path.join(state, "lastsave")
+    n = int(open(path).read()) if os.path.exists(path) else 100
+    if args[-1] == "BGSAVE":
+        open(path, "w").write(str(n + 1))
+        print("Background saving started")
+    else:
+        print(n)
+    sys.exit(0)
+with open(os.path.join(state, "producers.log"), "a") as fh:
+    fh.write(json.dumps(args) + "\n")
+out = sys.stdout.buffer
+out.write(b"a" * 65536)
+out.flush()
+if os.environ.get("FAIL_ON") and os.environ["FAIL_ON"] in args:
+    sys.stderr.write("Error response from daemon: connection reset\n")
+    sys.exit(1)
+out.write(b"b" * 65536)
 """
 
 # A fake restic that follows the two input rules the script depends on:
 # `--stdin` stores whatever arrived before EOF; `--stdin-from-command -- cmd`
-# runs cmd and stores nothing when cmd exits non-zero. One file per snapshot
-# in $RESTIC_REPOSITORY.
+# runs cmd and stores nothing when cmd exits non-zero, with restic's own error
+# text. One data file and one metadata file per snapshot in $RESTIC_REPOSITORY.
+# FAKE_RESTIC_FAIL=1 makes `backup` fail on its own, before the command runs.
 FAKE_RESTIC = r"""#!/usr/bin/env python3
-import json, os, subprocess, sys, time
+import json, os, subprocess, sys
 repo = os.environ["RESTIC_REPOSITORY"]
 os.makedirs(repo, exist_ok=True)
 args = sys.argv[1:]
 cmd = args[0] if args else ""
-snaps = sorted(p for p in os.listdir(repo) if p.endswith(".snap"))
+snaps = sorted(p[:-5] for p in os.listdir(repo) if p.endswith(".json"))
+def meta(s):
+    return json.load(open(os.path.join(repo, s + ".json")))
 if cmd == "backup":
+    name = args[args.index("--stdin-filename") + 1] if "--stdin-filename" in args else "stdin"
+    if os.environ.get("FAKE_RESTIC_FAIL"):
+        sys.stderr.write("Fatal: unable to open config file: Stat: connection refused\n")
+        sys.exit(1)
     if "--stdin-from-command" in args:
-        argv = args[args.index("--") + 1:]
-        proc = subprocess.run(argv, stdout=subprocess.PIPE)
+        proc = subprocess.run(args[args.index("--") + 1:], stdout=subprocess.PIPE)
         if proc.returncode != 0:
-            sys.stderr.write("Fatal: command failed: exit status %d\n" % proc.returncode)
+            sys.stderr.write("error: failed to save /%s: Fatal: command failed: exit status %d\n"
+                             % (name, proc.returncode))
             sys.exit(1)
         data = proc.stdout
     elif "--stdin" in args:
         data = sys.stdin.buffer.read()
     else:
         sys.exit(2)
-    name = "%d-%06d.snap" % (time.time_ns(), len(snaps))
-    with open(os.path.join(repo, name), "wb") as fh:
-        fh.write(data)
+    snap = "%06d" % len(snaps)
+    open(os.path.join(repo, snap + ".data"), "wb").write(data)
+    with open(os.path.join(repo, snap + ".json"), "w") as fh:
+        json.dump({"short_id": snap, "paths": ["/" + name]}, fh)
     sys.exit(0)
 if cmd == "snapshots":
-    print(json.dumps([{"short_id": s} for s in snaps]))
+    print(json.dumps([meta(s) for s in snaps]))
     sys.exit(0)
 if cmd == "stats":
-    print(json.dumps({"total_size": os.path.getsize(os.path.join(repo, snaps[-1]))}))
+    print(json.dumps({"total_size": os.path.getsize(os.path.join(repo, snaps[-1] + ".data"))}))
+    sys.exit(0)
+if cmd == "dump":
+    snap = snaps[-1] if args[1] == "latest" else args[1]
+    assert meta(snap)["paths"] == [args[2]], (meta(snap), args[2])
+    sys.stdout.buffer.write(open(os.path.join(repo, snap + ".data"), "rb").read())
     sys.exit(0)
 if cmd == "forget":
     sys.exit(0)
@@ -98,6 +129,43 @@ exec "$REAL_RESTIC" "$@"
 
 _RESTICS = ["fake", "real"]
 
+# Per method: the render variables, the snapshot file name (what restore.yml
+# dumps), the producer argv exactly as the script ran it before, and the
+# argument that makes the fake docker fail.
+METHODS: dict[str, dict[str, Any]] = {
+    "pg_dump": {
+        "accessory": "postgres",
+        "config": {"env": {"clear": {"POSTGRES_USER": "app", "POSTGRES_DB": "shop"}}},
+        "file": "postgres.sql",
+        "producer": ["exec", "postgres", "pg_dump", "-U", "app", "shop"],
+        "fail_on": "pg_dump",
+    },
+    "mysql": {
+        "accessory": "mysql",
+        "config": {"env": {"clear": {"MYSQL_ROOT_PASSWORD": "pw-placeholder",
+                                     "MYSQL_DATABASE": "shop"}}},
+        "file": "mysql.sql",
+        "producer": ["exec", "-e", "MYSQL_PWD=pw-placeholder", "mysql",
+                     "mysqldump", "-u", "root", "shop"],
+        "fail_on": "mysqldump",
+    },
+    "redis": {
+        "accessory": "redis",
+        "config": {"env": {"clear": {}}},
+        "file": "redis.rdb",
+        "producer": ["cp", "redis:/data/dump.rdb", "-"],
+        "fail_on": "cp",
+    },
+    "file": {
+        "accessory": "bay_shop_data",
+        "container": "shop",
+        "config": {"backup": {"source_path": "/app/data"}},
+        "file": "bay_shop_data.tar",
+        "producer": ["cp", "shop:/app/data", "-"],
+        "fail_on": "cp",
+    },
+}
+
 
 def _exe(path: Path, text: str) -> Path:
     path.write_text(text)
@@ -105,99 +173,170 @@ def _exe(path: Path, text: str) -> Path:
     return path
 
 
-def _setup(tmp_path: Path, which: str) -> tuple[Path, dict[str, str], Path]:
-    """Render the volume backup script; return (script, env, repo)."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    _exe(bin_dir / "docker", FAKE_DOCKER)
-    repo = tmp_path / "repo"
-    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-    env.pop("RESTIC_REPOSITORY", None)
-    if which == "fake":
-        restic = _exe(tmp_path / "restic", FAKE_RESTIC)
-    else:
-        real = shutil.which("restic")
-        if real is None:
-            pytest.skip("no restic on this machine; the fake restic covers the rule")
-        restic = _exe(tmp_path / "restic", REAL_RESTIC_WRAPPER)
-        env["REAL_RESTIC"] = real
-        init_env = {**env, "RESTIC_REPOSITORY": str(repo), "RESTIC_PASSWORD": "pw-placeholder",
-                    "RESTIC_CACHE_DIR": str(tmp_path / "cache")}
-        subprocess.run([real, "init", "-q"], env=init_env, check=True, capture_output=True)
-
-    script = make_ansible_env(ROOT / "roles" / "backup" / "templates").get_template(
-        "backup.sh.j2").render(
-        ansible_managed="managed", accessory_name="bay_shop_data", method="file",
-        retain=14, repo=str(repo),
-        accessory_config={"backup": {"source_path": "/app/data"}},
-        backup_container="shop", inventory_hostname="eu-1",
+def _render(method: str, **overrides: Any) -> str:
+    m = METHODS[method]
+    ctx: dict[str, Any] = dict(
+        ansible_managed="managed", accessory_name=m["accessory"], method=method,
+        retain=14, repo="r", accessory_config=m["config"], inventory_hostname="eu-1",
         backup_restic_password="pw-placeholder", backup_s3_access_key_id="id-placeholder",
-        backup_s3_secret_access_key="key-placeholder",
-        backup_scripts_dir=str(tmp_path / "backup"),
-        backup_lock_dir=str(tmp_path / "backup" / "locks"),
-        backup_restic_bin=str(restic),
-        alert_env_path=str(tmp_path / "no-alert.env"),
+        backup_s3_secret_access_key="key-placeholder", backup_scripts_dir="/b",
+        backup_lock_dir="/b/l", backup_restic_bin="/r",
         docker_monitor_alert_header="", docker_monitor_alert_footer="",
     )
-    path = _exe(tmp_path / "backup.sh", script)
-    return path, env, repo
+    if "container" in m:
+        ctx["backup_container"] = m["container"]
+    ctx.update(overrides)
+    env = make_ansible_env(ROOT / "roles" / "backup" / "templates")
+    return env.get_template("backup.sh.j2").render(**ctx)
 
 
-def _snapshots(tmp_path: Path, env: dict[str, str], repo: Path) -> int:
-    restic = tmp_path / "restic"
-    out = subprocess.run(
-        [str(restic), "snapshots", "--json"],
-        env={**env, "RESTIC_REPOSITORY": str(repo), "RESTIC_PASSWORD": "pw-placeholder",
-             "RESTIC_CACHE_DIR": str(tmp_path / "cache")},
-        check=True, capture_output=True, text=True,
-    ).stdout
-    return len(json.loads(out) or [])
+class Box:
+    """One rendered backup script with its fake docker and its restic repo."""
 
+    def __init__(self, tmp_path: Path, which: str, method: str, **overrides: Any) -> None:
+        self.tmp = tmp_path
+        self.method = method
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        _exe(bin_dir / "docker", FAKE_DOCKER)
+        state = tmp_path / "docker-state"
+        state.mkdir()
+        self.state = state
+        self.repo = tmp_path / "repo"
+        self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "FAKE_DOCKER_STATE": str(state)}
+        self.env.pop("RESTIC_REPOSITORY", None)
+        if which == "fake":
+            restic = _exe(tmp_path / "restic", FAKE_RESTIC)
+        else:
+            real = os.environ.get("BAY_TEST_RESTIC") or shutil.which("restic")
+            if real is None:
+                pytest.skip("no restic on this machine; the fake restic covers the rule")
+            restic = _exe(tmp_path / "restic", REAL_RESTIC_WRAPPER)
+            self.env["REAL_RESTIC"] = real
+            subprocess.run([real, "init", "-q"], env=self._restic_env(), check=True,
+                           capture_output=True)
+        self.restic = restic
+        script = _render(
+            method, repo=str(self.repo), backup_scripts_dir=str(tmp_path / "backup"),
+            backup_lock_dir=str(tmp_path / "backup" / "locks"), backup_restic_bin=str(restic),
+            alert_env_path=str(tmp_path / "no-alert.env"), **overrides,
+        )
+        self.script = _exe(tmp_path / "backup.sh", script)
 
-def _backup(script: Path, env: dict[str, str], docker: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["bash", str(script)], env={**env, "FAKE_DOCKER": docker},
-                          capture_output=True, text=True, timeout=120)
+    def _restic_env(self) -> dict[str, str]:
+        return {**self.env, "RESTIC_REPOSITORY": str(self.repo),
+                "RESTIC_PASSWORD": "pw-placeholder", "RESTIC_CACHE_DIR": str(self.tmp / "cache")}
+
+    def run(self, fail_on: str = "", **extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["bash", str(self.script)],
+                              env={**self.env, "FAIL_ON": fail_on, **extra},
+                              capture_output=True, text=True, timeout=120)
+
+    def snapshots(self) -> list[str]:
+        """The file path of every snapshot, oldest first."""
+        out = subprocess.run([str(self.restic), "snapshots", "--json"], env=self._restic_env(),
+                             check=True, capture_output=True, text=True).stdout
+        snaps = sorted(json.loads(out) or [], key=lambda s: s.get("time", s.get("short_id")))
+        return [p for s in snaps for p in s["paths"]]
+
+    def dump(self, path: str) -> bytes:
+        return subprocess.run([str(self.restic), "dump", "latest", path],
+                              env=self._restic_env(), check=True, capture_output=True).stdout
+
+    def producers(self) -> list[list[str]]:
+        log = self.state / "producers.log"
+        return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
 
 
 @pytest.mark.parametrize("which", _RESTICS)
 def test_volume_backup_failed_producer_leaves_no_snapshot(tmp_path: Path, which: str) -> None:
-    script, env, repo = _setup(tmp_path, which)
+    box = Box(tmp_path, which, "file")
 
     # docker cp dies mid-stream: the script fails, and no snapshot is stored.
-    failed = _backup(script, env, "fail")
+    failed = box.run(fail_on="cp")
     assert failed.returncode == 1, failed.stdout + failed.stderr
     assert "ERROR:" in failed.stdout
     assert "connection reset" in failed.stderr  # docker's own error reaches the journal
-    assert _snapshots(tmp_path, env, repo) == 0
+    assert box.snapshots() == []
     # The lock is released, so a deploy does not wait for a dead backup.
     assert not (tmp_path / "backup" / "locks" / "bay_shop_data.lock").exists()
 
     # A good docker cp makes exactly one snapshot.
-    ok = _backup(script, env, "ok")
+    ok = box.run()
     assert ok.returncode == 0, ok.stdout + ok.stderr
     assert "Backup complete for bay_shop_data" in ok.stdout
-    assert _snapshots(tmp_path, env, repo) == 1
+    assert box.snapshots() == ["/bay_shop_data.tar"]
 
     # A second failure after a good run leaves the good snapshot as the newest.
-    again = _backup(script, env, "fail")
+    again = box.run(fail_on="cp")
     assert again.returncode == 1
-    assert _snapshots(tmp_path, env, repo) == 1
+    assert box.snapshots() == ["/bay_shop_data.tar"]
 
 
-def test_file_backup_hands_docker_cp_to_restic() -> None:
-    """The rendered command: restic runs docker cp, nothing pipes into restic."""
-    script = make_ansible_env(ROOT / "roles" / "backup" / "templates").get_template(
-        "backup.sh.j2").render(
-        ansible_managed="m", accessory_name="headscale", method="file", retain=30, repo="r",
-        accessory_config={"backup": {"source_path": "/var/lib/headscale"}},
-        inventory_hostname="eu-1", backup_restic_password="p", backup_s3_access_key_id="i",
-        backup_s3_secret_access_key="k", backup_scripts_dir="/b", backup_lock_dir="/b/l",
-        backup_restic_bin="/r", docker_monitor_alert_header="", docker_monitor_alert_footer="",
-    )
-    file_branch = script[script.index("Starting file backup"):script.index("Error Checking")]
-    assert "--stdin-from-command -- docker cp \"${CONTAINER}:${SOURCE_PATH}\" -" in file_branch
-    assert "| \\" not in file_branch and "--stdin \\" not in file_branch
-    assert '--stdin-filename "${ACCESSORY}.tar"' in file_branch
+@pytest.mark.parametrize("which", _RESTICS)
+@pytest.mark.parametrize("method", sorted(METHODS))
+def test_backup_failed_dump_leaves_no_snapshot(tmp_path: Path, method: str, which: str) -> None:
+    m = METHODS[method]
+    box = Box(tmp_path, which, method)
+    failed = box.run(fail_on=m["fail_on"])
+    assert failed.returncode == 1, failed.stdout + failed.stderr
+    # The alert still names the dump, with its exit code and the file.
+    assert (f"ERROR: Dump command failed with exit code 1, no snapshot stored ({m['file']})"
+            in failed.stdout), failed.stdout + failed.stderr
+    assert "connection reset" in failed.stderr
+    assert box.snapshots() == []
+    assert box.producers() == [m["producer"]]
+    assert not (tmp_path / "backup" / "locks" / f"{m['accessory']}.lock").exists()
+
+
+@pytest.mark.parametrize("which", _RESTICS)
+@pytest.mark.parametrize("method", sorted(METHODS))
+def test_backup_dump_snapshot_keeps_its_file_name(tmp_path: Path, method: str, which: str) -> None:
+    """One snapshot, under the file name restore.yml dumps, of the whole stream."""
+    m = METHODS[method]
+    box = Box(tmp_path, which, method)
+    ok = box.run()
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert box.snapshots() == [f"/{m['file']}"]
+    assert box.dump(f"/{m['file']}") == b"a" * 65536 + b"b" * 65536
+    # The dump command is the one the script ran before, argument for argument.
+    assert box.producers() == [m["producer"]]
+
+
+def test_pg_dump_reports_a_failed_database_when_a_later_one_succeeds(tmp_path: Path) -> None:
+    """Each database is its own snapshot; a failure in the first is not masked by the next."""
+    config = {"env": {"clear": {"POSTGRES_USER": "app"}},
+              "backup": {"databases": ["shop", "blog"]}}
+    box = Box(tmp_path, "fake", "pg_dump", accessory_config=config)
+    failed = box.run(fail_on="shop")
+    assert failed.returncode == 1, failed.stdout + failed.stderr
+    assert ("Dump command failed with exit code 1, no snapshot stored (postgres-shop.sql)"
+            in failed.stdout)
+    assert box.snapshots() == ["/postgres-blog.sql"]
+    assert [p[-1] for p in box.producers()] == ["shop", "blog"]
+
+
+def test_restic_failure_is_not_called_a_dump_failure(tmp_path: Path) -> None:
+    box = Box(tmp_path, "fake", "pg_dump")
+    failed = box.run(FAKE_RESTIC_FAIL="1")
+    assert failed.returncode == 1
+    assert "ERROR: Restic backup failed with exit code 1 (postgres.sql)" in failed.stdout
+    assert "Dump command failed" not in failed.stdout
+    assert "connection refused" in failed.stderr
+    assert box.snapshots() == []
+
+
+@pytest.mark.parametrize("method", sorted(METHODS))
+def test_backup_hands_the_dump_to_restic(method: str) -> None:
+    """The rendered script: restic runs every producer, nothing pipes into restic."""
+    script = _render(method)
+    assert script.count('"$RESTIC" backup') == 1  # in backup_from, nowhere else
+    assert "--stdin-from-command -- \"$@\"" in script
+    assert "--stdin \\" not in script and "PIPESTATUS" not in script
+    body = script[script.index("# ── Backup ──"):script.index("# ── Error Checking")]
+    assert body.count("backup_from ") == 1
+    assert f'"${{ACCESSORY}}.{METHODS[method]["file"].rsplit(".", 1)[1]}"' in body
 
 
 # ── The restic the role leaves on the box ───────────────────────────────────

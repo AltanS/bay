@@ -145,7 +145,7 @@ def test_backup_role_volume_entries(tmp_path: Path) -> None:
     assert "CONTAINER=shop" in script
     assert "SOURCE_PATH=/app/data" in script
     assert 'docker cp "${CONTAINER}:${SOURCE_PATH}" -' in script
-    assert '--stdin-filename "${ACCESSORY}.tar"' in script
+    assert 'backup_from "${ACCESSORY}.tar"' in script
     assert "--keep-within 14d" in script
     # An accessory file backup still reads its own container.
     acc = env.get_template("backup.sh.j2").render(

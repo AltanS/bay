@@ -39,11 +39,48 @@ BAY_ALERT_FOOTER={{ docker_monitor_alert_footer | quote }}
 # Create lock (blocks deploys from restarting containers mid-backup)
 mkdir -p "$(dirname "$LOCK_FILE")"
 echo "$$" > "$LOCK_FILE"
-trap 'rm -f "$LOCK_FILE"' EXIT
+RESTIC_ERR=$(mktemp)
+trap 'rm -f "$LOCK_FILE" "$RESTIC_ERR"' EXIT
 
 # ── Prepare Cache ───────────────────────────────────────────────────────
 
 mkdir -p "$RESTIC_CACHE_DIR"
+
+# ── Restic runs the dump ────────────────────────────────────────────────
+
+# backup_from <snapshot file name> <dump command...>
+#
+# restic runs the dump command itself (backup --stdin-from-command, restic
+# 0.17.0 or newer) and stores no snapshot when the command exits non-zero.
+# Do not turn this back into `<dump> | restic backup --stdin`: a dump that
+# dies mid-stream closes the pipe like a finished one, and restic then stores
+# the cut-off dump as the newest snapshot.
+#
+# Never exits. On a failure it records the first one: RESTIC_EXIT (restic's
+# exit code), DUMP_ERROR (what restic says about the dump command, e.g.
+# `exit status 1`, empty when restic itself failed) and FAILED_FILE. restic's
+# stderr, with the dump command's own stderr in it, goes on to the journal.
+backup_from() {
+  local name="$1" rc=0 why
+  shift
+  "$RESTIC" backup \
+    --stdin-filename "$name" \
+    --tag "${HOST_TAG}" \
+    --tag "${ACCESSORY}" \
+    --tag "${METHOD}" \
+    ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
+    --retry-lock 15m \
+    --stdin-from-command -- "$@" 2> "$RESTIC_ERR" || rc=$?
+  cat "$RESTIC_ERR" >&2
+  if [ "$rc" -ne 0 ] && [ "${RESTIC_EXIT:-0}" -eq 0 ]; then
+    RESTIC_EXIT=$rc
+    FAILED_FILE=$name
+    # One sed, no pipe: under pipefail an early-closing reader fails the line.
+    why=$(sed -n '/command failed: /{s/.*command failed: //p;q;}' "$RESTIC_ERR")
+    DUMP_ERROR=$why
+  fi
+  return 0
+}
 
 # ── Backup ──────────────────────────────────────────────────────────────
 
@@ -55,46 +92,20 @@ mkdir -p "$RESTIC_CACHE_DIR"
 PG_USER={{ pg_user | quote }}
 PG_DB={{ db | quote }}
 echo "[$(date -Iseconds)] Starting pg_dump backup for ${ACCESSORY} (database: ${PG_DB})..."
-set +e
-docker exec "${ACCESSORY}" \
-  pg_dump -U "${PG_USER}" "${PG_DB}" | \
-  "$RESTIC" backup \
-    --stdin \
-    --stdin-filename "${ACCESSORY}{% if databases | length > 1 %}-${PG_DB}{% endif %}.sql" \
-    --tag "${HOST_TAG}" \
-    --tag "${ACCESSORY}" \
-    --tag "${METHOD}" \
-    ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
-    --retry-lock 15m
-
-_pipestatus=("${PIPESTATUS[@]}")
-DUMP_EXIT=${_pipestatus[0]}
-RESTIC_EXIT=${_pipestatus[1]}
-set -e
+backup_from "${ACCESSORY}{% if databases | length > 1 %}-${PG_DB}{% endif %}.sql" \
+  docker exec "${ACCESSORY}" \
+  pg_dump -U "${PG_USER}" "${PG_DB}"
 {% endfor %}
 {% elif method == 'mysql' %}
 MYSQL_PWD_VALUE={{ accessory_config.env['clear'].MYSQL_ROOT_PASSWORD | default(accessory_config.env['clear'].MYSQL_PASSWORD | default('')) | quote }}
 MYSQL_USER_VALUE={{ accessory_config.env['clear'].MYSQL_USER | default('root') | quote }}
 MYSQL_DB_VALUE={{ accessory_config.env['clear'].MYSQL_DATABASE | default('app') | quote }}
 echo "[$(date -Iseconds)] Starting mysqldump backup for ${ACCESSORY}..."
-set +e
-docker exec \
+backup_from "${ACCESSORY}.sql" \
+  docker exec \
   -e MYSQL_PWD="${MYSQL_PWD_VALUE}" \
   "${ACCESSORY}" \
-  mysqldump -u "${MYSQL_USER_VALUE}" "${MYSQL_DB_VALUE}" | \
-  "$RESTIC" backup \
-    --stdin \
-    --stdin-filename "${ACCESSORY}.sql" \
-    --tag "${HOST_TAG}" \
-    --tag "${ACCESSORY}" \
-    --tag "${METHOD}" \
-    ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
-    --retry-lock 15m
-
-_pipestatus=("${PIPESTATUS[@]}")
-DUMP_EXIT=${_pipestatus[0]}
-RESTIC_EXIT=${_pipestatus[1]}
-set -e
+  mysqldump -u "${MYSQL_USER_VALUE}" "${MYSQL_DB_VALUE}"
 {% elif method == 'redis' %}
 echo "[$(date -Iseconds)] Starting redis backup for ${ACCESSORY}..."
 
@@ -118,22 +129,9 @@ Error: <code>${ERROR_MSG}</code>"
   exit 1
 fi
 
-# Copy RDB out and pipe to restic
-set +e
-docker cp "${ACCESSORY}:/data/dump.rdb" - | \
-  "$RESTIC" backup \
-    --stdin \
-    --stdin-filename "${ACCESSORY}.rdb" \
-    --tag "${HOST_TAG}" \
-    --tag "${ACCESSORY}" \
-    --tag "${METHOD}" \
-    ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
-    --retry-lock 15m
-
-_pipestatus=("${PIPESTATUS[@]}")
-DUMP_EXIT=${_pipestatus[0]}
-RESTIC_EXIT=${_pipestatus[1]}
-set -e
+# Copy the RDB out; restic runs the copy
+backup_from "${ACCESSORY}.rdb" \
+  docker cp "${ACCESSORY}:/data/dump.rdb" -
 {% elif method == 'file' %}
 SOURCE_PATH={{ accessory_config.backup.source_path | default('/data') | quote }}
 # The container to read from: the accessory itself, or for a volume backup
@@ -142,44 +140,25 @@ SOURCE_PATH={{ accessory_config.backup.source_path | default('/data') | quote }}
 # Docker data root, wherever it is.
 CONTAINER={{ backup_container | default(accessory_name) | quote }}
 echo "[$(date -Iseconds)] Starting file backup for ${ACCESSORY}..."
-# restic runs docker cp itself (--stdin-from-command, restic 0.17.0 or newer)
-# and stores no snapshot when docker cp exits non-zero. Do not turn this back
-# into `docker cp ... | restic backup --stdin`: a docker cp that dies
-# mid-stream closes the pipe like a finished one, and restic then stores the
-# cut-off tar as the newest snapshot.
-set +e
-"$RESTIC" backup \
-  --stdin-filename "${ACCESSORY}.tar" \
-  --tag "${HOST_TAG}" \
-  --tag "${ACCESSORY}" \
-  --tag "${METHOD}" \
-  ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
-  --retry-lock 15m \
-  --stdin-from-command -- docker cp "${CONTAINER}:${SOURCE_PATH}" -
-RESTIC_EXIT=$?
-set -e
+backup_from "${ACCESSORY}.tar" \
+  docker cp "${CONTAINER}:${SOURCE_PATH}" -
 {% endif %}
 
 # ── Error Checking ──────────────────────────────────────────────────────
 
-# Check pipe status
-if [ "${DUMP_EXIT:-0}" -ne 0 ]; then
-  ERROR_MSG="Dump command failed with exit code $DUMP_EXIT"
-  echo "ERROR: $ERROR_MSG"
-  bay_notify backup.failed "<b>Backup failed</b>
-Accessory: <code>${ACCESSORY}</code>
-Host: <code>${BAY_HOST}</code>
-Error: <code>${ERROR_MSG}</code>"
-  exit 1
-fi
-
+# restic stores no snapshot for a failed dump. When restic names the dump
+# command as the cause, the alert says so; else it gives restic's exit code.
 if [ "${RESTIC_EXIT:-0}" -ne 0 ]; then
-  ERROR_MSG="Restic backup failed with exit code $RESTIC_EXIT"
+  case "${DUMP_ERROR:-}" in
+    "exit status "*) ERROR_MSG="Dump command failed with exit code ${DUMP_ERROR#exit status }, no snapshot stored (${FAILED_FILE})" ;;
+    ?*) ERROR_MSG="Dump command failed (${DUMP_ERROR}), no snapshot stored (${FAILED_FILE})" ;;
+    *) ERROR_MSG="Restic backup failed with exit code ${RESTIC_EXIT} (${FAILED_FILE})" ;;
+  esac
   echo "ERROR: $ERROR_MSG"
   bay_notify backup.failed "<b>Backup failed</b>
 Accessory: <code>${ACCESSORY}</code>
 Host: <code>${BAY_HOST}</code>
-Error: <code>${ERROR_MSG}</code>"
+Error: <code>$(bay_html_escape "${ERROR_MSG}")</code>"
   exit 1
 fi
 
