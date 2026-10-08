@@ -94,7 +94,12 @@
               },
               "commit_source": {
                 "enum": ["label", "tag", null],
-                "description": "Where commit came from: label (the image's commit label), tag (the single 12-hex commit tag of an image with no commit label), or null when there is no commit. Absent in receipts written before 2.5."
+                "description": "Where commit came from: label (the image's commit label), tag (the single 12-hex commit tag, in the container's own image repository, of an image with no commit label), or null when there is no commit. Absent in receipts written before 2.5."
+              },
+              "commit_tags": {
+                "type": ["array", "null"],
+                "items": {"type": "string", "pattern": "^[0-9a-f]{12}$"},
+                "description": "For a container with no commit label: the sorted 12-hex commit tags of the running image in the container's own image repository (tags of other repositories never count). Null for a labelled container, a removed one, or when the tags could not be read. Absent in receipts written before 2.5."
               },
               "config_hash": {"type": ["string", "null"]},
               "action": {"enum": ["noop", "create", "recreate", "start", "remove", null]},

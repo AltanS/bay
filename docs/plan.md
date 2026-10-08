@@ -1145,7 +1145,8 @@ where the last push put it. A project in the fleet passes no code targets.
 
 Before the box says an image is missing, it looks at the image the container
 runs (or at `:latest`, when the container is gone). When that image carries
-the target commit in its commit label, or has the tag `<image>:<commit12>`,
+the target commit in its commit label, or has the tag `<image>:<commit12>` in
+the image's own repository (a tag of another repository never counts),
 the box already runs the target: the move is `noop` with the detail
 `already running <commit12>`, and `bay up` prints no `kept` note. A local
 build that tagged only `:latest` is the usual case. When `:latest` points at
@@ -1154,14 +1155,18 @@ the box try a pull and report `<image>:<commit12> is not on this box`.
 
 Bay compares code only for a container whose receipt names a commit (see
 [deploy-receipt.md](deploy-receipt.md): the commit label, or the single
-commit tag of the image). A build container that the receipt lists with no
-commit gets no step, because there is nothing to compare. The plan names it
-in a note instead: `code of <container> on <box> is unknown (no commit label
-or tag); up will try to pin it to <commit12>`. The note is not a step and does
-not change the exit code. A project in the fleet, and the `bay adopt` commit,
-pass no code target, so for them the note ends after `(no commit label or
-tag)`. So every code move that `bay up` sends is a plan step for the
-container, or this note.
+own-repo commit tag of the image). With no commit, the pin still counts when
+its first 12 characters are among the row's `commit_tags`: a config-only push
+gave the running image a second tag, and the image is still the pin's
+(source `tag`). A build container that the receipt lists with no commit, and
+without the pin among its commit tags, gets no step, because there is
+nothing to compare. The plan names it in a note instead: `code of
+<container> on <box> is unknown (no commit label or tag); up will try to pin
+it to <commit12>`. The note is not a step and
+does not change the exit code. A project in the fleet, and the `bay adopt`
+commit, pass no code target, so for them the note ends after `(no commit
+label or tag)`. So every code move that `bay up` sends is a plan step for
+the container, or this note.
 
 In `branch` mode `bay up` applies the config at the pin and moves the code
 only forward. For each build container, Bay compares the commit in the
@@ -1213,8 +1218,9 @@ Bay checks the words in this order: `HALF`, `unknown`, `drift`, `ahead`, `behind
 
 RUNNING also names the code: `<container> code <commit12>` for each build container of the
 project in the receipt, and `code ?` when the receipt names no commit for it (see
-[deploy-receipt.md](deploy-receipt.md)). When the commit comes from the image's single commit
-tag, not from a commit label, the line reads `<container> code <commit12> (tag)`. `bay show
+[deploy-receipt.md](deploy-receipt.md)). When the commit comes from the image's single own-repo
+commit tag, or the pin is among the image's commit tags, not from a commit label, the line
+reads `<container> code <commit12> (tag)`. `bay show
 --json` has the same map in `envs[].running.code`, where the commit came from in
 `envs[].running.code_source` (`label`, `tag` or null), and each container in
 `envs[].running.boxes[].containers[]` has `commit` and `commit_source`.

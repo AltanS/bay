@@ -47,7 +47,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .images import commit_from_labels, is_commit, short, split_ref
+from .images import commit_from_labels, is_commit, own_commit_tags, short, split_ref
 
 #: Written by rebuild.sh (FAILED_COMMITS_DIR there): one file per container.
 FAILED_COMMITS_DIR = "/var/lib/bay/failed-commits"
@@ -119,7 +119,8 @@ def runs_commit(images: Images, name: str, image: str, commit: str) -> str | Non
     The image of the running container, or of ``image`` (``:latest``) when
     the container is gone. It runs ``commit`` when its commit label names it
     (``com.bay.commit``, then the revision label), or when it carries the tag
-    ``<repo>:<commit12>``.
+    ``<repo>:<commit12>`` in the repo of ``image`` (a tag of another repo
+    never counts, as in the receipt).
     """
     running = images.container_image(name) or images.image_id(image)
     if not running:
@@ -127,8 +128,9 @@ def runs_commit(images: Images, name: str, image: str, commit: str) -> str | Non
     labels, tags = images.image_meta(running)
     if commit_from_labels(labels) == commit:
         return running
-    repo, _ = split_ref(image)
-    if f"{repo}:{commit}" in tags:
+    # The receipt's rule (images.own_commit_tags): only a tag in the repo of
+    # ``image`` counts; the same commit tag of another repo is not this code.
+    if commit in own_commit_tags(tags, image):
         return running
     return None
 

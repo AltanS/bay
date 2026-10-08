@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from .bundle import Bundle, load_bundle
 from .docker_client import DockerClient
 from .executor import execute
-from .images import commit_from_labels, commit_from_tags, resolved_image
+from .images import commit_from_labels, commit_from_tags, own_commit_tags, resolved_image
 from .planner import describe, plan
 
 
@@ -46,16 +46,20 @@ def reconcile(
     }
 
 
-def _state_after(bundle: Bundle, client: DockerClient) -> dict[str, dict[str, str | None]]:
+def _state_after(bundle: Bundle, client: DockerClient) -> dict[str, dict[str, object]]:
     """Status, health, commit and image of every desired container once the pass is done.
 
     One more batched observe, read only. The deploy receipt
     (``bay_reconcile.receipt``) turns it into each container's ``healthy``,
-    ``commit``, ``commit_source`` and ``image`` fields. ``commit`` comes from
-    the container's labels (``images.commit_from_labels``, source ``label``).
-    A container with no commit label falls back to the repo tags of the image
-    it runs: exactly one commit tag (12 hex characters) names its commit
-    (``images.commit_from_tags``, source ``tag``); none or several name none.
+    ``commit``, ``commit_source``, ``commit_tags`` and ``image`` fields.
+    ``commit`` comes from the container's labels (``images.commit_from_labels``,
+    source ``label``). A container with no commit label falls back to the repo
+    tags of the image it runs, in the container's own repository only (the
+    repo of the spec's image): exactly one commit tag (12 hex characters)
+    names its commit (``images.commit_from_tags``, source ``tag``); none or
+    several name none. ``commit_tags`` lists those own-repo commit tags for a
+    container with no commit label (None for a labelled one, or when the tags
+    cannot be read), so the CLI can still find the pin among several.
     ``image`` is ``<repo>:<commit12>`` when that tag resolves to the image the
     container runs, else the spec's reference. A failed read is reported as
     no state, never as a failed deploy: the containers are already in place
@@ -67,7 +71,7 @@ def _state_after(bundle: Bundle, client: DockerClient) -> dict[str, dict[str, st
         return {}
     lookup = getattr(client, "image_id", None)
     tags_of = getattr(client, "image_tags", None)
-    out: dict[str, dict[str, str | None]] = {}
+    out: dict[str, dict[str, object]] = {}
     for spec in bundle.containers:
         current = observed.get(spec.name)
         if current is None or not current.exists:
@@ -75,20 +79,25 @@ def _state_after(bundle: Bundle, client: DockerClient) -> dict[str, dict[str, st
         commit = commit_from_labels(current.labels)
         source: str | None = "label" if commit else None
         image = resolved_image(spec.image, commit, current.image_id, lookup)
+        tags: list[str] | None = None
         if commit is None and tags_of is not None and current.image_id:
             try:
-                tagged = commit_from_tags(tags_of(current.image_id), prefer=spec.image)
+                refs = list(tags_of(current.image_id))
             except Exception:  # noqa: BLE001 - a status read never fails the deploy
-                tagged = None
-            if tagged is not None:
-                # The tag is on the very image the container runs.
-                commit, image = tagged
-                source = "tag"
+                refs = None
+            if refs is not None:
+                tags = own_commit_tags(refs, spec.image)
+                tagged = commit_from_tags(refs, spec.image)
+                if tagged is not None:
+                    # The tag is on the very image the container runs.
+                    commit, image = tagged
+                    source = "tag"
         out[spec.name] = {
             "status": current.status,
             "health": current.health,
             "commit": commit,
             "commit_source": source,
+            "commit_tags": tags,
             "image": image,
         }
     return out

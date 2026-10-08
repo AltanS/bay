@@ -41,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .images import is_commit, short
+from .images import is_commit, is_commit_tag, short
 from .routes import rendered_routes
 
 RECEIPT_VERSION = 1
@@ -158,6 +158,10 @@ def build_receipt(
                 # Where the commit came from: the image's commit label, or its
                 # single commit tag. Null when there is no commit.
                 "commit_source": _source_or_none(seen.get("commit"), seen.get("commit_source")),
+                # The own-repo commit tags of the running image, for a
+                # container with no commit label (null otherwise). With
+                # several, `commit` is null, and the CLI looks for the pin here.
+                "commit_tags": _tags_or_none(seen.get("commit_tags")),
                 "config_hash": entry.get("config_hash"),
                 "action": actions.get(name),
                 # The reconciler reported this container's action as failed.
@@ -173,6 +177,7 @@ def build_receipt(
                 "image_ref": None,
                 "commit": None,
                 "commit_source": None,
+                "commit_tags": None,
                 "config_hash": None,
                 "action": "remove",
                 "failed": name in failed,
@@ -228,6 +233,13 @@ def _commit_or_none(value: object) -> str | None:
 COMMIT_SOURCES = ("label", "tag")
 
 
+def _tags_or_none(value: object) -> list[str] | None:
+    """The sorted commit tags in ``value``, or None when it is not a list."""
+    if not isinstance(value, list):
+        return None
+    return sorted({t for t in value if is_commit_tag(t)})
+
+
 def _source_or_none(commit: object, source: object) -> str | None:
     """``label`` or ``tag`` for a container with a commit; None otherwise."""
     if not is_commit(commit):
@@ -256,6 +268,8 @@ def stamp_receipt(
             row["image"] = image
             row["commit"] = _commit_or_none(commit)
             row["commit_source"] = _source_or_none(commit, "label")
+            # A webhook build labels its image, so no tag list is needed.
+            row["commit_tags"] = None
             hit = True
     if not hit:
         return None

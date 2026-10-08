@@ -113,9 +113,9 @@ checks that the two match.
   "fleet_dirty": false,
   "result": "ok",
   "containers": [
-    {"name": "web", "image": "registry.example.com/acme/web:1a2b3c4d5e6f", "image_ref": "registry.example.com/acme/web:latest", "commit": "1a2b3c4d5e6f", "commit_source": "label", "config_hash": "a1b2...", "action": "recreate", "healthy": true},
-    {"name": "postgres", "image": "postgres:16", "image_ref": "postgres:16", "commit": null, "commit_source": null, "config_hash": "c3d4...", "action": "noop", "healthy": true},
-    {"name": "old-worker", "image": null, "image_ref": null, "commit": null, "commit_source": null, "config_hash": null, "action": "remove", "healthy": null}
+    {"name": "web", "image": "registry.example.com/acme/web:1a2b3c4d5e6f", "image_ref": "registry.example.com/acme/web:latest", "commit": "1a2b3c4d5e6f", "commit_source": "label", "commit_tags": null, "config_hash": "a1b2...", "action": "recreate", "healthy": true},
+    {"name": "postgres", "image": "postgres:16", "image_ref": "postgres:16", "commit": null, "commit_source": null, "commit_tags": [], "config_hash": "c3d4...", "action": "noop", "healthy": true},
+    {"name": "old-worker", "image": null, "image_ref": null, "commit": null, "commit_source": null, "commit_tags": null, "config_hash": null, "action": "remove", "healthy": null}
   ],
   "projects": {},
   "routes": [
@@ -147,8 +147,9 @@ Each container entry:
 | `name` | string | Container name. |
 | `image` | string or null | The image the container runs. `<repo>:<commit12>` when that commit tag resolves on the box to the running image, else the reference the deploy asked for. Null for a removed container. |
 | `image_ref` | string or null | The image reference the deploy asked for (the spec, often `:latest`). Absent in receipts written before 2.1. |
-| `commit` | string or null | The 12-character commit the running image was built from: the image label `com.bay.commit`, or `org.opencontainers.image.revision` for older builds. An image with neither label falls back to its tags: when exactly one tag of the running image is a commit tag (exactly 12 lowercase hex characters, in any repo), that tag names the commit. Null when the image has no commit label and no commit tag, or several different commit tags (a pulled third-party image, or a build from before 2.1 that was never tagged by commit). Absent before 2.1. |
-| `commit_source` | string or null | Where `commit` came from: `label` (a commit label of the image) or `tag` (the single commit tag of an image with no commit label). Null when `commit` is null. With `tag`, `image` is that tag. Absent in receipts written before 2.5.0; a reader takes a `commit` there as `label`. |
+| `commit` | string or null | The 12-character commit the running image was built from: the image label `com.bay.commit`, or `org.opencontainers.image.revision` for older builds. An image with neither label falls back to its tags: when exactly one tag of the running image is a commit tag (exactly 12 lowercase hex characters) in the container's own image repository (the repo part of the reference the deploy asked for, without the tag), that tag names the commit. A tag of another repository never counts. Null when the image has no commit label and no own commit tag, or several different own commit tags (a pulled third-party image, a build from before 2.1 that was never tagged by commit, or a running image that a config-only push tagged a second time). Absent before 2.1. |
+| `commit_source` | string or null | Where `commit` came from: `label` (a commit label of the image) or `tag` (the single own-repo commit tag of an image with no commit label). Null when `commit` is null. With `tag`, `image` is that tag. Absent in receipts written before 2.5.0; a reader takes a `commit` there as `label`. |
+| `commit_tags` | array or null | For a container with no commit label: the sorted own-repo commit tags of the running image (the same rule as `commit`), possibly empty. Null for a labelled container, a removed one, or when the tags could not be read. `bay plan` and `bay show` read it when `commit` is null: when the pinned commit's first 12 characters are in the list, the box runs the pin, with source `tag`. So after a config-only push gives the running image a second tag, `bay show` still prints `code <pin12> (tag)`. Absent in receipts written before 2.5.0. |
 | `config_hash` | string or null | The config hash the deploy compared. Null for a removed container. |
 | `action` | string or null | `noop`, `create`, `recreate`, `start` or `remove`. A zero-downtime swap is `recreate`. Null when the pass crashed before it reported. `start` is reserved; version 1 does not write it. |
 | `failed` | boolean | True when the container pass reported this container's action as failed. `bay up` reads it to tell the first image apart (exit 40, see [plan.md](plan.md#the-first-image)). Absent in receipts written before 2.2.0. |
@@ -158,7 +159,7 @@ A webhook build changes the code without a deploy. After it recreates a
 container, `rebuild.sh` stamps that container's `commit` and `image` into
 `<env>.json` (`python -m bay_reconcile.receipt stamp --env <env> --name <c>
 --commit <c12> --image <ref>`). The stamp rewrites the file atomically. It
-sets `commit_source` to `label` (null when it names no commit) and moves
+sets `commit_source` to `label` (null when it names no commit) and `commit_tags` to null, and moves
 nothing else: `image_ref`, `config_hash`, `action`, `deployed_at` and
 `<env>.prev.json` stay as the last deploy wrote them. `rebuild.sh` runs as the
 app user, so the receipts directory is group `docker`, mode `0775`. A failed
@@ -166,9 +167,9 @@ stamp is a log line, never a failed build. `bay plan` hashes `image_ref`, so a
 stamp is not drift; it reads `commit` for "code at X, config pinned at Y" (see
 [plan.md](plan.md), "Code and config").
 
-These fields, `failed` (2.2.0), `routes` (2.3.0) and `commit_source` (2.5.0) are additive, so the receipt stays `receipt_version` 1
+These fields, `failed` (2.2.0), `routes` (2.3.0), `commit_source` and `commit_tags` (2.5.0) are additive, so the receipt stays `receipt_version` 1
 and `bay status --json` stays `status_version` 2. A reader of an older receipt
-must treat a missing `commit` or `image_ref` as null, a missing `commit_source` as `label` when `commit` is set, a missing `failed` as unknown,
+must treat a missing `commit` or `image_ref` as null, a missing `commit_source` as `label` when `commit` is set, a missing `commit_tags` as null, a missing `failed` as unknown,
 and a missing `routes` as "this receipt does not say".
 
 `bay up` deploys the whole box environment, so the receipt covers every project on it. It reads `action` back: every container that is not `noop` goes into

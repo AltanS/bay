@@ -911,6 +911,14 @@ def test_codepin_noop_when_running_target(capsys) -> None:
     assert codepin.runs_commit(tagged, "web", "app/web:latest", pin) == "id-1"
     assert codepin.runs_commit(tagged, "web", "app/web:latest", other) is None
 
+    # The same commit tag under another repo is not this code (the receipt's rule).
+    class Foreign(_Images):
+        def image_meta(self, ref: str) -> tuple[dict[str, str], list[str]]:
+            return {}, ["app/web:latest", f"app/web-copy:{pin}", f"mirror/app/web:{pin}"]
+
+    foreign = Foreign({"app/web:latest": "id-1"}, containers={"web": "id-1"})
+    assert codepin.runs_commit(foreign, "web", "app/web:latest", pin) is None
+
     # A running image recorded as failed on this box is never "already running".
     failed = _Images({"app/web:latest": "id-1"}, labels={"id-1": label}, containers={"web": "id-1"})
     (move,) = codepin.plan_moves(

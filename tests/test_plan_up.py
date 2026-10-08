@@ -4653,6 +4653,24 @@ def test_show_prints_running_commit(
     assert shown["envs"][0]["running"]["code_source"] == {"webapp": "tag"}
     assert f"webapp code {first[:12]} (tag)" in applymod.render_show(shown)
 
+    # 2.5.0 review: a config-only push added a second own commit tag, so the
+    # receipt names no single commit. The pin among `commit_tags` still reads
+    # as the pin, in show and in plan.
+    assert lock_of(world)["envs"]["production"]["commit"] == first
+    row = box.container("webapp")
+    row.update(commit=None, commit_source=None, commit_tags=sorted(["0123456789ab", first[:12]]))
+    shown = json.loads(cli(world, "show", "--json").stdout)
+    run = shown["envs"][0]["running"]
+    assert (run["code"], run["code_source"]) == ({"webapp": first[:12]}, {"webapp": "tag"})
+    assert f"webapp code {first[:12]} (tag)" in applymod.render_show(shown)
+    assert not any(n.startswith("code of webapp") for n in make(world)["notes"])
+    # Two own tags without the pin: unknown.
+    row["commit_tags"] = ["0123456789ab", "111111111111"]
+    shown = json.loads(cli(world, "show", "--json").stdout)
+    assert shown["envs"][0]["running"]["code"] == {"webapp": None}
+    assert "webapp code ?" in applymod.render_show(shown)
+    assert any(n.startswith("code of webapp") for n in make(world)["notes"])
+
 
 def test_show_ahead_when_box_runs_wanted(
     world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch

@@ -6,8 +6,10 @@ Every build is tagged ``<repo>:<commit12>`` (``rebuild.sh``,
 running commit is read from the container's labels. Images built before the
 label existed may still carry ``org.opencontainers.image.revision`` (remote
 builds always set it). An image with neither label may still carry a commit
-tag: :func:`commit_from_tags` reads it when exactly one commit tag names the
-image.
+tag: :func:`commit_from_tags` reads it when exactly one commit tag of the
+container's own repository names the image. A tag of another repository
+never counts: an image can carry tags of several repos (a retag, a manual
+`docker tag`), and only the repo the container was started from is its code.
 """
 
 from __future__ import annotations
@@ -45,6 +47,11 @@ def is_commit(value: object) -> bool:
     return isinstance(value, str) and bool(_HEX.match(value.lower()))
 
 
+def is_commit_tag(value: object) -> bool:
+    """A tag as the builds write a commit: exactly 12 lowercase hex characters."""
+    return isinstance(value, str) and bool(_COMMIT_TAG.match(value))
+
+
 def short(commit: str) -> str:
     return commit.lower()[:COMMIT_LEN]
 
@@ -58,27 +65,60 @@ def commit_from_labels(labels: Mapping[str, str] | None) -> str | None:
     return None
 
 
-def commit_from_tags(
-    refs: Sequence[str] | None, prefer: str | None = None
-) -> tuple[str, str] | None:
-    """``(commit12, ref)`` when the tags of one image name exactly one commit, else None.
+def repo_key(repo: str) -> str:
+    """``repo`` as Docker names it: no ``docker.io/`` and no ``library/`` prefix.
 
-    ``refs`` are the repo tags of one image (``<repo>:<tag>``). A commit tag
-    is exactly 12 lowercase hex characters, as the builds write it. The same
-    commit under several repos is one commit; two different commit tags are
-    no answer, and neither is none. ``ref`` is the tag that names it, the one
-    in the repo of ``prefer`` when there is one.
+    The daemon lists ``postgres:16`` for an image pulled as
+    ``docker.io/library/postgres:16``; both are the same repository.
     """
-    found: dict[str, list[str]] = {}
+    for prefix in ("docker.io/", "index.docker.io/"):
+        if repo.startswith(prefix):
+            repo = repo[len(prefix) :]
+            break
+    if repo.startswith("library/") and repo.count("/") == 1:
+        repo = repo[len("library/") :]
+    return repo
+
+
+def own_commit_tags(refs: Sequence[str] | None, image: str | None) -> list[str]:
+    """The sorted commit tags among ``refs`` that are in the repository of ``image``.
+
+    ``refs`` are the repo tags of one image (``<repo>:<tag>``); ``image`` is
+    the reference the container was started with (its tag does not matter).
+    A commit tag is exactly 12 lowercase hex characters, as the builds write
+    it. A tag of another repository never counts. No ``image``, no tags.
+    """
+    if not image:
+        return []
+    want = repo_key(split_ref(image)[0])
+    found: set[str] = set()
     for ref in refs or []:
         repo, tag = split_ref(str(ref))
-        if tag and _COMMIT_TAG.match(tag):
-            found.setdefault(tag, []).append(f"{repo}:{tag}")
-    if len(found) != 1:
+        if tag and _COMMIT_TAG.match(tag) and repo_key(repo) == want:
+            found.add(tag)
+    return sorted(found)
+
+
+def commit_from_tags(
+    refs: Sequence[str] | None, image: str | None
+) -> tuple[str, str] | None:
+    """``(commit12, ref)`` when exactly one commit tag of ``image``'s repo names the image.
+
+    ``refs`` are the repo tags of one image (``<repo>:<tag>``); ``image`` is
+    the container's configured reference. Only tags of that repository count
+    (:func:`own_commit_tags`): two different own commit tags are no answer,
+    and neither is none. ``ref`` is the own-repo tag that names the commit, as
+    the daemon lists it, so it resolves on the box.
+    """
+    tags = own_commit_tags(refs, image)
+    if len(tags) != 1:
         return None
-    commit, named = next(iter(found.items()))
-    want = split_ref(prefer)[0] if prefer else None
-    ref = next((r for r in named if split_ref(r)[0] == want), sorted(named)[0])
+    commit = tags[0]
+    want = repo_key(split_ref(str(image))[0])
+    ref = sorted(
+        str(r) for r in refs or []
+        if split_ref(str(r))[1] == commit and repo_key(split_ref(str(r))[0]) == want
+    )[0]
     return commit, ref
 
 

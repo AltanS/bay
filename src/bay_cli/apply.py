@@ -211,7 +211,7 @@ def _previous_containers(
     if planmod.doc_at(proj, pin) is None:
         return None
     built = _build_containers(data, proj, lock, env, pin)
-    code = planmod.running_code(before, set(built))
+    code = planmod.running_code(before, set(built), pin=None if proj.in_fleet else pin)
     return {name: code.get(name) or {"commit": None, "image": None} for name in built}
 
 
@@ -1601,14 +1601,17 @@ def show(
             detail = planmod.running_detail(cache[box_env], names)
             listed = {c["name"] for b in detail for c in b["containers"]}
             built = (names & builds) & listed
+            # The pin counts as running code when it is among the image's own
+            # commit tags (planmod.receipt_row_code); never for an in-fleet pin.
+            code_pin = None if proj.in_fleet else lockfile.env_pin(lock, env)
             code = {
                 n: c
-                for n, c in planmod.running_commits(cache[box_env], built).items()
+                for n, c in planmod.running_commits(cache[box_env], built, pin=code_pin).items()
                 if n in built
             }
             code_source = {
                 n: c
-                for n, c in planmod.running_sources(cache[box_env], built).items()
+                for n, c in planmod.running_sources(cache[box_env], built, pin=code_pin).items()
                 if n in built
             }
         status, why = env_status(

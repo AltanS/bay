@@ -146,6 +146,7 @@ def test_deploy_receipt_roundtrip(tmp_path: Path) -> None:
         "image_ref": "acme/web:1",
         "commit": None,
         "commit_source": None,
+        "commit_tags": None,
         "config_hash": "h-web",
         "action": "recreate",
         "failed": False,
@@ -383,6 +384,7 @@ def test_reconciler_report_carries_post_pass_state() -> None:
             "health": "healthy",
             "commit": None,
             "commit_source": None,
+            "commit_tags": None,
             "image": "acme/web:1",
         }
     }
@@ -517,10 +519,11 @@ def test_receipt_records_commit_and_image_per_container(tmp_path: Path) -> None:
 
 
 def test_receipt_commit_from_single_tag() -> None:
-    """M120/03: no commit label, so the image's single commit tag names the commit."""
+    """M120/03: no commit label, so the image's single own-repo commit tag names the commit."""
     from bay_reconcile.images import commit_from_tags
 
     tag = "157b8d58661b"
+    other = "0123456789ab"
 
     def running(name: str, image_id: str, labels: dict[str, str] | None = None) -> ContainerState:
         return ContainerState(
@@ -538,23 +541,29 @@ def test_receipt_commit_from_single_tag() -> None:
     class Fake:
         def __init__(self) -> None:
             self.state = {
-                # One commit tag, under another repo name than the spec's.
+                # One commit tag in the container's own repo.
                 "web": running("web", "sha256:web"),
                 # Labelled: the label wins, the tags are not read.
                 "api": running("api", "sha256:api", {"com.bay.commit": "abcdef012345"}),
-                # Two different commit tags: no answer.
+                # Two different own commit tags: no answer, both listed.
                 "two": running("two", "sha256:two"),
                 # No commit tag at all (a 12-character tag that is not hex, too).
                 "none": running("none", "sha256:none"),
-                # The same commit under two repos is one commit.
+                # The same commit under two repos: only the own repo counts.
                 "same": running("same", "sha256:same"),
+                # Only a foreign repo has a commit tag: it never counts.
+                "foreign": running("foreign", "sha256:foreign"),
+                # One own tag plus a foreign one: the own one names the commit.
+                "mixed": running("mixed", "sha256:mixed"),
             }
             self.tags = {
-                "sha256:web": [f"acme/web-app:{tag}", "acme/web:latest"],
+                "sha256:web": [f"acme/web:{tag}", "acme/web:latest"],
                 "sha256:api": ["acme/api:fedcba987654", "acme/api:latest"],
                 "sha256:two": ["acme/two:111111111111", "acme/two:222222222222"],
                 "sha256:none": ["acme/none:latest", "acme/none:release-2026", "acme/none:1a2b3c"],
                 "sha256:same": [f"acme/same:{tag}", f"mirror/same:{tag}"],
+                "sha256:foreign": [f"acme/web-app:{tag}", "acme/foreign:latest"],
+                "sha256:mixed": [f"acme/mixed:{tag}", f"acme/other:{other}"],
             }
 
         def observe(self, managed_label):
@@ -566,10 +575,11 @@ def test_receipt_commit_from_single_tag() -> None:
         def image_tags(self, ref: str) -> list[str]:
             return self.tags.get(ref, [])
 
+    names = ("web", "api", "two", "none", "same", "foreign", "mixed")
     bundle_doc = {
         "containers": [
             {"name": n, "image": f"acme/{n}:latest", "type": "service", "config_hash": f"h-{n}"}
-            for n in ("web", "api", "two", "none", "same")
+            for n in names
         ]
     }
     code, report = reconcile(load_bundle(bundle_doc), Fake())
@@ -578,34 +588,81 @@ def test_receipt_commit_from_single_tag() -> None:
     jsonschema.validate(receipt, _RECEIPT_SCHEMA)
     rows = {c["name"]: c for c in receipt["containers"]}
     assert (rows["web"]["commit"], rows["web"]["commit_source"]) == (tag, "tag")
+    assert rows["web"]["commit_tags"] == [tag]
     # The tag is on the image the container runs: the receipt names it.
-    assert rows["web"]["image"] == f"acme/web-app:{tag}"
+    assert rows["web"]["image"] == f"acme/web:{tag}"
     assert rows["web"]["image_ref"] == "acme/web:latest"
     assert (rows["api"]["commit"], rows["api"]["commit_source"]) == ("abcdef012345", "label")
+    assert rows["api"]["commit_tags"] is None, "a labelled container lists no tags"
     assert (rows["two"]["commit"], rows["two"]["commit_source"]) == (None, None)
+    assert rows["two"]["commit_tags"] == ["111111111111", "222222222222"]
     assert rows["two"]["image"] == "acme/two:latest"
     assert (rows["none"]["commit"], rows["none"]["commit_source"]) == (None, None)
-    # Same commit, two repos: the spec's repo is preferred.
+    assert rows["none"]["commit_tags"] == []
     assert (rows["same"]["commit"], rows["same"]["commit_source"]) == (tag, "tag")
     assert rows["same"]["image"] == f"acme/same:{tag}"
+    assert rows["same"]["commit_tags"] == [tag]
+    # A foreign-repo 12-hex tag is ignored: no commit, and never the image.
+    assert (rows["foreign"]["commit"], rows["foreign"]["commit_source"]) == (None, None)
+    assert rows["foreign"]["commit_tags"] == []
+    assert rows["foreign"]["image"] == "acme/foreign:latest"
+    assert (rows["mixed"]["commit"], rows["mixed"]["commit_tags"]) == (tag, [tag])
+    assert rows["mixed"]["image"] == f"acme/mixed:{tag}"
 
     # The pure rule, and a client that cannot list tags (an older fake): no fallback.
-    assert commit_from_tags([f"a:{tag}", "a:LATEST", "a:ABCDEF012345"]) == (tag, f"a:{tag}")
-    assert commit_from_tags(["a:0123456789abc"]) is None  # 13 characters
+    assert commit_from_tags([f"a:{tag}", "a:LATEST", "a:ABCDEF012345"], "a:latest") == (
+        tag,
+        f"a:{tag}",
+    )
+    assert commit_from_tags([f"b:{tag}"], "a:latest") is None
+    assert commit_from_tags([f"a:{tag}"], None) is None
+    assert commit_from_tags(["a:0123456789abc"], "a:latest") is None  # 13 characters
+    # Docker lists a Hub image without docker.io/library/.
+    assert commit_from_tags([f"postgres:{tag}"], "docker.io/library/postgres:latest") == (
+        tag,
+        f"postgres:{tag}",
+    )
     del Fake.image_tags
     _, report = reconcile(load_bundle(bundle_doc), Fake())
     assert report["state"]["web"]["commit"] is None
+    assert report["state"]["web"]["commit_tags"] is None
 
     # bay plan and bay show read the source; a receipt from before 2.5 means label.
     from bay_cli import plan as planmod
 
     entries = [{"box": "app-1", "receipt": receipt}]
-    names = {"web", "api", "two"}
-    assert planmod.running_sources(entries, names) == {"web": "tag", "api": "label", "two": None}
+    names_ = {"web", "api", "two"}
+    assert planmod.running_sources(entries, names_) == {"web": "tag", "api": "label", "two": None}
     old = {"containers": [{"name": "web", "commit": "abcdef012345"}]}
     assert planmod.running_sources([{"box": "app-1", "receipt": old}], {"web"}) == {
         "web": "label"
     }
+
+
+def test_running_code_finds_the_pin_among_commit_tags() -> None:
+    """M120 review: two own commit tags, the pin among them, reads as the pin (source tag)."""
+    from bay_cli import plan as planmod
+
+    pin = "157b8d58661b" + "0" * 28
+    row = {"name": "web", "commit": None, "commit_source": None, "action": "noop"}
+    with_pin = {"containers": [{**row, "commit_tags": ["0123456789ab", pin[:12]]}]}
+    without = {"containers": [{**row, "commit_tags": ["0123456789ab", "111111111111"]}]}
+    entries = [{"box": "app-1", "receipt": with_pin}]
+    assert planmod.running_commits(entries, {"web"}, pin=pin) == {"web": pin[:12]}
+    assert planmod.running_sources(entries, {"web"}, pin=pin) == {"web": "tag"}
+    assert planmod.unknown_code(entries, {"web"}, pin=pin) == []
+    assert planmod.running_code(entries, {"web"}, pin=pin)["web"]["commit"] == pin[:12]
+    # No pin given: unknown, as before.
+    assert planmod.running_commits(entries, {"web"}) == {"web": None}
+    assert planmod.unknown_code(entries, {"web"}) == [("web", "app-1")]
+    # The pin is not among them: unknown.
+    entries = [{"box": "app-1", "receipt": without}]
+    assert planmod.running_commits(entries, {"web"}, pin=pin) == {"web": None}
+    assert planmod.running_sources(entries, {"web"}, pin=pin) == {"web": None}
+    assert planmod.unknown_code(entries, {"web"}, pin=pin) == [("web", "app-1")]
+    # A receipt from before commit_tags: unknown.
+    entries = [{"box": "app-1", "receipt": {"containers": [row]}}]
+    assert planmod.running_commits(entries, {"web"}, pin=pin) == {"web": None}
 
 
 # ── the Ansible wiring ───────────────────────────────────────────────────

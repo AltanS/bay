@@ -1548,27 +1548,31 @@ def running_slice(entries: list[dict[str, Any]], names: set[str]) -> dict[str, A
     return {"checked": True, "receipt_sha256": digest, "boxes": boxes}
 
 
-def running_commits(entries: list[dict[str, Any]], names: set[str]) -> dict[str, str | None]:
-    """``{container: commit12 or None}`` for this project's containers, from the receipts."""
-    out: dict[str, str | None] = {}
-    for entry in entries:
-        receipt = entry.get("receipt")
-        if not isinstance(receipt, Mapping):
-            continue
-        for c in receipt.get("containers") or []:
-            if isinstance(c, Mapping) and c.get("name") in names:
-                commit = c.get("commit")
-                out[str(c["name"])] = str(commit)[:12] if commit else None
-    return out
+def receipt_row_code(c: Mapping[str, Any], pin: str | None = None) -> tuple[str | None, str | None]:
+    """``(commit12, source)`` of one receipt container row, or ``(None, None)``.
+
+    The row's ``commit`` first, with its ``commit_source`` (``label`` when a
+    receipt from before 2.5.0 has none). With no commit, the pinned commit
+    still counts when its 12-character prefix is among the row's
+    ``commit_tags`` (the own-repo commit tags of an image with no commit
+    label, 2.5.0): a config-only push adds a second tag to the running image,
+    so ``commit`` is null, but the image is still the pin's. Source ``tag``.
+    """
+    commit = c.get("commit")
+    if commit:
+        return str(commit)[:12], str(c.get("commit_source") or "label")
+    tags = c.get("commit_tags")
+    if pin and isinstance(tags, list) and str(pin)[:12] in tags:
+        return str(pin)[:12], "tag"
+    return None, None
 
 
-def running_sources(entries: list[dict[str, Any]], names: set[str]) -> dict[str, str | None]:
-    """``{container: "label" | "tag" | None}``: where each receipt commit came from.
+def running_commits(
+    entries: list[dict[str, Any]], names: set[str], pin: str | None = None
+) -> dict[str, str | None]:
+    """``{container: commit12 or None}`` for this project's containers, from the receipts.
 
-    ``label``: the image's commit label. ``tag``: the image's single commit
-    tag (the container has no commit label). None: no commit. A receipt from
-    before 2.5.0 has no ``commit_source``; a commit there came from a label.
-    Same row choice as :func:`running_commits`.
+    ``pin``: the pinned code commit; see :func:`receipt_row_code`.
     """
     out: dict[str, str | None] = {}
     for entry in entries:
@@ -1577,16 +1581,40 @@ def running_sources(entries: list[dict[str, Any]], names: set[str]) -> dict[str,
             continue
         for c in receipt.get("containers") or []:
             if isinstance(c, Mapping) and c.get("name") in names:
-                source = c.get("commit_source") or "label"
-                out[str(c["name"])] = str(source) if c.get("commit") else None
+                out[str(c["name"])] = receipt_row_code(c, pin)[0]
     return out
 
 
-def unknown_code(entries: list[dict[str, Any]], names: set[str]) -> list[tuple[str, str]]:
+def running_sources(
+    entries: list[dict[str, Any]], names: set[str], pin: str | None = None
+) -> dict[str, str | None]:
+    """``{container: "label" | "tag" | None}``: where each receipt commit came from.
+
+    ``label``: the image's commit label. ``tag``: the image's single own-repo
+    commit tag, or the pin found among its ``commit_tags`` (the container has
+    no commit label). None: no commit. A receipt from before 2.5.0 has no
+    ``commit_source``; a commit there came from a label. Same row choice as
+    :func:`running_commits`.
+    """
+    out: dict[str, str | None] = {}
+    for entry in entries:
+        receipt = entry.get("receipt")
+        if not isinstance(receipt, Mapping):
+            continue
+        for c in receipt.get("containers") or []:
+            if isinstance(c, Mapping) and c.get("name") in names:
+                out[str(c["name"])] = receipt_row_code(c, pin)[1]
+    return out
+
+
+def unknown_code(
+    entries: list[dict[str, Any]], names: set[str], pin: str | None = None
+) -> list[tuple[str, str]]:
     """``(container, box)`` for each of ``names`` that a receipt lists with no commit.
 
-    The box runs it, but its image has no commit label and not exactly one
-    commit tag, so Bay cannot say which code runs there.
+    The box runs it, but its image has no commit label, not exactly one
+    own-repo commit tag, and not the pin among its commit tags, so Bay cannot
+    say which code runs there.
     """
     out: set[tuple[str, str]] = set()
     for entry in entries:
@@ -1599,7 +1627,7 @@ def unknown_code(entries: list[dict[str, Any]], names: set[str]) -> list[tuple[s
                 isinstance(c, Mapping)
                 and c.get("name") in names
                 and c.get("action") != "remove"
-                and not c.get("commit")
+                and receipt_row_code(c, pin)[0] is None
             ):
                 out.add((str(c["name"]), box))
     return sorted(out)
@@ -1801,13 +1829,14 @@ def code_status(
 
 
 def running_code(
-    entries: list[dict[str, Any]], names: set[str]
+    entries: list[dict[str, Any]], names: set[str], pin: str | None = None
 ) -> dict[str, dict[str, str | None]]:
     """``{container: {"commit": commit12 or None, "image": image or None}}`` from the receipts.
 
     ``image`` is what the container runs (the receipt's ``image``, which a
     webhook stamp moves), not the reference the deploy asked for. A container
-    on several boxes keeps the first row that names a commit.
+    on several boxes keeps the first row that names a commit. ``pin``: see
+    :func:`receipt_row_code`.
     """
     out: dict[str, dict[str, str | None]] = {}
     for entry in entries:
@@ -1820,10 +1849,9 @@ def running_code(
             name = str(c["name"])
             if name in out and out[name]["commit"]:
                 continue
-            commit = c.get("commit")
             image = c.get("image")
             out[name] = {
-                "commit": str(commit)[:12] if commit else None,
+                "commit": receipt_row_code(c, pin)[0],
                 "image": str(image) if image else None,
             }
     return out
@@ -2664,15 +2692,23 @@ def project_code(
     }
     # Only build containers carry this project's code; a pulled image's
     # revision label names someone else's repo.
+    # The pin counts as the running code when it is among the image's own
+    # commit tags (a config-only push added a second one). Not for an
+    # in-fleet project: its pin is a fleet commit, never a code commit.
+    pinned = lockfile.env_pin(proj.lock, env)
+    code_pin = None if proj.in_fleet else pinned
     commits = {
-        name: c for name, c in running_commits(receipt_entries, env_names).items() if name in built
+        name: c
+        for name, c in running_commits(receipt_entries, env_names, pin=code_pin).items()
+        if name in built
     }
+    track = bay_toml.track(wanted.doc, env)
     code = code_status(
         commits,
         project=proj.name,
-        track=bay_toml.track(wanted.doc, env),
+        track=track,
         in_fleet=proj.in_fleet,
-        pinned_commit=lockfile.env_pin(proj.lock, env),
+        pinned_commit=pinned,
         wanted_commit=wanted.commit,
         frozen=(proj.lock.get("envs") or {}).get(env),
         # The adopt commit moves no code (bay up passes no code target).
@@ -2692,7 +2728,7 @@ def project_code(
     sends = not proj.in_fleet and not adopt_pending(proj, env, wanted.commit)
     code.info.extend(
         unknown_code_note(name, box, wanted.commit if sends else None)
-        for name, box in unknown_code(receipt_entries, built)
+        for name, box in unknown_code(receipt_entries, built, pin=code_pin)
     )
     return code
 
