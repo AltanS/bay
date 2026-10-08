@@ -537,7 +537,8 @@ the receiver's in-memory `IMAGE_MAP` table on process start
   missing, or the image's `com.bay.receiver-hash` label differs from the
   hash of the receiver files (`bay_tree_hash` in
   `filter_plugins/bay_filters.py`: sha256 over the file contents in sorted
-  path order, `__pycache__` left out). That file runs under `deploy_stack`
+  path order; `__pycache__`, bytecode, dotfiles other than `.dockerignore`, `*~` and `*.swp`
+  are left out, and a dangling symlink is an error). That file runs under `deploy_stack`
   too, so `bay up` builds it. The container spec carries the same label, so
   a receiver change changes the container's config hash: `bay plan --remote`
   predicts the recreate, although check mode builds nothing. Under `bay up`,

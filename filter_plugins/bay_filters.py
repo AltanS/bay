@@ -1416,10 +1416,14 @@ def bay_spec_hash(spec, env_digest=None):
 
 
 #: Never part of a build context: Python bytecode that a test run or an import
-#: on the control node leaves beside the sources. The receiver's Dockerfile
-#: copies named files only, so these never reach the image.
+#: on the control node leaves beside the sources, and the files an editor
+#: leaves (dotfiles such as `.app.py.swp` or emacs's `.#app.py`, `*~` backups,
+#: `*.swp`). The receiver's Dockerfile copies named files only (requirements.txt,
+#: bay_alert.py, app.py), so none of these reaches the image. `.dockerignore`
+#: is the one dotfile that is a build input: it decides what a COPY can see.
 _TREE_HASH_SKIP_DIRS = frozenset({"__pycache__"})
-_TREE_HASH_SKIP_SUFFIXES = (".pyc", ".pyo")
+_TREE_HASH_SKIP_SUFFIXES = (".pyc", ".pyo", "~", ".swp")
+_TREE_HASH_KEEP_DOTFILES = frozenset({".dockerignore"})
 _FRAMEWORK_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -1434,8 +1438,12 @@ def bay_tree_hash(path):
     Deterministic: the files are taken in sorted order of their relative POSIX
     path, and each one adds its path and the sha256 of its bytes. Modes,
     owners and mtimes are not read. A symlinked file counts as its target's
-    bytes (``copy`` ships the target too). ``__pycache__`` and ``*.pyc`` are
-    left out. A missing directory is an error, never an empty hash.
+    bytes (``copy`` ships the target too); a symlink whose target is missing
+    raises ``ValueError``, since a hash that skipped it would not change when
+    the build breaks. ``__pycache__``, ``*.pyc``, dotfiles (but not
+    ``.dockerignore``), ``*~`` and ``*.swp`` are left out: editor and bytecode
+    litter, never a build input. A missing directory is an error, never an
+    empty hash.
 
     A relative ``path`` is read from the framework checkout that holds this
     file (the directory above ``filter_plugins/``), so the same expression
@@ -1453,6 +1461,12 @@ def bay_tree_hash(path):
         rel = item.relative_to(root)
         if _TREE_HASH_SKIP_DIRS & set(rel.parts) or item.name.endswith(_TREE_HASH_SKIP_SUFFIXES):
             continue
+        if any(
+            part.startswith(".") and part not in _TREE_HASH_KEEP_DOTFILES for part in rel.parts
+        ):
+            continue
+        if item.is_symlink() and not item.exists():
+            raise ValueError(f"bay_tree_hash: {item} is a symlink to a missing target")
         if item.is_file():
             files.append((rel.as_posix(), item))
     digest = hashlib.sha256()

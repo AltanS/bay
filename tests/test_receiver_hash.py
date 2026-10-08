@@ -104,6 +104,32 @@ def test_receiver_hash_label_ignores_mtimes_modes_and_bytecode(tmp_path: Path) -
     assert bay_tree_hash(tree) == before
 
 
+def test_receiver_hash_label_ignores_editor_files(tmp_path: Path) -> None:
+    """Dotfiles, `*~` and `*.swp` are not build inputs: the Dockerfile copies named files."""
+    tree = _receiver_copy(tmp_path)
+    before = bay_tree_hash(tree)
+    (tree / ".app.py.swp").write_bytes(b"swap")
+    (tree / "app.py.swp").write_bytes(b"swap")
+    (tree / "app.py~").write_bytes(b"backup")
+    (tree / ".hidden").write_bytes(b"x")
+    (tree / ".cache").mkdir()
+    (tree / ".cache" / "file").write_bytes(b"x")
+    (tree / ".#app.py").symlink_to("nobody@host.1234")  # emacs lock file: dangling
+    assert bay_tree_hash(tree) == before
+    # `.dockerignore` decides what a COPY sees, so it is a build input.
+    (tree / ".dockerignore").write_text("app.py\n")
+    assert bay_tree_hash(tree) != before
+
+
+def test_receiver_hash_label_dangling_symlink_is_an_error(tmp_path: Path) -> None:
+    """A symlink with no target is a broken build context, not a file to skip."""
+    tree = _receiver_copy(tmp_path)
+    (tree / "bay_alert.py").unlink()
+    (tree / "bay_alert.py").symlink_to("no-such-target.py")
+    with pytest.raises(ValueError, match="symlink to a missing target"):
+        bay_tree_hash(tree)
+
+
 def test_receiver_hash_label_relative_path_is_the_framework_checkout() -> None:
     assert bay_tree_hash("roles/git_deploy/files/webhook") == bay_tree_hash(RECEIVER)
     with pytest.raises(ValueError, match="not a directory"):
