@@ -10,6 +10,8 @@ Verifies that the image consumer mapping filters correctly:
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -427,3 +429,35 @@ class TestImageRegionMap:
         assert result[platform_image] == ["eu"]
         animals_image = "registry.infra.example.com/demo/animals:latest"
         assert result[animals_image] == ["eu"]
+
+
+_ORDER_SCRIPT = """
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from bay_filters import bay_image_region_map
+services = {}
+for i in range(16):
+    services[f"svc-{i}"] = {
+        "build": {"repo": f"git@example.com:t/r{i}.git", "strategy": "remote"},
+        "image": f"registry.example.com/demo/app-{i}:latest",
+        "regions": ["eu", "na"],
+    }
+print(json.dumps(list(bay_image_region_map(services, list(services)).items())))
+"""
+
+
+def _region_map_under_seed(seed: str) -> str:
+    out = subprocess.run(
+        [sys.executable, "-c", _ORDER_SCRIPT, _filter_dir],
+        env={"PYTHONHASHSEED": seed, "PATH": ""},
+        capture_output=True, text=True, check=True,
+    )
+    return out.stdout
+
+
+def test_image_region_map_is_stable():
+    """The map keeps one key order under any hash seed, so rebuild.sh renders the same bytes."""
+    outputs = {seed: _region_map_under_seed(seed) for seed in ("1", "2", "3", "12345")}
+    assert len(set(outputs.values())) == 1, outputs
+    keys = [k for k, _ in json.loads(outputs["1"])]
+    assert keys == sorted(keys)

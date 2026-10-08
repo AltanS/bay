@@ -1337,7 +1337,7 @@ def bay_image_region_map(services, build_service_names):
 
     # For each built image, find all services using it and collect regions
     result = {}
-    for image in built_images:
+    for image in sorted(built_images):
         regions = set()
         for svc_name, svc in services.items():
             if svc.get("image") == image:
