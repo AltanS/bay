@@ -4814,3 +4814,56 @@ def test_up_runs_backup_tag_on_backup_change(
     assert tags[-1] == "deploy_stack,backup"
     do_up(world)
     assert tags[-1] is None
+
+
+def _failed_up(result_over: dict[str, Any]) -> Any:
+    result = {
+        "project": "webapp", "projects": ["webapp"], "env": "production", "box_env": "production",
+        "commit": "a" * 40, "error": "the box said no", "steps": [], "notes": [],
+    }
+    result.update(result_over)
+
+    def failing(*_a: Any, **_k: Any) -> Any:
+        raise applymod.DeployFailed(result)
+
+    return failing
+
+
+def test_failed_up_with_extra_tags_names_the_deploy_retry(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """services.yml is committed by then, so a second `bay up` plans no step and skips the tags."""
+    monkeypatch.setattr(applymod, "up", _failed_up({"deploy_tags": "deploy_stack,backup"}))
+    out = cli(world, "up", "--project", "webapp")
+    assert out.exit_code == 1
+    text = " ".join(out.output.split())
+    assert "bay deploy production --tags deploy_stack,backup" in text
+    assert "second bay up plans no step" in text
+
+
+def test_failed_up_with_the_plain_tags_gives_no_deploy_retry(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(applymod, "up", _failed_up({"deploy_tags": "deploy_stack"}))
+    out = cli(world, "up", "--project", "webapp")
+    assert out.exit_code == 1
+    assert "bay deploy" not in out.output and "--tags" not in out.output
+    assert "bay show says HALF" in " ".join(out.output.split())
+
+
+def test_failed_route_only_up_names_the_deploy_retry(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        applymod, "up_env",
+        _failed_up({"route_only": True, "deploy_tags": "deploy_stack,headscale,traefik"}),
+    )
+    out = cli(world, "up", "production", cwd=world["fleet"])
+    assert out.exit_code == 1
+    text = " ".join(out.output.split())
+    assert "bay deploy production --tags deploy_stack,headscale,traefik" in text
+    assert "run bay up production again" not in text
+
+
+def test_up_results_carry_the_tags_the_deploy_used(world: dict[str, Path], box: FakeBox) -> None:
+    assert do_up(world)["deploy_tags"] == applymod.UP_DEPLOY_TAGS

@@ -587,8 +587,12 @@ def _apply(
         if as_json:
             _echo_json(exc.result)
         else:
+            retry = _retry_deploy(exc.result)
             if exc.result.get("route_only"):
-                console.error(f"{exc}. No lock changed; run bay up {exc.result['env']} again.")
+                console.error(
+                    f"{exc}. No lock changed; "
+                    + (retry or f"run bay up {exc.result['env']} again.")
+                )
                 raise typer.Exit(exc.exit_code) from None
             pins = (
                 f"the fleet pins {exc.result['commit'][:12]}"
@@ -596,6 +600,8 @@ def _apply(
                 else f"the fleet pins the planned commits of {len(exc.result['projects'])} projects"
             )
             console.error(f"{exc}. {pins}; bay show says HALF until a deploy succeeds.")
+            if retry:
+                console.info(retry)
             if exc.exit_code == applymod.FIRST_IMAGE_EXIT:
                 for note in exc.result.get("notes") or []:
                     if note.startswith("first deploy of "):
@@ -635,6 +641,25 @@ def _apply(
         console.warning(f"the fleet repo was not pushed: {result['push_error']}")
     if result.get("push_skipped"):
         console.warning(str(result["push_skipped"]))
+
+
+def _retry_deploy(result: dict[str, Any]) -> str | None:
+    """How to retry a failed up whose deploy ran extra tags, else None.
+
+    The failed up already committed ``services.yml``, so a second ``bay up`` plans
+    no step and would leave the extra tags (route, volume backup) out. The
+    retry that runs them is ``bay deploy <env> --tags <the tags that up used>``.
+    """
+    from bay_cli.apply import UP_DEPLOY_TAGS
+
+    tags = str(result.get("deploy_tags") or "")
+    if tags in ("", UP_DEPLOY_TAGS):
+        return None
+    return (
+        f"A second bay up plans no step, because services.yml is already committed, "
+        f"and would skip the tags {tags}. Retry with: "
+        f"bay deploy {result['box_env']} --tags {tags}"
+    )
 
 
 def up(

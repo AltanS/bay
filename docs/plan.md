@@ -676,6 +676,14 @@ When the deploy fails, the lock keeps the new pin and records
 `result: failed`. Bay still commits and pushes that record. `bay show` then
 says `HALF` until a deploy succeeds.
 
+**Retry after a failed `bay up` with extra tags.** The failed `bay up` has already
+committed `services.yml`. A second `bay up` therefore plans no step, and it would
+leave out the extra tags that the first one ran for a route (`headscale,traefik`) or
+a volume backup (`backup`). When the deploy ran such tags, the error prints the
+retry: `bay deploy <env> --tags <the tags that up used>`. The JSON result of the
+failed `bay up` lists them as `deploy_tags`. When the deploy used only
+`deploy_stack`, a second `bay up` is the retry.
+
 #### Every deployed project is pinned
 
 `bay up` deploys the whole box environment, not only one project. So after

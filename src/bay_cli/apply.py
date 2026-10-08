@@ -705,6 +705,7 @@ def _apply_plan(
         "code_targets": code_targets,
         "code_kept": code_kept,
         "first_image": first,
+        "deploy_tags": tags,
         "frozen": any(bool(locks[p.name]["envs"][env].get("frozen")) for p, _ in members),
     }
     if push:
@@ -818,6 +819,7 @@ def _apply_route_plan(
         "code_targets": {},
         "code_kept": [],
         "first_image": [],
+        "deploy_tags": tags,
         "frozen": False,
         "route_only": True,
     }
