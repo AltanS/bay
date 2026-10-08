@@ -304,7 +304,7 @@ This provides independent locking, independent retention, and failure isolation 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `backup_enabled` | `false` | Master switch — set to `true` in group_vars to enable |
-| `backup_restic_version` | `0.17.3` | Restic binary version. The role installs it only when `backup_restic_bin` is missing, and stops when the binary there is older than 0.17.0 |
+| `backup_restic_version` | `0.17.3` | Restic binary version. The role installs it only when `backup_restic_bin` is missing, and stops when the binary there is older than 0.17.0 or is 0.19.0 or newer (0.19 prints a progress line before the JSON of `restic stats --json`) |
 | `backup_s3_endpoint` | `{{ secrets.backup_s3_endpoint \| default(S3_ENDPOINT) }}` | Set in `secrets:` dict; falls back to shared `S3_ENDPOINT` var |
 | `backup_s3_bucket` | `{{ secrets.backup_s3_bucket \| default(S3_BUCKET) }}` | Set in `secrets:` dict; falls back to shared `S3_BUCKET` var |
 | `backup_s3_access_key_id` | `{{ secrets.backup_s3_access_key_id \| default(S3_ACCESS_KEY_ID) }}` | Set in `secrets:` dict; falls back to shared `S3_ACCESS_KEY_ID` var |

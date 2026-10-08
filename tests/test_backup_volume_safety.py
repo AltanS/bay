@@ -385,7 +385,9 @@ def _task(path: Path, name: str) -> dict[str, Any]:
 
 @pytest.mark.parametrize(("stdout", "skipped", "passes"), [
     ("restic 0.17.3 compiled with go1.23.3 on linux/amd64", False, True),
-    ("restic 0.19.0 compiled with go1.26.4 on linux/amd64", False, True),
+    ("restic 0.18.1 compiled with go1.24.1 on linux/amd64", False, True),
+    # 0.19 prints a progress line before the JSON of `restic stats --json`.
+    ("restic 0.19.0 compiled with go1.26.4 on linux/amd64", False, False),
     ("restic 0.16.4 compiled with go1.21.6 on linux/amd64", False, False),
     ("restic 0.9.6 compiled with go1.13.8 on linux/amd64", False, False),
     ("not restic", False, False),
@@ -396,7 +398,7 @@ def test_role_requires_a_restic_that_runs_the_producer(
     tmp_path: Path, stdout: str, skipped: bool, passes: bool
 ) -> None:
     gate = _task(ROOT / "roles" / "backup" / "tasks" / "install.yml",
-                 "Require restic 0.17.0 or newer for the backup scripts")
+                 "Require restic 0.17 or 0.18 for the backup scripts")
     registered: dict[str, Any] = {"stdout": stdout, "rc": 0, "changed": False}
     if skipped:
         registered = {"skipped": True, "changed": False, "stdout": "", "rc": 0}
@@ -405,7 +407,7 @@ def test_role_requires_a_restic_that_runs_the_producer(
                                     "backup_restic_version": "0.17.3"})
     assert (proc.returncode == 0) is passes, proc.stdout[-2000:]
     if not passes:
-        assert "0.17.0 or newer" in proc.stdout
+        assert "0.17.0 or newer" in proc.stdout and "older than 0.19.0" in proc.stdout
 
 
 # ── The deploy waits for a running volume backup ────────────────────────────
