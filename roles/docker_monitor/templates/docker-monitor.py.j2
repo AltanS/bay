@@ -29,6 +29,8 @@ ALERT_CONTAINER_CRASH = {{ docker_monitor_alert_container_crash | bool | string 
 ALERT_RESTART_LOOP = {{ docker_monitor_alert_restart_loop | bool | string }}
 ALERT_HEALTHCHECK_FAILURE = {{ docker_monitor_alert_healthcheck_failure | bool | string }}
 
+# Label of a container that bay-job.sh starts for a scheduled job.
+JOB_LABEL = "com.bay.job-of"
 RESTART_LOOP_THRESHOLD = {{ docker_monitor_restart_loop_threshold }}
 RESTART_LOOP_WINDOW = {{ docker_monitor_restart_loop_window }}
 # Seconds between two container.restart_loop alerts for the same container.
@@ -368,6 +370,12 @@ def handle_start(event):
 
     # --- Restart loop detection ---
     if not ALERT_RESTART_LOOP:
+        return
+
+    # A job container (bay.toml [[jobs]]) starts on a timer, often. Each run is
+    # a new container with the same name, not a restart. A failing job still
+    # raises container.crash above. Docker puts the labels in the event.
+    if JOB_LABEL in attrs:
         return
 
     now = time.monotonic()

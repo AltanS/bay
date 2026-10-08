@@ -155,6 +155,25 @@ def test_restart_loop_reaches_the_critical_pager(tmp_path, sent, recipients_only
     assert len(_to(sent, _SECRET_URL)) == 1
 
 
+def test_a_job_container_that_starts_often_is_not_a_restart_loop(tmp_path, sent, recipients_only):
+    """A job starts on a timer: many starts of one name are runs, not a crash loop."""
+    monitor = _load(_render(tmp_path, alert_recipients=_RECIPIENTS))
+    job = {"name": "shop-job-tick", "com.bay.job-of": "shop"}
+    for _ in range(10):
+        monitor.handle_start({"Action": "start", "Actor": {"Attributes": job}})
+    assert sent == [], "a job container must not raise container.restart_loop"
+    # The same name without the label still counts.
+    _loop(monitor, "shop-job-tick")
+    assert len(_telegram(sent)) == 1
+
+
+def test_a_failing_job_container_still_raises_a_crash(tmp_path, sent, recipients_only):
+    monitor = _load(_render(tmp_path, alert_recipients=_RECIPIENTS))
+    monitor.handle_die({"Action": "die", "Actor": {"Attributes": {
+        "name": "shop-job-tick", "exitCode": "1", "com.bay.job-of": "shop"}}})
+    assert len(_to(sent, _SECRET_URL)) == 1
+
+
 def test_crash_reaches_only_the_warn_floor_webhook(tmp_path, sent, recipients_only):
     monitor = _load(_render(tmp_path, alert_recipients=_RECIPIENTS))
     _die(monitor, "web")
