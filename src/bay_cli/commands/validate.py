@@ -1286,7 +1286,9 @@ def _check_domain_uniqueness(
             continue
         domains = svc.get("domains", [])
         regions = list(svc.get("regions", []))
+        # /api and /api/ are the same route (the router rule strips the slash).
         path = str(svc.get("path") or "")
+        path = (path.rstrip("/") or "/") if path else ""
         for domain in domains:
             domain_map.setdefault((str(domain), path), []).append((svc_name, regions))
 

@@ -648,3 +648,28 @@ def test_release_and_auto_update_are_checked_per_environment() -> None:
     # A service's own update does not count: only the main container has a release.
     doc = _release_doc(services={"worker": {"command": "run", "update": "auto"}})
     assert not bay_toml.validate(doc)
+
+
+# ── path routes ─────────────────────────────────────────────────────────────
+
+def _path_doc(**paths: str) -> dict[str, Any]:
+    doc = _release_doc()
+    del doc["release"]
+    doc["services"] = {name: {"command": "run", "port": 3001, "path": path}
+                       for name, path in paths.items()}
+    return doc
+
+
+def test_a_root_path_is_an_error() -> None:
+    assert not bay_toml.validate(_path_doc(api="/api"))
+    found = bay_toml.validate(_path_doc(api="/"))
+    assert [v.path for v in found] == ["services.api.path"]
+    assert "every request" in found[0].message
+    assert [v.path for v in bay_toml.validate(_path_doc(api="//"))] == ["services.api.path"]
+
+
+def test_paths_that_differ_by_a_trailing_slash_collide() -> None:
+    found = bay_toml.validate(_path_doc(api="/api", api2="/api/"))
+    assert [v.path for v in found] == ["services.api2.path"]
+    assert "same route as services.api.path" in found[0].message
+    assert not bay_toml.validate(_path_doc(api="/api", apiary="/apiary/"))

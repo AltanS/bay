@@ -827,6 +827,24 @@ class TestPathRoutedService:
         # No stripprefix: the app sees the full path.
         assert not any("stripprefix" in k for k in labels)
 
+    def test_trailing_slashes_make_the_same_rule_in_both_filter_copies(self):
+        import importlib.util
+
+        root = Path(__file__).parent.parent
+        mods = []
+        for rel, name in (("filter_plugins/bay_filters.py", "_slash_top"),
+                          ("roles/container_lifecycle/filter_plugins/bay_filters.py", "_slash_role")):
+            spec = importlib.util.spec_from_file_location(name, root / rel)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[name] = mod
+            spec.loader.exec_module(mod)
+            mods.append(mod)
+        for mod in mods:
+            plain = mod.bay_traefik_labels({**self.MAIN, "path": "/api"}, "x", _BASE_CONFIG)
+            for variant in ("/api/", "/api//"):
+                got = mod.bay_traefik_labels({**self.MAIN, "path": variant}, "x", _BASE_CONFIG)
+                assert got == plain, variant
+
     def test_path_router_outranks_every_shape_of_the_main_router(self):
         path = bay_traefik_labels({**self.MAIN, "path": "/a"}, "app-api", _BASE_CONFIG)
         rank = self._rank(path, "app-api")

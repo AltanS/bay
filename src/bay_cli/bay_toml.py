@@ -274,6 +274,7 @@ def _file_rules(doc: dict[str, Any]) -> Iterator[Violation]:
     yield from _access_rules(doc, services)
     yield from _deploy_rules(doc, envs, services)
     yield from _release_update_rules(doc, envs)
+    yield from _path_rules(services)
     yield from _domain_rules(doc, envs, services)
 
 
@@ -588,6 +589,36 @@ def _internal_main_access(doc: dict[str, Any], top_mode: Any) -> Iterator[Violat
 
 def _str_list(value: Any) -> list[str]:
     return [x for x in value if isinstance(x, str)] if isinstance(value, list) else []
+
+
+def _path_rules(services: dict[str, Any]) -> Iterator[Violation]:
+    """``path`` routes a prefix of the main domain: never ``/``, never twice.
+
+    A ``/`` prefix matches every request of the domain, so it would take the
+    traffic of the main container. A trailing slash changes nothing (``/api``
+    and ``/api/`` are one route), so two services with the same path once the
+    slash is dropped would claim the same requests.
+    """
+    seen: dict[str, str] = {}
+    for name, svc in services.items():
+        path = svc.get("path") if isinstance(svc, dict) else None
+        if not isinstance(path, str) or not path.startswith("/"):
+            continue
+        key = path.rstrip("/")
+        if not key:
+            yield Violation(
+                f"services.{name}.path",
+                "a path of / would take every request of the domain, including the main "
+                "container's; write a prefix such as /api",
+            )
+        elif key in seen:
+            yield Violation(
+                f"services.{name}.path",
+                f"{path} is the same route as services.{seen[key]}.path; "
+                "a trailing slash does not make a route different",
+            )
+        else:
+            seen[key] = name
 
 
 def _release_update_rules(

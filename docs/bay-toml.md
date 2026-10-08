@@ -583,7 +583,16 @@ service may use that name. Container names are in rule 8.
   `secrets`, `fleet_secrets`, `needs`, `image` or `build`.
 - Routing: `path = "/api"` routes a prefix of the main domain, on a segment boundary
   (`/api` and `/api/x`, not `/apiary`). The prefix is not stripped: the app sees the full
-  path. The router of the service outranks the main container's router.  `domain = "..."` gives
+  path. The router of the service outranks the main container's router. A trailing slash
+  changes nothing: `/api` and `/api/` are one route, and two services with the same path
+  collide. `path = "/"` is an error, because it would take every request of the domain.
+  The match is case-sensitive, unlike `vpn_routes`. A `vpn_routes` entry keeps a path
+  private, so a case variant such as `/Admin` that missed it would reach the backend from
+  the internet (GH#3); that match ignores case. A `path` route keeps nothing private: a
+  request that misses it, such as `/API` for a service on `/api`, reaches the main
+  container and gets what the main container's own `access` allows, never the data of the
+  path service. Ignoring case there would only change which container answers.
+  `domain = "..."` gives
   the service its own domain. Set one of them, or neither. With neither, the service is
   internal and may not set `access`.
 - A routed service takes the project's `access.mode` unless it sets its own. Password

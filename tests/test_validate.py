@@ -424,6 +424,22 @@ def test_domain_uniqueness_duplicate_same_region():
         assert "app2" in result.failed[0]
 
 
+def test_domain_uniqueness_trailing_slash_is_the_same_path():
+    """/api and /api/ route the same requests, so they collide."""
+    with _JsonMode():
+        result = ValidationResult()
+        services = {
+            "a": {"domains": ["app.example.com"], "path": "/api", "regions": []},
+            "b": {"domains": ["app.example.com"], "path": "/api/", "regions": []},
+        }
+        _check_domain_uniqueness(services, result)
+        assert any("with path '/api'" in f for f in result.failed), result.failed
+        result = ValidationResult()
+        services["b"]["path"] = "/other/"
+        _check_domain_uniqueness(services, result)
+        assert result.failed == []
+
+
 def test_domain_uniqueness_duplicate_different_regions():
     """Same domain in non-overlapping regions is OK (no conflict)."""
     with _JsonMode():
