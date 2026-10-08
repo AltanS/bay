@@ -132,10 +132,11 @@ services:
 ### Database binding: `database:` vs manual `DATABASE_URL`
 
 A `database:` block does two things: it provisions the database and role on
-the accessory (idempotent, via `roles/deploy_stack/tasks/database_provision.yml`
-— `CREATE DATABASE`/`CREATE ROLE` run over `docker exec ... psql`), and it
-injects connection env vars into the service's env file. Postgres only — the
+the accessory (idempotent, via `roles/deploy_stack/tasks/database_provision.yml`,
+which runs `CREATE DATABASE` and `CREATE ROLE` over `docker exec ... psql`), and
+it injects connection env vars into the service's env file. Postgres only: the
 provisioning tasks and the env template both hardcode `psql` and port `5432`.
+There is no MySQL provisioner.
 
 ```yaml
 accessories:
@@ -175,6 +176,45 @@ DB_PASSWORD=<password>
 `<password>` is read from vault key `<DB_USER upper, - to _>_POSTGRES_PASSWORD`
 — the same secret `database_provision.yml` uses to create/alter the role, so
 the two always agree.
+
+#### Role passwords: compared, not re-set
+
+The task "Provision databases, roles and grants" reports `changed` only when
+it changes something. For the role password that takes three steps, one
+`docker exec` per accessory each:
+
+1. **Read.** A read-only session asks Postgres, per bound role, which kind
+   of verifier it stores (SCRAM, md5, none) and, for SCRAM, only the
+   `<iterations>:<salt>` part of `SCRAM-SHA-256$<iterations>:<salt>$<StoredKey>:<ServerKey>`.
+   StoredKey and ServerKey never leave the box.
+2. **Compute.** On the controller, the filter `bay_db_password_verifier`
+   computes the verifier the password in the encrypted secrets file would
+   have with that salt and count (`bay_scram_verifier`, the same PBKDF2 and
+   HMAC steps as Postgres). For an md5 role it is `md5` plus
+   `md5(password || role)`.
+3. **Compare.** The provisioning script carries the computed verifier on
+   stdin, like the password. The server runs `ALTER ROLE ... PASSWORD`, and
+   the script prints `CHANGED: set password for role <r>`, only when the
+   stored verifier differs. A rotated password is set and reported; an
+   unchanged one is `ok`.
+
+When no safe comparison exists, the password is set and reported on every
+run, as before: the read failed (accessory not running, a `POSTGRES_USER`
+that is not a superuser and cannot read `pg_authid`), the role does not exist
+yet, the password is empty or not pure ASCII (Postgres normalizes those with
+SASLprep), the stored verifier has another kind than the server's
+`password_encryption`, or its iteration count differs from `scram_iterations`
+(Postgres 16 and later). In the last two cases a new `ALTER ROLE` would
+store a different form, so the deploy lets it.
+
+Every task that sees a password or a verifier has `no_log: true`. The read
+step has it too. `-e provision_db_debug=true` turns it off for all three.
+
+**Check mode.** The read step runs in check mode too (it is read-only).
+Another task, "Predict database, role and password changes", runs only in
+check mode: the same script in a read-only session, cut down to its
+`CHANGED` lines. It reports `changed` exactly when a real run would, and
+changes nothing. The real provisioning task stays skipped in check mode.
 
 **Use `database:`** when the service and the database accessory are both
 managed by this `services.yml` (the common case) — it removes a whole class
