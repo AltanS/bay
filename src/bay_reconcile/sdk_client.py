@@ -28,6 +28,9 @@ from .observe import (
     parse_state,
 )
 
+#: Container states in which nothing runs, so a leftover release container is safe to remove.
+_FINISHED = frozenset({"created", "exited", "dead"})
+
 
 def _ctr_port_key(ctr: str) -> str:
     """Container-port key for the docker SDK ``ports`` mapping.
@@ -187,7 +190,12 @@ class SdkDockerClient:
         return raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw)
 
     def _remove_release(self, name: str, of: str) -> None:
-        """Remove a release container a crashed run left, never a container of another owner."""
+        """Remove a finished release container a crashed run left.
+
+        Never a container of another owner, and never one that still runs: a
+        webhook build may be running its migration right now, and a force
+        remove would kill it. A running one fails this release instead.
+        """
         try:
             ctr = self._c.containers.get(name)
         except docker.errors.NotFound:
@@ -195,6 +203,13 @@ class SdkDockerClient:
         if (ctr.labels or {}).get(RELEASE_LABEL) != of:
             raise RuntimeError(
                 f"a container named {name} exists and is not the release container of {of}"
+            )
+        status = getattr(ctr, "status", None)
+        if status not in _FINISHED:
+            raise RuntimeError(
+                f"the release container {name} is still {status or 'running'}, so another "
+                f"release of {of} may be running; wait for it to end, or remove it with "
+                f"`docker rm -f {name}` if it is stuck"
             )
         ctr.remove(force=True)
 
