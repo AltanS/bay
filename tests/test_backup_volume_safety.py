@@ -309,13 +309,15 @@ def test_deploy_waits_for_volume_backup_lock(tmp_path: Path) -> None:
 
     timer = threading.Timer(3, _finish_backup)
     lines: list[str] = []
+    reached = False
     proc = subprocess.Popen(argv, cwd=tmp_path, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True)
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
             lines.append(line)
-            if line.startswith("TASK [Wait for active backups") and not timer.is_alive():
+            if line.startswith("TASK [Wait for active backups") and not reached:
+                reached = True
                 timer.start()
         proc.wait(timeout=300)
     finally:
@@ -324,10 +326,13 @@ def test_deploy_waits_for_volume_backup_lock(tmp_path: Path) -> None:
             proc.kill()
     output = "".join(lines)
     assert proc.returncode == 0, output[-3000:]
-    assert removed_at, "the play never reached the wait task:\n" + output[-3000:]
+    assert reached, "the play never reached the wait task:\n" + output[-3000:]
+    # The play ended before the backup released its lock: the deploy did not wait.
+    assert removed_at, "the deploy went on while the volume backup held its lock"
     got = json.loads(out.read_text())
     # Accessory and volume locks; not the volume of a container on another host.
     assert list(got["waited"]) == ["postgres", "bay_shop_data"]
-    # The deploy went on only after the volume backup released its lock.
-    assert got["waited"]["bay_shop_data"] >= 2
+    # The deploy went on only after the volume backup released its lock. (Not
+    # the `elapsed` of the item: under load the module may start late, and
+    # that number shrinks; the order of the two clocks does not.)
     assert got["done"] >= removed_at[0]
