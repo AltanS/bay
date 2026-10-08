@@ -207,6 +207,14 @@ SASLprep), the stored verifier has another kind than the server's
 (Postgres 16 and later). In the last two cases a new `ALTER ROLE` would
 store a different form, so the deploy lets it.
 
+The password and the verifier never appear in the SQL text. The script sets
+them as psql variables (`\set bay_pw '...'`, with every `'` and every `\`
+doubled and a newline written as `\n`), and the SQL reads them as
+`:'bay_pw'`, which psql quotes as a literal. The statements are built by
+`format('... %I ... %L', ...)` and run by `\gexec`. There is no `DO` block,
+so no dollar-quoted body that a password with `$tag$` in it could end. Any
+password works, including a number in YAML: it is cast to a string first.
+
 Every task that sees a password or a verifier has `no_log: true`. The read
 step has it too. `-e provision_db_debug=true` turns it off for all three.
 

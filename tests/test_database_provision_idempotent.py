@@ -199,6 +199,40 @@ def _render_provision(bindings, secrets, observed="", predict=False):
     )
 
 
+def _psql_unquote(arg: str) -> str:
+    """Read one single-quoted psql backslash-command argument, as psql does.
+
+    psql's rules (psql docs, "Meta-Commands"): `''` is one quote; inside the
+    quotes `\\n`, `\\r`, `\\t`, `\\b`, `\\f` are C escapes and a backslash
+    before any other character quotes that character. Enough of it to check
+    what the template writes; the real-Postgres tests prove it against psql.
+    """
+    assert arg[0] == "'" and arg[-1] == "'", arg
+    out, i, body = [], 0, arg[1:-1]
+    escapes = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f"}
+    while i < len(body):
+        c = body[i]
+        if c == "'":
+            assert body[i + 1] == "'", f"a lone quote ends the argument: {arg!r}"
+            out.append("'")
+            i += 2
+        elif c == "\\":
+            nxt = body[i + 1]
+            out.append(escapes.get(nxt, nxt))
+            i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _psql_var(sql, name):
+    """The value the script gives psql variable `name` with `\\set`."""
+    lines = [line for line in sql.splitlines() if line.startswith(f"\\set {name} ")]
+    assert len(lines) == 1, lines
+    return _psql_unquote(lines[0].split(" ", 2)[2])
+
+
 def _guard_literal(sql, user="app"):
     """The verifier the CHANGED line compares the stored one with."""
     lines = sql.splitlines()
@@ -206,10 +240,9 @@ def _guard_literal(sql, user="app"):
         n for n, line in enumerate(lines) if "CHANGED: set password for role" in line
     )
     guard = lines[i + 1]
-    marker = "rolpassword IS DISTINCT FROM '"
     assert f"rolname = '{user}'" in guard
-    assert marker in guard, guard
-    return guard.split(marker, 1)[1].split("'", 1)[0]
+    assert "rolpassword IS DISTINCT FROM :'bay_ver'" in guard, guard
+    return _psql_var(sql, "bay_ver")
 
 
 def _box(password, salt="W22ZaJ0SNY7soEsUEjb6gQ=="):
@@ -227,10 +260,13 @@ def test_db_provision_idempotent_render_unchanged_password():
     stored, observed = _box(_OLD_PW)
     sql = _render_provision([_binding()], _secrets(_OLD_PW), observed)
     assert _guard_literal(sql) == stored
-    body = sql.split("DO $bay$", 1)[1].split("$bay$;", 1)[0]
-    alter = body.index("'ALTER ROLE '")
-    guard = body.rindex("IF ", 0, alter)
-    assert f"rolpassword IS DISTINCT FROM '{stored}'" in body[guard:alter]
+    alter = next(
+        n for n, line in enumerate(sql.splitlines())
+        if "format('ALTER ROLE %I WITH PASSWORD %L'" in line
+    )
+    guard = sql.splitlines()[alter + 1]
+    assert "rolpassword IS DISTINCT FROM :'bay_ver'" in guard
+    assert sql.splitlines()[alter + 2] == "\\gexec"
     # The read step's salt is reused; the keys come from the controller.
     assert stored.split("$")[1] == observed["roles"]["app"]["params"]
 
@@ -242,7 +278,8 @@ def test_db_provision_idempotent_render_changed_password():
     literal = _guard_literal(sql)
     assert literal != stored
     assert literal == bay_scram_verifier(_NEW_PW, 4096, "W22ZaJ0SNY7soEsUEjb6gQ==")
-    assert "'ALTER ROLE '" in sql
+    assert "format('ALTER ROLE %I WITH PASSWORD %L'" in sql
+    assert _psql_var(sql, "bay_pw") == _NEW_PW
     assert "CHANGED: set password for role" in sql
 
 
@@ -273,6 +310,10 @@ def test_db_provision_idempotent_render_predict_mode_is_read_only():
         assert word not in body, word
     # The password itself is not in the predict script, only the verifier.
     assert _NEW_PW.replace("'", "''") not in body
+    assert "bay_pw" not in body
+    assert _psql_var(body, "bay_ver") == bay_scram_verifier(
+        _NEW_PW, 4096, "W22ZaJ0SNY7soEsUEjb6gQ=="
+    )
     assert body.count("SELECT 'CHANGED:") == 3
 
 
@@ -603,3 +644,116 @@ def test_db_provision_idempotent_through_ansible(pg, tmp_path):
     assert s[provision] == "ok"
 
     pg.scalar("DROP DATABASE svc; DROP ROLE svc;")
+
+
+# ── hostile passwords (2.5.0 pre-release review) ─────────────────────────
+#
+# The password used to sit inside `DO $bay$ ... $bay$`; one containing
+# `$bay$` ended the body and the rest ran as SQL as the superuser. Now it is
+# a psql variable (`\set bay_pw '...'`) read as `:'bay_pw'`. Each of these
+# must set, log in, and compare equal on the next run. Placeholders only.
+
+_INJECTION = "x$bay$; CREATE ROLE pwned SUPERUSER; --"
+_HOSTILE_PASSWORDS = {
+    "quote": "bay-test-o'quote''",
+    "backslash": "bay-test-back\\slash\\",
+    "dollar_tag": "bay-test-$bay$-tag",
+    "dollar_dollar": "bay-test-$$-dd$$",
+    "colon": "bay-test-:bay_pw-:'bay_pw'",
+    "semicolon": "bay-test-; SELECT 1;",
+    "spaces": "bay test with  spaces ",
+    "leading_dash": "-bay-test-dash",
+    "int": 1234567890,
+    "injection": _INJECTION,
+    "newline": "bay-test-new\nline",
+}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [*_HOSTILE_PASSWORDS.values(), "cr\rlf\r\n", "tab\there", "\\n'\\'"],
+    ids=[*_HOSTILE_PASSWORDS, "crlf", "tab", "escape_lookalike"],
+)
+def test_psql_quoting_round_trips_in_render(value):
+    """The `\\set bay_pw` argument reads back as the exact password."""
+    sql = _render_provision([_binding()], _secrets(value))
+    assert _psql_var(sql, "bay_pw") == str(value)
+
+
+@_needs_runtime
+def test_psql_quoting_round_trips_through_psql(pg):
+    """psql itself reads every `\\set bay_pw` argument back unchanged."""
+    values = [
+        *map(str, _HOSTILE_PASSWORDS.values()),
+        "cr\rlf\r\n", "tab\there", "\\n'\\'",
+    ]
+    for value in values:
+        sql = _render_provision([_binding()], _secrets(value))
+        line = next(x for x in sql.splitlines() if x.startswith("\\set bay_pw "))
+        r = pg.psql(
+            f"\\set ON_ERROR_STOP on\n{line}\n"
+            "SELECT encode(convert_to(:'bay_pw', 'UTF8'), 'hex');\n",
+            "-At",
+        )
+        assert r.returncode == 0, r.stderr
+        assert bytes.fromhex(r.stdout.strip()).decode() == value
+
+
+@_needs_runtime
+@pytest.mark.parametrize("name", sorted(_HOSTILE_PASSWORDS))
+def test_db_provision_idempotent_hostile_password_postgres(pg, name):
+    password = _HOSTILE_PASSWORDS[name]
+    text = str(password)
+    pg.scalar("DROP DATABASE IF EXISTS app; DROP ROLE IF EXISTS app;")
+    try:
+        # Create path.
+        first = _deploy(pg, _secrets(password))
+        assert "CHANGED: create role app" in first
+        assert pg.login("app", text, "app")
+        assert "CHANGED" not in _deploy(pg, _secrets(password)), (
+            "an unchanged password was not compared equal"
+        )
+        # Alter path: from a plain password to this one, then steady.
+        assert _deploy(pg, _secrets(_OLD_PW)).strip() == "CHANGED: set password for role app"
+        assert pg.login("app", _OLD_PW, "app")
+        assert _deploy(pg, _secrets(password), predict=True).strip() == (
+            "CHANGED: set password for role app"
+        )
+        assert _deploy(pg, _secrets(password)).strip() == "CHANGED: set password for role app"
+        assert pg.login("app", text, "app")
+        assert not pg.login("app", _OLD_PW, "app")
+        assert "CHANGED" not in _deploy(pg, _secrets(password))
+        assert "CHANGED" not in _deploy(pg, _secrets(password), predict=True)
+        assert pg.scalar("SELECT count(*) FROM pg_roles WHERE rolname = 'pwned';") == "0"
+    finally:
+        pg.scalar("DROP DATABASE IF EXISTS app; DROP OWNED BY app; DROP ROLE IF EXISTS app;")
+
+
+# Against the old template this one did create a superuser: `$bay$` ended
+# the DO body, psql then ran the `\\set` meta-command, and the next line ran
+# as SQL.
+_META_INJECTION = "x$bay$ \\set ON_ERROR_STOP off\n; CREATE ROLE pwned SUPERUSER; --"
+
+
+@_needs_runtime
+@pytest.mark.parametrize("password", [_INJECTION, _META_INJECTION], ids=["sql", "meta"])
+def test_db_provision_dollar_tag_password_creates_no_role(pg, password):
+    """The review's proof of concept: it must be a password, nothing more."""
+    pg.scalar("DROP DATABASE IF EXISTS app; DROP ROLE IF EXISTS app; DROP ROLE IF EXISTS pwned;")
+    try:
+        for read in (True, False):  # with and without a verifier to compare
+            _deploy(pg, _secrets(password), read=read)
+            _deploy(pg, _secrets(_OLD_PW), read=read)
+            _deploy(pg, _secrets(password), read=read)
+            assert pg.scalar(
+                "SELECT count(*) FROM pg_roles WHERE rolname = 'pwned';"
+            ) == "0"
+            assert pg.scalar(
+                "SELECT rolsuper FROM pg_roles WHERE rolname = 'app';"
+            ) == "f"
+            assert pg.login("app", password, "app")
+    finally:
+        pg.scalar(
+            "DROP DATABASE IF EXISTS app; DROP OWNED BY app; DROP ROLE IF EXISTS app;"
+            " DROP ROLE IF EXISTS pwned;"
+        )

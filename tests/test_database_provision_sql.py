@@ -15,6 +15,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -130,9 +131,47 @@ def test_a_hostile_password_never_leaves_its_literal():
     payload = "pw'; DROP DATABASE x; --"
     sql = _render([_binding("app")], {_vault_key("app"): payload})
     # The quote is doubled at render time, so the raw payload is absent and
-    # the escaped form sits inside a literal that `format('%L')` then quotes.
+    # the escaped form sits inside the `\\set bay_pw` literal, never in SQL.
     assert payload not in _strip_comments(sql)
     _assert_only_inside_literals(sql, payload.replace("'", "''"))
+    holders = [
+        line for line in _strip_comments(sql).splitlines()
+        if payload.replace("'", "''") in line
+    ]
+    assert holders == ["\\set bay_pw 'pw''; DROP DATABASE x; --'"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "x$bay$; CREATE ROLE pwned SUPERUSER; --",
+        "a$$b",
+        "$bay$",
+        "back\\slash",
+        "multi\nline",
+    ],
+)
+def test_no_secret_is_inside_a_dollar_body(payload):
+    """No DO block, no dollar quoting: a password with `$bay$` cannot end one.
+
+    The password only ever sits on the `\\set bay_pw` line, where psql's own
+    quoting holds it; SQL reads it as `:'bay_pw'`.
+    """
+    sql = _strip_comments(_render([_binding("app")], {_vault_key("app"): payload}))
+    assert "DO " not in sql and "$bay$" not in sql.replace(_psql_quote(payload), "")
+    lines = [line for line in sql.splitlines() if line.startswith("\\set bay_pw ")]
+    assert lines == [f"\\set bay_pw {_psql_quote(payload)}"]
+    rest = sql.replace(lines[0], "")
+    for piece in ("CREATE ROLE pwned", "a$$b", "back", "multi"):
+        assert piece not in rest
+    assert "PASSWORD %L', 'app', :'bay_pw')" in sql
+
+
+def _psql_quote(value: str) -> str:
+    return "'" + (
+        value.replace("\\", "\\\\").replace("'", "''")
+        .replace("\n", "\\n").replace("\r", "\\r")
+    ) + "'"
 
 
 def test_a_single_quote_is_doubled_not_dropped():
@@ -149,14 +188,21 @@ def test_idempotence_guards_replaced_the_exists_check_tasks():
 
 
 def test_create_database_runs_outside_a_do_block():
-    """CREATE DATABASE cannot run in a transaction, so it must use \\gexec."""
+    """CREATE DATABASE cannot run in a transaction, so it must use \\gexec.
+
+    Since 2.5.0 every other computed statement does too: there is no `DO`
+    block left, so no dollar-quoted body a value could end early.
+    """
     sql = _render([_binding("app")], {_vault_key("app"): "pw"})
-    create = sql.index("'CREATE DATABASE '")
+    create = sql.index("format('CREATE DATABASE %I'")
     tail = sql[create:]
     assert tail.split("\n\n")[0].rstrip().endswith("\\gexec")
-    # ...and every other statement does go through format() in a DO block.
-    assert "DO $bay$" in sql
-    assert sql.count("format('%I'") >= 3
+    assert sql.index("BEGIN;") > create, "CREATE DATABASE stays outside the transaction"
+    body = _strip_comments(sql)
+    assert "DO $" not in body and "DO\n" not in body
+    assert "$bay$" not in body
+    assert body.count("format('") >= 6
+    assert body.count("\\gexec") >= 5
 
 
 def test_every_identifier_goes_through_format_i():
@@ -168,7 +214,7 @@ def test_every_identifier_goes_through_format_i():
                  "GRANT ALL PRIVILEGES ON DATABASE "):
         assert f"{stmt}appdb" not in sql
         assert f"{stmt}appuser" not in sql
-    assert "format('%L'" in sql, "the password must be server-quoted too"
+    assert "PASSWORD %L'" in sql, "the password must be server-quoted too"
 
 
 def test_changed_marker_is_emitted_only_for_real_work():

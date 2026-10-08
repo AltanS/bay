@@ -7,49 +7,60 @@
 -- The accessory name is deliberately NOT interpolated into this comment: a
 -- name containing a newline would end the comment and the rest would be SQL.
 --
--- Quoting contract — read before editing.
+-- Quoting contract, read before editing.
 --
 --   * IDENTIFIERS are never interpolated as identifiers. Every name reaches
 --     the server as a SQL *string literal* (with `'` doubled at render time)
---     and is turned into an identifier by `format('%I', ...)` — one call per
---     name, concatenated into the statement — or by psql's own `:"var"`
---     interpolation for `\connect`.
+--     and is turned into an identifier by `format('%I', ...)`, or by psql's
+--     own `:"var"` interpolation for `\connect`.
 --     That is server-side quoting: the last gate, after the schema's
 --     `^[a-z_][a-z0-9_]{0,62}$` pattern and validate.py's identifier check.
---   * PASSWORDS use `format('%L', ...)`, so the value is quoted by the
---     server too. The render-time `'`-doubling stays as belt and braces.
---   * `CREATE DATABASE` cannot run inside a transaction block, and therefore
---     not inside `DO`. It is emitted by a guarded `SELECT ... \gexec`: the
---     SELECT returns zero rows when the database already exists, so `\gexec`
---     executes nothing. That is why this one statement uses `\gexec` and
---     every other uses `DO`.
+--   * SECRETS (the password and the verifier computed from it) never appear
+--     in SQL text at all. Each is set as a psql variable with `\set`, quoted
+--     for psql's backslash-command parser (macro `psql_lit`: every `\` and
+--     every `'` doubled, a newline written as `\n`, a carriage return as
+--     `\r`). SQL reads them as `:'bay_pw'` and `:'bay_ver'`, which psql sends
+--     as properly escaped literals. The password then reaches the statement
+--     through `format('%L', ...)`, quoted by the server.
+--   * NO DOLLAR QUOTING and no `DO` block. A value inside `$tag$ ... $tag$`
+--     that contains the tag ends the body early, and the rest runs as SQL as
+--     the superuser. psql also does not interpolate variables inside a
+--     dollar body. So every statement that needs a computed name or a
+--     secret is built by a guarded `SELECT format(...)` and run by `\gexec`:
+--     the SELECT returns zero rows when there is nothing to do, so `\gexec`
+--     executes nothing. `\gexec` sends each value as it is; it does not
+--     interpolate psql variables in it.
 --
 -- Change reporting: every branch that will actually mutate something first
--- SELECTs a `CHANGED: ...` line. `\pset tuples_only` + `psql -q` means
--- nothing else reaches stdout, so the calling task's `changed_when` is
--- simply "did the script say CHANGED".
+-- SELECTs a `CHANGED: ...` line with the same guard as the statement it
+-- reports. `\pset tuples_only` + `psql -q` means nothing else reaches stdout,
+-- so the calling task's `changed_when` is simply "did the script say CHANGED".
+-- The role part of each binding runs in one transaction, so the report and
+-- the statement see the same state.
 --
 -- Passwords: the read step (read-db-roles.sql.j2) brings back each role's
 -- `<iter>:<salt>` and verifier kind, never the keys. The controller computes
 -- the verifier the password in the encrypted secrets file would have with
--- that salt (`bay_db_password_verifier`) and renders it here as a literal.
+-- that salt (`bay_db_password_verifier`) and sets it as `bay_ver`.
 -- The server compares: `ALTER ROLE ... PASSWORD` runs, and the CHANGED line
 -- prints, only when the stored verifier IS DISTINCT FROM the computed one.
 -- With no computed verifier (no read result, a new role, a password that is
 -- not pure ASCII, an unknown form) the guard is the old "role exists", so
--- the password is set on every run exactly as before.
+-- the password is set on every run exactly as before. The password is cast
+-- to a string first, so a YAML int password is compared too.
 --
 -- Predict mode (`_db_predict`, check mode only): the session is read-only
 -- and the script is the CHANGED lines and nothing else. They are plain
 -- SELECTs with the same guards, so `--check` reports what a run would do.
+-- The password itself is not in the predict script, only the verifier.
 
 \set ON_ERROR_STOP on
 \pset tuples_only on
 \pset format unaligned
 
 {% macro lit(value) %}'{{ value | string | replace("'", "''") }}'{% endmacro %}
-{% macro pw(user) %}{{ lit(secrets[(user | upper | replace('-', '_')) ~ '_POSTGRES_PASSWORD']) }}{% endmacro %}
-{% macro pw_differs(user, verifier) %}{% if verifier %}EXISTS (SELECT 1 FROM pg_authid WHERE rolname = {{ lit(user) }} AND rolpassword IS DISTINCT FROM {{ lit(verifier) }}){% else %}EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(user) }}){% endif %}{% endmacro %}
+{% macro psql_lit(value) %}'{{ value | string | replace('\\', '\\\\') | replace("'", "''") | replace('\n', '\\n') | replace('\r', '\\r') }}'{% endmacro %}
+{% macro pw_differs(user, verifier) %}{% if verifier %}EXISTS (SELECT 1 FROM pg_authid WHERE rolname = {{ lit(user) }} AND rolpassword IS DISTINCT FROM :'bay_ver'){% else %}EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(user) }}){% endif %}{% endmacro %}
 {% set _predict = _db_predict | default(false) %}
 {% if _predict %}
 SET default_transaction_read_only = on;
@@ -57,19 +68,27 @@ SET default_transaction_read_only = on;
 {% for _b in _acc_bindings %}
 {% set _db = _b.value.database.name | default(_b.key) %}
 {% set _user = _b.value.database.user | default(_b.key) %}
-{% set _verifier = secrets[(_user | upper | replace('-', '_')) ~ '_POSTGRES_PASSWORD'] | bay_db_password_verifier(_user, _acc_observed | default('')) %}
+{% set _password = secrets[(_user | upper | replace('-', '_')) ~ '_POSTGRES_PASSWORD'] | string %}
+{% set _verifier = _password | bay_db_password_verifier(_user, _acc_observed | default('')) %}
 
 -- ── database ─────────────────────────────────────────────────────────
 SELECT 'CHANGED: create database ' || {{ lit(_db) }}
  WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = {{ lit(_db) }});
 
 {% if not _predict %}
-SELECT 'CREATE DATABASE ' || format('%I', {{ lit(_db) }})
+SELECT format('CREATE DATABASE %I', {{ lit(_db) }})
  WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = {{ lit(_db) }})
 \gexec
 {% endif %}
 
 -- ── role ─────────────────────────────────────────────────────────────
+{% if _verifier %}
+\set bay_ver {{ psql_lit(_verifier) }}
+{% endif %}
+{% if not _predict %}
+\set bay_pw {{ psql_lit(_password) }}
+BEGIN;
+{% endif %}
 SELECT 'CHANGED: create role ' || {{ lit(_user) }}
  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }});
 
@@ -80,21 +99,23 @@ SELECT 'CHANGED: set password for role ' || {{ lit(_user) }}
  WHERE {{ pw_differs(_user, _verifier) }};
 {% if not _predict %}
 
-DO $bay$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }}) THEN
-    IF {{ pw_differs(_user, _verifier) }} THEN
-      EXECUTE 'ALTER ROLE ' || format('%I', {{ lit(_user) }})
-           || ' WITH PASSWORD ' || format('%L', {{ pw(_user) }});
-    END IF;
-  ELSE
-    EXECUTE 'CREATE ROLE ' || format('%I', {{ lit(_user) }})
-         || ' WITH LOGIN PASSWORD ' || format('%L', {{ pw(_user) }});
-  END IF;
-  EXECUTE 'GRANT ALL PRIVILEGES ON DATABASE ' || format('%I', {{ lit(_db) }})
-       || ' TO ' || format('%I', {{ lit(_user) }});
-END
-$bay$;
+-- The ALTER comes before the CREATE: on a new role its guard is false, so a
+-- role is either altered or created, never both.
+SELECT format('ALTER ROLE %I WITH PASSWORD %L', {{ lit(_user) }}, :'bay_pw')
+ WHERE {{ pw_differs(_user, _verifier) }}
+\gexec
+
+SELECT format('CREATE ROLE %I WITH LOGIN PASSWORD %L', {{ lit(_user) }}, :'bay_pw')
+ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }})
+\gexec
+
+SELECT format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', {{ lit(_db) }}, {{ lit(_user) }})
+\gexec
+COMMIT;
+\unset bay_pw
+{% endif %}
+{% if _verifier %}
+\unset bay_ver
 {% endif %}
 {% endfor %}
 {% if not _predict %}
@@ -102,7 +123,7 @@ $bay$;
 -- ── per-database schema grants (PG15+) ───────────────────────────────
 -- These are database-local, so each one needs its own connection. psql's
 -- `:"var"` interpolation quotes the value as an identifier, which is the same
--- guarantee `format('%I', ...)` gives inside SQL — `\connect` is a psql
+-- guarantee `format('%I', ...)` gives inside SQL. `\connect` is a psql
 -- meta-command, so `format()` cannot be used there.
 {% for _b in _acc_bindings %}
 {% set _db = _b.value.database.name | default(_b.key) %}
@@ -111,14 +132,11 @@ $bay$;
 SELECT {{ lit(_db) }} AS bay_db \gset
 \connect :"bay_db"
 
-DO $bay$
-BEGIN
-  EXECUTE 'GRANT ALL ON SCHEMA public TO ' || format('%I', {{ lit(_user) }});
-  EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO '
-       || format('%I', {{ lit(_user) }});
-  EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO '
-       || format('%I', {{ lit(_user) }});
-END
-$bay$;
+SELECT format('GRANT ALL ON SCHEMA public TO %I', {{ lit(_user) }})
+UNION ALL
+SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO %I', {{ lit(_user) }})
+UNION ALL
+SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO %I', {{ lit(_user) }})
+\gexec
 {% endfor %}
 {% endif %}
