@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ from test_rebuild_config import (  # noqa: E402
     _local_service,
     _remote_service_with_token,
     _render_rebuild_sh,
+    _render_webhook_config,
 )
 
 ROOT = _TESTS_DIR.parent
@@ -190,6 +192,8 @@ CB_MAX_FAILURES=3
 SERVICE="svc"
 HOSTNAME="testhost"
 SHA="0123456789ab"
+SHARED_TOML_PATHS=()
+CHECKOUT_SERVICES=()
 RECONCILE_PYTHONPATH={str(shipped)!r}
 FAILED_COMMITS_DIR={str(tmp_path / "failed-commits")!r}
 docker() {{ printf '%s\\n' "$*" >> {str(docker_log)!r}; }}
@@ -212,6 +216,8 @@ format_timestamp() {{ echo "Jan 01, 00:00 UTC"; }}
             _extract_helper(rendered, "_config_only_push"),
             _extract_helper(rendered, "_forget_failed_build"),
             _extract_helper(rendered, "_clear_failed_commit"),
+            _extract_helper(rendered, "_seen_head"),
+            _extract_helper(rendered, "_mark_seen"),
         ]
     )
     proc = subprocess.run(
@@ -581,7 +587,9 @@ cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
     assert remote < remote_sh.index('HOLD_REASON=$(_hold_reason "${REPO_DIR}")', remote)
     assert remote < remote_sh.index("_remote_buildx() {", remote)
     # Both paths take the previous commit from the label, else from the
-    # checkout's HEAD read before the fetch (remote) or the pull (local).
+    # checkout's HEAD read before the fetch (remote) or the pull (local: as
+    # this service last saw the shared checkout, _seen_head; the mark moves
+    # right after the pull).
     prev = 'PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")'
     head = "_PREV_HEAD=$(git rev-parse --short=12 HEAD 2>/dev/null || true)"
     fetch = remote_sh.index("git reset --hard FETCH_HEAD")
@@ -589,7 +597,9 @@ cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
     start = local_sh.index("# ── Local strategy")
     pull = local_sh.index('eval "${PULL_CMD}"', start)
     assert local_sh.count(prev) == 2, "the remote path and the local path"
-    assert start < local_sh.index(head, start) < pull < local_sh.index(prev, start)
+    seen = local_sh.index('_PREV_HEAD=$(_seen_head "${REPO_DIR}")', start)
+    mark = local_sh.index('_mark_seen "${REPO_DIR}"', pull)
+    assert start < seen < pull < mark < local_sh.index(prev, start)
 
     # A directory mount counts for every file under it.
     (repo / "conf" / "extra").mkdir()
@@ -1179,3 +1189,294 @@ def test_no_previous_commit_and_no_latest_is_a_normal_build(
         local_sh, _decide(repo, "", pre_head="deadbeef0000", fake=fake), tmp_path, env=env
     )
     assert "config-only" not in proc.stdout and hold in proc.stdout
+
+
+# ── two projects, one app repo (M119/02, gap 30) ───────────────────────
+
+SHARED_REPO = "git@github.com:acmecorp/shop.git"
+
+#: Two projects in one repo, each with its own bay.toml under bay/.
+WEB_TOML = """\
+name = "web"
+fleet = "demo"
+port = 3000
+
+[build]
+dockerfile = "apps/web/Dockerfile"
+
+[deploy.production]
+domain = "web.example.com"
+"""
+ADMIN_TOML = WEB_TOML.replace('"web"', '"admin"').replace("apps/web", "apps/admin").replace(
+    "web.example.com", "admin.example.com"
+)
+
+#: The config keys of one service, as its block of the rendered rebuild.sh sets them.
+_CONFIG_KEYS = (
+    "BUILD_STRATEGY", "IMAGE_NAME", "IMAGE_REPO", "TRACK", "FROZEN", "BAY_TOML_PATH",
+    "PINNED_TOML_HASH", "PINNED_BUILD_HASH", "BAY_TOML_FILES", "SHARED_TOML_PATHS",
+    "CHECKOUT_SERVICES",
+)
+
+
+def _shared_services(strategy: str) -> dict:
+    """web and admin build from one repo and branch; two controls do not share it."""
+
+    def build(path: str, text: str, **extra: object) -> dict:
+        return {
+            "repo": SHARED_REPO,
+            "branch": "main",
+            "strategy": strategy,
+            "bay_toml_path": path,
+            "bay_toml_hash": tomlhash.canonical_hash(text.encode()),
+            "bay_build_hash": tomlhash.section_hash(text.encode(), "build"),
+            **extra,
+        }
+
+    def svc(name: str, b: dict) -> dict:
+        out = {
+            "build": b, "access": "public", "domains": [f"{name}.example.com"],
+            "ports": {"internal": 3000},
+        }
+        if strategy == "remote":
+            out["image"] = f"zot.example.com/demo/{name}:latest"
+        return out
+
+    return {
+        "web": svc("web", build("bay/web.toml", WEB_TOML)),
+        "admin": svc(
+            "admin", build("bay/admin.toml", ADMIN_TOML, bay_toml_files=["apps/admin/conf"])
+        ),
+        # The same repo on another branch: another checkout, another history.
+        "web-next": svc("web-next", {**build("bay/web-next.toml", WEB_TOML), "branch": "next"}),
+        # Another repo with the same toml path.
+        "blog": svc(
+            "blog",
+            {**build("bay/web.toml", WEB_TOML), "repo": "git@github.com:acmecorp/blog.git"},
+        ),
+    }
+
+
+def _service_config(rendered: str, name: str) -> str:
+    """The config lines of ``name``'s block in the rendered script, ready to run."""
+    start = rendered.index(f"if [[ \"${{SERVICE}}\" == '{name}' ]]; then")
+    end = rendered.index("if [[ \"${SERVICE}\" == '", start + 10)
+    keys = "|".join(_CONFIG_KEYS)
+    lines = re.findall(rf"^  (?:{keys})=.*$", rendered[start:end], flags=re.MULTILINE)
+    assert len(lines) == len(_CONFIG_KEYS), lines
+    return "\n".join(line.strip() for line in lines)
+
+
+def _shared_repo(tmp_path: Path) -> tuple[Path, str]:
+    """The app repo (the "remote") with both projects. Returns it and its first commit."""
+    origin = tmp_path / "origin"
+    (origin / "apps" / "web").mkdir(parents=True)
+    (origin / "apps" / "admin" / "conf").mkdir(parents=True)
+    (origin / "bay").mkdir()
+    _git(tmp_path, "init", "-q", "-b", "main", str(origin))
+    (origin / "apps" / "web" / "main.js").write_text("web(1)\n")
+    (origin / "apps" / "admin" / "main.js").write_text("admin(1)\n")
+    (origin / "apps" / "admin" / "conf" / "site.yaml").write_text("site: 1\n")
+    (origin / "bay" / "web.toml").write_text(WEB_TOML)
+    (origin / "bay" / "admin.toml").write_text(ADMIN_TOML)
+    _git(origin, "add", "-A")
+    _git(origin, "commit", "-q", "-m", "app")
+    return origin, _git(origin, "rev-parse", "--short=12", "HEAD")
+
+
+def _registry_docker(log: Path, refs: Path) -> str:
+    """A fake docker: no container, unlabeled; ``refs`` lists the images that exist.
+
+    ``docker tag`` and ``imagetools create`` add their targets to ``refs``.
+    """
+    return f"""
+docker() {{
+  printf '%s\\n' "$*" >> {str(log)!r}
+  local ref="${{@: -1}}"
+  case "$1 $2" in
+    "inspect --format") return 1 ;;
+    "image inspect"|"manifest inspect") grep -qxF -- "${{ref}}" {str(refs)!r}; return ;;
+    "tag "*) printf '%s\\n' "$3" >> {str(refs)!r}; return 0 ;;
+    "buildx imagetools")
+      [[ "$3" == "create" ]] || return 1
+      shift 3
+      while [[ "$1" == "-t" ]]; do printf '%s\\n' "$2" >> {str(refs)!r}; shift 2; done
+      return 0 ;;
+  esac
+  return 0
+}}"""
+
+
+def _run_push(
+    rendered: str, name: str, checkout: Path, tmp_path: Path, *, extra: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """One run of ``name`` for a push, as rebuild.sh does it: the config of the
+    rendered block, the strategy's fetch or pull, the config-only decision site."""
+    git_env = "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1"
+    log, refs = tmp_path / "docker.log", tmp_path / "refs"
+    script = f"""
+{git_env}
+{_registry_docker(log, refs)}
+SERVICE={name!r}
+{_service_config(rendered, name)}
+{extra}
+cd {str(checkout)!r}
+if [[ "${{BUILD_STRATEGY}}" == "remote" ]]; then
+  _PREV_HEAD=$(git rev-parse --short=12 HEAD 2>/dev/null || true)
+  git fetch -q origin main && git reset -q --hard FETCH_HEAD
+  REPO="${{IMAGE_REPO}}"
+else
+  _PREV_HEAD=$(_seen_head "${{PWD}}")
+  git pull -q --ff-only origin main
+  _mark_seen "${{PWD}}"
+  REPO="${{IMAGE_NAME}}"
+fi
+SHA=$(git rev-parse --short=12 HEAD)
+PREV_COMMIT=$(_previous_commit "${{SERVICE}}" "${{_PREV_HEAD}}")
+if _config_only "${{PWD}}" "${{PREV_COMMIT}}"; then
+  _config_only_push "${{REPO}}" "${{PREV_COMMIT}}" \\
+    || _log "config-only push ${{SHA}}: no image known to hold ${{PREV_COMMIT:0:12}}, building"
+fi
+printf 'BUILD %s\\n' "${{SERVICE}}"
+"""
+    proc, _, alerts = _harness(rendered, script, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert alerts == [], "a config-only push sends no alert"
+    return proc
+
+
+def test_config_only_push_tags_every_shared_repo_image(tmp_path: Path) -> None:
+    """Gap 30: a push that changes only one project's bay.toml in a repo two projects
+    build from tags the image of BOTH with the pushed commit, local and remote: no
+    build, no recreate. The case that showed it: the adopt commit of the second project."""
+    local_sh = _render_rebuild_sh(
+        _shared_services("local"), ["web", "admin", "web-next", "blog"],
+        git_deploy_services=["web", "admin", "web-next", "blog"],
+    )
+    remote_sh = _render_rebuild_sh(
+        _shared_services("remote"), ["web", "admin", "web-next", "blog"],
+        git_deploy_services=["web", "admin", "web-next", "blog"],
+        git_deploy_build_strategy="remote",
+    )
+
+    # ── what the render gives each service ──
+    for rendered in (local_sh, remote_sh):
+        assert 'SHARED_TOML_PATHS=("bay/admin.toml")' in _service_config(rendered, "web")
+        assert 'SHARED_TOML_PATHS=("bay/web.toml")' in _service_config(rendered, "admin")
+        # Another branch or another repo shares nothing, whatever its toml path.
+        assert "SHARED_TOML_PATHS=()" in _service_config(rendered, "web-next")
+        assert "SHARED_TOML_PATHS=()" in _service_config(rendered, "blog")
+    # Local builds share one checkout per repo and branch; remote ones have one each.
+    assert 'CHECKOUT_SERVICES=("web" "admin")' in _service_config(local_sh, "web")
+    assert 'CHECKOUT_SERVICES=("web-next")' in _service_config(local_sh, "web-next")
+    assert "CHECKOUT_SERVICES=()" in _service_config(remote_sh, "web")
+    # The local path reads this service's mark before the pull and moves it after.
+    pull = local_sh.index('eval "${PULL_CMD}"', local_sh.index("# ── Local strategy"))
+    assert local_sh.rindex('_PREV_HEAD=$(_seen_head "${REPO_DIR}")', 0, pull) < pull
+    assert local_sh.index('_mark_seen "${REPO_DIR}"', pull) < local_sh.index("_config_only \"", pull)
+    # A project whose bay.toml lives in the fleet has no config-only rule: nothing shared.
+    in_fleet = _shared_services("local")
+    for key in ("bay_toml_path", "bay_toml_hash", "bay_build_hash"):
+        del in_fleet["web"]["build"][key]
+    plain = _render_rebuild_sh(in_fleet, ["web", "admin"], git_deploy_services=["web", "admin"])
+    assert "SHARED_TOML_PATHS=()" in _service_config(plain, "web")
+    assert 'SHARED_TOML_PATHS=()' in _service_config(plain, "admin")
+
+    # ── the receiver passes the sibling's bay.toml push for both ──
+    webhook_dir = str(ROOT / "roles" / "git_deploy" / "files" / "webhook")
+    if webhook_dir not in sys.path:
+        sys.path.insert(0, webhook_dir)
+    from app import push_filter
+
+    config = _render_webhook_config(_shared_services("remote"))
+    assert config["web"]["shared_toml_paths"] == ["bay/admin.toml"]
+    assert config["admin"]["shared_toml_paths"] == ["bay/web.toml"]
+    assert "shared_toml_paths" not in config["blog"]
+    assert "shared_toml_paths" not in config["web-next"]
+    watched = {"paths": {"include": ["apps/web/**"]}}
+    assert push_filter({"bay/admin.toml"}, {**config["web"], **watched}) == (
+        True, "config file changed: bay/admin.toml"
+    )
+    # Before 2.4.0 (no shared paths) `watch` dropped it: the second adopt commit.
+    bare = {k: v for k, v in config["web"].items() if k != "shared_toml_paths"}
+    assert push_filter({"bay/admin.toml"}, {**bare, **watched})[0] is False
+    # Another project's mounted file is no config of web: `watch` decides.
+    assert push_filter({"apps/admin/conf/site.yaml"}, {**config["web"], **watched})[0] is False
+
+    # ── local: one shared checkout, containers without a com.bay.commit label ──
+    origin, first = _shared_repo(tmp_path)
+    checkout = tmp_path / "checkout"
+    _git(tmp_path, "clone", "-q", str(origin), str(checkout))
+    refs = tmp_path / "refs"
+    refs.write_text(f"bay-teststack-web:{first}\nbay-teststack-admin:{first}\n")
+    # The push: the adopt commit of admin, its bay.toml only (no build change).
+    pushed = _commit(origin, {"bay/admin.toml": ADMIN_TOML.replace("admin.example", "adm.example")})
+
+    proc = _run_push(local_sh, "web", checkout, tmp_path)
+    assert f"config-only push {pushed}: run bay up" in proc.stdout and "BUILD" not in proc.stdout
+    # web ran first and pulled the shared checkout; admin still finds its own
+    # previous commit (its mark), not the HEAD web's pull left.
+    proc = _run_push(local_sh, "admin", checkout, tmp_path)
+    assert f"config-only push {pushed}: run bay up" in proc.stdout and "BUILD" not in proc.stdout
+    calls = _calls(tmp_path)
+    assert [c for c in calls if c.startswith("tag ")] == [
+        f"tag bay-teststack-web:{first} bay-teststack-web:{pushed}",
+        f"tag bay-teststack-admin:{first} bay-teststack-admin:{pushed}",
+    ]
+    assert not any("build" in c or ":latest" in c for c in calls), "no build, no :latest move"
+    marks = _git(checkout, "for-each-ref", "--format=%(refname) %(objectname:short=12)", "refs/bay")
+    assert marks.splitlines() == [f"refs/bay/seen/admin {pushed}", f"refs/bay/seen/web {pushed}"]
+
+    # Controls. Without the mark, admin reads the HEAD web's pull left: it sees
+    # no change and builds. Without the shared path, web builds.
+    nxt = _commit(origin, {"bay/admin.toml": ADMIN_TOML})
+    _run_push(local_sh, "web", checkout, tmp_path)
+    _git(checkout, "update-ref", "-d", "refs/bay/seen/admin")
+    proc = _run_push(local_sh, "admin", checkout, tmp_path)
+    assert "BUILD admin" in proc.stdout and "config-only" not in proc.stdout
+    nxt = _commit(origin, {"bay/admin.toml": ADMIN_TOML.replace("admin.example", "a.example")})
+    proc = _run_push(local_sh, "web", checkout, tmp_path, extra="SHARED_TOML_PATHS=()")
+    assert "BUILD web" in proc.stdout and f"bay-teststack-web:{nxt}" not in refs.read_text()
+    _calls(tmp_path)
+
+    # ── remote: one checkout per service on the build server, tags in the registry ──
+    tmp_r = tmp_path / "remote"
+    tmp_r.mkdir()
+    origin, first = _shared_repo(tmp_r)
+    for name in ("web", "admin"):
+        _git(tmp_r, "clone", "-q", str(origin), str(tmp_r / name))
+    refs = tmp_r / "refs"
+    refs.write_text(
+        f"zot.example.com/demo/web:{first}\nzot.example.com/demo/admin:{first}\n"
+    )
+    pushed = _commit(origin, {"bay/admin.toml": ADMIN_TOML.replace("admin.example", "adm.example")})
+    for name in ("web", "admin"):
+        proc = _run_push(remote_sh, name, tmp_r / name, tmp_r)
+        assert f"config-only push {pushed}: run bay up" in proc.stdout, proc.stdout
+    calls = _calls(tmp_r)
+    assert [c for c in calls if "imagetools" in c] == [
+        f"buildx imagetools create -t zot.example.com/demo/web:{pushed} "
+        f"zot.example.com/demo/web:{first}",
+        f"buildx imagetools create -t zot.example.com/demo/admin:{pushed} "
+        f"zot.example.com/demo/admin:{first}",
+    ]
+    assert not [c for c in calls if c.startswith("tag ")], "the build server tags the registry"
+
+    # A [build] change of admin: web still only gets the tag; admin builds.
+    admin_build = ADMIN_TOML.replace("apps/admin/Dockerfile", "apps/admin/Dockerfile.new")
+    built = _commit(origin, {"bay/admin.toml": admin_build})
+    proc = _run_push(remote_sh, "web", tmp_r / "web", tmp_r)
+    assert f"config-only push {built}: run bay up" in proc.stdout
+    proc = _run_push(remote_sh, "admin", tmp_r / "admin", tmp_r)
+    assert "BUILD admin" in proc.stdout and "config-only" not in proc.stdout
+    # admin's mounted file: config only for admin, a build input for web (it builds).
+    mounted = _commit(origin, {"apps/admin/conf/site.yaml": "site: 2\n"})
+    proc = _run_push(remote_sh, "web", tmp_r / "web", tmp_r)
+    assert "BUILD web" in proc.stdout and "config-only" not in proc.stdout
+    # (bay up has pinned the [build] change and the build of it is in the registry.)
+    refs.write_text(refs.read_text() + f"zot.example.com/demo/admin:{built}\n")
+    repinned = tomlhash.section_hash(admin_build.encode(), "build")
+    proc = _run_push(
+        remote_sh, "admin", tmp_r / "admin", tmp_r, extra=f"PINNED_BUILD_HASH={repinned!r}"
+    )
+    assert f"config-only push {mounted}: run bay up" in proc.stdout

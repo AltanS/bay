@@ -439,7 +439,7 @@ lockfile (see Behavior).
 | `context` | string | `.` | Build context, relative to the repo root. |
 | `strategy` | `local`, `remote`, `registry` | fleet setting | Where the image is built. |
 | `memory` | size | fleet setting | Build memory cap. (validated, not deployed yet) when it differs from the fleet's build memory. |
-| `watch` | list of globs | everything | A push that touches none of these files does not rebuild. This filter runs first, before the config-only and hold checks (see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push)). Bay passes a push that changes `bay.toml` or a file its mounts read, whatever `watch` says, so you do not list them here (see "Config-only push" under `[[mounts]]` below). |
+| `watch` | list of globs | everything | A push that touches none of these files does not rebuild. This filter runs first, before the config-only and hold checks (see [build-pipeline.md](build-pipeline.md#order-of-the-guards-on-a-push)). Bay passes a push that changes `bay.toml` or a file its mounts read, or the `bay.toml` of another project that builds from the same repo, whatever `watch` says, so you do not list them here (see "Config-only push" under `[[mounts]]` below). |
 | `ignore` | list of globs | none | Files that never trigger a rebuild. Applied after `watch`. |
 | `[build.args]` | table of strings | none | Build arguments. |
 | `[build.secrets]` | table | none | BuildKit secret id = fleet secret name. |
@@ -544,6 +544,11 @@ to that commit finds its image, also with `track = "pin"`. Run `bay up` to deplo
   one of them, whatever `watch` and `ignore` say, and logs `config file changed: <files>`. So the
   push always reaches the config-only rule and gets its tag. A project in the fleet has no such
   paths: its `bay.toml` is not in the app repo.
+- **Two projects in one repo.** When two projects build from the same repo and branch, each with
+  its own `bay.toml`, a push that changes only one `bay.toml` is config only for both: `bay up`
+  pins both at the repo's head, so the image of each gets the pushed commit's tag. The receiver
+  passes that push for both, whatever their `watch` says. Only the other project's `bay.toml`
+  counts, not the files its mounts read.
 
 ### `[backup]`
 

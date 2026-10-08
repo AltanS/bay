@@ -226,6 +226,12 @@ def config_files_changed(changed_files: set[str], svc_config: dict | None) -> li
     must reach rebuild.sh, where the config-only rule and the hold guard decide
     what it does. The `watch` filter does not know them, so this check runs
     before it.
+
+    `shared_toml_paths` are the bay.toml files of the other projects that
+    build from the same repo and branch (bay_filters `bay_shared_toml_paths`).
+    `bay up` pins every project of the repo at its head, so a push of one of
+    them must reach rebuild.sh for this project too: its config-only rule
+    gives this image the new commit tag.
     """
     if not svc_config or not changed_files:
         return []
@@ -233,9 +239,10 @@ def config_files_changed(changed_files: set[str], svc_config: dict | None) -> li
     toml_path = svc_config.get("bay_toml_path")
     if isinstance(toml_path, str) and toml_path.strip("/"):
         paths.append(toml_path.strip("/"))
-    for entry in svc_config.get("bay_toml_files") or []:
-        if isinstance(entry, str) and entry.strip("/"):
-            paths.append(entry.strip("/"))
+    for key in ("bay_toml_files", "shared_toml_paths"):
+        for entry in svc_config.get(key) or []:
+            if isinstance(entry, str) and entry.strip("/"):
+                paths.append(entry.strip("/"))
     if not paths:
         return []
     return sorted(

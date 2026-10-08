@@ -928,6 +928,13 @@ takes the commit that the box's checkout was at before the pull, and tags
 `:latest` when that image holds it. The next `bay plan` shows zero steps. Any
 other unpushed commit is still refused.
 
+Two projects that build from one app repo (two `bay.toml` files) are adopted one after the
+other, and each adopt commit is pushed after its `bay up`. The second adopt commit changes only
+the second `bay.toml`. Since 2.4.0 that push is config only for the first project too, so both
+images get its commit tag, and the next `bay up`, which pins both projects at that commit,
+finds the code of each. Before 2.4.0 the push gave the first project no tag, and `bay up` kept
+its code (`code: kept <container> (<image>:<commit12> is not on this box)`).
+
 Bay refuses, before it changes anything, when:
 
 - the fleet has no `projects/<name>/bay.toml` (the project is not in the

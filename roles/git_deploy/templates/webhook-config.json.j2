@@ -27,6 +27,15 @@
 {% if build.bay_toml_files is defined and build.bay_toml_files %}
 {% set _ = entry.update({"bay_toml_files": build.bay_toml_files | list}) %}
 {% endif %}
+{#
+  The bay.toml files of the other projects that build from the same repo and
+  branch: their push is config only for this project too (rebuild.sh
+  `_config_only`), so the receiver passes it as well.
+#}
+{% set _shared = services | bay_shared_toml_paths(svc_name) %}
+{% if _shared %}
+{% set _ = entry.update({"shared_toml_paths": _shared}) %}
+{% endif %}
 {% set _ = entry.update({"regions": svc.regions | default([])}) %}
 {% set _ = entry.update({"peer_urls": git_deploy_peer_webhook_urls | default({})}) %}
 {% set _ = entry.update({"strategy": build.strategy | default(git_deploy_build_strategy | default('local'))}) %}

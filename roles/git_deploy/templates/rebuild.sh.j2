@@ -363,9 +363,12 @@ _hold_reason() {
 # ── Config-only push (docs/build-pipeline.md, "Config-only push") ──
 # A push that changes only the project's bay.toml (BAY_TOML_PATH) and the files
 # its mounts read (BAY_TOML_FILES, relative to the repo root) carries no code:
-# only `bay up` can deploy it. True (0) when the files changed between the
-# previous commit and HEAD of the checkout are all such files, and what the
-# image is built from ([build], image: `tomlhash --section build`) at HEAD still
+# only `bay up` can deploy it. The bay.toml of another project that builds from
+# the same repo and branch (SHARED_TOML_PATHS) counts too: it carries no code
+# for this project either, and `bay up` pins every project of the repo at its
+# head, so this image needs the commit tag as well. True (0) when the files
+# changed between the previous commit and HEAD of the checkout are all such
+# files, and what the image is built from ([build], image: `tomlhash --section build`) at HEAD still
 # hashes to the pinned PINNED_BUILD_HASH. False when the bay.toml is not in the
 # app repo, when no previous commit is known or found, when nothing changed, or
 # when the build inputs changed or cannot be hashed: then the normal path runs
@@ -380,7 +383,7 @@ _config_only() {
   while IFS= read -r f; do
     [[ -z "${f}" ]] && continue
     hit=""
-    for p in "${BAY_TOML_PATH}" "${BAY_TOML_FILES[@]}"; do
+    for p in "${BAY_TOML_PATH}" "${BAY_TOML_FILES[@]}" "${SHARED_TOML_PATHS[@]}"; do
       if [[ "${f}" == "${p}" || "${f}" == "${p}"/* ]]; then
         hit=1
         break
@@ -415,6 +418,34 @@ _previous_commit() {
   local c
   c=$(_running_commit "$1")
   printf '%s' "${c:-$2}"
+}
+
+# Local builds share one checkout per repo and branch (CHECKOUT_SERVICES). The
+# first service's run of a push pulls it, so for the next service the checkout's
+# HEAD is already the pushed commit, and its config-only check would see no
+# change. So each service keeps its own mark, the ref refs/bay/seen/<service>:
+# the commit the checkout was at after that service's last pull (_mark_seen).
+# _seen_head runs before the pull. It first gives every service of the checkout
+# that has no mark yet the current HEAD (what that service's own run would read
+# now), then prints this service's mark: the checkout's HEAD before the pull,
+# as this service last saw it. A fresh clone has no marks: the current HEAD.
+#   $1  the checkout
+_seen_head() {
+  local repo_dir="$1" head s
+  head=$(git -C "${repo_dir}" rev-parse --short=12 HEAD 2>/dev/null) || return 0
+  for s in "${CHECKOUT_SERVICES[@]}"; do
+    git -C "${repo_dir}" rev-parse -q --verify "refs/bay/seen/${s}^{commit}" >/dev/null 2>&1 \
+      || git -C "${repo_dir}" update-ref "refs/bay/seen/${s}" HEAD >/dev/null 2>&1 \
+      || true
+  done
+  git -C "${repo_dir}" rev-parse -q --short=12 --verify "refs/bay/seen/${SERVICE}^{commit}" 2>/dev/null \
+    || printf '%s' "${head}"
+}
+
+# After the pull: this service has seen the checkout at its new HEAD.
+#   $1  the checkout
+_mark_seen() {
+  git -C "$1" update-ref "refs/bay/seen/${SERVICE}" HEAD >/dev/null 2>&1 || true
 }
 
 # True when both name the same commit: hex, one a prefix of the other, the
@@ -946,6 +977,20 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   PINNED_TOML_HASH="{{ dq(build.bay_toml_hash | default('')) }}"
   PINNED_BUILD_HASH="{{ dq(build.bay_build_hash | default('')) }}"
   BAY_TOML_FILES=({% for f in build.bay_toml_files | default([]) %}"{{ dq(f) }}"{% if not loop.last %} {% endif %}{% endfor %})
+  # The bay.toml files of the other projects that build from this repo and branch.
+  SHARED_TOML_PATHS=({% for f in services | bay_shared_toml_paths(svc_name) %}"{{ dq(f) }}"{% if not loop.last %} {% endif %}{% endfor %})
+{% set _checkout = [] %}
+{% if strategy != 'remote' %}
+{% for _other in _build_services %}
+{% set _ob = services[_other].build %}
+{% set _os = _ob.strategy | default(git_deploy_build_strategy | default('local')) %}
+{% if _os not in ('remote', 'push') and ((_ob.repo | default('')) | bay_repo_slug(_ob.branch | default('main'))) == slug %}
+{% set _ = _checkout.append(_other) %}
+{% endif %}
+{% endfor %}
+{% endif %}
+  # The services that share this checkout (local builds: one per repo and branch).
+  CHECKOUT_SERVICES=({% for s in _checkout %}"{{ dq(s) }}"{% if not loop.last %} {% endif %}{% endfor %})
 {#
   The three command strings below are handed to `eval`, so every consumer
   value in them is referenced as an ESCAPED parameter expansion — `\"\${BRANCH}\"`
@@ -1009,6 +1054,8 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   PINNED_TOML_HASH=""
   PINNED_BUILD_HASH=""
   BAY_TOML_FILES=()
+  SHARED_TOML_PATHS=()
+  CHECKOUT_SERVICES=()
   PRIMARY_IMAGE=""
   BUILD_ARGS=()
   declare -A BUILD_SECRETS=()
@@ -1667,17 +1714,20 @@ _log "Acquired repo lock for ${SERVICE}"
 
 # ── Pull latest code ──
 cd "${REPO_DIR}"
-# The commit the checkout is at before the pull: the previous commit of the
-# config-only check when the running container has no com.bay.commit label.
-_PREV_HEAD=$(git rev-parse --short=12 HEAD 2>/dev/null || true)
+# The commit the checkout was at before the pull, as this service last saw it
+# (the checkout is shared, _seen_head): the previous commit of the config-only
+# check when the running container has no com.bay.commit label.
+_PREV_HEAD=$(_seen_head "${REPO_DIR}")
 eval "${PULL_CMD}"
+_mark_seen "${REPO_DIR}"
 
 # ── Get new commit SHA (12 characters: the image's commit tag) ──
 SHA=$(git rev-parse --short=12 HEAD)
 
 # ── Config-only push: before the build and the hold guard ──
 # The previous commit is the one the running container was built from, else
-# the one the checkout was at before the pull (a container from before 2.1.0).
+# the one the checkout was at before this service's pull (a container from
+# before 2.1.0).
 PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")
 if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then
   _config_only_push "${IMAGE_NAME}" "${PREV_COMMIT}" \

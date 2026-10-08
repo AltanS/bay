@@ -43,6 +43,9 @@ def _alert_filters() -> dict:
             "bay_alert_content_type",
             "bay_env_name",
             "bay_alert_env_value",
+            # rebuild.sh and the webhook receiver config: config-only pushes
+            # of projects that share one app repo.
+            "bay_shared_toml_paths",
         )
     }
 

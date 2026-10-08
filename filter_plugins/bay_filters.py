@@ -210,6 +210,7 @@ class FilterModule:
             "bay_prefix_volumes": bay_prefix_volumes,
             "bay_repo_slug": bay_repo_slug,
             "bay_repo_groups": bay_repo_groups,
+            "bay_shared_toml_paths": bay_shared_toml_paths,
             "bay_build_dedup_map": bay_build_dedup_map,
             "bay_token_url": bay_token_url,
             "bay_hexkey": bay_hexkey,
@@ -1136,6 +1137,36 @@ def bay_token_url(repo, token):
 def bay_repo_slug(repo, branch="main"):
     """Jinja2 filter: compute a filesystem-safe repo slug from (repo, branch)."""
     return _repo_slug(repo, branch)
+
+
+def bay_shared_toml_paths(services, svc_name):
+    """The bay.toml paths of the OTHER projects that build from svc_name's repo and branch.
+
+    Two projects in one app repo (two bay.toml files) share every commit: a
+    push that changes only one project's bay.toml carries no code for the
+    other either, and `bay up` pins both at the repo head. So for svc_name
+    such a push is config only too (rebuild.sh `_config_only`), and the
+    webhook receiver passes it whatever `watch` says (app.py
+    `config_files_changed`). Only a project whose own bay.toml is in the app
+    repo (`bay_toml_path` and `bay_build_hash` compiled) has the config-only
+    rule, so any other service gets an empty list. Mounted files of the other
+    projects do not count: such a file may be a build input of svc_name.
+    Sorted, without duplicates and without svc_name's own path.
+    """
+    own = (services.get(svc_name) or {}).get("build") or {}
+    own_path = own.get("bay_toml_path") or ""
+    if not own_path or not own.get("bay_build_hash") or not own.get("repo"):
+        return []
+    slug = _repo_slug(own["repo"], own.get("branch", "main"))
+    paths = set()
+    for name, svc in services.items():
+        build = (svc or {}).get("build") or {}
+        path = build.get("bay_toml_path") or ""
+        if name == svc_name or not path or path == own_path or not build.get("repo"):
+            continue
+        if _repo_slug(build["repo"], build.get("branch", "main")) == slug:
+            paths.add(path)
+    return sorted(paths)
 
 
 def bay_repo_groups(services, service_names):

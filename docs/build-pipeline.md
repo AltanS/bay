@@ -157,12 +157,30 @@ every file under it) carries no code. `rebuild.sh` checks this first, right
 after it reads the pushed commit and before the build and the hold guard, on
 the box (local builds) and on the build server (remote builds).
 
+Two projects can build from one app repo and branch, each with its own
+`bay.toml` (for example `bay/web.toml` and `bay/admin.toml`). A push that
+changes only the other project's `bay.toml` carries no code for this one
+either, and `bay up` pins every project of the repo at the repo's head. So it
+counts as config only for this project too, and its image gets the tag of the
+pushed commit. The other project's `bay.toml` paths are compiled into the
+script (`SHARED_TOML_PATHS`) and into the receiver config
+(`shared_toml_paths`). Only the other `bay.toml` files count, not the files
+their mounts read: such a file can be an input of this project's build. A
+push of one `bay.toml` therefore tags the image of every project of that repo
+and branch, on every box that builds it (local builds) or in the registry
+(remote builds; the box pulls `<image>:<commit12>` at `bay up`).
+
 The previous commit is the `com.bay.commit` label of the running container.
 A container created before 2.1.0 has no such label (and on a build server
 there may be no container). Then the previous commit is the commit that the
 checkout was at before this run's pull or fetch: the last commit the box
-built or deployed. The changed files are
-`git diff --name-only <previous> <pushed>`.
+built or deployed. Local builds share one checkout per repo and branch, and
+the first service's run of a push pulls it for all. So each service keeps its
+own mark, the git ref `refs/bay/seen/<service>` in that checkout: the commit
+the checkout was at after that service's last pull. The first run after an
+upgrade gives every service of the checkout a mark at the checkout's HEAD. A
+remote build has one checkout per service and needs no mark. The changed files
+are `git diff --name-only <previous> <pushed>`.
 
 The push also needs an image of the previous commit:
 
@@ -219,10 +237,11 @@ In the webhook receiver, before any trigger file exists:
 
 1. A deleted branch, or a ref that is not the deploy branch, is ignored (HTTP 200).
 2. A push that changes the project's `bay.toml` or a file its mounts read (`bay_toml_path`
-   and `bay_toml_files` of the receiver config, a file under a listed directory too) passes,
-   whatever `watch` and `ignore` say. The receiver logs `config file changed: <files>` and
-   writes the trigger, so the config-only check (7) and the hold guard (9) decide. A project
-   in the fleet has no such paths.
+   and `bay_toml_files` of the receiver config, a file under a listed directory too), or the
+   `bay.toml` of another project that builds from the same repo and branch
+   (`shared_toml_paths`), passes, whatever `watch` and `ignore` say. The receiver logs
+   `config file changed: <files>` and writes the trigger, so the config-only check (7) and the
+   hold guard (9) decide. A project in the fleet has no such paths.
 3. The `[build] watch` and `ignore` lists (compiled to the include and exclude path
    filters, gitignore syntax) filter the other pushed files. A push that fails the filter
    returns 200 "skipped" and writes no trigger: nothing is built, no commit tag exists, no
@@ -234,9 +253,10 @@ In `rebuild.sh`, for a trigger that got through:
 5. A pull signal for a held project (`track = "pin"` or frozen): fetch the commit tag only,
    exit 0. A pull-only service exits 0 here as well.
 6. Fetch or pull, and read the commit.
-7. Config-only check (see "Config-only push" above): only `bay.toml` and its mounted files
-   changed since the previous commit (the container's label, else the checkout's HEAD before
-   the pull) and the `[build]` hash is the same. Tag the previous commit's image (its commit
+7. Config-only check (see "Config-only push" above): only `bay.toml`, its mounted files and
+   the `bay.toml` of the other projects of the repo changed since the previous commit (the
+   container's label, else the checkout's HEAD before the pull, as this service last saw it)
+   and the `[build]` hash is the same. Tag the previous commit's image (its commit
    tag, else a `:latest` that holds it) with the commit, exit 0.
    A project in the fleet never gets the keys for this, so every push of it builds.
 8. Build `<image>:<commit12>`, unless that image already exists.
