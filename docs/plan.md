@@ -1174,6 +1174,10 @@ lock's state in `build_lock`: `held`, `not needed`, `timeout`, or `not taken
 (<why>)` when the file cannot be opened (then no build can take it either,
 and the moves go on).
 
+A strict code target (`track = "pin"`) that hits the build-lock timeout is
+`skipped`, not `missing`. The deploy goes on, and `:latest` stays off the pin
+until the next `bay up`.
+
 Bay compares code only for a container whose receipt names a commit (see
 [deploy-receipt.md](deploy-receipt.md): the commit label, or the single
 own-repo commit tag of the image). With no commit, the pin still counts when
