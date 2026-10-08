@@ -8,6 +8,39 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.5.0] - 2026-10-08
+
+A registry retag keeps the image ID, the deploy receipt names the running code of tag-only images, a backup run checks every snapshot, and the database role step stops reporting `changed` on every run.
+
+### Added
+
+- The deploy receipt names the commit of a container that has no commit label, when its image has exactly one commit tag (12 lowercase hex). Container rows get `commit_source`: `label`, `tag` or null. The change is additive: `receipt_version` stays 1 and `status_version` stays 2.
+- `bay show` prints `code <c12> (tag)` when the commit comes from a tag. `bay show --json` has `envs[].running.code_source`.
+- `bay plan` names each build container whose running code is unknown: `code of <name> on <box> is unknown (no commit label or tag); up will try to pin it to <c12>`. For an in-fleet project or an adopt commit, the note has no last clause. There is no new step and no change to the exit codes.
+- Filters `bay_scram_verifier`, `bay_md5_verifier` and `bay_db_password_verifier` compute a Postgres password verifier on the control node.
+- A check-mode task, "Predict database, role and password changes", reads the database state in a read-only session.
+- A test fails when a single-source `docker buildx imagetools create` under `roles/` has no `--prefer-index=false`.
+
+### Changed
+
+- The backup role accepts restic 0.19.x. The assert is now `>= 0.17.0` and `< 0.20.0`. The size check reads the JSON from the last stdout line that starts with `{`, so a progress line before it no longer breaks the check.
+
+### Fixed
+
+- A registry retag copies the manifest as it is. `rebuild.sh` runs `docker buildx imagetools create --prefer-index=false` at all three single-source retag sites: the config-only push (remote strategy) and the `:latest` repoint when the commit is already in the registry. Before, buildx wrapped the manifest in a new index: same child, new top-level digest. On a box with the containerd image store that digest is the image ID, so a config-only push recreated the container (gap 34).
+- `rebuild.sh` renders `IMAGE_REGIONS` in sorted order. `bay_image_region_map` iterated a set, so the task "Deploy rebuild script" reported `changed` on every run (gap 35).
+- The backup size check reads every snapshot the run made, by id (`restic stats <id>`). Before, a run with several databases checked only the last one (`stats latest`). A small snapshot fails the run, and the alert names the file. A size that cannot be read now fails the run with `backup.failed`.
+- A second failing database in one run no longer trips `set -u` in `backup_from`.
+- `bay up` no longer notes `kept` when the box already runs the target commit, for example after a local build that tagged only `:latest`. The move is `noop` with `already running <c12>`. If `:latest` points at another image, it moves back to the running one (gap 37).
+- The task "Provision databases, roles and grants" no longer reports `changed` on every run (gap 36). A read step fetches each role's verifier kind and its SCRAM `<iter>:<salt>`, never the keys. The control node computes the verifier of the password from the encrypted secrets file. The server sets the password only when the stored verifier differs. A rotated password is still set and reported.
+
+### Upgrade notes
+
+- Remote build strategy: the build server needs buildx 0.12 or newer. There is no fallback. The next `bay up` renders the new `rebuild.sh`, so no separate deploy is needed. Index tags that are already in the registry stay. A box that already runs one has the same image ID.
+- Backups: the restic pin stays 0.17.3. The role never upgrades an existing binary. The backup scripts reach a box only through `bay --fleet <fleet> deploy <env> --tags backup`, because `bay up` runs only the stack. Redirect the output of that command, because `bay deploy` has no `--log`.
+- Receipt and plan: no manual step. The first receipt after the upgrade fills the commit. Until then, the plan reads the old receipt and may note unknown code for a container that has a tag.
+- Databases: no manual step. A role stored as md5 on a scram-sha-256 server is set once more, then compared. `bay plan --remote` (deploy in check mode) now opens two read-only psql sessions per database accessory. The comparison needs a superuser `POSTGRES_USER`, which the official image makes. Without one, the old behaviour stays. Test CI with docker pulls `postgres:17-alpine` and `postgres:18-alpine`. `BAY_TEST_PG_IMAGES` overrides them.
+
 ## [2.4.0] - 2026-10-08
 
 The plan predicts the receiver recreate and drops a false push note, two projects in one app repo both get commit tags, jobs get a timeout and entrypoint-safe commands, a failed dump no longer stores a cut-off backup, and a route of a box that has not deployed since the pin reads `unknown`.
