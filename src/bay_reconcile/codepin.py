@@ -18,6 +18,14 @@ A target names its commit in one of two ways:
 cannot be pulled, and the report lists the commit tags that are there. A
 non-strict target is skipped with a note, and the container keeps its image.
 
+A box may already run the target even when ``<repo>:<commit12>`` is not on it
+(a local build that tagged only ``:latest``). Before a move reports "not on
+this box", :func:`runs_commit` looks at the image of the running container (or
+of ``:latest``, when the container is gone): when its commit label names the
+target, or it carries the tag ``<repo>:<commit12>``, the move is ``noop``
+(already running). When ``:latest`` points at another image, it moves to the
+running one (``retag``), so the pass keeps the container on the target.
+
 A commit whose webhook build failed its health check on this box is refused
 the same way: ``rebuild.sh`` records ``<commit12> <image id>`` per container in
 ``/var/lib/bay/failed-commits/<container>`` (:data:`FAILED_COMMITS_DIR`) and
@@ -39,7 +47,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .images import is_commit, short, split_ref
+from .images import commit_from_labels, is_commit, short, split_ref
 
 #: Written by rebuild.sh (FAILED_COMMITS_DIR there): one file per container.
 FAILED_COMMITS_DIR = "/var/lib/bay/failed-commits"
@@ -53,6 +61,14 @@ class Images(Protocol):
     def tag(self, source: str, target: str) -> None: ...
 
     def commit_tags(self, repo: str) -> list[str]: ...
+
+    def container_image(self, name: str) -> str | None:
+        """The image id the container ``name`` runs, or None when there is no such container."""
+        ...
+
+    def image_meta(self, ref: str) -> tuple[Mapping[str, str], list[str]]:
+        """``(labels, repo tags)`` of the image ``ref`` names (an id works); empty when absent."""
+        ...
 
 
 @dataclass
@@ -95,6 +111,26 @@ def _registry_ref(repo: str) -> bool:
     """A repo with a registry host (``host.tld/...`` or ``host:port/...``) can be pulled."""
     first = repo.split("/", 1)[0]
     return "/" in repo and ("." in first or ":" in first or first == "localhost")
+
+
+def runs_commit(images: Images, name: str, image: str, commit: str) -> str | None:
+    """The image id that already runs ``commit`` for container ``name``, or None.
+
+    The image of the running container, or of ``image`` (``:latest``) when
+    the container is gone. It runs ``commit`` when its commit label names it
+    (``com.bay.commit``, then the revision label), or when it carries the tag
+    ``<repo>:<commit12>``.
+    """
+    running = images.container_image(name) or images.image_id(image)
+    if not running:
+        return None
+    labels, tags = images.image_meta(running)
+    if commit_from_labels(labels) == commit:
+        return running
+    repo, _ = split_ref(image)
+    if f"{repo}:{commit}" in tags:
+        return running
+    return None
 
 
 @dataclass
@@ -165,6 +201,37 @@ def plan_moves(
         have = images.image_id(source)
         if have is None and commit in bad.commits:
             have = ""  # untagged after its failure: never pulled back
+        if have is None:
+            running = runs_commit(images, name, image, commit)
+            if running is not None and running not in bad.images:
+                latest = images.image_id(image)
+                if latest == running:
+                    out.append(
+                        Move(
+                            name,
+                            "noop",
+                            source=source,
+                            target=image,
+                            detail=f"already running {commit}",
+                            strict=strict,
+                        )
+                    )
+                    continue
+                # :latest moved on, but the container runs the target: keep it there.
+                if latest is not None:
+                    images.tag(image, f"{repo}:previous")
+                images.tag(running, image)
+                out.append(
+                    Move(
+                        name,
+                        "retag",
+                        source=running,
+                        target=image,
+                        detail=f"already running {commit}; {image} points at it again",
+                        strict=strict,
+                    )
+                )
+                continue
         if have is None and _registry_ref(repo) and images.pull(source):
             have = images.image_id(source)
         if have is None:
@@ -230,6 +297,21 @@ class SdkImages:
     def tag(self, source: str, target: str) -> None:
         repo, tag = split_ref(target)
         self._c.images.get(source).tag(repo, tag=tag)
+
+    def container_image(self, name: str) -> str | None:
+        try:
+            ctr = self._c.containers.get(name)
+        except (self._docker.errors.NotFound, self._docker.errors.APIError):
+            return None
+        return str((ctr.attrs or {}).get("Image") or "") or None
+
+    def image_meta(self, ref: str) -> tuple[Mapping[str, str], list[str]]:
+        try:
+            img = self._c.images.get(ref)
+        except (self._docker.errors.ImageNotFound, self._docker.errors.APIError):
+            return {}, []
+        labels = getattr(img, "labels", None) or {}
+        return dict(labels), [str(t) for t in (getattr(img, "tags", None) or [])]
 
     def commit_tags(self, repo: str) -> list[str]:
         try:

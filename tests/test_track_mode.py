@@ -758,10 +758,20 @@ def test_bay_toml_files_reach_the_rendered_script() -> None:
 
 
 class _Images:
-    def __init__(self, ids: dict[str, str], pullable: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        ids: dict[str, str],
+        pullable: dict[str, str] | None = None,
+        *,
+        labels: dict[str, dict[str, str]] | None = None,
+        containers: dict[str, str] | None = None,
+    ) -> None:
         self.ids = dict(ids)
         self.pullable = dict(pullable or {})
         self.pulled: list[str] = []
+        # image id -> labels; container -> the image id it runs.
+        self.labels = dict(labels or {})
+        self.containers = dict(containers or {})
 
     def image_id(self, ref: str) -> str | None:
         return self.ids.get(ref)
@@ -774,11 +784,22 @@ class _Images:
         return False
 
     def tag(self, source: str, target: str) -> None:
-        self.ids[target] = self.ids[source]
+        self.ids[target] = self.ids.get(source, source)
 
     def commit_tags(self, repo: str) -> list[str]:
         tags = (r.rsplit(":", 1)[1] for r in self.ids if r.startswith(repo + ":"))
         return sorted(t for t in tags if t not in ("latest", "previous"))
+
+    def container_image(self, name: str) -> str | None:
+        return self.containers.get(name)
+
+    def image_meta(self, ref: str) -> tuple[dict[str, str], list[str]]:
+        image = self.ids.get(ref, ref)
+        if image not in self.ids.values() and image not in self.labels:
+            return {}, []
+        return dict(self.labels.get(image, {})), sorted(
+            r for r, i in self.ids.items() if i == image
+        )
 
 
 def _pin(images: _Images, targets: dict, spec: dict, capsys) -> tuple[int, dict]:
@@ -821,6 +842,83 @@ def test_codepin_moves_latest_and_refuses_a_missing_strict_image(capsys) -> None
     code, _ = _pin(reg, {"web": {"commit": a, "strict": True}}, {"web": f"{ref}:latest"}, capsys)
     assert code == 0 and reg.pulled == [f"{ref}:{a}"]
     assert reg.ids[f"{ref}:latest"] == "id-a"
+
+
+def test_codepin_noop_when_running_target(capsys) -> None:
+    """M120/03: the box runs the target, but has no <repo>:<commit12> tag. No `kept`."""
+    pin, other = "46dcff0b65ec", "aaaaaaaaaaaa"
+    spec = {"web": "app/web:latest"}
+    label = {"com.bay.commit": pin}
+
+    # A local build: only :latest, labelled with the pin, and the container runs it.
+    images = _Images({"app/web:latest": "id-1"}, labels={"id-1": label}, containers={"web": "id-1"})
+    code, report = _pin(images, {"web": {"commit": pin}}, spec, capsys)
+    (move,) = report["moves"]
+    assert code == 0 and move["status"] == "noop" and report["changed"] is False
+    assert move["detail"] == f"already running {pin}"
+    assert images.pulled == []
+    # Strict (track = "pin") too: noop, not a refusal.
+    code, report = _pin(images, {"web": {"commit": pin, "strict": True}}, spec, capsys)
+    assert code == 0 and report["moves"][0]["status"] == "noop"
+
+    # The older revision label counts as well.
+    rev = _Images(
+        {"app/web:latest": "id-1"},
+        labels={"id-1": {"org.opencontainers.image.revision": pin + "0" * 28}},
+        containers={"web": "id-1"},
+    )
+    assert _pin(rev, {"web": {"commit": pin}}, spec, capsys)[1]["moves"][0]["status"] == "noop"
+
+    # The container is gone: :latest is read instead.
+    gone = _Images({"app/web:latest": "id-1"}, labels={"id-1": label})
+    assert _pin(gone, {"web": {"commit": pin}}, spec, capsys)[1]["moves"][0]["status"] == "noop"
+
+    # :latest moved on (a build not deployed yet); the container still runs the
+    # pin. :latest goes back to the running image, so the pass keeps it there.
+    moved = _Images(
+        {"app/web:latest": "id-2"},
+        labels={"id-1": label, "id-2": {"com.bay.commit": other}},
+        containers={"web": "id-1"},
+    )
+    code, report = _pin(moved, {"web": {"commit": pin}}, spec, capsys)
+    (move,) = report["moves"]
+    assert code == 0 and move["status"] == "retag" and report["changed"] is True
+    assert moved.ids["app/web:latest"] == "id-1" and moved.ids["app/web:previous"] == "id-2"
+
+    # The running image carries another commit, and the pin's tag is not here:
+    # the old path, skipped with "not on this box" (a strict target stops).
+    elsewhere = _Images(
+        {"app/web:latest": "id-2"}, labels={"id-2": {"com.bay.commit": other}},
+        containers={"web": "id-2"},
+    )
+    code, report = _pin(elsewhere, {"web": {"commit": pin}}, spec, capsys)
+    assert report["moves"][0]["status"] == "skipped"
+    assert report["moves"][0]["detail"] == f"app/web:{pin} is not on this box"
+    code, report = _pin(elsewhere, {"web": {"commit": pin, "strict": True}}, spec, capsys)
+    assert code == 1 and report["moves"][0]["status"] == "missing"
+
+    # An unlabelled image that carries the pin's tag under the spec's repo is it too.
+    from bay_reconcile import codepin
+
+    class Tagged(_Images):
+        def image_id(self, ref: str) -> str | None:
+            return None if ref == f"app/web:{pin}" else super().image_id(ref)
+
+        def image_meta(self, ref: str) -> tuple[dict[str, str], list[str]]:
+            return {}, ["app/web:latest", f"app/web:{pin}"]
+
+    tagged = Tagged({"app/web:latest": "id-1"}, containers={"web": "id-1"})
+    assert codepin.runs_commit(tagged, "web", "app/web:latest", pin) == "id-1"
+    assert codepin.runs_commit(tagged, "web", "app/web:latest", other) is None
+
+    # A running image recorded as failed on this box is never "already running".
+    failed = _Images({"app/web:latest": "id-1"}, labels={"id-1": label}, containers={"web": "id-1"})
+    (move,) = codepin.plan_moves(
+        [{"name": "web", "image": "app/web:latest", "commit": pin}],
+        failed,
+        failed={"web": codepin.Failed(images={"id-1"})},
+    )
+    assert move.status == "skipped"
 
 
 def test_codepin_runs_before_the_pass_only_on_a_full_real_deploy() -> None:
