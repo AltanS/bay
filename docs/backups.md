@@ -5,7 +5,7 @@ Bay uses [restic](https://restic.net/) for deduplicated, encrypted backups to S3
 ## How it works
 
 1. **Per-accessory scripts** — the backup role generates a `backup-<name>.sh` script for each accessory
-2. **Streaming** — restic runs each dump command and reads its output (`restic backup --stdin-from-command`), so there are no intermediate files on disk
+2. **Streaming**, restic runs each dump command and reads its output (`restic backup --stdin-from-command`), so there are no intermediate files on disk
 
    restic runs the dump command itself (`restic backup --stdin-from-command -- <dump command>`), for every method: `pg_dump`, `mysqldump`, the Redis `docker cp` and the `file` `docker cp`. When the dump command fails, also in the middle of the stream, restic stores no snapshot, so a cut-off dump never becomes the newest snapshot. The snapshot file names are the same as before (`<name>.sql`, `<name>-<db>.sql`, `<name>.rdb`, `<name>.tar`), so the restore commands do not change. The Redis restore did change: the `.rdb` snapshot is a tar archive that the restore now unpacks (see Restore below). This needs restic 0.17.0 or newer and older than 0.19.0, and the role stops when the box has another version.
 
