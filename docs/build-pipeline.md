@@ -236,9 +236,11 @@ single manifest in a new image index. The child is the same, but the top-level
 digest is new. On a box with the containerd image store the image ID is that
 digest, so the reconciler would read the retagged image as a new one and
 recreate the container for a config-only push. The remote strategy needs
-buildx 0.12 or newer on the build server, the first version with
-`--prefer-index`. There is no fallback for an older buildx. A test fails when
-any `imagetools create` under `roles/` has one source and lacks the flag.
+buildx 0.15 or newer on the build server, the first version with
+`--prefer-index`. There is no fallback: on buildx 0.12 to 0.14 every retag
+fails with `unknown flag` and the push ends as `build.failed`. A test fails
+when any `imagetools create` under `roles/` has one source and lacks the
+flag, also when the command continues over several lines.
 
 A change of what the image is built from is never config only. `bay compile`
 writes `build.bay_build_hash` next to `bay_toml_hash`: the canonical hash of
