@@ -528,9 +528,9 @@ _config_only_push() {
     local tag_err="" tag_ok=1 out
     if [[ "${BUILD_STRATEGY:-local}" == "remote" ]]; then
       if [[ "${src}" == "${repo}:${prev:0:12}" ]]; then
-        out=$(docker buildx imagetools create -t "${repo}:${SHA}" "${src}" 2>&1 >/dev/null) || { tag_ok=0; tag_err+="${out}"; }
+        out=$(docker buildx imagetools create --prefer-index=false -t "${repo}:${SHA}" "${src}" 2>&1 >/dev/null) || { tag_ok=0; tag_err+="${out}"; }
       else
-        out=$(docker buildx imagetools create -t "${repo}:${SHA}" -t "${repo}:${prev:0:12}" "${src}" 2>&1 >/dev/null) || { tag_ok=0; tag_err+="${out}"; }
+        out=$(docker buildx imagetools create --prefer-index=false -t "${repo}:${SHA}" -t "${repo}:${prev:0:12}" "${src}" 2>&1 >/dev/null) || { tag_ok=0; tag_err+="${out}"; }
       fi
     else
       out=$(docker tag "${src}" "${repo}:${SHA}" 2>&1) || { tag_ok=0; tag_err+="${out}"; }
@@ -1522,7 +1522,7 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
   if docker manifest inspect "${IMAGE_REPO}:${SHA}" &>/dev/null; then
     _log "Image ${IMAGE_REPO}:${SHA} already in registry, skipping build"
     # Point the moving tag at it (registry side, no pull), unless held.
-    if [[ -z "${HOLD_REASON}" ]] && ! docker buildx imagetools create -t "${IMAGE_REF}" "${IMAGE_REPO}:${SHA}" >/dev/null 2>&1; then
+    if [[ -z "${HOLD_REASON}" ]] && ! docker buildx imagetools create --prefer-index=false -t "${IMAGE_REF}" "${IMAGE_REPO}:${SHA}" >/dev/null 2>&1; then
       _record_failure "${SHA}" "Registry retag" "could not point ${IMAGE_REF} at ${IMAGE_REPO}:${SHA}"
       trap - ERR
       exit 1

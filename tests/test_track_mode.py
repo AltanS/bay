@@ -574,7 +574,7 @@ cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
     calls = (tmp_path / "docker.log").read_text().splitlines()
     assert calls[1:] == [
         f"manifest inspect bay-app/svc:{first}",
-        f"buildx imagetools create -t bay-app/svc:{pushed} bay-app/svc:{first}",
+        f"buildx imagetools create --prefer-index=false -t bay-app/svc:{pushed} bay-app/svc:{first}",
     ]
 
     # Both rendered paths decide before the build and before the hold guard.
@@ -1082,7 +1082,7 @@ def test_config_only_push_falls_back_to_pre_pull_head_without_label(
     assert f"config-only push {pushed}{DONE}" in proc.stdout
     assert _calls(tmp_path)[1:] == [
         f"manifest inspect bay-app/svc:{first}",
-        f"buildx imagetools create -t bay-app/svc:{pushed} bay-app/svc:{first}",
+        f"buildx imagetools create --prefer-index=false -t bay-app/svc:{pushed} bay-app/svc:{first}",
     ]
 
     # The label still wins over the checkout: the running commit differs from
@@ -1177,7 +1177,7 @@ def test_config_only_push_tags_from_latest_when_no_commit_tag(
     rev = {"config": {"Labels": {"org.opencontainers.image.revision": first}}}
     assert f"config-only push {pushed}{DONE}" in remote(rev)
     assert _calls(tmp_path)[-1] == (
-        f"buildx imagetools create -t bay-app/svc:{pushed} -t bay-app/svc:{first} "
+        f"buildx imagetools create --prefer-index=false -t bay-app/svc:{pushed} -t bay-app/svc:{first} "
         "bay-app/svc:latest"
     )
     # A multi-platform index (provenance attestations) nests it by platform.
@@ -1335,6 +1335,8 @@ docker() {{
     "buildx imagetools")
       [[ "$3" == "create" ]] || return 1
       shift 3
+      [[ "$1" == "--prefer-index=false" ]] || return 1  # a retag must be a carbon copy
+      shift
       while [[ "$1" == "-t" ]]; do printf '%s\\n' "$2" >> {str(refs)!r}; shift 2; done
       return 0 ;;
   esac
@@ -1503,9 +1505,9 @@ def test_config_only_push_tags_every_shared_repo_image(tmp_path: Path) -> None:
         assert f"config-only push {pushed}: run bay up" in proc.stdout, proc.stdout
     calls = _calls(tmp_r)
     assert [c for c in calls if "imagetools" in c] == [
-        f"buildx imagetools create -t zot.example.com/demo/web:{pushed} "
+        f"buildx imagetools create --prefer-index=false -t zot.example.com/demo/web:{pushed} "
         f"zot.example.com/demo/web:{first}",
-        f"buildx imagetools create -t zot.example.com/demo/admin:{pushed} "
+        f"buildx imagetools create --prefer-index=false -t zot.example.com/demo/admin:{pushed} "
         f"zot.example.com/demo/admin:{first}",
     ]
     assert not [c for c in calls if c.startswith("tag ")], "the build server tags the registry"

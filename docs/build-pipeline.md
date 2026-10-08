@@ -78,8 +78,8 @@ the push may deploy. The rules for each webhook build:
    way. A remote build pushes `:<commit12>` always, and `:latest` only when the
    push may deploy. When `:<commit12>` is already in the registry, the build is
    skipped and the registry moves `:latest` with
-   `docker buildx imagetools create` (a failure is `build.failed`, "Registry
-   retag").
+   `docker buildx imagetools create --prefer-index=false` (a failure is
+   `build.failed`, "Registry retag").
 2. **Hold guard.** `_hold_reason` decides. (A held push waits for `bay up`. `bay up` deploys the whole box environment, not one project.) The push is held when:
    - the compiled `build.track` is `pin` (`[deploy.<env>] track = "pin"`).
      This holds every push, so `build.held` (warn) fires on every push of a
@@ -227,6 +227,18 @@ If a tag command fails (a registry that refuses the tag, say), the push is not
 config only. The script logs `config-only push <commit12>: tag failed`, counts
 a failure for the circuit breaker, sends `build.failed` with the output of the
 tag command, and exits 1. It builds nothing.
+
+A registry tag is a carbon copy: the new tag points at the same manifest, so
+it has the same digest. `rebuild.sh` runs `docker buildx imagetools create
+--prefer-index=false` for every single-source retag (the config-only tag and
+the `:latest` repoint of a skipped build). Without the flag, buildx wraps a
+single manifest in a new image index. The child is the same, but the top-level
+digest is new. On a box with the containerd image store the image ID is that
+digest, so the reconciler would read the retagged image as a new one and
+recreate the container for a config-only push. The remote strategy needs
+buildx 0.12 or newer on the build server, the first version with
+`--prefer-index`. There is no fallback for an older buildx. A test fails when
+any `imagetools create` under `roles/` has one source and lacks the flag.
 
 A change of what the image is built from is never config only. `bay compile`
 writes `build.bay_build_hash` next to `bay_toml_hash`: the canonical hash of
