@@ -694,5 +694,24 @@ def test_release_and_job_command_reject_other_shapes(value):
 def test_job_timeout_is_a_positive_integer():
     job = {"name": "a", "schedule": "0 2 * * *", "command": "x"}
     assert bay_toml.validate(_doc(jobs=[{**job, "timeout": 90}])) == []
-    for bad in (0, -5, "90", 1.5):
+    assert bay_toml.validate(_doc(jobs=[{**job, "timeout": 86400}])) == []
+    for bad in (0, -5, "90", 1.5, 86401):
         assert _paths(bay_toml.validate(_doc(jobs=[{**job, "timeout": bad}]))) == {"jobs[0].timeout"}, bad
+
+
+def test_job_timeout_has_the_same_maximum_in_the_services_schema():
+    """The compiled `jobs:` map is checked by services.schema.json: one day at most."""
+    import json
+    from pathlib import Path
+
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads((Path(bay_toml.__file__).parent / "schemas" / "services.schema.json").read_text())
+    job = {"of": "shop", "schedule": "0 2 * * *", "on_calendar": "*-*-* 02:00:00 UTC", "command": "x"}
+    validator = Draft202012Validator(schema)
+
+    def errors(timeout):
+        return list(validator.iter_errors({"jobs": {"shop-job-a": {**job, "timeout": timeout}}}))
+
+    assert errors(86400) == []
+    assert errors(86401) and errors(0)

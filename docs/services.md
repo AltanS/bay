@@ -291,7 +291,7 @@ jobs:
     on_calendar: "*-*-* 02:00:00 UTC"  # the same, as a systemd OnCalendar expression
     command: node dist/cleanup.js    # a string runs as /bin/sh -c; a list keeps the image ENTRYPOINT
     memory: 256m                     # optional; default: the main container's mem_limit
-    timeout: 600                     # optional, seconds a run may take; default 3600
+    timeout: 600                     # optional, seconds a run may take, 1 to 86400; default 3600
 ```
 
 `deploy_stack` installs, on the box that runs `of`, the script `<stack_dir>/jobs/<job>.sh`, the

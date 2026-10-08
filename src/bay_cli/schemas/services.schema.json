@@ -63,6 +63,7 @@
           "timeout": {
             "type": "integer",
             "minimum": 1,
+            "maximum": 86400,
             "description": "Seconds a run may take before systemd stops it (TimeoutStartSec). Default 3600 when absent."
           }
         }

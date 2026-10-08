@@ -144,7 +144,7 @@ Jobs and release:
 - A job gets the image, env, secrets, `fleet_secrets`, needs and mounts of the main
   container. It runs the image the main container runs at that time.
 - A job may set `memory`. Without it, the job gets the memory cap of the main container.
-- A job may set `timeout`, the seconds a run may take (default 3600). Past it, the run is
+- A job may set `timeout`, the seconds a run may take (default 3600, at most 86400). Past it, the run is
   stopped and its container removed.
 - A systemd timer on the box of the main container starts the job, in UTC. A run that is
   still busy is not started a second time. A missed run is not made up.
@@ -576,7 +576,7 @@ Scheduled one-shot runs of the main container's image.
 | `schedule` | five-field cron, UTC | When the job runs, for example `"0 2 * * *"`. |
 | `command` | string or list of strings | What to run. A string runs as `/bin/sh -c` and bypasses the image ENTRYPOINT entirely (a wrapper entrypoint ending in `exec "$@"` does not run). A list keeps the image ENTRYPOINT and is passed to it as the arguments; use it for an image that needs its entrypoint. |
 | `memory` | size | Optional memory limit for the job container. |
-| `timeout` | integer >= 1 | Optional. Seconds a run may take before it is stopped. Default 3600. |
+| `timeout` | integer, 1 to 86400 | Optional. Seconds a run may take before it is stopped (one day at most). Default 3600. |
 
 `name`, `schedule` and `command` are required. A job runs as a one-shot container named
 `<name>-job-<job>` in the primary environment and `<name>-<env>-job-<job>` in the others.

@@ -12,7 +12,8 @@
 # overlaps itself: systemd does not start an active unit again).
 #
 # A job that is gone (removed from bay.toml, or its container moved to another
-# host) loses its timer, its timeout drop-in and its script here. The units
+# host) loses its timer, its timeout drop-in and its script here. A drop-in
+# directory with no timer or script left (an orphan) goes too. The units
 # live in /etc, so those tasks run as root: this play's become_user is app_user.
 
 - name: Select the jobs whose container runs on this host
@@ -116,6 +117,16 @@
     file_type: file
   register: _bay_job_timer_files
 
+# The drop-in directory of a job outlives its timer and script when an earlier
+# prune stopped half way, so it names a gone job on its own. The pattern needs
+# a job name: `bay-job@.service.d` belongs to the template unit.
+- name: Find the job unit drop-in directories on this host
+  ansible.builtin.find:
+    paths: /etc/systemd/system
+    patterns: "bay-job@?*.service.d"
+    file_type: directory
+  register: _bay_job_dropin_dirs
+
 # A box that never ran a job has no jobs/ directory. find warns about a missing
 # path on every deploy, so look first.
 - name: Check for the job script directory on this host
@@ -137,8 +148,10 @@
       {{ ((_bay_job_timer_files.files | default([]) | map(attribute='path') | map('basename')
            | map('regex_replace', '^bay-job@', '') | map('regex_replace', '[.]timer$', '') | list)
           + (_bay_job_script_files.files | default([]) | map(attribute='path') | map('basename')
-           | map('regex_replace', '[.]sh$', '') | list))
-         | unique | reject('in', _bay_jobs.keys() | list) | sort }}
+           | map('regex_replace', '[.]sh$', '') | list)
+          + (_bay_job_dropin_dirs.files | default([]) | map(attribute='path') | map('basename')
+           | map('regex_replace', '^bay-job@', '') | map('regex_replace', '[.]service[.]d$', '') | list))
+         | unique | reject('in', _bay_jobs.keys() | list) | reject('equalto', '') | sort }}
 
 - name: Stop and disable the timers of jobs that are gone
   ansible.builtin.systemd:

@@ -167,11 +167,19 @@ def test_job_units_render_and_prune(tmp_path: Path) -> None:
                 {"path": "/opt/bay/jobs/shop-job-small.sh"},
                 {"path": "/opt/bay/jobs/blog-job-sync.sh"},
             ]},
+            # An orphan drop-in directory (no timer, no script) names a gone job
+            # too; the drop-in of a job that stays does not; the template unit's
+            # own directory (no job name) is nobody's job.
+            "_bay_job_dropin_dirs": {"files": [
+                {"path": "/etc/systemd/system/bay-job@shop-job-small.service.d"},
+                {"path": "/etc/systemd/system/bay-job@orphan-job.service.d"},
+                {"path": "/etc/systemd/system/bay-job@.service.d"},
+            ]},
         },
     )
     # blog does not run here: its job is not installed, and its old script goes.
     assert sorted(facts["jobs"]) == ["shop-job-nightly", "shop-job-small"]
-    assert facts["gone"] == ["blog-job-sync", "shop-job-old"]
+    assert facts["gone"] == ["blog-job-sync", "orphan-job", "shop-job-old"]
 
     # Without a `jobs:` map nothing is selected and nothing is installed.
     empty = _run_set_facts(
@@ -211,7 +219,8 @@ def _run_script_scan(tmp_path: Path, stack_dir: Path) -> tuple[str, list[str]]:
     play = [{
         "hosts": "localhost", "connection": "local", "gather_facts": False,
         "vars": {"stack_dir": str(stack_dir), "_bay_jobs": {"shop-job-nightly": {}},
-                 "_bay_job_timer_files": {"files": []}},
+                 "_bay_job_timer_files": {"files": []},
+                 "_bay_job_dropin_dirs": {"files": []}},
         "tasks": [*(_task(n) for n in names), {
             "name": "Write the result",
             "ansible.builtin.copy": {"content": "{{ _bay_jobs_gone | to_json }}", "dest": str(out)},
@@ -245,3 +254,31 @@ def test_the_scan_still_names_the_scripts_of_jobs_that_are_gone(tmp_path: Path) 
     output, gone = _run_script_scan(tmp_path, tmp_path / "stack")
     assert "WARNING" not in output
     assert gone == ["shop-job-old"]
+
+
+def test_the_drop_in_scan_finds_job_directories_only(tmp_path: Path) -> None:
+    """The real find task (pointed at a temp dir): job drop-in dirs, not the template's."""
+    units = tmp_path / "units"
+    for name in ("bay-job@orphan-job.service.d", "bay-job@.service.d", "other.service.d"):
+        (units / name).mkdir(parents=True)
+    (units / "unit-notes.txt").write_text("")
+    task = _task("Find the job unit drop-in directories on this host")
+    task["ansible.builtin.find"]["paths"] = str(units)
+    out = tmp_path / "found.json"
+    play = [{
+        "hosts": "localhost", "connection": "local", "gather_facts": False,
+        "tasks": [task, {"name": "Write the result", "ansible.builtin.copy": {
+            "content": "{{ _bay_job_dropin_dirs.files | map(attribute='path') | map('basename') "
+                       "| sort | to_json }}", "dest": str(out)}}],
+    }]
+    (tmp_path / "play.yml").write_text(yaml.safe_dump(play))
+    (tmp_path / "ansible.cfg").write_text("[defaults]\n")
+    env = {**os.environ, "ANSIBLE_CONFIG": str(tmp_path / "ansible.cfg"), "ANSIBLE_NOCOLOR": "1",
+           "ANSIBLE_PYTHON_INTERPRETER": sys.executable, "ANSIBLE_LOCALHOST_WARNING": "0",
+           "ANSIBLE_INVENTORY_UNPARSED_WARNING": "0"}
+    proc = subprocess.run(
+        [sys.executable, "-m", "ansible.cli.playbook", "-i", "localhost,", str(tmp_path / "play.yml")],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+    assert json.loads(out.read_text()) == ["bay-job@orphan-job.service.d"]
