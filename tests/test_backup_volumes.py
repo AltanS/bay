@@ -196,15 +196,17 @@ def test_backup_role_volume_entries(tmp_path: Path) -> None:
     )
     assert got == {"is_volume": False, "method": "pg_dump"}
 
-    # The volume restore: stop, read the Mountpoint, extract as root, start always.
+    # The volume restore: list and stop every container on the volume, read the
+    # Mountpoint, extract as root, start the same set always.
     tasks = {t["name"]: t for t in _all_tasks(playbook["tasks"] + playbook["pre_tasks"])}
     block = tasks["Restore a volume backup"]
     assert [t["name"] for t in block["block"]] == [
-        "Stop the container of the volume for restore",
+        "List the running containers that mount the volume",
+        "Stop every container that mounts the volume for restore",
         "Read the mountpoint of the volume",
         "Restore the volume into its mountpoint",
     ]
-    assert [t["name"] for t in block["always"]] == ["Start the container of the volume after restore"]
+    assert [t["name"] for t in block["always"]] == ["Start the containers that ran on the volume before restore"]
     inspect = tasks["Read the mountpoint of the volume"]["ansible.builtin.command"]["cmd"]
     assert "docker volume inspect" in inspect and ".Mountpoint" in inspect
     extract = tasks["Restore the volume into its mountpoint"]

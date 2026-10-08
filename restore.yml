@@ -86,6 +86,26 @@
       check_mode: false
       when: _is_volume | bool
 
+    # If no targeted host runs the container, every host would end here and the
+    # play would finish green with nothing restored. Say so instead.
+    - name: Fail when no targeted host runs the container of the volume
+      ansible.builtin.assert:
+        that:
+          - >-
+            ansible_play_hosts_all
+            | map('extract', hostvars)
+            | selectattr('_volume_container', 'defined')
+            | map(attribute='_volume_container')
+            | selectattr('rc', 'defined')
+            | selectattr('rc', 'equalto', 0)
+            | list | length > 0
+        fail_msg: >-
+          No targeted host runs the container '{{ _volume_backup.container }}'
+          of volume '{{ accessory }}'. Nothing was restored. Check the target
+          environment, and that the container exists on one of its boxes.
+      run_once: true
+      when: _is_volume | bool
+
     - name: Skip a host that does not run the container of the volume
       ansible.builtin.meta: end_host
       when:
@@ -250,17 +270,26 @@
         # A volume: the archive is `docker cp <container>:<path> -`, so its
         # top entry is the last part of the path. It is written as root into
         # the volume's Mountpoint (from `docker volume inspect`, so a moved
-        # Docker data root still works), with the container stopped, over the
-        # files that are there. The container starts again in any case.
+        # Docker data root still works), with every container that mounts the
+        # volume stopped (a second writer would corrupt the restore), over the
+        # files that are there. The containers that ran before start again in
+        # any case; one that was already stopped stays stopped.
         - name: Restore a volume backup
           when:
             - _is_volume | bool
             - _snap is defined
           block:
-            - name: Stop the container of the volume for restore
+            - name: List the running containers that mount the volume
               ansible.builtin.command:
-                cmd: "docker stop {{ _volume_backup.container }}"
+                cmd: "docker ps -q --filter volume={{ accessory }}"
+              register: _volume_users
+              changed_when: false
+
+            - name: Stop every container that mounts the volume for restore
+              ansible.builtin.command:
+                cmd: "docker stop {{ _volume_users.stdout_lines | join(' ') }}"
               changed_when: true
+              when: _volume_users.stdout_lines | length > 0
 
             - name: Read the mountpoint of the volume
               ansible.builtin.command:
@@ -284,10 +313,11 @@
               become_user: root
               when: _snap is defined
           always:
-            - name: Start the container of the volume after restore
+            - name: Start the containers that ran on the volume before restore
               ansible.builtin.command:
-                cmd: "docker start {{ _volume_backup.container }}"
+                cmd: "docker start {{ _volume_users.stdout_lines | join(' ') }}"
               changed_when: true
+              when: (_volume_users.stdout_lines | default([])) | length > 0
 
         - name: Restore file backup
           ansible.builtin.shell:

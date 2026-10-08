@@ -166,11 +166,14 @@ volume whose container runs on the host:
 - `backup = false` on the mount leaves the volume out. A volume from `bay import` carries it,
   because the old YAML fleet backed up no volume. Drop it to start the backups.
 
-Restore a volume with `bay backup restore <env> <stack_name>_<volume>`. The restore stops the
-container, reads the volume's mountpoint with `docker volume inspect`, extracts the snapshot
-there as root (over the files that are there, it does not empty the volume first) and starts
-the container again, also after a failure. The pre-restore backup runs first, as for an
-accessory. Hosts that do not run the container are skipped.
+Restore a volume with `bay backup restore <env> <stack_name>_<volume>`. The restore stops
+every running container that mounts the volume (found with `docker ps --filter volume=`, not
+only the owner), reads the volume's mountpoint with `docker volume inspect`, extracts the
+snapshot there as root (over the files that are there, it does not empty the volume first) and
+starts the same containers again, also after a failure. A container that was stopped before
+stays stopped. The pre-restore backup runs first, as for an accessory. Hosts that do not run
+the container are skipped. When no targeted host runs the container, the restore fails and
+names it, with nothing restored.
 
 ## Rig infrastructure: Headscale
 
