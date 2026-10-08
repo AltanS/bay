@@ -30,6 +30,13 @@ container_lifecycle_stop_timeout: 30
 # webhook rebuild script reads the same name (roles/git_deploy/defaults).
 bay_release_timeout: 600
 
+# How long `bay up` and `bay rollback` wait for a running webhook build before
+# they skip a code move (seconds). bay_reconcile.codepin takes rebuild.sh's
+# build lock (git_deploy_build_lock_path) before it moves `:latest`. On a
+# timeout `:latest` stays, the move is `skipped` (`build running`) and bay up
+# notes the container as kept. The same bound as the deploy's wait for backups.
+container_lifecycle_build_lock_wait: 300
+
 # Suffix appended to canary containers during zero-downtime deploy
 container_lifecycle_canary_suffix: "-new"
 

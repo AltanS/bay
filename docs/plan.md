@@ -1150,8 +1150,29 @@ the image's own repository (a tag of another repository never counts),
 the box already runs the target: the move is `noop` with the detail
 `already running <commit12>`, and `bay up` prints no `kept` note. A local
 build that tagged only `:latest` is the usual case. When `:latest` points at
-another image, it moves back to the running one. Only after this check does
-the box try a pull and report `<image>:<commit12> is not on this box`.
+another image, it moves back to the running one. Next the box looks for a
+local image of the same repository whose commit label (`com.bay.commit`, else
+`org.opencontainers.image.revision`) names the target, for example a
+`:latest` or `:previous` that the container no longer runs. A failed build
+never counts. When it finds one, it tags it `<image>:<commit12>` and the move
+goes on as if the tag had been there; the move detail reads `found by its
+commit label, tagged <image>:<commit12>`. Only after these checks does the
+box try a pull and report `<image>:<commit12> is not on this box`.
+
+A webhook build holds the build lock of the box (`git_deploy_build_lock_path`,
+default `<stack_dir>/build.lock`) from its start until it exits, so also while
+it moves `:latest` and starts the new container. Before the box moves
+`:latest` for `bay up` or `bay rollback`, it takes the same lock. It waits at
+most `container_lifecycle_build_lock_wait` seconds (default 300, the same as
+the deploy's wait for a running backup). So a deploy never moves `:latest`
+between a build's promotion and its container start. When the wait runs out,
+`:latest` stays where the build put it, the move is `skipped` with the detail
+`build running: ...`, and `bay up` prints `code: kept <container> (build
+running: ...)`. Run `bay up` again when the build is done. A deploy that
+moves no `:latest` never waits for the lock. The codepin report names the
+lock's state in `build_lock`: `held`, `not needed`, `timeout`, or `not taken
+(<why>)` when the file cannot be opened (then no build can take it either,
+and the moves go on).
 
 Bay compares code only for a container whose receipt names a commit (see
 [deploy-receipt.md](deploy-receipt.md): the commit label, or the single

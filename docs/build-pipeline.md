@@ -129,6 +129,23 @@ box to point `:latest` at that commit's image before the container pass
 receipt's image and freezes the env. Both are in [plan.md](plan.md), "Code and
 config".
 
+**The build lock covers the promotion and the start.** `rebuild.sh` takes the
+build lock (`git_deploy_build_lock_path`, default `<stack_dir>/build.lock`,
+an exclusive `flock` on fd 9) before any work and holds it until it exits:
+through the build, the hold guard, the release, the move of `:latest`, the
+container start, the health check and the receipt stamp. The pull path holds
+it the same way. `bay_reconcile.codepin` takes the same lock before it moves
+`:latest` or `:previous` for `bay up` or `bay rollback`, with a bounded wait
+(`container_lifecycle_build_lock_wait`, default 300 seconds). So a deploy
+cannot move `:latest` back to the pinned image after a build promoted its own
+image and before it started it, which would start old code under the new
+commit. When a build holds the lock past the wait, the deploy does not touch
+`:latest`, the code move is `skipped` (`build running: ...`) and `bay up`
+notes the container as kept. The lock file is created by the app user, mode
+0644; codepin opens it read only, which is enough for `flock`. Only one build
+runs at a time on a box, so the wait can also be for a build of another
+service.
+
 **A failed health check marks the commit.** When the container of a webhook
 deploy fails its health check, `_handle_rollback` removes the tag
 `<image>:<commit12>` of the failed build (`docker rmi` of the tag; the image

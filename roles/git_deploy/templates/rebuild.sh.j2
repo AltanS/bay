@@ -1165,9 +1165,9 @@ fi
 # (no stale-lockfile cleanup needed). A 1-hour timeout bounds deadlocks if
 # any single build legitimately hangs that long.
 #
-# Note: the per-repo flock further down (${REPO_DIR}/.git/rebuild.lock)
-# remains as a defensive inner layer — it's now redundant under this lock
-# but cheap, and survives if anyone ever loosens or scopes the global lock.
+# Held until exit, so it also spans the :latest promotion and the container
+# start: bay_reconcile.codepin (bay up, bay rollback) takes this same lock
+# before it moves :latest. The per-repo flock below is an inner layer.
 {% set _build_lock_path = git_deploy_build_lock_path | default(stack_dir ~ '/build.lock') %}
 {% set _build_lock_timeout = git_deploy_build_lock_timeout | default(3600) %}
 if ! { exec 9>"{{ _build_lock_path }}"; } 2>/dev/null; then  # brace group scopes 2>/dev/null to the open; bare `exec >f 2>/dev/null` silences the shell's stderr permanently

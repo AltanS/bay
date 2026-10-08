@@ -337,7 +337,10 @@
     # target whose image is not on the box (and cannot be pulled) stops the
     # deploy here, before any container changes, and names the commit tags the
     # box has. Never in a partial pass. `--check` skips it like the real run
-    # below: a command task does not run in check mode.
+    # below: a command task does not run in check mode. A move of `:latest`
+    # takes rebuild.sh's build lock first (same file as git_deploy), so it never
+    # lands between a webhook build's promotion and its start; when a build holds
+    # it past the wait, the move is skipped (`build running`) and bay up notes it.
     - name: Point :latest at the pinned commit images
       ansible.builtin.command:
         argv:
@@ -352,6 +355,10 @@
           # Same env expression as the receipt task below.
           - >-
             /var/lib/bay/receipts/{{ target_host | default(group_names | reject('equalto', 'all') | first | default('default')) }}.prev.json
+          - --build-lock
+          - "{{ git_deploy_build_lock_path | default(stack_dir ~ '/build.lock') }}"
+          - --lock-wait
+          - "{{ container_lifecycle_build_lock_wait | string }}"
       environment:
         PYTHONPATH: "{{ stack_dir }}/.reconcile"
       register: _codepin_result

@@ -801,6 +801,10 @@ class _Images:
             r for r, i in self.ids.items() if i == image
         )
 
+    def labelled(self, repo: str) -> list[tuple[str, dict[str, str]]]:
+        ids = sorted({i for r, i in self.ids.items() if r.rsplit(":", 1)[0] == repo})
+        return [(i, dict(self.labels.get(i, {}))) for i in ids]
+
 
 def _pin(images: _Images, targets: dict, spec: dict, capsys) -> tuple[int, dict]:
     from bay_reconcile import codepin

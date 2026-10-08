@@ -457,6 +457,9 @@ def test_rollback_lists_code_it_kept(
         def image_meta(self, ref: str) -> tuple[dict[str, str], list[str]]:
             return {}, []
 
+        def labelled(self, repo: str) -> list[tuple[str, dict[str, str]]]:
+            return []
+
     old_prev = {"containers": [{"name": "webapp", "image": "bay-testfleet-webapp:latest"}]}
 
     def deploy(cx: Context, box_env: str, *, config_files_root: Path | None = None,
@@ -3302,6 +3305,10 @@ class _Images:
         return dict(self.labels.get(image, {})), sorted(
             r for r, i in self.ids.items() if i == image
         )
+
+    def labelled(self, repo: str) -> list[tuple[str, dict[str, str]]]:
+        ids = sorted({i for r, i in self.ids.items() if r.rsplit(":", 1)[0] == repo})
+        return [(i, dict(self.labels.get(i, {}))) for i in ids]
 
 
 def test_up_releases_hold_and_retags_latest(
