@@ -1201,13 +1201,15 @@ WANTED (`bay.fleet.toml`), PINNED (the compiled `tailnet_proxies`) and RUNNING
 (the routes the ingress box receipt lists) and one status: `ok`, `pending`
 (the fleet file differs from the compiled file), `drift` (the box serves
 something else) or `unknown` (the receipt cannot speak for the pin: no
-receipt lists routes, or the receipt is older than the commit that last
-changed the compiled routes, so the box has not deployed since the pin). Only a
-receipt that is not older than the pin can make a route `drift`. The CLI asks
-git once for the commit that last changed the `tailnet_proxies` map in the
-compiled file, and once whether the receipt's fleet commit descends from it. A
-receipt commit that the local fleet clone does not know reads `unknown`. The
-ingress box writes `routes` into its receipt on every deploy (see
+receipt lists routes, or the receipt was deployed from a fleet commit whose
+compiled routes differ from the pinned ones, so the box has not deployed since
+the pin). Only a receipt that was deployed with the pinned routes can make a
+route `drift`. The CLI makes one git call for the whole table: it reads the
+compiled services file at the receipt's fleet commit and compares its
+`tailnet_proxies` map with the pinned one. An edit of anything else in that
+file does not matter. A receipt with no fleet commit, or with a commit that
+the local fleet clone does not know, reads `unknown`. The ingress box writes
+`routes` into its receipt on every deploy (see
 [deploy-receipt.md](deploy-receipt.md)). `bay status --json` passes it
 through, and `bay status --env <env>` prints the route count.
 

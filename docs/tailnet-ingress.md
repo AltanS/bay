@@ -324,10 +324,12 @@ Headscale host is in another box env, the route `bay up` never reaches it: deplo
 
 `bay show --routes` prints one status per route: `ok`, `pending` (the fleet file differs
 from the compiled file; plan and up), `drift` (the box serves something else) or `unknown`
-(the receipt cannot speak for the pin: no receipt lists routes, or the ingress box has not
-deployed since the commit that last changed the compiled routes). A partial deploy therefore
-reads `unknown`, not `drift`. `drift` needs a receipt that is not older than the pin. Deploy
-the ingress box to settle an `unknown`.
+(the receipt cannot speak for the pin: no receipt lists routes, or the ingress box deployed
+from a fleet commit whose compiled `tailnet_proxies` differ from the pinned ones). A partial
+deploy therefore reads `unknown`, not `drift`. `drift` needs a receipt that was deployed with
+the pinned routes. The CLI compares the two maps with one `git show` of the compiled file at
+the receipt's fleet commit, so an edit of a service does not make a route `unknown`, and an
+edit of a route alias does. Deploy the ingress box to settle an `unknown`.
 
 **Removing the last route.** When the fleet has no route left, the Traefik role deletes
 `dynamic/tailnet-proxies.yml` on the ingress box. The file provider watches the directory, so

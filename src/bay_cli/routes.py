@@ -498,38 +498,44 @@ def _running_routes(
     return found, source
 
 
-#: A line of the compiled services file that belongs to the route map: the
-#: ``tailnet_proxies`` key or a key of one route. ``domains`` and ``entrypoint``
-#: also occur on services, which only makes the pin look newer (more ``unknown``).
-_ROUTE_LINE = (
-    r"^(tailnet_proxies:|[ ]+(upstream|domains|identity_inject|pass_host_header|entrypoint):)"
-)
+def receipt_speaks_for_pin(
+    fleet_root: Path | None,
+    receipt: Mapping[str, Any] | None,
+    pinned: Mapping[str, Any],
+) -> bool:
+    """True when the receipt's deploy was made with the routes that are pinned now.
 
-
-def receipt_speaks_for_pin(fleet_root: Path | None, receipt: Mapping[str, Any] | None) -> bool:
-    """True when the receipt's deploy came after the commit that last changed the routes.
-
-    The pin of the routes is the compiled services file in the fleet repo
-    (the ``tailnet_proxies`` map). A receipt whose fleet commit is not a
-    descendant of the commit that last changed that map was written before
-    the pin, so it cannot say whether the box serves the pinned routes. Two
-    git calls for the whole table: the commit that last changed the map, and
-    the ancestry check. No pin commit (no history, no repo, no route ever
-    pinned) leaves nothing to be older than, so the receipt speaks. A receipt
-    commit the local clone does not know does not.
+    The pin of the routes is the ``tailnet_proxies`` map of the compiled services
+    file in the fleet repo. The receipt names the fleet commit that the deploy
+    ran from. This reads the compiled file at that commit (one git call) and
+    compares its map with the pinned one. Equal: the receipt speaks, so the box
+    can be compared with the pin. Different, a commit the local clone does not
+    know, a receipt with no fleet commit, or a file that is not there: the
+    receipt cannot say whether the box serves the pinned routes. An edit of
+    anything else in the services file (a service, say) does not matter.
+    ``fleet_root`` None or a receipt that is not a mapping leaves nothing to
+    compare, so the receipt speaks.
     """
+    import yaml
+
     from bay_cli import gitrepo
     from bay_cli.fleet import GENERATED_SERVICES
 
     if fleet_root is None or not isinstance(receipt, Mapping):
         return True
-    pin = gitrepo.last_change_matching(fleet_root, str(GENERATED_SERVICES), _ROUTE_LINE)
-    if pin is None:
-        return True
     commit = receipt.get("fleet_commit")
     if not isinstance(commit, str) or not commit:
         return False
-    return gitrepo.is_ancestor(fleet_root, pin, commit) is True
+    raw = gitrepo.show_file(fleet_root, commit, str(GENERATED_SERVICES))
+    if raw is None:
+        return False
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(data, Mapping):
+        return False
+    return _proxies(data) == _proxies(pinned)
 
 
 def _serves(pinned: Mapping[str, Any] | None, running: Mapping[str, Any] | None) -> bool:
@@ -557,14 +563,14 @@ def show_routes(
     (the fleet table differs from the compiled file: plan and up), ``drift``
     (the box serves something else than the compiled file) or ``unknown``
     (the receipt cannot speak for the pin: none lists routes, or the one that
-    does was written before the commit that last changed the routes; see
+    does was deployed from a fleet commit with other routes than the pin; see
     :func:`receipt_speaks_for_pin`). ``fleet_root`` None skips the commit check.
     """
     wanted_raw, errors = compile_routes(fleet)
     wanted = {k: _norm(v) for k, v in wanted_raw.items()}
     pin = _proxies(pinned)
     running, receipt = _running_routes(entries) if entries is not None else (None, None)
-    current = running is not None and receipt_speaks_for_pin(fleet_root, receipt)
+    current = running is not None and receipt_speaks_for_pin(fleet_root, receipt, pinned)
     rows: list[dict[str, Any]] = []
     for name in sorted(set(wanted) | set(pin) | set(running or {})):
         w, p = wanted.get(name), pin.get(name)
@@ -608,7 +614,7 @@ def render_show(doc: Mapping[str, Any]) -> str:
         lines.append("note: no receipt lists routes, so RUNNING is unknown")
     elif not doc.get("running_current", True):
         lines.append(
-            "note: the receipt is older than the last change of the routes, so the status is "
+            "note: the receipt was deployed with other routes than the pin, so the status is "
             "unknown; deploy the ingress box"
         )
     for e in doc.get("errors") or []:

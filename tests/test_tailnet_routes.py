@@ -677,7 +677,7 @@ def test_route_status_unknown_after_partial_deploy(
     box.receipts["production"] = copy.deepcopy(first)
     assert _statuses(world) == {"nas": "unknown", "notes": "unknown"}
     text = cli(world, "show", "--routes").stdout
-    assert "the receipt is older than the last change of the routes" in text
+    assert "the receipt was deployed with other routes than the pin" in text
 
     # A receipt of a commit the local clone does not know, or with none: unknown.
     box.receipts["production"] = copy.deepcopy(first)
@@ -693,17 +693,67 @@ def test_route_status_unknown_after_partial_deploy(
     box.receipts["production"]["routes"] = box.receipts["production"]["routes"][:1]
     assert _statuses(world) == {"nas": "ok", "notes": "drift"}
 
-    # One git log for the whole table, not one per route.
+    # One git call for the whole table, not one per route.
     calls: list[tuple[str, ...]] = []
-    real = gitrepo._run
+    real = gitrepo._run_bytes
 
     def spy(repo: Path, *args: str, **kw: Any) -> Any:
         calls.append(args)
         return real(repo, *args, **kw)
 
-    monkeypatch.setattr(gitrepo, "_run", spy)
+    monkeypatch.setattr(gitrepo, "_run_bytes", spy)
     _statuses(world)
-    assert sum(1 for a in calls if a and a[0] == "log") == 1, calls
+    assert len(calls) == 1 and calls[0][0] == "show", calls
+
+
+def _edit_pin(world: dict[str, Path], edit: Any, message: str) -> None:
+    """Change the compiled services file by hand and commit it, as a later compile would."""
+    path = world["fleet"] / GENERATED_SERVICES
+    header, body = path.read_text().split("\n", 1)
+    data = yaml.safe_load(body)
+    edit(data)
+    path.write_text(header + "\n" + yaml.safe_dump(data, sort_keys=False))
+    commit_all(world["fleet"], message)
+
+
+def test_route_status_alias_edit_is_unknown_until_deployed(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """A pin change that only adds an alias (a domain list item) is a pin change."""
+    assert add_route(world, "notes", **NOTES).exit_code == 0
+    do_up(world)
+    assert _statuses(world) == {"notes": "ok"}
+
+    fleet_file = world["fleet"] / "bay.fleet.toml"
+    fleet_file.write_text(
+        fleet_file.read_text().replace(
+            'domain = "notes.ts.example.com"\n',
+            'domain = "notes.ts.example.com"\naliases = ["memo.ts.example.com"]\n',
+        )
+    )
+    result = cli(world, "compile")
+    assert result.exit_code == 0, result.output
+    commit_all(world["fleet"], "alias")
+    assert _statuses(world) == {"notes": "unknown"}
+    # The ingress box deploys the pin: the receipt speaks again.
+    do_up(world)
+    assert _statuses(world) == {"notes": "ok"}
+
+
+def test_route_status_unrelated_service_edit_stays_ok(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """A later pin commit that touches services (domains, entrypoint) leaves the routes alone."""
+    assert add_route(world, "notes", **NOTES).exit_code == 0
+    do_up(world)
+
+    def edit(data: dict[str, Any]) -> None:
+        (svc,) = [v for v in data["services"].values()][:1]
+        svc["domains"] = ["other.example.com"]
+        svc["entrypoint"] = "websecure"
+
+    _edit_pin(world, edit, "service")
+    assert _statuses(world) == {"notes": "ok"}
 
 
 # ── the verbs ───────────────────────────────────────────────────────────────
