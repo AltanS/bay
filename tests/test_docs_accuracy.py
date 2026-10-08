@@ -76,3 +76,24 @@ def test_contributing_still_documents_the_release_command() -> None:
     text = (_REPO_ROOT / "CONTRIBUTING.md").read_text()
     assert "make release VERSION=" in text
     assert "CHANGELOG.md" in text
+
+
+def test_every_doc_that_names_bay_up_says_it_deploys_the_whole_box_environment() -> None:
+    """`bay up` is not a one-project deploy. A doc that names it must say so.
+
+    A doc whose first lines carry `Status: historical` describes an old design
+    and is exempt. The shell form of the rule:
+    for f in $(grep -l "bay up" docs/*.md); do grep -qi "status: historical" $f ||
+    grep -q "deploys the whole box environment" $f || echo $f; done
+    """
+    missing = []
+    for doc in sorted((_REPO_ROOT / "docs").glob("*.md")):
+        text = doc.read_text()
+        if "bay up" not in text:
+            continue
+        head = "\n".join(text.splitlines()[:10]).lower()
+        if "status: historical" in head:
+            continue
+        if "deploys the whole box environment" not in text:
+            missing.append(doc.name)
+    assert not missing, f"these docs name `bay up` without saying it deploys the whole box environment: {missing}"
