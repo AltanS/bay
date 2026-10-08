@@ -948,6 +948,8 @@ def test_unsupported_refuses_without_the_flag(fleet: Path, tmp_path: Path) -> No
 
 def test_compile_release_command(fleet: Path) -> None:
     """``release`` lands on the main container; ``[deploy.<env>] release`` wins."""
+    # A release runs at deploy time only, so the shop leaves automatic updates (validate rejects both).
+    edit(fleet, SHOP, 'update = "auto"', 'update = "notify"')
     edit(fleet, SHOP, 'secrets = ["SESSION_SECRET"]', 'secrets = ["SESSION_SECRET"]\nrelease = "bin/migrate"')
     edit(fleet, SHOP, 'branch = "develop"', 'branch = "develop"\nrelease = "bin/migrate --staging"')
     result = compiled(fleet)
