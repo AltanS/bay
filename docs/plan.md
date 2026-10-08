@@ -181,6 +181,8 @@ leave it out.
    two commit keys that `bay adopt` writes, see [The lockfile](#the-lockfile)) the note says instead that it is the adopt
    commit and not pushed yet, that `bay up` takes it and moves no code, and that you run
    `git push` after. Ignore the refusal wording there: there is none for that commit.
+   When the adopt commit is already on a branch of the remote, there is no note: it is a
+   pushed commit like any other (`bay up` still moves no code for it).
 2. Bay copies the fleet inputs to a temporary directory. Every project is
    read at its pinned commit. This project is read at the WANTED commit.
    Each file that a `bay.toml` mounts is copied from beside the toml to
@@ -917,7 +919,10 @@ first": the lock records it as `adopted.app_commit`), and it moves no code
 for it: no code target, the running image stays. The box only gets the new
 `rebuild.sh` with `bay_toml_path`, `bay_toml_hash`, `bay_build_hash` and
 `bay_toml_files`, and the new config. Run `bay up` in the app checkout: the
-adopt commit is not in the fleet's repo cache yet. Then push. The adopt
+adopt commit is not in the fleet's repo cache yet. The `bay up` result has a note
+that the adopt commit moves no code and that you push it after. Bay asks the remote
+first: when the adopt commit is already on a branch of the remote, the note is not
+there, because there is nothing to push. Then push. The adopt
 commit changes only the `bay.toml` and the files beside it, so the new script
 sees a config-only push (see [build-pipeline.md](build-pipeline.md),
 "Config-only push"): it tags the image of the previous commit (the running one) with the adopt

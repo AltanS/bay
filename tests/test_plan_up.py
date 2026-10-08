@@ -4028,6 +4028,57 @@ def test_up_json_notes_carry_the_adopt_note(
     assert f"note: {want}" in echoed
 
 
+@pytest.mark.parametrize("remote", [True, False, None], ids=["pushed", "unpushed", "unknown"])
+def test_adopt_note_only_when_unpushed(
+    world: dict[str, Path],
+    tmp_path: Path,
+    box: FakeBox,
+    monkeypatch: pytest.MonkeyPatch,
+    remote: bool | None,
+) -> None:
+    """Gap 29: the adopt notes fire only when the adopt commit is not on the remote.
+
+    ``pushed`` and ``unpushed`` ask the real remote; ``unknown`` stands for a
+    remote that cannot be read. In every case bay up takes the commit and
+    moves no code.
+    """
+    shop = _shop(world, tmp_path, toml=BUILD_SHOP_TOML)
+    assert _adopt(world, shop).exit_code == 0
+    adopt_commit = git(shop["app"], "rev-parse", "HEAD")
+    if remote is True:
+        git(shop["app"], "push", "-q", "origin", "main")
+    if remote is None:
+        monkeypatch.setattr(planmod, "commit_on_remote", lambda proj, commit: None)
+    proj = planmod.load_project(cx_of(world), "shop", cwd=shop["app"])
+    assert planmod.commit_on_remote(proj, adopt_commit) is remote
+
+    plan_note = "is the bay adopt commit and not pushed yet"
+    plan = planmod.make_plan(proj, planmod.PlanOptions())
+    assert plan["verdict"] == "auto", plan
+    assert any(plan_note in n for n in plan["notes"]) is (remote is not True), plan["notes"]
+    env_plan = planmod.make_env_plan(
+        cx_of(world), planmod.PlanOptions(read_running=False), cwd=shop["app"]
+    )
+    has_env_note = any(n.startswith("shop: ") and plan_note in n for n in env_plan["notes"])
+    assert has_env_note is (remote is not True), env_plan["notes"]
+
+    up = applymod.up(
+        proj,
+        planmod.PlanOptions(),
+        deploy=lambda cx, box_env, **kw: box.deploy(
+            cx, box_env, config_files_root=kw.get("config_files_root")
+        ),
+    )
+    assert up["result"] == "ok" and up["commit"] == adopt_commit
+    assert up["code_targets"] == {}, "the adopt commit moves no code, pushed or not"
+    up_note = (
+        f"shop: {adopt_commit[:12]} is the bay adopt commit; no code moves, "
+        "git push it after this bay up"
+    )
+    assert (up_note in up["notes"]) is (remote is not True), up["notes"]
+    assert not any("is the bay adopt commit" in n for n in up["notes"] if n != up_note)
+
+
 def test_adopt_toml_path_monorepo(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
     shop = _shop(world, tmp_path)
     before = _body((world["fleet"] / GENERATED_SERVICES).read_text())

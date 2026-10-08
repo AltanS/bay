@@ -435,16 +435,18 @@ def _apply_plan(
     box_env = str(plan["box_env"])
     adopt_notes: list[str] = []
     for proj, commit in members:
+        on_remote = planmod.commit_on_remote(proj, commit)
         if planmod.adopt_pending(proj, env, commit):
             # The adopt commit: bay up deploys its config before the push, so
             # the push meets the new rebuild.sh and is config only. The note
-            # goes to the result's notes, which also echo to the log.
-            adopt_notes.append(
-                f"{proj.name}: {commit[:12]} is the bay adopt commit; no code moves, "
-                "git push it after this bay up"
-            )
+            # goes to the result's notes, which also echo to the log. Once
+            # the commit is on the remote, there is nothing to push: no note.
+            if on_remote is not True:
+                adopt_notes.append(
+                    f"{proj.name}: {commit[:12]} is the bay adopt commit; no code moves, "
+                    "git push it after this bay up"
+                )
             continue
-        on_remote = planmod.commit_on_remote(proj, commit)
         if on_remote is not True:
             why = "is not" if on_remote is False else "cannot be checked to be"
             raise Refused(
