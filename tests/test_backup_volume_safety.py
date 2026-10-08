@@ -40,7 +40,8 @@ from helpers import make_ansible_env  # noqa: E402
 # The fake docker. `redis-cli LASTSAVE/BGSAVE` keep a counter, so the BGSAVE
 # poll ends at once. Every other call is a producer: it is logged (argv, one
 # JSON line), writes 64 KiB, then fails when $FAIL_ON is one of its arguments,
-# else writes 64 KiB more.
+# else writes 64 KiB more. When $EMPTY_ON is one of its arguments it writes
+# nothing and exits 0.
 FAKE_DOCKER = r"""#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
@@ -57,9 +58,13 @@ if args[:1] == ["exec"] and "redis-cli" in args:
 with open(os.path.join(state, "producers.log"), "a") as fh:
     fh.write(json.dumps(args) + "\n")
 out = sys.stdout.buffer
+if os.environ.get("EMPTY_ON") and os.environ["EMPTY_ON"] in args:
+    sys.exit(0)  # a dump that exits 0 and writes nothing
 out.write(b"a" * 65536)
 out.flush()
 if os.environ.get("FAIL_ON") and os.environ["FAIL_ON"] in args:
+    if os.environ.get("NOISE"):
+        sys.stderr.write("helper: command failed: boom\n")  # not restic's line
     sys.stderr.write("Error response from daemon: connection reset\n")
     sys.exit(1)
 out.write(b"b" * 65536)
@@ -91,6 +96,15 @@ if cmd == "backup":
                              % (name, proc.returncode))
             sys.exit(1)
         data = proc.stdout
+        if not data:
+            # restic 0.17: an empty stream fails the file, still stores the snapshot.
+            snap = "%06d" % len(snaps)
+            open(os.path.join(repo, snap + ".data"), "wb").write(data)
+            with open(os.path.join(repo, snap + ".json"), "w") as fh:
+                json.dump({"short_id": snap, "paths": ["/" + name]}, fh)
+            print("snapshot %s saved" % snap)
+            sys.stderr.write("error: failed to save /%s: read /%s: no data read\n" % (name, name))
+            sys.exit(3)
     elif "--stdin" in args:
         data = sys.stdin.buffer.read()
     else:
@@ -112,6 +126,9 @@ if cmd == "dump":
     sys.stdout.buffer.write(open(os.path.join(repo, snap + ".data"), "rb").read())
     sys.exit(0)
 if cmd == "forget":
+    for gone in [a for a in args[1:] if a in snaps]:
+        os.remove(os.path.join(repo, gone + ".json"))
+        os.remove(os.path.join(repo, gone + ".data"))
     sys.exit(0)
 sys.exit(2)
 """
@@ -228,9 +245,10 @@ class Box:
         return {**self.env, "RESTIC_REPOSITORY": str(self.repo),
                 "RESTIC_PASSWORD": "pw-placeholder", "RESTIC_CACHE_DIR": str(self.tmp / "cache")}
 
-    def run(self, fail_on: str = "", **extra: str) -> subprocess.CompletedProcess[str]:
+    def run(self, fail_on: str = "", empty_on: str = "", **extra: str
+            ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(["bash", str(self.script)],
-                              env={**self.env, "FAIL_ON": fail_on, **extra},
+                              env={**self.env, "FAIL_ON": fail_on, "EMPTY_ON": empty_on, **extra},
                               capture_output=True, text=True, timeout=120)
 
     def snapshots(self) -> list[str]:
@@ -302,6 +320,49 @@ def test_backup_dump_snapshot_keeps_its_file_name(tmp_path: Path, method: str, w
     assert box.dump(f"/{m['file']}") == b"a" * 65536 + b"b" * 65536
     # The dump command is the one the script ran before, argument for argument.
     assert box.producers() == [m["producer"]]
+
+
+@pytest.mark.parametrize("which", _RESTICS)
+@pytest.mark.parametrize("method", sorted(METHODS))
+def test_backup_empty_dump_stores_no_snapshot(tmp_path: Path, method: str, which: str) -> None:
+    """A dump that exits 0 and writes nothing: restic fails with `no data read` but has
+    stored a snapshot of the empty file. The script removes that one and alerts."""
+    m = METHODS[method]
+    box = Box(tmp_path, which, method)
+    # A good snapshot first: it must survive, and stay the newest.
+    assert box.run().returncode == 0
+    assert box.snapshots() == [f"/{m['file']}"]
+    failed = box.run(empty_on=m["fail_on"])
+    assert failed.returncode == 1, failed.stdout + failed.stderr
+    assert (f"ERROR: Dump produced no data, no snapshot stored ({m['file']})"
+            in failed.stdout), failed.stdout + failed.stderr
+    assert "no data read" in failed.stderr
+    assert box.snapshots() == [f"/{m['file']}"]
+    assert box.dump(f"/{m['file']}") == b"a" * 65536 + b"b" * 65536
+    assert not (tmp_path / "backup" / "locks" / f"{m['accessory']}.lock").exists()
+
+
+@pytest.mark.parametrize("which", _RESTICS)
+def test_backup_empty_dump_on_an_empty_repo_leaves_nothing(tmp_path: Path, which: str) -> None:
+    box = Box(tmp_path, which, "file")
+    failed = box.run(empty_on="cp")
+    assert failed.returncode == 1, failed.stdout + failed.stderr
+    assert "Dump produced no data" in failed.stdout
+    assert box.snapshots() == []
+
+
+@pytest.mark.parametrize("which", _RESTICS)
+def test_dump_stderr_with_command_failed_does_not_hide_the_exit_code(
+    tmp_path: Path, which: str
+) -> None:
+    """The exit code comes from restic's `Fatal: command failed: ` line, not from the
+    first `command failed: ` in stderr (the dump command's own text comes first)."""
+    box = Box(tmp_path, which, "file")
+    failed = box.run(fail_on="cp", NOISE="1")
+    assert failed.returncode == 1
+    assert "helper: command failed: boom" in failed.stderr
+    assert ("ERROR: Dump command failed with exit code 1, no snapshot stored "
+            "(bay_shop_data.tar)") in failed.stdout, failed.stdout
 
 
 def test_pg_dump_reports_a_failed_database_when_a_later_one_succeeds(tmp_path: Path) -> None:

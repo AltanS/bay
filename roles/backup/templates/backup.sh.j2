@@ -40,7 +40,8 @@ BAY_ALERT_FOOTER={{ docker_monitor_alert_footer | quote }}
 mkdir -p "$(dirname "$LOCK_FILE")"
 echo "$$" > "$LOCK_FILE"
 RESTIC_ERR=$(mktemp)
-trap 'rm -f "$LOCK_FILE" "$RESTIC_ERR"' EXIT
+RESTIC_OUT=$(mktemp)
+trap 'rm -f "$LOCK_FILE" "$RESTIC_ERR" "$RESTIC_OUT"' EXIT
 
 # ── Prepare Cache ───────────────────────────────────────────────────────
 
@@ -58,10 +59,17 @@ mkdir -p "$RESTIC_CACHE_DIR"
 #
 # Never exits. On a failure it records the first one: RESTIC_EXIT (restic's
 # exit code), DUMP_ERROR (what restic says about the dump command, e.g.
-# `exit status 1`, empty when restic itself failed) and FAILED_FILE. restic's
-# stderr, with the dump command's own stderr in it, goes on to the journal.
+# `exit status 1`, empty when restic itself failed), EMPTY_DUMP (the dump
+# exited 0 and wrote nothing) and FAILED_FILE. restic's stderr, with the dump
+# command's own stderr in it, goes on to the journal.
+#
+# A dump that exits 0 with no output is not an error to the dump command, but
+# restic fails with `no data read` and still stores a snapshot of the empty
+# file. That snapshot would be the newest one and a restore would pick it. It
+# is removed here, by the id restic printed for this run (`snapshot <id>
+# saved`), so no other snapshot can be touched.
 backup_from() {
-  local name="$1" rc=0 why
+  local name="$1" rc=0 why snap
   shift
   "$RESTIC" backup \
     --stdin-filename "$name" \
@@ -70,14 +78,25 @@ backup_from() {
     --tag "${METHOD}" \
     ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
     --retry-lock 15m \
-    --stdin-from-command -- "$@" 2> "$RESTIC_ERR" || rc=$?
+    --stdin-from-command -- "$@" > "$RESTIC_OUT" 2> "$RESTIC_ERR" || rc=$?
+  cat "$RESTIC_OUT"
   cat "$RESTIC_ERR" >&2
   if [ "$rc" -ne 0 ] && [ "${RESTIC_EXIT:-0}" -eq 0 ]; then
     RESTIC_EXIT=$rc
     FAILED_FILE=$name
     # One sed, no pipe: under pipefail an early-closing reader fails the line.
-    why=$(sed -n '/command failed: /{s/.*command failed: //p;q;}' "$RESTIC_ERR")
+    why=$(sed -n '/Fatal: command failed: /{s/.*Fatal: command failed: //p;q;}' "$RESTIC_ERR")
     DUMP_ERROR=$why
+    if [ -z "$why" ] && grep -qF 'no data read' "$RESTIC_ERR"; then
+      EMPTY_DUMP=1
+    fi
+  fi
+  if [ "$rc" -ne 0 ] && [ -z "$why" ] && grep -qF 'no data read' "$RESTIC_ERR"; then
+    snap=$(sed -n '/^snapshot [0-9a-f]* saved/{s/^snapshot \([0-9a-f]*\) saved.*/\1/p;q;}' "$RESTIC_OUT")
+    if [ -n "$snap" ]; then
+      "$RESTIC" forget "$snap" --retry-lock 15m >&2 \
+        || echo "WARNING: could not remove the empty snapshot ${snap} (${name})" >&2
+    fi
   fi
   return 0
 }
@@ -149,9 +168,12 @@ backup_from "${ACCESSORY}.tar" \
 # ── Error Checking ──────────────────────────────────────────────────────
 
 # restic stores no snapshot for a failed dump. When restic names the dump
-# command as the cause, the alert says so; else it gives restic's exit code.
+# command as the cause, the alert says so; a dump that wrote nothing has its
+# own text (its empty snapshot is removed in backup_from); else the alert gives
+# restic's exit code.
 if [ "${RESTIC_EXIT:-0}" -ne 0 ]; then
-  case "${DUMP_ERROR:-}" in
+  case "${EMPTY_DUMP:+empty}${DUMP_ERROR:-}" in
+    empty*) ERROR_MSG="Dump produced no data, no snapshot stored (${FAILED_FILE})" ;;
     "exit status "*) ERROR_MSG="Dump command failed with exit code ${DUMP_ERROR#exit status }, no snapshot stored (${FAILED_FILE})" ;;
     ?*) ERROR_MSG="Dump command failed (${DUMP_ERROR}), no snapshot stored (${FAILED_FILE})" ;;
     *) ERROR_MSG="Restic backup failed with exit code ${RESTIC_EXIT} (${FAILED_FILE})" ;;
