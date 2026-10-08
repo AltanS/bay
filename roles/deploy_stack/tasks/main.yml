@@ -218,7 +218,7 @@
           {{ active_accessories | default({}) | dict2items
              | selectattr('value.backup', 'defined') | map(attribute='key') | list }}
         _volume_backup_locks: >-
-          {{ [stack_name ~ '_']
+          {{ [(stack_name | default('bay')) ~ '_']
              | product(volume_backups | default({}) | dict2items
                        | selectattr('value.container', 'in',
                                     (active_services | default({}) | list)

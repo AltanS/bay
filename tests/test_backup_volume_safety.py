@@ -538,3 +538,26 @@ def test_deploy_waits_for_volume_backup_lock(tmp_path: Path) -> None:
     # the `elapsed` of the item: under load the module may start late, and
     # that number shrinks; the order of the two clocks does not.)
     assert got["done"] >= removed_at[0]
+
+
+def test_deploy_wait_names_volume_locks_without_stack_name(tmp_path: Path) -> None:
+    """The wait task has `ignore_errors`, so a lock list that failed to render would be
+    "wait for nothing". With no `stack_name` the list still names `bay_<volume>`."""
+    wait = _task(ROOT / "roles" / "deploy_stack" / "tasks" / "main.yml",
+                 "Wait for active backups to complete before deploy")
+    wait = {**wait, "register": "_waited"}
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    out = tmp_path / "out.json"
+    record = {"name": "Record what the wait covered", "ansible.builtin.copy": {
+        "content": "{{ (_waited.results | default([]) | map(attribute='item') | list) | to_json }}",
+        "dest": str(out), "mode": "0600"}}
+    argv, env = _play_files(tmp_path, [wait, record], {
+        "stack_dir": str(tmp_path),
+        "backup_lock_dir": str(locks),
+        "active_services": {"shop": {"image": "x"}},
+        "volume_backups": {"shop_data": {"container": "shop", "path": "/app/data"}},
+    })
+    proc = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stdout[-3000:]
+    assert json.loads(out.read_text()) == ["bay_shop_data"]
