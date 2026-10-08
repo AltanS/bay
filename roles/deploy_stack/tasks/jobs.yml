@@ -5,12 +5,15 @@
 #   {{ stack_dir }}/jobs/<job>.sh          docker run --rm of the main image
 #   /etc/systemd/system/bay-job@<job>.timer OnCalendar from the compiled
 #                                           schedule, in UTC
+#   /etc/systemd/system/bay-job@<job>.service.d/timeout.conf
+#                                           TimeoutStartSec from the job's
+#                                           `timeout` (3600 seconds by default)
 # plus the shared template unit bay-job@.service (Type=oneshot, so a run never
 # overlaps itself: systemd does not start an active unit again).
 #
 # A job that is gone (removed from bay.toml, or its container moved to another
-# host) loses its timer and its script here. The units live in /etc, so those
-# tasks run as root: this play's become_user is app_user.
+# host) loses its timer, its timeout drop-in and its script here. The units
+# live in /etc, so those tasks run as root: this play's become_user is app_user.
 
 - name: Select the jobs whose container runs on this host
   ansible.builtin.set_fact:
@@ -74,6 +77,38 @@
   become_user: root
   register: _bay_job_timers
 
+# The shared template unit cannot carry a per-job value, so each job gets a
+# drop-in with its TimeoutStartSec (the job's `timeout`, 3600 seconds by default).
+- name: Ensure the job unit drop-in directories exist
+  ansible.builtin.file:
+    path: "/etc/systemd/system/bay-job@{{ item.key }}.service.d"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ _bay_jobs | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  become: true
+  become_user: root
+
+- name: Install the job start timeouts
+  ansible.builtin.template:
+    src: job-timeout.conf.j2
+    dest: "/etc/systemd/system/bay-job@{{ item.key }}.service.d/timeout.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ _bay_jobs | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+  vars:
+    job_name: "{{ item.key }}"
+    job: "{{ item.value }}"
+  become: true
+  become_user: root
+  register: _bay_job_timeouts
+
 - name: Find the job timers on this host
   ansible.builtin.find:
     paths: /etc/systemd/system
@@ -124,6 +159,15 @@
   become_user: root
   register: _bay_job_removed
 
+- name: Remove the start timeouts of jobs that are gone
+  ansible.builtin.file:
+    path: "/etc/systemd/system/bay-job@{{ item }}.service.d"
+    state: absent
+  loop: "{{ _bay_jobs_gone }}"
+  become: true
+  become_user: root
+  register: _bay_job_timeouts_removed
+
 - name: Remove the scripts of jobs that are gone
   ansible.builtin.file:
     path: "{{ stack_dir }}/jobs/{{ item }}.sh"
@@ -138,6 +182,8 @@
   when: >-
     _bay_job_service is changed
     or _bay_job_timers is changed
+    or _bay_job_timeouts is changed
+    or _bay_job_timeouts_removed is changed
     or _bay_job_removed is changed
 
 # Not in check mode: a timer the dry run did not write cannot be started.

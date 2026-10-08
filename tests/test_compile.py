@@ -991,6 +991,27 @@ def test_compile_jobs_as_cron_containers(fleet: Path) -> None:
     assert any("jobs[0].schedule" in m and "day of the week" in m for m in msgs), msgs
 
 
+def test_compile_command_forms_and_job_timeout(fleet: Path) -> None:
+    """A list release or job command and a job timeout compile as written; a string is unchanged."""
+    edit(fleet, SHOP, 'update = "auto"', 'update = "notify"')
+    edit(fleet, SHOP, 'secrets = ["SESSION_SECRET"]', 'secrets = ["SESSION_SECRET"]\nrelease = ["bin/migrate", "up", "--all"]')
+    edit(fleet, SHOP, "[deploy.production]", (
+        '[[jobs]]\nname = "nightly"\nschedule = "30 2 * * 1-5"\ncommand = ["bin/report", "--all"]\ntimeout = 120\n\n'
+        '[[jobs]]\nname = "tick"\nschedule = "0 * * * *"\ncommand = "bin/tick"\n\n'
+        "[deploy.production]"
+    ))
+    result = compiled(fleet)
+    assert not result.unsupported, result.unsupported
+    doc = yaml.safe_load(result.body())
+    assert doc["services"]["shop"]["release"] == ["bin/migrate", "up", "--all"]
+    assert doc["jobs"]["shop-job-nightly"]["command"] == ["bin/report", "--all"]
+    assert doc["jobs"]["shop-job-nightly"]["timeout"] == 120
+    # The string form and a job without `timeout` compile exactly as before.
+    assert doc["jobs"]["shop-job-tick"] == {
+        "of": "shop", "schedule": "0 * * * *", "on_calendar": "*-*-* *:00:00 UTC", "command": "bin/tick",
+    }
+
+
 def test_job_name_collides_with_a_container(fleet: Path) -> None:
     _second_project(fleet, "shop-job-nightly", '[access]\nmode = "public"\n[deploy.production]\ndomain = "j.example.com"\n')
     edit(fleet, SHOP, "[deploy.production]", '[[jobs]]\nname = "nightly"\nschedule = "0 2 * * *"\ncommand = "x"\n\n[deploy.production]')

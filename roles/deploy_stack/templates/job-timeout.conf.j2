@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# bay.toml [[jobs]] timeout: the longest a run of {{ job_name }} may take. Past it
+# systemd stops the run and ExecStopPost removes the container.
+[Service]
+TimeoutStartSec={{ job.timeout | default(3600) | int }}

@@ -104,7 +104,7 @@ services:
     zero_downtime: true              # Enable canary zero-downtime deploy (default: false)
     replicas: 1                      # Container replicas (default: 1)
     command: <override>              # Override container CMD
-    release: <command>               # Run once in a one-shot container of the new image before create/recreate
+    release: <command>               # String (sh -c) or list (image ENTRYPOINT); run once in a one-shot container of the new image before create/recreate
 
     middleware:                       # Per-service middleware config
       security_headers: true         #   Opt-out of global headers (default: true)
@@ -245,8 +245,11 @@ accessories:
 
 ### `release`
 
-`release` is a shell command (`sh -c`). The compile writes it on the main container from
-`bay.toml` `release` (the env value wins). The reconciler runs it once in a one-shot
+`release` is a string or a list of strings. A string is a shell command: it runs as
+`/bin/sh -c "<cmd>"` with the image entrypoint overridden, so an image with
+`ENTRYPOINT ["node"]` does not run `node sh -c ...`. A list (`["bin/migrate", "up"]`) keeps
+the image ENTRYPOINT and is passed to it as the arguments. The compile writes it on the main
+container from `bay.toml` `release` (the env value wins), in the form it was written. The reconciler runs it once in a one-shot
 container `<name>-release` of the new image, with the env, network, mounts and user of the
 container, before it creates or recreates the container. A non-zero exit or a timeout
 (`bay_release_timeout`, default 600 seconds) fails that container's action: the old
@@ -284,15 +287,21 @@ jobs:
     of: myapp                        # the main container
     schedule: "0 2 * * *"            # cron line from bay.toml, UTC
     on_calendar: "*-*-* 02:00:00 UTC"  # the same, as a systemd OnCalendar expression
-    command: node dist/cleanup.js
+    command: node dist/cleanup.js    # a string runs as /bin/sh -c; a list keeps the image ENTRYPOINT
     memory: 256m                     # optional; default: the main container's mem_limit
+    timeout: 600                     # optional, seconds a run may take; default 3600
 ```
 
 `deploy_stack` installs, on the box that runs `of`, the script `<stack_dir>/jobs/<job>.sh`, the
 shared one-shot unit `bay-job@.service` (runs as the app user) and the timer
 `bay-job@<job>.timer`. The script runs `docker run --rm` with the image that `of` runs at that
-moment, its env file, network and mounts. A job that is gone loses its timer and script on
-the next deploy.
+moment, its env file, network and mounts. A string `command` runs through
+`/bin/sh -c` with the image entrypoint overridden. A list `command` keeps the image ENTRYPOINT
+and is passed to it as the arguments. `timeout` becomes `TimeoutStartSec` of the job, in a
+drop-in `bay-job@<job>.service.d/timeout.conf` (3600 seconds when the key is absent). Past it
+systemd stops the run and removes the container. The timer has no `Persistent=` setting, so a
+run missed while the box was off is not made up. A job that is gone loses its timer, its
+timeout drop-in and its script on the next deploy.
 
 ### `volume_backups`
 

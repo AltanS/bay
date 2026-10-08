@@ -306,7 +306,7 @@ def _backup_sh_volume(payload: str) -> str:
     )
 
 
-def _bay_job_sh(payload: str) -> str:
+def _bay_job_sh(payload: str, *, command: object = None) -> str:
     """bay.toml [[jobs]]: every value of the job and of its main container is poisoned."""
     sys.path.insert(0, str(_REPO_ROOT / "filter_plugins"))
     from bay_filters import bay_prefix_volumes
@@ -317,12 +317,18 @@ def _bay_job_sh(payload: str) -> str:
     return env.get_template(path.name).render(
         ansible_managed="test",
         job_name=payload,
-        job={"of": payload, "command": payload, "schedule": "0 2 * * *"},
+        job={"of": payload, "command": payload if command is None else command,
+             "schedule": "0 2 * * *"},
         job_main={"network_mode": payload, "env": {}, "volumes": [f"{payload}:/data"]},
         job_memory=payload,
         stack_dir=f"/opt/{payload}",
         stack_name=payload,
     )
+
+
+def _bay_job_sh_list_command(payload: str) -> str:
+    """The list form of a job command: each element is quoted on its own."""
+    return _bay_job_sh(payload, command=["bin/run", payload, f"--{payload}"])
 
 
 def _maintenance_sh(payload: str) -> str:
@@ -534,6 +540,32 @@ def _rebuild_sh(payload: str) -> str:
     return _render_rebuild_sh(services, ["api"], git_deploy_services=["api"])
 
 
+def _rebuild_sh_release(payload: str) -> str:
+    """bay.toml `release` as a string: the _run_release function of rebuild.sh."""
+    return _rebuild_sh_release_with(payload, payload)
+
+
+def _rebuild_sh_release_list(payload: str) -> str:
+    """bay.toml `release` as a list: each element is quoted on its own."""
+    return _rebuild_sh_release_with(payload, ["bin/migrate", payload, f"--{payload}"])
+
+
+def _rebuild_sh_release_with(payload: str, release: object) -> str:
+    from test_rebuild_config import _render_rebuild_sh
+
+    services = {
+        "api": {
+            "access": "public",
+            "image": "registry.invalid/api:latest",
+            "domains": ["api.example.com"],
+            "ports": {"internal": 3000},
+            "build": {"repo": "git@github.com:acme/api.git", "branch": "main"},
+            "release": release,
+        }
+    }
+    return _render_rebuild_sh(services, ["api"], git_deploy_services=["api"])
+
+
 def _rebuild_sh_build_fields(payload: str) -> str:
     """The `build:` block itself — repo, branch, dockerfile, context.
 
@@ -641,6 +673,7 @@ _CASES: list[Case] = [
     Case("roles/backup/templates/backup.sh.j2", _backup_sh_file),
     Case("roles/backup/templates/backup.sh.j2", _backup_sh_volume),
     Case("roles/deploy_stack/templates/bay-job.sh.j2", _bay_job_sh),
+    Case("roles/deploy_stack/templates/bay-job.sh.j2", _bay_job_sh_list_command),
     Case("roles/backup/templates/maintenance.sh.j2", _maintenance_sh),
     Case("roles/alert_channel/templates/_notify.sh.j2", _notify_snippet),
     Case("roles/alert_channel/templates/_notify.sh.j2", _notify_snippet_env_names),
@@ -679,6 +712,8 @@ _CASES: list[Case] = [
         _rebuild_sh,
         residuals={"docker_monitor_alert_header"},
     ),
+    Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_release),
+    Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_release_list),
     Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_build_fields),
     Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_build_fields_token),
     Case("roles/git_deploy/templates/rebuild.sh.j2", _rebuild_sh_build_fields_remote),

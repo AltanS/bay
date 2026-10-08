@@ -446,7 +446,7 @@ def test_rebuild_runs_release_before_swap(tmp_path):
     assert rendered.count("_run_release() {") == 2
     local_def = rendered[rendered.index("if [[ \"${SERVICE}\" == 'svc-local' ]]; then\n  _run_release"):]
     local_def = local_def[: local_def.index("\nfi\n")]
-    assert "sh -c 'bin/migrate --yes'" in local_def
+    assert "--entrypoint /bin/sh \"$1\" -c 'bin/migrate --yes'" in local_def
     assert '--name "svc-local-release"' in local_def
     assert '--label "com.bay.release-of=svc-local"' in local_def
     assert '--env-file "${STACK_DIR}/env/svc-local.env"' in local_def

@@ -18,6 +18,7 @@ from .models import (
     ContainerSpec,
     ContainerState,
     healthcheck_to_sdk,
+    release_command_kwargs,
 )
 from .observe import (
     HASH_LABEL as _HASH_LABEL,
@@ -156,11 +157,11 @@ class SdkDockerClient:
         kwargs: dict[str, Any] = {
             "name": name,
             "image": spec.image,
-            "command": ["sh", "-c", str(spec.release)],
             "detach": True,
             "environment": dict(spec.env),
             "labels": {RELEASE_LABEL: spec.name},
         }
+        kwargs.update(release_command_kwargs(spec.release))
         if spec.network_mode:
             kwargs["network_mode"] = spec.network_mode
         elif spec.networks:

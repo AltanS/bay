@@ -497,7 +497,8 @@ class _Compiler:
         """``[[jobs]]`` -> ``jobs:``: one entry per job, keyed by its container name.
 
         ``{of: <main container>, schedule: <cron>, on_calendar: <timer>,
-        command: <cmd>, memory: <size>}`` (``memory`` only when set). The
+        command: <cmd>, memory: <size>, timeout: <seconds>}`` (``memory`` and
+        ``timeout`` only when set; ``command`` is a string or a list of strings). The
         deploy renders a script and a systemd timer per entry on the box of
         ``of``; the job runs the main container's image with its env file,
         network and mounts. ``on_calendar`` is the cron line converted for
@@ -526,6 +527,8 @@ class _Compiler:
             }
             if "memory" in job:
                 entry["memory"] = job["memory"]
+            if "timeout" in job:
+                entry["timeout"] = job["timeout"]
             self.jobs[name] = entry
 
     def _emit_container(self, unit: _Unit, service: str) -> None:

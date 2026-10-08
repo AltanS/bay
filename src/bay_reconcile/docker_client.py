@@ -47,9 +47,11 @@ class DockerClient(Protocol):
         """Run ``spec.release`` once in a one-shot container and remove it.
 
         The container is ``<name>-release`` (``models.RELEASE_SUFFIX``): the
-        spec's image, env, volumes, network and user, the command
-        ``sh -c <release>``, no ports, and only the label
-        ``models.RELEASE_LABEL``. Returns ``(exit code, last log lines)``;
-        the exit code is None when the run passed ``timeout`` seconds.
+        spec's image, env, volumes, network and user, no ports, and only the
+        label ``models.RELEASE_LABEL``. A string release runs as
+        ``/bin/sh -c`` with the image entrypoint overridden; a list keeps the
+        image ENTRYPOINT and is passed as its arguments
+        (``models.release_command_kwargs``). Returns ``(exit code, last log
+        lines)``; the exit code is None when the run passed ``timeout`` seconds.
         """
         ...

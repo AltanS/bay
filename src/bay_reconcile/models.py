@@ -19,6 +19,18 @@ ContainerType = Literal["service", "accessory", "infra"]
 RELEASE_SUFFIX = "-release"
 RELEASE_LABEL = "com.bay.release-of"
 
+
+def release_command_kwargs(release: str | Sequence[str] | None) -> dict[str, object]:
+    """The ``entrypoint`` and ``command`` of a release one-shot.
+
+    A string runs as ``/bin/sh -c <release>`` with the image ENTRYPOINT
+    overridden, so an exec-form ``ENTRYPOINT ["node"]`` does not turn it into
+    ``node sh -c ...``. A list keeps the image ENTRYPOINT and is its arguments.
+    """
+    if isinstance(release, str):
+        return {"entrypoint": ["/bin/sh"], "command": ["-c", release]}
+    return {"command": [str(a) for a in release or ()]}
+
 _DURATION_UNITS_NS: dict[str, int] = {
     "ns": 1,
     "us": 1_000,
@@ -133,12 +145,14 @@ class ContainerSpec:
     log_options: Mapping[str, str] | None = None
     zero_downtime: bool = False
     build: bool = False
-    #: ``bay.toml`` ``release``: a shell command run once in a one-shot
-    #: container of the new image before this container is created or
-    #: recreated. A non-zero exit or a timeout fails the action before the old
-    #: container is touched. Not hashed: a changed command alone recreates
+    #: ``bay.toml`` ``release``: a command run once in a one-shot container of
+    #: the new image before this container is created or recreated. A string
+    #: runs as ``/bin/sh -c <release>`` with the image ENTRYPOINT overridden. A
+    #: tuple of strings keeps the image ENTRYPOINT and is its arguments. A
+    #: non-zero exit or a timeout fails the action before the old container is
+    #: touched. Not hashed: a changed command alone recreates
     #: nothing.
-    release: str | None = None
+    release: str | tuple[str, ...] | None = None
     #: Only in a check-mode plan, and only when the env file the deploy would
     #: write differs from the one on the box: ``{"live", "added", "removed",
     #: "changed", "reordered"}``. KEY NAMES and booleans only, never a value.

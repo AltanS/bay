@@ -6,6 +6,9 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
+# The longest a run may take. bay-job@<job>.service.d/timeout.conf sets the
+# job's own `timeout` (bay.toml [[jobs]], 3600 seconds by default).
+TimeoutStartSec=3600
 User={{ app_user }}
 ExecStart={{ stack_dir }}/jobs/%i.sh
 # A stop (or a timeout) kills the docker client, not the container.

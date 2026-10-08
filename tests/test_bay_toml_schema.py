@@ -673,3 +673,26 @@ def test_paths_that_differ_by_a_trailing_slash_collide() -> None:
     assert [v.path for v in found] == ["services.api2.path"]
     assert "same route as services.api.path" in found[0].message
     assert not bay_toml.validate(_path_doc(api="/api", apiary="/apiary/"))
+
+
+# ── command forms and the job timeout ───────────────────────────────────────
+
+def test_release_and_job_command_accept_a_string_or_a_list():
+    job = {"name": "a", "schedule": "0 2 * * *"}
+    for value in ("bin/migrate up", ["bin/migrate", "up"], ["bin/migrate"], ["bin/x", ""]):
+        assert bay_toml.validate(_doc(release=value)) == [], value
+        assert bay_toml.validate(_doc(jobs=[{**job, "command": value}])) == [], value
+
+
+@pytest.mark.parametrize("value", ["", [], [""], ["", "x"], [1], ["x", 2], {"a": "b"}, 7])
+def test_release_and_job_command_reject_other_shapes(value):
+    job = {"name": "a", "schedule": "0 2 * * *"}
+    assert _paths(bay_toml.validate(_doc(release=value))) == {"release"}, value
+    assert _paths(bay_toml.validate(_doc(jobs=[{**job, "command": value}]))) == {"jobs[0].command"}, value
+
+
+def test_job_timeout_is_a_positive_integer():
+    job = {"name": "a", "schedule": "0 2 * * *", "command": "x"}
+    assert bay_toml.validate(_doc(jobs=[{**job, "timeout": 90}])) == []
+    for bad in (0, -5, "90", 1.5):
+        assert _paths(bay_toml.validate(_doc(jobs=[{**job, "timeout": bad}]))) == {"jobs[0].timeout"}, bad

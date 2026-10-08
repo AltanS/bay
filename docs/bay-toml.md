@@ -144,9 +144,16 @@ Jobs and release:
 - A job gets the image, env, secrets, `fleet_secrets`, needs and mounts of the main
   container. It runs the image the main container runs at that time.
 - A job may set `memory`. Without it, the job gets the memory cap of the main container.
+- A job may set `timeout`, the seconds a run may take (default 3600). Past it, the run is
+  stopped and its container removed.
 - A systemd timer on the box of the main container starts the job, in UTC. A run that is
   still busy is not started a second time. A missed run is not made up.
 - A failed `release` aborts the deploy before traffic moves.
+- `release` and a job `command` are a string or a list of strings. A string is a shell
+  command: it runs as `/bin/sh -c`, with the image entrypoint overridden. A list keeps the
+  image ENTRYPOINT and is passed to it as the arguments, so `release = ["bin/migrate", "up"]`
+  on an image with `ENTRYPOINT ["node"]` runs `node bin/migrate up`. Write a list when the
+  image has an exec-form ENTRYPOINT that the command must go through.
 - `release` runs once per environment per deploy, inside a one-shot container of the new
   image. It runs only when the main container is created or recreated, and a push build
   runs it before it swaps the container. It has the env, secrets, network and mounts of
@@ -303,8 +310,9 @@ hour = 3                       # UTC; default fleet setting
 [[jobs]]
 name = "cleanup"
 schedule = "0 2 * * *"         # UTC cron
-command = "node dist/cleanup.js"
+command = "node dist/cleanup.js"   # a string runs as /bin/sh -c; a list such as ["bin/run", "cleanup"] keeps the image ENTRYPOINT
 memory = "256m"                # default none; the job is a one-shot container <name>-job-cleanup
+timeout = 600                  # seconds a run may take; default 3600
 
 # ── Extra services ─────────────────────────────────────────
 # Inherit by default: image/[build], env, secrets, fleet_secrets, needs. `inherit = false` starts empty.
@@ -376,7 +384,7 @@ These keys sit at the top level. Every key in this table may also be set in a
 | `image` | string | none | Pull this image instead of building. Not together with `[build]`. |
 | `port` | integer 1-65535 | none | Container port that receives traffic. |
 | `command` | string | image CMD | Command to run. |
-| `release` | string | none | Runs once per environment per deploy, in a one-shot container of the new image, before traffic moves. A failure stops the deploy and the old container stays. |
+| `release` | string or list of strings | none | Runs once per environment per deploy, in a one-shot container of the new image, before traffic moves. A string runs as `/bin/sh -c`; a list keeps the image ENTRYPOINT and is passed to it as the arguments. A failure stops the deploy and the old container stays. |
 | `health` | string | `"/"` when there is a port, else `"none"` | Health check path, or `"none"`. Bay probes it on the container, not through the route. A failed check removes the new container and starts the previous one again. A path other than `/` on an internal container (no `domain`, no `path`) is (validated, not deployed yet). |
 | `replicas` | integer >= 1 | `1` | Number of containers. More than 1 on an internal container is (validated, not deployed yet). |
 | `memory` | size | none | Memory limit. Bay sets `mem_limit` and `memswap_limit` to this one value, so the container gets no swap (a `docker run --memory-swap` equal to `--memory`). A container that ran with `mem_limit` alone is recreated once by the first deploy of the compiled file, and the box prediction names it as `memory: memswap_limit <now> -> <memory>` (see [plan.md](plan.md#the-box-prediction---remote)). |
@@ -558,8 +566,9 @@ Scheduled one-shot runs of the main container's image.
 |-----|------|---------|
 | `name` | name | Unique among jobs, and not the name of a service. |
 | `schedule` | five-field cron, UTC | When the job runs, for example `"0 2 * * *"`. |
-| `command` | string | What to run. |
+| `command` | string or list of strings | What to run. A string runs as `/bin/sh -c` with the image entrypoint overridden. A list keeps the image ENTRYPOINT and is passed to it as the arguments. |
 | `memory` | size | Optional memory limit for the job container. |
+| `timeout` | integer >= 1 | Optional. Seconds a run may take before it is stopped. Default 3600. |
 
 `name`, `schedule` and `command` are required. A job runs as a one-shot container named
 `<name>-job-<job>` in the primary environment and `<name>-<env>-job-<job>` in the others.

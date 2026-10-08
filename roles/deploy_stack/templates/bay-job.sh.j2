@@ -3,6 +3,8 @@
 # A Bay job (bay.toml [[jobs]]): the job container and its main container are
 # named below. Run by bay-job@<job>.service, which bay-job@<job>.timer starts.
 # One run at a time: systemd does not start the service while it runs.
+# A string command runs as /bin/sh -c with the image ENTRYPOINT overridden. A list
+# command keeps the image ENTRYPOINT and is passed as its arguments.
 # No value is interpolated into a comment: a newline in it would end the comment.
 set -euo pipefail
 
@@ -27,4 +29,9 @@ exec docker run --rm \
   --memory {{ job_memory | quote }} \
   --memory-swap {{ job_memory | quote }} \
 {% endif %}
-  "${IMAGE}" sh -c {{ job.command | quote }}
+{% if job.command is string %}
+  --entrypoint /bin/sh \
+  "${IMAGE}" -c {{ job.command | quote }}
+{% else %}
+  "${IMAGE}" {{ job.command | map('quote') | join(' ') }}
+{% endif %}

@@ -133,11 +133,11 @@ def test_job_units_render_and_prune(tmp_path: Path) -> None:
     assert words[words.index("--env-file") + 1] == "/opt/bay/env/shop.env"
     assert ["-v", "bay_shop-data:/app/data"] == words[words.index("-v"):words.index("-v") + 2]
     assert words[words.index("--memory") + 1] == "128m"  # the job's own cap wins
-    assert words[-4:] == ["${IMAGE}", "sh", "-c", "bin/tick"]
+    assert words[-5:] == ["--entrypoint", "/bin/sh", "${IMAGE}", "-c", "bin/tick"]
     assert "-p" not in words and not any(w.startswith("traefik.") for w in words)
     # Without a job cap, the main container's cap applies.
     nightly = _render_script("shop-job-nightly", SHOP)
-    assert "--memory 512m" in nightly and "sh -c 'bin/report --all'" in nightly
+    assert "--memory 512m" in nightly and "-c 'bin/report --all'" in nightly
 
     # ── the units: one-shot service, UTC timer per job
     env = _env()

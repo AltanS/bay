@@ -1023,11 +1023,11 @@ else
 fi
 
 {#
-  _run_release: one per service with `release`, run by _release_or_fail. The
-  same network, env file and mounts as the container itself, no ports, no
-  Traefik labels, and the label com.bay.release-of (never bay.managed, so the
-  deploy's orphan cleanup ignores it). `timeout` exits 124 when the release
-  runs longer than bay_release_timeout.
+  _run_release: one per service with `release`, run by _release_or_fail. A string
+  runs as `/bin/sh -c` with the image ENTRYPOINT overridden, a list keeps it (an
+  exec-form ENTRYPOINT ["node"] would make `sh -c ...` into `node sh -c ...`).
+  Same network, env file and mounts as the container, no ports, no Traefik labels,
+  label com.bay.release-of (never bay.managed). `timeout` exits 124 past the limit.
 #}
 {% for svc_name in git_deploy_rebuild_services if services[svc_name].release is defined %}
 {% set svc = services[svc_name] %}
@@ -1047,7 +1047,7 @@ if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
 {% for vol in svc.volumes | default([]) | bay_prefix_volumes(stack_name | default('bay')) %}
       -v "{{ vol }}" \
 {% endfor %}
-      "$1" sh -c {{ svc.release | quote }}
+      {% if svc.release is string %}--entrypoint /bin/sh "$1" -c {{ svc.release | quote }}{% else %}"$1" {{ svc.release | map('quote') | join(' ') }}{% endif +%}
   }
 fi
 {% endfor %}

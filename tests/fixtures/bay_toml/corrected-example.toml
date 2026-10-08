@@ -86,8 +86,9 @@ hour = 3                       # UTC; default fleet setting
 [[jobs]]
 name = "cleanup"
 schedule = "0 2 * * *"         # UTC cron
-command = "node dist/cleanup.js"
+command = "node dist/cleanup.js"   # a string runs as /bin/sh -c; a list such as ["bin/run", "cleanup"] keeps the image ENTRYPOINT
 memory = "256m"                # default none; the job is a one-shot container <name>-job-cleanup
+timeout = 600                  # seconds a run may take; default 3600
 
 # ── Extra services ─────────────────────────────────────────
 # Inherit by default: image/[build], env, secrets, fleet_secrets, needs. `inherit = false` starts empty.

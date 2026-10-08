@@ -74,14 +74,22 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
     )
 
 
-def _release(d: Mapping[str, Any]) -> str | None:
-    """The spec's ``release`` command, or None. Checked at load time, before anything runs."""
+def _release(d: Mapping[str, Any]) -> str | tuple[str, ...] | None:
+    """The spec's ``release`` command, or None. Checked at load time, before anything runs.
+
+    A string is a shell command. A non-empty list of strings is an argument
+    vector for the image ENTRYPOINT.
+    """
     raw = d.get("release")
     if raw is None:
         return None
-    if not isinstance(raw, str) or not raw.strip():
-        raise ValueError(f"{d.get('name')!r}: release must be a non-empty string")
-    return raw
+    if isinstance(raw, str) and raw.strip():
+        return raw
+    if isinstance(raw, list) and raw and all(isinstance(a, str) for a in raw) and raw[0].strip():
+        return tuple(raw)
+    raise ValueError(
+        f"{d.get('name')!r}: release must be a non-empty string or a non-empty list of strings"
+    )
 
 
 def _env_file_change(d: Mapping[str, Any]) -> Mapping[str, object] | None:
