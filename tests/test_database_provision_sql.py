@@ -222,11 +222,18 @@ def test_the_task_file_is_one_exec_per_accessory():
         if "ansible.builtin.command" in t
         and t["ansible.builtin.command"]["argv"][:2] == ["docker", "exec"]
     ]
-    assert len(execs) == 1
-    task = execs[0]
-    assert task["loop"] == "{{ _db_accessories }}"
-    assert "provision-db.sql.j2" in task["ansible.builtin.command"]["stdin"]
+    # Read, predict (check mode only), provision. Each loops per accessory.
+    assert len(execs) == 3
+    for task in execs:
+        assert task["loop"] == "{{ _db_accessories }}"
+        # Every one of them sees a password, a verifier or a salt.
+        assert "no_log" in task
+    provision = [
+        t for t in execs
+        if "provision-db.sql.j2" in t["ansible.builtin.command"]["stdin"]
+        and "check_mode" not in t
+    ]
+    assert len(provision) == 1
+    task = provision[0]
     assert "CHANGED:" in task["changed_when"]
     assert task["changed_when"] is not True
-    # The script carries every bound role's password.
-    assert "no_log" in task

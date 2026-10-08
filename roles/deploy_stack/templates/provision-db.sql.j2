@@ -28,6 +28,20 @@
 -- SELECTs a `CHANGED: ...` line. `\pset tuples_only` + `psql -q` means
 -- nothing else reaches stdout, so the calling task's `changed_when` is
 -- simply "did the script say CHANGED".
+--
+-- Passwords: the read step (read-db-roles.sql.j2) brings back each role's
+-- `<iter>:<salt>` and verifier kind, never the keys. The controller computes
+-- the verifier the password in the encrypted secrets file would have with
+-- that salt (`bay_db_password_verifier`) and renders it here as a literal.
+-- The server compares: `ALTER ROLE ... PASSWORD` runs, and the CHANGED line
+-- prints, only when the stored verifier IS DISTINCT FROM the computed one.
+-- With no computed verifier (no read result, a new role, a password that is
+-- not pure ASCII, an unknown form) the guard is the old "role exists", so
+-- the password is set on every run exactly as before.
+--
+-- Predict mode (`_db_predict`, check mode only): the session is read-only
+-- and the script is the CHANGED lines and nothing else. They are plain
+-- SELECTs with the same guards, so `--check` reports what a run would do.
 
 \set ON_ERROR_STOP on
 \pset tuples_only on
@@ -35,35 +49,44 @@
 
 {% macro lit(value) %}'{{ value | string | replace("'", "''") }}'{% endmacro %}
 {% macro pw(user) %}{{ lit(secrets[(user | upper | replace('-', '_')) ~ '_POSTGRES_PASSWORD']) }}{% endmacro %}
+{% macro pw_differs(user, verifier) %}{% if verifier %}EXISTS (SELECT 1 FROM pg_authid WHERE rolname = {{ lit(user) }} AND rolpassword IS DISTINCT FROM {{ lit(verifier) }}){% else %}EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(user) }}){% endif %}{% endmacro %}
+{% set _predict = _db_predict | default(false) %}
+{% if _predict %}
+SET default_transaction_read_only = on;
+{% endif %}
 {% for _b in _acc_bindings %}
 {% set _db = _b.value.database.name | default(_b.key) %}
 {% set _user = _b.value.database.user | default(_b.key) %}
+{% set _verifier = secrets[(_user | upper | replace('-', '_')) ~ '_POSTGRES_PASSWORD'] | bay_db_password_verifier(_user, _acc_observed | default('')) %}
 
 -- ── database ─────────────────────────────────────────────────────────
 SELECT 'CHANGED: create database ' || {{ lit(_db) }}
  WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = {{ lit(_db) }});
 
+{% if not _predict %}
 SELECT 'CREATE DATABASE ' || format('%I', {{ lit(_db) }})
  WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = {{ lit(_db) }})
 \gexec
+{% endif %}
 
 -- ── role ─────────────────────────────────────────────────────────────
 SELECT 'CHANGED: create role ' || {{ lit(_user) }}
  WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }});
 
--- The existing-role branch below runs ALTER ROLE ... PASSWORD unconditionally
--- — the vault password is written to the server on every run, because there
--- is no way to read the stored SCRAM verifier back and compare it. That is a
--- real mutation, so it reports one. Without this line a password rotation
--- deployed silently, as `ok`.
+-- An existing role gets ALTER ROLE ... PASSWORD only behind this guard, and
+-- this line reports it. A rotation in the encrypted secrets file must never
+-- deploy silently as `ok`; an unchanged password must not report `changed`.
 SELECT 'CHANGED: set password for role ' || {{ lit(_user) }}
- WHERE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }});
+ WHERE {{ pw_differs(_user, _verifier) }};
+{% if not _predict %}
 
 DO $bay$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {{ lit(_user) }}) THEN
-    EXECUTE 'ALTER ROLE ' || format('%I', {{ lit(_user) }})
-         || ' WITH PASSWORD ' || format('%L', {{ pw(_user) }});
+    IF {{ pw_differs(_user, _verifier) }} THEN
+      EXECUTE 'ALTER ROLE ' || format('%I', {{ lit(_user) }})
+           || ' WITH PASSWORD ' || format('%L', {{ pw(_user) }});
+    END IF;
   ELSE
     EXECUTE 'CREATE ROLE ' || format('%I', {{ lit(_user) }})
          || ' WITH LOGIN PASSWORD ' || format('%L', {{ pw(_user) }});
@@ -72,7 +95,9 @@ BEGIN
        || ' TO ' || format('%I', {{ lit(_user) }});
 END
 $bay$;
+{% endif %}
 {% endfor %}
+{% if not _predict %}
 
 -- ── per-database schema grants (PG15+) ───────────────────────────────
 -- These are database-local, so each one needs its own connection. psql's
@@ -96,3 +121,4 @@ BEGIN
 END
 $bay$;
 {% endfor %}
+{% endif %}

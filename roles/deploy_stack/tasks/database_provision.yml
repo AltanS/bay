@@ -20,6 +20,24 @@
 # `no_log: true` covers the whole task now: the script carries every bound
 # role's password. To debug a failure, re-run with `-e provision_db_debug=true`
 # — that flips no_log off and the SQL (passwords included) prints.
+#
+# Passwords are compared, not re-set on every run. Three steps per accessory:
+#
+#   1. Read (templates/read-db-roles.sql.j2): a read-only session returns, per
+#      bound role, the verifier kind and for SCRAM only `<iter>:<salt>`. No
+#      StoredKey or ServerKey leaves the box. Runs in check mode too.
+#   2. The provision script renders, per role, the verifier the password in
+#      the encrypted secrets file would have with that salt (filter
+#      `bay_db_password_verifier`, on the controller, inside this no_log task)
+#      and lets the server compare. The password is set, and its CHANGED
+#      line printed, only when the stored verifier differs.
+#   3. Check mode only: the same script in predict mode, a read-only session
+#      that runs only the CHANGED lines, so `--check` reports what a run would
+#      change. The real provision task is skipped by check mode as before.
+#
+# A failed read (accessory not running yet, a non-superuser POSTGRES_USER)
+# is not an error: every guard falls back to "role exists" and the password
+# is set as it was before the read existed.
 
 - name: Collect services with database bindings
   ansible.builtin.set_fact:
@@ -40,11 +58,10 @@
              | map(attribute='value.database.accessory')
              | unique | list }}
 
-    # One `docker exec` per accessory. `-q` plus the script's
-    # `\pset tuples_only` means the only thing on stdout is the script's own
-    # "CHANGED:" lines, so `changed` is derived from real work rather than
-    # asserted with `changed_when: true`.
-    - name: Provision databases, roles and grants
+    # Read-only (the script sets the session read-only), so it runs in check
+    # mode as well. `failed_when: false`: a failed read only means no
+    # comparison, see the header.
+    - name: Read the stored password form of each bound role
       vars:
         _acc: "{{ item }}"
         _acc_bindings: >-
@@ -62,8 +79,92 @@
           - -U
           - "{{ (active_accessories[_acc].env['clear'].POSTGRES_USER) | default('postgres') }}"
         stdin: >-
-          {{ lookup('ansible.builtin.template', 'provision-db.sql.j2',
+          {{ lookup('ansible.builtin.template', 'read-db-roles.sql.j2',
                     template_vars={'_acc_bindings': _acc_bindings}) }}
+      loop: "{{ _db_accessories }}"
+      register: _db_read
+      check_mode: false
+      changed_when: false
+      failed_when: false
+      no_log: "{{ not (provision_db_debug | default(false) | bool) }}"
+
+    # Check mode skips the provision task below. This runs the same script in
+    # predict mode instead: a read-only session, only the CHANGED lines. A
+    # failure (no accessory yet) predicts a change, which is what a run does.
+    - name: Predict database, role and password changes
+      when: ansible_check_mode
+      vars:
+        _acc: "{{ item }}"
+        _acc_bindings: >-
+          {{ _db_bindings
+             | selectattr('value.database.accessory', 'equalto', item)
+             | list }}
+        _acc_read: "{{ _db_read.results | default([]) | selectattr('item', 'equalto', item) | first | default({}) }}"
+        _acc_observed: >-
+          {{ _acc_read.stdout | default('')
+             if (_acc_read is not skipped and (_acc_read.rc | default(1)) == 0)
+             else '' }}
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - -i
+          - "{{ _acc }}"
+          - psql
+          - -q
+          - -U
+          - "{{ (active_accessories[_acc].env['clear'].POSTGRES_USER) | default('postgres') }}"
+        stdin: >-
+          {{ lookup('ansible.builtin.template', 'provision-db.sql.j2',
+                    template_vars={'_acc_bindings': _acc_bindings,
+                                   '_acc_observed': _acc_observed,
+                                   '_db_predict': true}) }}
+      loop: "{{ _db_accessories }}"
+      register: _db_predict_run
+      check_mode: false
+      changed_when: >-
+        (_db_predict_run.rc | default(1)) != 0
+        or 'CHANGED:' in (_db_predict_run.stdout | default(''))
+      failed_when: false
+      no_log: "{{ not (provision_db_debug | default(false) | bool) }}"
+
+    # One `docker exec` per accessory. `-q` plus the script's
+    # `\pset tuples_only` means the only thing on stdout is the script's own
+    # "CHANGED:" lines, so `changed` is derived from real work rather than
+    # asserted with `changed_when: true`.
+    #
+    # `_acc_observed` is the read step's JSON, or '' when the read did not
+    # run or failed. `is not skipped` is the guard: a command task skipped by
+    # check mode registers rc 0 and an empty stdout, so an `rc` test alone
+    # would pass. The read has `check_mode: false`, so this is belt and
+    # braces, and '' only means "no comparison, set the password".
+    - name: Provision databases, roles and grants
+      vars:
+        _acc: "{{ item }}"
+        _acc_bindings: >-
+          {{ _db_bindings
+             | selectattr('value.database.accessory', 'equalto', item)
+             | list }}
+        _acc_read: "{{ _db_read.results | default([]) | selectattr('item', 'equalto', item) | first | default({}) }}"
+        _acc_observed: >-
+          {{ _acc_read.stdout | default('')
+             if (_acc_read is not skipped and (_acc_read.rc | default(1)) == 0)
+             else '' }}
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - -i
+          - "{{ _acc }}"
+          - psql
+          - -q
+          - -U
+          - "{{ (active_accessories[_acc].env['clear'].POSTGRES_USER) | default('postgres') }}"
+        stdin: >-
+          {{ lookup('ansible.builtin.template', 'provision-db.sql.j2',
+                    template_vars={'_acc_bindings': _acc_bindings,
+                                   '_acc_observed': _acc_observed,
+                                   '_db_predict': false}) }}
       loop: "{{ _db_accessories }}"
       register: _db_provision
       changed_when: "'CHANGED:' in (_db_provision.stdout | default(''))"

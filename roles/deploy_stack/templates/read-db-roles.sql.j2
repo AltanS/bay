@@ -1,0 +1,55 @@
+-- {{ ansible_managed }}
+--
+-- Read step for templates/provision-db.sql.j2. Read-only: the session is set
+-- read-only before the one SELECT, so this script cannot change anything.
+--
+-- It prints ONE line of JSON:
+--
+--   {"password_encryption": "scram-sha-256",
+--    "scram_iterations": "4096",
+--    "roles": {"<rolname>": {"kind": "scram", "params": "<iter>:<salt>"}}}
+--
+-- For a SCRAM verifier (`SCRAM-SHA-256$<iter>:<salt>$<StoredKey>:<ServerKey>`)
+-- `params` is `split_part(rolpassword, '$', 2)`, the `<iter>:<salt>` part and
+-- nothing else. StoredKey and ServerKey never leave the box. For md5, null
+-- and unknown forms `params` is null; the controller needs only the kind.
+-- A role that does not exist is absent from `roles`.
+--
+-- `scram_iterations` exists from Postgres 16; `current_setting(..., true)`
+-- reads it as null on older servers. `pg_authid` needs a superuser, which is
+-- what the official image makes POSTGRES_USER. If the read fails, the deploy
+-- falls back to setting every password, as it did before the read existed.
+--
+-- Quoting contract: as in provision-db.sql.j2, names reach the server only
+-- as SQL string literals with `'` doubled at render time.
+
+\set ON_ERROR_STOP on
+\pset tuples_only on
+\pset format unaligned
+
+SET default_transaction_read_only = on;
+
+{% macro lit(value) %}'{{ value | string | replace("'", "''") }}'{% endmacro %}
+SELECT json_build_object(
+  'password_encryption', current_setting('password_encryption'),
+  'scram_iterations', current_setting('scram_iterations', true),
+  'roles', COALESCE((
+    SELECT json_object_agg(rolname, json_build_object(
+      'kind', CASE
+        WHEN rolpassword IS NULL THEN 'null'
+        WHEN rolpassword LIKE 'SCRAM-SHA-256$%' THEN 'scram'
+        WHEN rolpassword ~ '^md5[0-9a-f]{32}$' THEN 'md5'
+        ELSE 'unknown'
+      END,
+      'params', CASE
+        WHEN rolpassword LIKE 'SCRAM-SHA-256$%'
+        THEN split_part(rolpassword, '$', 2)
+      END))
+      FROM pg_authid
+     WHERE rolname IN (
+{% for _b in _acc_bindings %}
+       {{ lit(_b.value.database.user | default(_b.key)) }}{{ ',' if not loop.last else '' }}
+{% endfor %}
+     )
+  ), '{}'::json)
+);

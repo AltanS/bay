@@ -234,6 +234,9 @@ class FilterModule:
             "bay_env_value": bay_env_value,
             "bay_alert_env_value": bay_alert_env_value,
             "bay_config_dirs": bay_config_dirs,
+            "bay_scram_verifier": bay_scram_verifier,
+            "bay_md5_verifier": bay_md5_verifier,
+            "bay_db_password_verifier": bay_db_password_verifier,
         }
 
 
@@ -1520,3 +1523,136 @@ def bay_gateway_bind_ip(hostvars_entry):
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+# ── Database role passwords (deploy_stack/database_provision.yml) ─────────
+#
+# Postgres stores a role password as a verifier, never as the password. A
+# SCRAM verifier is `SCRAM-SHA-256$<iter>:<salt>$<StoredKey>:<ServerKey>`
+# and its salt is random, so the same password set twice stores two different
+# strings. To skip `ALTER ROLE ... PASSWORD` when nothing changed, the deploy
+# reads only `<iter>:<salt>` from the box, computes the verifier the password
+# in the encrypted secrets file WOULD have with that salt, and lets the server
+# compare. StoredKey and ServerKey never leave the box.
+
+_SCRAM_PREFIX = "SCRAM-SHA-256"
+
+
+def bay_scram_verifier(password, iterations, salt_b64):
+    """The Postgres SCRAM-SHA-256 verifier for `password` with a given salt.
+
+    Mirrors `scram_build_secret` in Postgres (src/common/scram-common.c), per
+    RFC 5802 and RFC 7677: SaltedPassword = PBKDF2-HMAC-SHA-256(password,
+    salt, iterations); ClientKey = HMAC(SaltedPassword, "Client Key");
+    StoredKey = SHA-256(ClientKey); ServerKey = HMAC(SaltedPassword, "Server
+    Key"). All three byte strings are standard base64 with padding.
+
+    Postgres runs the password through SASLprep first. For a pure ASCII
+    password SASLprep returns it unchanged, so this function refuses anything
+    else rather than return a verifier that silently disagrees with the
+    server. `bay_db_password_verifier` checks that before calling here.
+    """
+    import base64
+    import binascii
+    import hmac
+
+    if not isinstance(password, str) or not password.isascii():
+        raise ValueError("bay_scram_verifier: the password must be an ASCII string")
+    iterations = int(iterations)
+    if iterations < 1:
+        raise ValueError("bay_scram_verifier: iterations must be positive")
+    try:
+        salt_b64 = str(salt_b64)
+        salt = base64.b64decode(salt_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("bay_scram_verifier: the salt is not valid base64") from exc
+    if not salt:
+        raise ValueError("bay_scram_verifier: the salt is empty")
+
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode("ascii"), salt, iterations)
+    client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
+    stored_key = hashlib.sha256(client_key).digest()
+    server_key = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
+
+    def b64(raw):
+        return base64.b64encode(raw).decode("ascii")
+
+    # The salt goes back out exactly as it came in, so the result can equal
+    # the stored string byte for byte.
+    return (
+        f"{_SCRAM_PREFIX}${iterations}:{salt_b64}"
+        f"${b64(stored_key)}:{b64(server_key)}"
+    )
+
+
+def bay_md5_verifier(password, rolname):
+    """The Postgres md5 verifier: `'md5' || md5(password || rolname)`."""
+    raw = (str(password) + str(rolname)).encode("utf-8")
+    return "md5" + hashlib.md5(raw, usedforsecurity=False).hexdigest()
+
+
+def bay_db_password_verifier(password, rolname, observed):
+    """The verifier the server would hold for `rolname` if `password` were set.
+
+    `observed` is the read step's stdout (one JSON document) or the parsed
+    dict: `{"password_encryption", "scram_iterations", "roles": {rolname:
+    {"kind", "params"}}}`, where `params` is `<iter>:<salt>` and nothing more.
+
+    Returns "" when no safe comparison exists. The caller then sets the
+    password exactly as before this function existed (and reports CHANGED).
+    That is the answer for: no or unreadable read result, a role that does
+    not exist yet, a password that is empty or not pure ASCII, a stored
+    verifier of another kind than the server's `password_encryption` (a new
+    `ALTER ROLE` would convert it), a SCRAM iteration count other than the
+    server's `scram_iterations` (a new `ALTER ROLE` would re-hash it), and
+    any form this function does not know.
+
+    A non-empty result means: `ALTER ROLE ... PASSWORD` would store a
+    verifier equivalent to this one, so if the stored value equals it, the
+    password is already the one in the encrypted secrets file.
+    """
+    import json
+
+    if isinstance(observed, str):
+        if not observed.strip():
+            return ""
+        try:
+            observed = json.loads(observed)
+        except ValueError:
+            return ""
+    if not isinstance(observed, dict):
+        return ""
+    if not isinstance(password, str) or not password or not password.isascii():
+        return ""
+    roles = observed.get("roles")
+    if not isinstance(roles, dict):
+        return ""
+    entry = roles.get(str(rolname))
+    if not isinstance(entry, dict):
+        return ""
+    encryption = observed.get("password_encryption")
+    kind = entry.get("kind")
+
+    if kind == "md5":
+        if encryption != "md5":
+            return ""
+        return bay_md5_verifier(password, rolname)
+
+    if kind != "scram" or encryption != "scram-sha-256":
+        return ""
+    params = entry.get("params")
+    if not isinstance(params, str) or params.count(":") != 1:
+        return ""
+    iter_text, salt = params.split(":")
+    if not iter_text.isdigit():
+        return ""
+    iterations = int(iter_text)
+    server_iterations = observed.get("scram_iterations")
+    # Postgres 16 added `scram_iterations`; before it the count was a fixed
+    # 4096 and the setting reads back as null.
+    if server_iterations is not None and str(server_iterations) != str(iterations):
+        return ""
+    try:
+        return bay_scram_verifier(password, iterations, salt)
+    except ValueError:
+        return ""

@@ -812,12 +812,33 @@ def test_database_provision_sql_is_quoted():
         if "ansible.builtin.command" in t
         and t["ansible.builtin.command"].get("argv", [])[:2] == ["docker", "exec"]
     ]
-    assert len(execs) == 1, "one docker exec per accessory, not a fan"
-    # `cmd:` would shlex-split the accessory name; argv does not.
-    assert "argv" in execs[0]["ansible.builtin.command"]
-    assert "cmd" not in execs[0]["ansible.builtin.command"]
+    # Read, predict (check mode only) and provision: each is one exec per
+    # accessory, never one per binding.
+    assert len(execs) == 3, "read, predict and provision, nothing else"
+    for task in execs:
+        assert task["loop"] == "{{ _db_accessories }}", "one exec per accessory, not a fan"
+        # `cmd:` would shlex-split the accessory name; argv does not.
+        assert "argv" in task["ansible.builtin.command"]
+        assert "cmd" not in task["ansible.builtin.command"]
     # No SQL text left in the task file at all.
     assert not any(kw in task_text for kw in _SQL_KEYWORDS)
+
+    # The read step lists the bound role names; they cross as literals too.
+    read_path = _ROLES / "deploy_stack" / "templates" / "read-db-roles.sql.j2"
+    read_template = make_ansible_env(read_path.parent).get_template(read_path.name)
+    for payload in _PAYLOADS.values():
+        sql = read_template.render(
+            ansible_managed="test",
+            _acc_bindings=[
+                {"key": payload, "value": {"database": {"accessory": "postgres"}}}
+            ],
+        )
+        body = "\n".join(
+            line for line in sql.splitlines() if not line.lstrip().startswith("--")
+        )
+        escaped = payload.replace("'", "''")
+        assert f"'{escaped}'" in body, "fixture broken: payload never reached the SQL"
+        assert f'"{payload}"' not in body
 
     sql_path = _ROLES / "deploy_stack" / "templates" / "provision-db.sql.j2"
     env = make_ansible_env(sql_path.parent)
