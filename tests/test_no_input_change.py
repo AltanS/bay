@@ -583,3 +583,55 @@ def test_rebuild_sh_reads_the_marker_and_decides_after_config_only() -> None:
     # The box helper ships with the reconciler package and is pure stdlib.
     source = Path(pushinputs.__file__).read_text()
     assert "import pathspec" not in source
+
+
+def test_a_moved_input_is_an_input_change(tmp_path: Path) -> None:
+    """Rename detection hides the old path of a moved file: `git diff
+    --name-only` lists only the new one. A build input moved out of `watch`
+    then looked like no input change, and a build input moved into a config
+    path looked like a config-only push. Both decisions list the paths with
+    `--no-renames`, so the old path counts."""
+    rendered = _render("remote")
+    origin, first = _shared_repo(tmp_path)
+    checkout = tmp_path / "checkout"
+    _git(tmp_path, "clone", "-q", str(origin), str(checkout))
+
+    # An input of web moves out of its `watch`, and another one into the
+    # directory a mount of web's bay.toml reads.
+    (origin / "docs").mkdir()
+    (origin / "bay" / "mounted").mkdir()
+    _git(origin, "mv", "apps/web/main.js", "docs/main.js")
+    moved = _commit(origin, {})
+    _git(checkout, "pull", "-q", "--ff-only", "origin", "main")
+
+    script = f"""
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+{_service_config(rendered, "web")}
+cd {str(checkout)!r}
+_no_input_change {str(checkout)!r} {first!r}
+echo "no_input_change=$?"
+"""
+    proc, _, _ = _harness(rendered, script, tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "no_input_change=1" in proc.stdout, (
+        f"a moved input of {moved} is an input change: the push builds"
+    )
+
+    # Second move: an input of web into a path of the config-only set.
+    _git(origin, "mv", "apps/admin/main.js", "bay/mounted/main.js")
+    _git(origin, "mv", "docs/main.js", "bay/mounted/web.js")
+    _commit(origin, {})
+    _git(checkout, "pull", "-q", "--ff-only", "origin", "main")
+    script = f"""
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+{_service_config(rendered, "web")}
+BAY_TOML_FILES=(bay/mounted)
+PINNED_BUILD_HASH=$(PYTHONPATH="${{RECONCILE_PYTHONPATH}}" python3 -m bay_reconcile.tomlhash --section build {str(checkout / "bay" / "web.toml")!r})
+BAY_TOML_PATH=bay/web.toml
+cd {str(checkout)!r}
+_config_only {str(checkout)!r} {first!r}
+echo "config_only=$?"
+"""
+    proc, _, _ = _harness(rendered, script, tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "config_only=1" in proc.stdout, "an input moved into a config path builds"

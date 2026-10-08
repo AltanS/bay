@@ -375,10 +375,12 @@ _hold_reason() {
 # (a [build] edit builds, and the hold guard holds it).
 #   $1  the checkout at the pushed commit   $2  the previous commit (may be empty)
 _config_only() {
+  # --no-renames: a moved file lists its old path too, so a build input moved
+  # into a config path still counts as an input change.
   local repo_dir="$1" prev="$2" files f p hit have
   [[ -n "${BAY_TOML_PATH:-}" && -n "${PINNED_BUILD_HASH:-}" && -n "${prev}" ]] || return 1
   git -C "${repo_dir}" cat-file -e "${prev}^{commit}" 2>/dev/null || return 1
-  files=$(git -C "${repo_dir}" diff --name-only "${prev}" HEAD 2>/dev/null) || return 1
+  files=$(git -C "${repo_dir}" diff --name-only --no-renames "${prev}" HEAD 2>/dev/null) || return 1
   [[ -n "${files}" ]] || return 1
   while IFS= read -r f; do
     [[ -z "${f}" ]] && continue
@@ -580,10 +582,12 @@ _config_only_push() {
 # previous commit, or one the checkout does not have (the push is skipped).
 #   $1  the checkout at the pushed commit   $2  the previous commit (may be empty)
 _no_input_change() {
+  # --no-renames: a moved file lists its old path too, so a build input moved
+  # out of `watch` still counts as an input change.
   local repo_dir="$1" prev="$2" files f p rest="" inputs have
   [[ -n "${prev}" ]] || return 2
   git -C "${repo_dir}" cat-file -e "${prev}^{commit}" 2>/dev/null || return 2
-  files=$(git -C "${repo_dir}" diff --name-only "${prev}" HEAD 2>/dev/null) || return 2
+  files=$(git -C "${repo_dir}" diff --name-only --no-renames "${prev}" HEAD 2>/dev/null) || return 2
   while IFS= read -r f; do
     [[ -z "${f}" ]] && continue
     for p in "${BAY_TOML_PATH:-}" "${BAY_TOML_FILES[@]}"; do
