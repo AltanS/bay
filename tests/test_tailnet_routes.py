@@ -538,6 +538,18 @@ def test_compiled_routes_render_like_the_old_map() -> None:
         assert render_headscale(name, compiled) == render_headscale(name, OLD_MAP), name
 
 
+def test_rendered_routes_survive_an_unreadable_route_file(tmp_path: Path) -> None:
+    """A non-UTF-8 route file gives no routes; it must not crash the receipt."""
+    stack = tmp_path / "stack"
+    (stack / "dynamic").mkdir(parents=True)
+    (stack / "dynamic" / "tailnet-proxies.yml").write_bytes(b"http:\n  routers:\n    \xff\xfe\x80:\n")
+    assert box_routes.rendered_routes(stack) == []
+    # A directory where the file should be is an OSError: also no routes.
+    (stack / "dynamic" / "tailnet-proxies.yml").unlink()
+    (stack / "dynamic" / "tailnet-proxies.yml").mkdir()
+    assert box_routes.rendered_routes(stack) == []
+
+
 def test_receipt_lists_rendered_routes(tmp_path: Path) -> None:
     rendered = render_traefik(OLD_MAP)
     stack = tmp_path / "stack"

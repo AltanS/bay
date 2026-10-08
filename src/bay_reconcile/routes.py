@@ -95,7 +95,8 @@ def rendered_routes(stack_dir: Path) -> list[dict[str, Any]]:
     """Routes in ``<stack_dir>/dynamic/tailnet-proxies.yml``; ``[]`` when there is none."""
     path = stack_dir / ROUTE_FILE
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
+        return parse(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Unreadable, not UTF-8 (UnicodeDecodeError is a ValueError) or malformed:
+        # the receipt reports no routes instead of crashing the whole pass.
         return []
-    return parse(text)
