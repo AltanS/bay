@@ -36,6 +36,10 @@ docs-skill:
 
 docs: docs-alerts docs-skill
 
+# Regenerate the contents lists in README.md and the long docs.
+toc:
+	python3 -I scripts/docs-toc.py
+
 # Point git at .githooks/ so the SKILL.md pre-commit hook runs. Per-clone
 # config, so every checkout needs it once; `make install` does it for you.
 hooks:
@@ -48,4 +52,4 @@ ifndef VERSION
 endif
 	bash scripts/release.sh $(VERSION)
 
-.PHONY: install hooks lint typecheck test test-framework test-bootstrap test-python docs docs-alerts docs-skill release
+.PHONY: install hooks toc lint typecheck test test-framework test-bootstrap test-python docs docs-alerts docs-skill release
