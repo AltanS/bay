@@ -8,6 +8,20 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.5.2] - 2026-10-09
+
+A change to the webhook receiver's config now shows in `bay plan` and in the `bay up` receipt.
+
+### Fixed
+- A change to the receiver config (`config.json`, `image-map.json`), for example a `watch` edit or a new build app, now recreates `bay-webhook` through the reconciler. `bay plan` shows it as a `bay-webhook` step and `bay up --json` lists it in `applied`. Before, an Ansible handler restarted the container and neither the plan nor the receipt showed it.
+
+### Added
+- The `bay-webhook` container carries the label `com.bay.receiver-config-hash`, a sha256 of the two rendered receiver templates, computed on the control node.
+
+### Upgrade notes
+- The first 2.5.2 `bay up` recreates `bay-webhook` once on each box with a receiver, because the new label is added. This is expected. A second `bay up` applies nothing.
+- Under `bay up` the restart handler can still restart the receiver once before the container pass. This is harmless.
+
 ## [2.5.1] - 2026-10-08
 
 Two projects that build from one repo each get an image for every pushed commit, `bay up` no longer moves `:latest` while a webhook build runs, and a webhook deploy stamps the receipt from the image that really started.
