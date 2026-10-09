@@ -56,6 +56,7 @@ _FULL_PATH_TASKS = (
     "Resolve build strategies",
     "Set git_deploy_services to local builds",
     "Set git_deploy_rebuild_services (deployment server)",
+    "Set git_deploy_rebuild_services for build server",
 )
 
 
@@ -68,12 +69,42 @@ def _walk(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+_FACT_NAMES = (
+    "git_deploy_rebuild_services",
+    "git_deploy_peer_webhook_urls",
+    "git_deploy_build_strategy",
+)
+
+
+def _sets_build_fact(task: dict[str, Any]) -> bool:
+    fact = task.get("ansible.builtin.set_fact")
+    return isinstance(fact, dict) and any(name in fact for name in _FACT_NAMES)
+
+
+def test_full_path_fact_list_is_complete() -> None:
+    """A new main.yml task that sets a fact the templates read must join the copied list."""
+    tasks = _walk(yaml.safe_load((GIT_DEPLOY / "main.yml").read_text()))
+    setters = {t["name"] for t in tasks if _sets_build_fact(t)}
+    copied = {n for n in _FULL_PATH_TASKS if n in setters}
+    assert setters == copied, f"add to _FULL_PATH_TASKS: {sorted(setters - copied)}"
+    # Both build-server and deployment-server setters are covered.
+    assert {n for n in setters if "rebuild_services" in n} >= {
+        "Set git_deploy_rebuild_services (deployment server)",
+        "Set git_deploy_rebuild_services for build server",
+    }
+
+
 def _full_path_facts() -> list[dict[str, Any]]:
     by_name = {t.get("name"): t for t in _walk(yaml.safe_load((GIT_DEPLOY / "main.yml").read_text()))}
     picked = []
     for name in _FULL_PATH_TASKS:
         task = copy.deepcopy(by_name[name])
         task.pop("when", None)
+        if name.endswith("for build server"):
+            # main.yml guards the build-server block with this condition.
+            task["when"] = "_is_build_server | bool and _global_remote_build_services | length > 0"
+        elif name.endswith("(deployment server)"):
+            task["when"] = "not (_is_build_server | bool and _global_remote_build_services | length > 0)"
         task.pop("tags", None)
         if "ansible.builtin.include_tasks" in task:
             del task["ansible.builtin.include_tasks"]
@@ -206,7 +237,7 @@ def test_receiver_config_hash_stable_across_paths(tmp_path: Path) -> None:
     build_specs.yml. Mixed strategies make the image map non-trivial.
     """
     services = copy.deepcopy(BASE)
-    services["api"] = _svc("api", strategy="remote")
+    services["api"] = {**_svc("api", strategy="remote"), "image": "registry.example.com/api:1"}
     services["static"] = {"image": "registry.example.com/static:1", **{
         k: v for k, v in _svc("static").items() if k != "build"}}
     stack = _label(tmp_path, services, path="deploy_stack", run="stack")
@@ -214,6 +245,18 @@ def test_receiver_config_hash_stable_across_paths(tmp_path: Path) -> None:
     assert stack == full
     # With git_deploy_peer_webhook_urls set the value moves, on both paths alike.
     extra = {"git_deploy_peer_webhook_urls": {"eu": "https://hooks.eu.example.com"}}
+    # A build server with a remote-strategy service: the build-server branch of
+    # both paths (main.yml sets the list for it, render_image_map.yml mirrors it).
+    # The remote service is not active on this host, so only the build server
+    # branch puts it in the image map.
+    local_only = {"active_services": {k: v for k, v in services.items() if k != "api"}}
+    plain = _label(tmp_path, services, path="deploy_stack", run="b0", extra=local_only)
+    server = {**local_only, "build_server": "localhost"}
+    bs_stack = _label(tmp_path, services, path="deploy_stack", run="b1", extra=server)
+    bs_full = _label(tmp_path, services, path="full", run="b2", extra=server)
+    assert bs_stack == bs_full
+    # The branch really is the build-server one: it adds remote services to the map.
+    assert bs_stack != plain
     peers_stack = _label(tmp_path, services, path="deploy_stack", run="p1", extra=extra)
     peers_full = _label(tmp_path, services, path="full", run="p2", extra=extra)
     assert peers_stack == peers_full != stack
@@ -228,16 +271,3 @@ def test_receiver_config_hash_has_one_owner() -> None:
     for path in (ROOT / "roles").rglob("*.yml"):
         if path != BUILD_SPECS:
             assert f"{LABEL}:" not in path.read_text(), path
-
-
-def test_deploy_stack_marks_a_recreated_receiver_as_reconciled() -> None:
-    """Under `bay up` the restart handler must skip a receiver the container pass recreated."""
-    tasks = yaml.safe_load((ROOT / "roles" / "deploy_stack" / "tasks" / "main.yml").read_text())
-    flat = _walk(tasks)
-    names = [t.get("name") for t in flat]
-    deploy = names.index("Deploy containers")
-    mark = names.index("Record whether the container pass recreated the webhook receiver")
-    assert mark == deploy + 1
-    fact = flat[mark]["ansible.builtin.set_fact"]["_bay_webhook_reconciled"]
-    assert "_bay_webhook_reconciled" in fact, "an earlier true value is kept"
-    assert "bay-webhook" in flat[mark]["vars"]["_bay_webhook_pass_results"]

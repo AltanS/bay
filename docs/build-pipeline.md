@@ -679,8 +679,9 @@ the receiver's in-memory `IMAGE_MAP` table on process start
   `deploy_stack` renders. On a new box, `bay up` creates the receiver.
   The spec also carries `com.bay.receiver-config-hash`, a hash of the rendered
   `config.json` and `image-map.json`, so a config change recreates
-  `bay-webhook` in the plan and in `applied`; the restart handler is then only
-  a safety net.
+  `bay-webhook` in the plan and in `applied`. The restart
+  handler may still restart the receiver once before the container pass; that
+  is harmless.
 
 - **Local-strategy producers sharing an image with siblings** —
   Cross-host fan-out for this topology is a separate latent gap (the

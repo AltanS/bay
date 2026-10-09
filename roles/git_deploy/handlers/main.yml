@@ -20,12 +20,14 @@
 # is already current. In a full deploy webhook.yml reconciles the receiver
 # (recreate on image drift) before handlers run; when that reconcile just
 # recreated the container it read the new files already, so the restart is
-# skipped. Under `bay up` (deploy_stack only) the deploy_stack container pass
-# recreates the receiver on image, env or config drift (the spec label
-# `com.bay.receiver-config-hash` hashes the two rendered files), so the plan
-# predicts it, and deploy_stack sets `_bay_webhook_reconciled` from that pass:
-# the restart is skipped there too. The handler stays as a safety net. A host
-# with no receiver yet (fresh host, deploy_stack creates it) is not an error.
+# skipped. Under `bay up` (deploy_stack only) nothing sets that fact. The
+# log_archive role flushes handlers before deploy_stack runs, so this handler
+# may restart the receiver at that flush, before the container pass. The spec
+# label `com.bay.receiver-config-hash` (a hash of the two rendered files) then
+# makes the container pass recreate the receiver, which the plan predicts and
+# `applied` lists. The extra restart is harmless: it reads the same new files.
+# A host with no receiver yet (fresh host, deploy_stack creates it) is not an
+# error.
 # In check mode the command is skipped.
 #
 # Container name `bay-webhook` is the framework-fixed identity used by
