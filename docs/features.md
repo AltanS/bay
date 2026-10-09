@@ -115,7 +115,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 - **Framework versioning** -- Bay releases are semver tags; `bay self update [--to <tag>]` and `bay self version` manage the installed copy
 - **`bay --fleet <path>`** -- point any command at a fleet; the editable install runs a framework change at once, with no tag to cut
 - **Config change detection** -- only redeploy services whose configuration has actually changed
-- **Dry runs** -- `bay deploy production -- --check --diff` passes extra args through to Ansible and prints the reconciler's container plan (see [reconciler.md](reconciler.md#check-mode----check---diff))
+- **Dry runs** -- `bay deploy production -- --check --diff` passes extra args through to Ansible and prints the reconciler's container plan (see [reconciler.md](reconciler.md#check-mode------check---diff))
 
 ## Infrastructure as Code
 
