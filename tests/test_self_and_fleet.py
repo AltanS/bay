@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -173,8 +174,11 @@ def test_fleet_ls_lists_fleets_and_says_when_there_are_none(home: Path) -> None:
 
 
 @pytest.fixture
-def checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, list[str]]:
-    """A framework checkout cloned from an origin that has tags v1.0.0 and v1.1.0."""
+def checkout(home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, list[str]]:
+    """A framework checkout cloned from an origin that has tags v1.0.0 and v1.1.0.
+
+    It uses the fake ``home``, so `self update` never rewrites the real agent skill files.
+    """
     origin = tmp_path / "origin"
     origin.mkdir()
     _git(origin, "init", "--quiet")
@@ -209,6 +213,32 @@ def test_self_update_moves_to_the_newest_tag_and_installs_again(checkout: tuple[
     assert "v1.0.0 -> v1.1.0" in result.output
     assert _git(root, "describe", "--tags", "--exact-match") == "v1.1.0"
     assert steps == ["deps framework", "install framework"]
+
+
+def test_self_update_rewrites_the_recorded_skill_files(home: Path, checkout: tuple[Path, list[str]]) -> None:
+    from bay_cli import agent_skill
+
+    agent_skill.install(["pi"], "0.0.1")
+    result = runner.invoke(cli.app, ["--json", "self", "update"])
+    assert result.exit_code == 0, result.output
+    skills = json.loads(result.output)["data"]["skills"]
+    assert [(s["harness"], s["result"]) for s in skills] == [("pi", "written")]
+    stamp = agent_skill.read_stamp((home / ".pi/agent/skills/bay/SKILL.md").read_text())
+    assert stamp is not None and stamp[0] != "0.0.1"
+
+
+def test_self_update_survives_a_target_without_the_skill_module(
+    checkout: tuple[Path, list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bay_cli import agent_skill
+
+    def gone(version: str) -> None:
+        raise ImportError("no agent_skill in this tag")
+
+    monkeypatch.setattr(agent_skill, "update", gone)
+    result = runner.invoke(cli.app, ["self", "update"])
+    assert result.exit_code == 0, result.output
+    assert "v1.0.0 -> v1.1.0" in result.output
 
 
 def test_self_update_to_a_tag_can_go_back(checkout: tuple[Path, list[str]]) -> None:

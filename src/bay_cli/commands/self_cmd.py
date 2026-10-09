@@ -126,10 +126,26 @@ def update(
     _install_tool(root)
 
     new = framework_version(root)
+    skills = _refresh_skills()
     if console.is_json_mode():
-        console.emit_result({"old": old, "new": new}, command="self update")
+        console.emit_result({"old": old, "new": new, "skills": skills}, command="self update")
         return
     console.success(f"Updated Bay: {old} -> {new}")
+    for line in skills:
+        typer.echo(f"skill {line['result']}: {line['harness']} {line['path']}")
+
+
+def _refresh_skills() -> list[dict[str, str]]:
+    """Rewrite the agent skill files that `bay skill install` recorded. Never fails the update."""
+    try:
+        from bay_cli import agent_skill
+        from bay_cli.commands.skill_cmd import installed_version
+
+
+        return [o.to_dict() for o in agent_skill.update(installed_version())]
+    except Exception as exc:  # noqa: BLE001 - a downgrade may lack agent_skill; never fail the update
+        console.warning(f"could not update the agent skill: {exc}")
+        return []
 
 
 def _install_tool(root: Path) -> None:

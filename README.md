@@ -290,7 +290,7 @@ Install the Bay command once per machine. It does not live inside your project. 
 
 Bay resolves the active fleet in this order: `--fleet <path>`, `BAY_FLEET`, the `fleet =` line in your current `bay.toml`, `BAY_FLEET_NAME`, and your current fleet directory (for `plan`, `up`, `approve`, `rollback`, `remove`, `doctor`, and `show <name>` only). If none match, the command stops and lists these options. Read [docs/install.md](docs/install.md#pick-a-fleet) for the full rule.
 
-[SKILL.md](SKILL.md) documents the framework for an AI agent in a fleet. It covers critical rules, the full command inventory compiled from the CLI, and a doc map. Run `bay --skill` to print it raw for piping.
+[SKILL.md](SKILL.md) documents the framework for an AI agent in a fleet. It covers critical rules, the full command inventory compiled from the CLI, and a doc map. Run `bay --skill` to print it raw for piping. Run `bay skill install` to install it for Claude Code, Codex, OpenCode and Pi on this machine; `bay self update` keeps it current ([docs/install.md](docs/install.md#teach-your-coding-agents-bay-skill)).
 
 ### Versioning
 

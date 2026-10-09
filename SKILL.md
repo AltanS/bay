@@ -29,7 +29,51 @@ my-app/bay.toml                 # an app repo, names its fleet
 ```
 
 This file is generated in part. `bay --skill` prints it; `make docs-skill`
-in the framework repo rebuilds the generated sections.
+in the framework repo rebuilds the generated sections. `bay skill install`
+copies it into the skill folder of each coding agent on the machine (Claude
+Code, Codex, OpenCode, Pi), and `bay self update` keeps those copies current.
+
+## Three truths, and who moves them
+
+- **WANTED** is `bay.toml` (in the app repo, or `projects/<name>/bay.toml` in
+  the fleet). **PINNED** is `projects/<name>/bay.lock` in the fleet plus the
+  compiled `group_vars/all/services.yml`. **RUNNING** is the receipt each box
+  writes after a deploy.
+- **A push never moves the lock.** A git push to an app repo builds and
+  deploys code (`bay show` then says `behind`). A push that edits `bay.toml`
+  is held until `bay up`. Only `bay up` and `bay rollback` move the pin.
+- **`services.yml` is generated** by `bay compile` and has a hash header.
+  Never hand-edit it. Edit `bay.toml` or `bay.fleet.toml`.
+
+## The daily loop: show, plan, approve, up
+
+```
+bay show <project>                                    # one status word per env
+bay plan <env> --project <p> --remote --json          # WANTED vs PINNED vs RUNNING; asks the box
+bay approve <plan-id> --reason "<why>"                # only when the verdict is approve (exit 10)
+bay up <env> --project <p> --json --log /tmp/up.log   # pin, compile, commit, deploy, receipt, push
+bay status --json --env <env>                         # read the receipt right after
+```
+
+- Plan exit codes: 0 auto, 10 approve, 20 blocked, 30 stale (plan again).
+- `bay up` deploys the **whole box environment**, not one project. It pins
+  every project it covered, commits the plan record under `plans/` and the
+  receipt, and pushes the fleet. Never delete `plans/`.
+- `bay up --json` lists what the deploy did in `applied`. Its `steps` field
+  is the plan, not the result.
+- `bay rollback <env> --project <p>` returns to the previous pin and freezes it.
+- With `--json`, stdout is one JSON document. Pass `--log <file>` (or redirect
+  stderr): Ansible refuses to run when stderr is non-blocking, which is common
+  in agent shells.
+- **Prefer `bay plan` then `bay up` for app changes.** Use `bay deploy` and
+  `bay provision` for infrastructure work.
+- **Ask the operator first** before `bay up`, `bay deploy`, `bay provision`,
+  `bay rollback`, `bay restore` or a vault write on a production env. Verbs
+  that do not change a box (`show`, `plan`, `status`, `doctor`, `validate`,
+  `secret missing`) are safe to run without asking. `plan` writes an
+  untracked record under `plans/`; leave it or remove that one file.
+- **Never print or commit a secret value.** `bay secret missing <env>` prints
+  names only. The vault password is `.vault_pass` in the fleet root, never in git.
 
 ## Rules — operating a fleet
 
@@ -38,8 +82,10 @@ in the framework repo rebuilds the generated sections.
 - **`bay validate` before any deploy that touches config.** An invalid
   Headscale ACL crash-loops the control server; an invalid `services.yml`
   reaches the host.
-- **`git pull` the fleet before deploying.** A stale local clone silently
-  reverts remote-only config to framework defaults.
+- **`git pull` the fleet before `bay deploy` and `bay provision`.** A stale
+  local clone silently reverts remote-only config to framework defaults.
+  `bay plan` and `bay up` refuse a fleet that is behind its remote; the
+  playbook verbs do not.
 - **A deploy ships app code, not just config.** `git_deploy` pulls each
   service's repo, so `bay deploy` can change what is running even when no
   framework or config file changed. Weigh blast radius accordingly.
@@ -80,7 +126,9 @@ in the framework repo rebuilds the generated sections.
 | Goal | Command |
 |---|---|
 | First-time setup | Install Bay (`docs/install.md`), then `bay fleet init <name>`, then `bay init` in an app repo |
-| Deploy services | `bay deploy production` |
+| Ship an app change | `bay plan production --project <p> --remote`, then `bay up production --project <p>` |
+| Teach the coding agents on this machine | `bay skill install`, then `bay skill status` |
+| Deploy services (playbook) | `bay deploy production` |
 | Deploy including infra roles | `bay deploy --rig production` |
 | Recreate containers | `bay deploy production --tags deploy_stack` |
 | Dry run | `bay deploy production -- --check --diff` |
@@ -115,6 +163,12 @@ to reproduce it. The flags that change what a command *means*:
 - `bay self` — Show or change the Bay version installed on this machine.
 - `bay self update` — Move this machine to the newest Bay release, or to the tag given by --to.
 - `bay self version` — Print the installed Bay version and where the checkout lives.
+- `bay skill` — Install and update the Bay skill for coding agents (Claude Code, Codex, OpenCode, Pi).
+- `bay skill install` — Write the skill into the user-level skill folder of each harness.
+- `bay skill show` — Print the SKILL.md text of this Bay, with its stamp.
+- `bay skill status` — One line per harness: found here, recorded, and the state of the file.
+- `bay skill uninstall` — Remove the recorded skill files (all, or the --harness ones).
+- `bay skill update` — Rewrite every recorded install with the skill of this Bay.
 - `bay status` — Show the installed Bay version, the fleet it works on, and the feature flags.
 
 ### Operations

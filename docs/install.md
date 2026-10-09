@@ -8,6 +8,7 @@ Bay is a command you install once per machine. It is not a clone inside your pro
 - [What you need](#what-you-need)
 - [Install](#install)
 - [Update](#update)
+- [Teach your coding agents: bay skill](#teach-your-coding-agents-bay-skill)
 - [Development mode: the editable install](#development-mode-the-editable-install)
 - [Make a fleet](#make-a-fleet)
   - [The vault password](#the-vault-password)
@@ -65,6 +66,36 @@ packages, the roles and the collections, installs the command again and prints t
 and the new version. With no `--to` it takes the newest tag by version. It stops when
 the checkout has uncommitted changes. It works on the checkout that the running `bay`
 came from, wherever that is.
+
+## Teach your coding agents: bay skill
+
+`SKILL.md` at the root of the checkout tells a coding agent how to use Bay: the three
+truths, the plan and up loop, the rules and every verb. `bay skill install` copies it into
+the user-level skill folder of each agent on this machine:
+
+| Agent | Skill file | Folder override |
+|---|---|---|
+| Claude Code | `~/.claude/skills/bay/SKILL.md` | `CLAUDE_CONFIG_DIR` |
+| Codex | `~/.codex/skills/bay/SKILL.md` | `CODEX_HOME` |
+| OpenCode | `~/.config/opencode/skills/bay/SKILL.md` | `OPENCODE_CONFIG_DIR`, `XDG_CONFIG_HOME` |
+| Pi | `~/.pi/agent/skills/bay/SKILL.md` | `PI_CODING_AGENT_DIR` |
+
+```bash
+bay skill install                    # every agent found: its command is on PATH, or its folder exists
+bay skill install -H claude -H pi    # only these
+bay skill status                     # one line per agent: ok, outdated, edited, unstamped or missing
+bay skill update                     # rewrite every recorded file with this Bay's text
+bay skill uninstall                  # remove them again
+bay skill show                       # print the text
+```
+
+OpenCode also reads `~/.claude/skills`, so with both installed it finds two `bay` skills with the same text and keeps one. That is harmless.
+
+Bay records each file it wrote in `~/.config/bay/skills.json`. `bay self update` runs
+`bay skill update` after it moves the checkout, so the skill always matches the installed
+version. A recorded agent that is no longer on the machine is skipped, not written again. Each file ends with a stamp line, `<!-- bay-skill <version> <hash> -->`. With it,
+Bay tells a file it wrote (`ok` or `outdated`) from one you changed by hand (`edited`). Bay
+never overwrites a file without a stamp. It overwrites an edited file only with `--force`.
 
 ## Development mode: the editable install
 
