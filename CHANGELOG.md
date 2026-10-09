@@ -8,6 +8,17 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.6.1] - 2026-10-09
+
+Each release now gets a GitHub Release page with its changelog notes.
+
+### Added
+- `make release` creates a GitHub Release for the new tag. The notes are the tag's section of `CHANGELOG.md`.
+- `scripts/release-notes.sh X.Y.Z` prints that section. If `gh` fails after the tag is pushed, the release still stands, and the script prints the command to rerun.
+
+### Upgrade notes
+- None. No code that runs on a box changed. No deploy is needed.
+
 ## [2.6.0] - 2026-10-09
 
 A skill for coding agents. `bay skill install` teaches Claude Code, Codex, OpenCode and Pi how to use Bay.

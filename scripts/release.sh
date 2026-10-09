@@ -160,5 +160,15 @@ git commit -m "chore: release ${TAG}"
 git tag "$TAG"
 git push origin main --tags
 
+# A GitHub Release per tag, with the changelog section as its notes. The tag
+# is already pushed, so a failure here only warns: rerun the printed command.
+NOTES_CMD="gh release create $TAG --title $TAG --verify-tag --notes-file <(bash scripts/release-notes.sh $VERSION)"
+if ! command -v gh >/dev/null 2>&1; then
+  echo "warning: gh not found, no GitHub Release made. Run: $NOTES_CMD"
+elif ! gh release create "$TAG" --title "$TAG" --verify-tag \
+       --notes-file <(bash scripts/release-notes.sh "$VERSION"); then
+  echo "warning: GitHub Release for $TAG failed. Run: $NOTES_CMD"
+fi
+
 echo ""
 echo "Released $TAG"

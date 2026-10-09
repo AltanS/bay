@@ -85,3 +85,41 @@ def test_versions_are_ordered_newest_first():
         assert key(newer) >= key(older), (
             f"CHANGELOG.md is out of order: {newer} appears above {older}"
         )
+
+
+def _release_notes(version: str, changelog: Path) -> "subprocess.CompletedProcess[str]":
+    import subprocess
+
+    return subprocess.run(
+        ["bash", str(_REPO_ROOT / "scripts" / "release-notes.sh"), version, str(changelog)],
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_release_notes_print_one_section_without_heading(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(
+        "# Changelog\n\nIntro.\n\n"
+        "## [1.2.0] - 2026-10-09\n\nNew thing.\n\n### Added\n- a\n\n"
+        "## [1.1.0] — 2026-10-08\n\nOld thing.\n"
+    )
+    result = _release_notes("v1.2.0", changelog)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "New thing.\n\n### Added\n- a\n"
+
+
+def test_release_notes_refuse_a_missing_version(tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text("# Changelog\n\n## [1.1.0] - 2026-10-08\n\nOld.\n")
+    result = _release_notes("1.2.0", changelog)
+    assert result.returncode == 1
+    assert "no entry for 1.2.0" in result.stderr
+
+
+def test_every_documented_version_has_release_notes():
+    for version in _documented_versions():
+        result = _release_notes(version, _CHANGELOG)
+        assert result.returncode == 0 and result.stdout.strip(), (
+            f"scripts/release-notes.sh printed nothing for {version}"
+        )
