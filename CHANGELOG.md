@@ -8,6 +8,18 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.5.4] - 2026-10-09
+
+Docs only. Long docs get a contents list at the top.
+
+### Docs
+- `README.md` and every doc over 150 lines (22 files in `docs/`) start with a generated "Contents" list of their `##` and `###` headings. The anchors follow GitHub's slug rules.
+- `make toc` rewrites the lists after a docs edit. `scripts/docs-toc.py --check` and `tests/test_docs_toc.py` fail when a list does not match its headings.
+- Fixed a broken anchor link in `docs/features.md` (reconciler check mode).
+
+### Upgrade notes
+- None. No code that runs on a box changed. After you edit a heading in a long doc, run `make toc`.
+
 ## [2.5.3] - 2026-10-09
 
 Docs only. The lockfile gets a plain-words overview, and the README is easier to read.
