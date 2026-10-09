@@ -8,6 +8,22 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.6.0] - 2026-10-09
+
+A skill for coding agents. `bay skill install` teaches Claude Code, Codex, OpenCode and Pi how to use Bay.
+
+### Added
+- `bay skill install|update|status|uninstall|show`. It writes `SKILL.md` (the file `bay --skill` prints) to `skills/bay/SKILL.md` in the user-level folder of each agent harness found on the machine, and records every file in `~/.config/bay/skills.json`.
+- Each file ends with a stamp, `<!-- bay-skill <version> <hash> -->`. Bay never overwrites a file without a stamp, and overwrites a hand-edited one only with `--force`.
+- `bay self update` rewrites the recorded skill files after it moves the checkout.
+
+### Changed
+- `SKILL.md` teaches the v2 flow first: the three truths, `show`, `plan`, `approve`, `up`, the plan exit codes, `--log` for agent shells, and when to ask the operator. "Deploy services" in the task table is now `plan` then `up`.
+
+### Upgrade notes
+- Run `bay skill install` once on each machine where you use a coding agent. Later updates come with `bay self update`.
+- No code that runs on a box changed. No deploy is needed.
+
 ## [2.5.4] - 2026-10-09
 
 Docs only. Long docs get a contents list at the top.
