@@ -253,7 +253,10 @@ Check mode changes nothing live. It writes only to temporary places:
   `com.bay.receiver-hash`. When the running container has another hash, or no
   such label, the box predicts `recreate` for `bay-webhook`, with the reason
   `labels: differ for com.bay.receiver-hash`. With the same receiver files it
-  predicts `noop`.
+  predicts `noop`. The same container carries `com.bay.receiver-config-hash`,
+  a sha256 of the rendered receiver config and image map (computed here from
+  the templates and the fleet facts, not read from the box), so a `watch`
+  change or a new build app is a `recreate` step for `bay-webhook` too.
 - On this machine, each box writes its report into a temporary directory
   outside every working tree. Bay reads it and removes it.
 
