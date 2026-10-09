@@ -589,8 +589,10 @@ plan id changes and the approval no longer applies. Bay refuses to approve a
    of every build container on the box:
    - the rebuild script, so a later webhook build uses the deployed config, not
      the config from before this `up`;
-   - the receiver config (its list of build containers) and its image map. A
-     change restarts the receiver at the end of the run;
+   - the receiver config (its list of build containers) and its image map. The
+     receiver reads both only at start. Since 2.5.2 the container carries the
+     label `com.bay.receiver-config-hash`, so a change is a `bay-webhook` recreate
+     that the plan predicts and `applied` lists;
    - the receiver image. Bay builds `bay-webhook:latest` when the receiver
      files changed, the image is missing, or the image's `com.bay.receiver-hash`
      label is not the hash of the receiver files. The container pass then
@@ -1432,6 +1434,28 @@ know.
   and `cleanup` (the lines to run by hand). See [bay remove](#bay-remove).
 
 ## The lockfile
+
+### In plain words
+
+Each project has one lockfile: `projects/<name>/bay.lock` in the fleet repo.
+It records the app commit you approved and what happened at the last deploy.
+The app repo says what you want. The lock says what you approved. The box
+receipt says what runs.
+
+| Action | Changes the lock? | What runs on the box |
+|---|---|---|
+| `git push` to the app repo | No | The webhook builds and deploys the new code. `bay show` then says `behind`. |
+| `git push` that changes `bay.toml` | No | The build is held (`build.held` alert). Nothing deploys until `bay up`. |
+| `bay up` | Yes: the pin moves to the new commit, the old pin goes to `previous` | Bay deploys the whole box environment from the pinned commits. |
+| `bay rollback` | Yes: the pin moves back to `previous`, and `frozen` is set | The previous code and config. Pushes build but do not deploy. |
+
+The lock syncs through git. `bay up` commits it and pushes the fleet repo.
+Another machine gets it with `git pull`. `bay plan` and `bay up` fetch first.
+They refuse to run if the fleet is behind its remote. `bay deploy` and
+`bay provision` do not check. Pull the fleet before you run them. A stale
+clone puts old config back on the box.
+
+### Reference
 
 `projects/<name>/bay.lock` (schema `src/bay_cli/schemas/bay_lock.schema.json`),
 version 2. Only the CLI writes it, atomically. It holds `repo` (the clone URL,

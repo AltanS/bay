@@ -8,6 +8,18 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.5.3] - 2026-10-09
+
+Docs only. The lockfile gets a plain-words overview, and the README is easier to read.
+
+### Docs
+- `docs/plan.md`, "The lockfile": a new "In plain words" part. It shows which actions move the lock (`bay up`, `bay rollback`) and which do not (a push, a held push), how the lock syncs through git, and that `bay deploy` and `bay provision` do not check for a fleet behind its remote, so pull first.
+- `docs/plan.md`, the `bay up` steps: a receiver config change is a `bay-webhook` recreate that the plan shows (2.5.2), not a restart at the end of the run.
+- `README.md`: shorter, plainer sentences throughout. No command, link or heading changed. One fix: Watchtower in monitor-only mode may pull a newer image, and the next `bay up` then plans a recreate.
+
+### Upgrade notes
+- None. No code changed.
+
 ## [2.5.2] - 2026-10-09
 
 A change to the webhook receiver's config now shows in `bay plan` and in the `bay up` receipt.
