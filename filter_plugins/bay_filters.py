@@ -219,6 +219,7 @@ class FilterModule:
             "bay_image_region_map": bay_image_region_map,
             "bay_spec_hash": bay_spec_hash,
             "bay_tree_hash": bay_tree_hash,
+            "bay_framework_path": bay_framework_path,
             "bay_port_binding_tuple": bay_port_binding_tuple,
             "bay_port_spec_tuple": bay_port_spec_tuple,
             "bay_alert_body": bay_alert_body,
@@ -1501,6 +1502,23 @@ def bay_tree_hash(path):
         digest.update(hashlib.sha256(item.read_bytes()).hexdigest().encode("ascii"))
         digest.update(b"\n")
     return "sha256:" + digest.hexdigest()
+
+
+def bay_framework_path(path):
+    """Absolute path of a file in the framework checkout that holds this filter.
+
+    Resolved the way ``bay_tree_hash`` resolves a relative path, so a task can
+    pass a role template to ``lookup('ansible.builtin.template', ...)`` from any
+    role, with no ``role_path`` and on any machine (``com.bay.receiver-config-hash``
+    in container_lifecycle build_specs.yml). A missing file is an error, never a
+    silent empty render.
+    """
+    target = Path(str(path))
+    if not target.is_absolute():
+        target = _FRAMEWORK_ROOT / target
+    if not target.is_file():
+        raise ValueError(f"bay_framework_path: {target} is not a file")
+    return str(target)
 
 
 # ── Access-gateway adapter: cross-host bind-IP resolver ──────────────────

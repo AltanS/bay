@@ -335,6 +335,19 @@
     # Sorted by service name, so the value (and with it the container's config
     # hash) does not move when services.yml lists its services in another order.
     _webhook_build_services: "{{ _all_build_services_for_webhook | sort(attribute='key') }}"
+    # The single owner of the receiver config hash (label com.bay.receiver-config-hash).
+    # Renders the two git_deploy templates with the facts that are in scope
+    # here: `services`, `git_deploy_rebuild_services` (set by git_deploy's
+    # render_image_map.yml on every path that reaches the container pass, since
+    # the git_deploy role runs before deploy_stack and before the receiver
+    # reconcile), `git_deploy_build_strategy` and `git_deploy_peer_webhook_urls`.
+    # Template paths come from the framework checkout, as bay_tree_hash does.
+    _webhook_receiver_config_hash: >-
+      {{ ('sha256:' ~ ((
+           lookup('ansible.builtin.template', 'roles/git_deploy/templates/webhook-config.json.j2' | bay_framework_path)
+           ~ '\n--\n' ~
+           lookup('ansible.builtin.template', 'roles/git_deploy/templates/image-map.json.j2' | bay_framework_path)
+         ) | hash('sha256'))) }}
     _service_branches: "{{ _webhook_build_services | map(attribute='key') | zip(_webhook_build_services | map(attribute='value.build.branch', default='main')) | map('join', ':') | join(',') }}"
     _webhook_spec:
       name: bay-webhook
@@ -412,6 +425,12 @@
         # control node; same files, same hash, so a run without a receiver
         # change stays a NoOp.
         com.bay.receiver-hash: "{{ 'roles/git_deploy/files/webhook' | bay_tree_hash }}"
+        # The receiver reads config.json and image-map.json once, at start, so
+        # a changed render must recreate it. This is the hash of both files as
+        # git_deploy renders them (the two templates, the same facts), computed
+        # here on the control node: never read from the box files, which check
+        # mode does not write. See `_webhook_receiver_config_hash` above.
+        com.bay.receiver-config-hash: "{{ _webhook_receiver_config_hash }}"
 
 - name: Build zot registry container spec
   ansible.builtin.set_fact:

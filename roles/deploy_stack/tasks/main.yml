@@ -246,6 +246,30 @@
         name: container_lifecycle
       tags: [deploy_stack]
 
+    # Tells the "Restart bay-webhook" handler (git_deploy) that this pass just
+    # created or recreated the receiver, which then read the rendered config
+    # files at start, so a restart would be a second, pointless one. The
+    # container carries `com.bay.receiver-config-hash`, so a config change is a
+    # recreate here. Same fact, same meaning as git_deploy webhook.yml sets on
+    # the full-deploy path; an earlier true value is kept. Check mode skips the
+    # reconcile command, so nothing is read there.
+    - name: Record whether the container pass recreated the webhook receiver
+      ansible.builtin.set_fact:
+        _bay_webhook_reconciled: >-
+          {{ (_bay_webhook_reconciled | default(false) | bool)
+             or (_bay_webhook_pass_results | length > 0) }}
+      vars:
+        _bay_webhook_pass_results: >-
+          {{ ((_reconcile_result.stdout | from_json).results | default([]))
+             | selectattr('name', 'equalto', 'bay-webhook')
+             | selectattr('kind', 'in', ['Create', 'Recreate', 'CanarySwap'])
+             | selectattr('status', 'equalto', 'done')
+             | list
+             if (_reconcile_result is defined and _reconcile_result is not skipped
+                 and (_reconcile_result.stdout | default('') | trim | length > 0))
+             else [] }}
+      tags: [deploy_stack]
+
     # ── log_retention boundary (post) ─────────────────────────────────
     # Compare post-recreate IDs against pre. Write a sentinel line to
     # live.log where the container was recreated so operators grepping
