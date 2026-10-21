@@ -503,6 +503,7 @@ git_deploy_build_strategy: local         # default for all build: services
 git_deploy_build_mem_limit: "2G"         # systemd MemoryMax on bay-build@.service (wrapper cgroup; integer-only, uppercase)
 git_deploy_buildkit_memory_max: "2.5G"   # docker --memory cap on buildx_buildkit_argo-builder0 (defaults to the wrapper var when unset)  # kept-argo: live buildx builder name on hosts, migrate separately
 git_deploy_build_lock_timeout: 3600      # seconds before a queued build aborts waiting for the build lock
+git_deploy_buildkit_image: "moby/buildkit:v0.34.1@sha256:..."  # BuildKit image of the builder, pinned by digest; a change recreates the builder ("" = buildx default)
 ```
 
 Per-service `build.strategy` overrides the server default.

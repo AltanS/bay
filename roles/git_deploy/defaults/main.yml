@@ -40,6 +40,24 @@ git_deploy_build_mem_limit: "2G"
 # Docker accepts decimals here (`2.5G`) — systemd does not.
 git_deploy_buildkit_memory_max: "{{ git_deploy_build_mem_limit }}"
 
+# BuildKit image of the local buildx builder (bay_buildx_builder). The builder
+# pulls every base image and pushes every build to the registry, so its TLS
+# trust is the trust of the whole supply chain. Pinned by digest, never a
+# moving tag such as buildx-stable-1.
+#
+# v0.34.1 is built with Go 1.26.10. Its x509 block list rejects the eight
+# eMudhra intermediates of the October 2026 incident, which chain to
+# "emSign ECC Root CA - G3". The image's own Alpine CA bundle still lists that
+# root, so the Go version is the fix: do not move to an image built with an
+# older Go. buildx-stable-1 was v0.29.0, Go 1.26.1.
+# Digest: the multi-arch index digest of moby/buildkit:v0.34.1, from
+# `docker buildx imagetools inspect`, checked against the Docker Hub tags API.
+#
+# A changed value removes and recreates the builder on the next deploy (it
+# waits for the build lock first). That drops the local build cache. Set ""
+# to leave the choice to buildx (no image check, no recreate).
+git_deploy_buildkit_image: "moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c"
+
 # Cross-service build serialization. rebuild.sh acquires an exclusive flock
 # on this path before doing any work, so when two bay-build@* path units
 # fire simultaneously (common with monorepo pushes that match multiple

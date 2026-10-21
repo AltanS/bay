@@ -465,6 +465,17 @@
       volumes:
         - "{{ zot_config_dir | default('/opt/zot/config') }}:/etc/zot:ro"
         - "{{ zot_data_dir | default('/opt/zot/data') }}:/var/lib/registry"
+        # eMudhra CA incident (Oct 2026): zot v2.1.15 is built with Go 1.25.8
+        # and its distroless image ships a CA bundle that still trusts
+        # "emSign ECC Root CA - G3", so a MITM on the S3 storage driver could
+        # swap blobs and tags. The host's bundle (Ubuntu ca-certificates)
+        # dropped that root. Mounted over the image's only bundle file, which
+        # is also where SSL_CERT_FILE points. A bind mount pins the file the
+        # host had at container start: update-ca-certificates writes a new
+        # file, so a later host update reaches zot only on a recreate.
+        # Remove when zot ships a build with Go 1.27.3+ (or 1.26.10+).
+        # Mirror of roles/deploy_stack/templates/_zot.j2.
+        - "/etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro"
       labels:
         traefik.enable: "true"
         traefik.docker.network: "{{ traefik_docker_network | default('services') }}"

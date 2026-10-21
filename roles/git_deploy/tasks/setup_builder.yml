@@ -3,7 +3,10 @@
 # The container driver isolates builds in their own cgroup, enabling
 # memory limits via `docker update --memory` on the builder container.
 #
-# Idempotent: checks for existing builder before creating.
+# Idempotent: checks for existing builder before creating, and recreates it
+# only when its BuildKit image differs from git_deploy_buildkit_image.
+# main.yml has the same steps for build servers with only remote-strategy
+# services; keep the two in step.
 # Called once from main.yml after strategy resolution, before any builds.
 #
 # On the build server it also registers the optional remote BuildKit builder
@@ -16,6 +19,32 @@
   register: _buildx_inspect
   failed_when: false
   changed_when: false
+  # Read-only, so check mode runs it too and can report an image change.
+  check_mode: false
+
+# The builder keeps the image it was created with. `buildx inspect` prints it
+# on the "Driver Options:" line as image="<ref>"; a builder created without
+# the option prints no such line. Either way a different image means remove
+# and create again, the same way remote_builder.yml handles an endpoint change.
+# An empty git_deploy_buildkit_image turns the check off.
+- name: Compare the buildx builder image with git_deploy_buildkit_image
+  ansible.builtin.set_fact:
+    _buildx_image_drift: >-
+      {{ _buildx_inspect.rc == 0
+         and (git_deploy_buildkit_image | default('')) | length > 0
+         and ('image="' ~ git_deploy_buildkit_image ~ '"') not in (_buildx_inspect.stdout | default('')) }}
+
+# Waits for the build lock that rebuild.sh holds for every webhook build, so a
+# running build is never cut off. `buildx rm` also drops the build cache
+# volume: the next build starts cold, and no layer pulled by the old builder
+# is reused. Fails the run when the lock wait times out.
+- name: Remove the buildx builder (image changed)
+  ansible.builtin.command:
+    cmd: >-
+      flock -x -w {{ git_deploy_build_lock_timeout }} {{ git_deploy_build_lock_path }}
+      docker buildx rm {{ bay_buildx_builder }}
+  when: _buildx_image_drift | bool
+  changed_when: true
 
 - name: Create buildx builder
   ansible.builtin.command:
@@ -24,16 +53,17 @@
       --name {{ bay_buildx_builder }}
       --driver docker-container
       --driver-opt network=host
+      {% if git_deploy_buildkit_image | default('') | length > 0 %}--driver-opt image={{ git_deploy_buildkit_image }}{% endif %}
       --bootstrap
   register: _buildx_create
-  when: _buildx_inspect.rc != 0
+  when: _buildx_inspect.rc != 0 or _buildx_image_drift | bool
   changed_when: _buildx_create.rc == 0
 
 - name: Ensure buildx builder is running
   ansible.builtin.command:
     cmd: docker buildx inspect --bootstrap {{ bay_buildx_builder }}
   register: _buildx_bootstrap
-  when: _buildx_inspect.rc == 0
+  when: _buildx_inspect.rc == 0 and not (_buildx_image_drift | bool)
   changed_when: "'starting container' in (_buildx_bootstrap.stderr | default(''))"
 
 - name: Apply memory limit to builder container

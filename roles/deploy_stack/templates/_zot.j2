@@ -7,6 +7,10 @@
     volumes:
       - {{ zot_config_dir }}:/etc/zot:ro
       - {{ zot_data_dir }}:/var/lib/registry
+{# eMudhra CA incident (Oct 2026): the host's CA bundle over the image's,
+   which still trusts "emSign ECC Root CA - G3". Remove when zot ships a
+   build with Go 1.27.3+. Mirror of container_lifecycle build_specs.yml. #}
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
     networks:
       - {{ traefik_docker_network }}
 {% if (zot_storage_driver | default('filesystem')) == 's3' %}

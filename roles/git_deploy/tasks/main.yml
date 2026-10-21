@@ -199,11 +199,33 @@
           register: _buildx_inspect
           failed_when: false
           changed_when: false
+          check_mode: false
+
+        # Same image check as setup_builder.yml (see the comments there):
+        # a builder whose BuildKit image differs from git_deploy_buildkit_image
+        # is removed, under the build lock, and created again.
+        - name: Compare the bay buildx instance image with git_deploy_buildkit_image
+          ansible.builtin.set_fact:
+            _buildx_image_drift: >-
+              {{ _buildx_inspect.rc == 0
+                 and (git_deploy_buildkit_image | default('')) | length > 0
+                 and ('image="' ~ git_deploy_buildkit_image ~ '"') not in (_buildx_inspect.stdout | default('')) }}
+
+        - name: Remove the bay buildx instance (image changed)
+          ansible.builtin.command:
+            cmd: >-
+              flock -x -w {{ git_deploy_build_lock_timeout }} {{ git_deploy_build_lock_path }}
+              docker buildx rm {{ bay_buildx_builder }}
+          when: _buildx_image_drift | bool
+          changed_when: true
 
         - name: Create the bay buildx instance
           ansible.builtin.command:
-            cmd: docker buildx create --name {{ bay_buildx_builder }} --driver docker-container --bootstrap
-          when: _buildx_inspect.rc != 0
+            cmd: >-
+              docker buildx create --name {{ bay_buildx_builder }} --driver docker-container
+              {% if git_deploy_buildkit_image | default('') | length > 0 %}--driver-opt image={{ git_deploy_buildkit_image }}{% endif %}
+              --bootstrap
+          when: _buildx_inspect.rc != 0 or _buildx_image_drift | bool
 
         # On remote-only hosts (no local-strategy services) setup_builder.yml is
         # never included, so without this call the buildkit container runs

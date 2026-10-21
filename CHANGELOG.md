@@ -8,6 +8,27 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.6.2] - 2026-10-21
+
+Security fix for the eMudhra CA incident. Three rig parts trusted the root "emSign ECC Root CA - G3", which signed eight bad intermediates.
+
+### Security
+- The local buildx builder runs `moby/buildkit:v0.34.1`, pinned by digest, in place of `buildx-stable-1` (v0.29.0). v0.34.1 is built with Go 1.26.10, whose x509 block list rejects the eight intermediates. The builder pulls every base image and pushes every build, so a MITM there poisons the supply chain.
+- Zot mounts the host's `/etc/ssl/certs/ca-certificates.crt` read-only over its own bundle. Zot v2.1.15 is built with Go 1.25.8, and its bundle still trusts the root. The mount goes away when zot ships a build with Go 1.27.3 or newer.
+- `bay-webhook` and `tailnet-identity` build from `python:3.12-slim` pinned by digest. That image ships `ca-certificates 20250419+deb13u1`, without the root. The webhook sends alerts to the Telegram API with the bot token in the URL.
+
+### Added
+- `git_deploy_buildkit_image`: the BuildKit image of the local builder. Set `""` to leave the choice to buildx.
+
+### Changed
+- `git_deploy` compares the builder's image with `git_deploy_buildkit_image` on each deploy. When they differ, it waits for the build lock, removes the builder and creates it again. Both builder paths do this: `setup_builder.yml` and the remote build server block in `main.yml`.
+
+### Upgrade notes
+- The first deploy after the update recreates the builder on every host that builds. `docker buildx rm` drops the local build cache, so the next build on each host starts cold. The task waits up to `git_deploy_build_lock_timeout` for a running webhook build. Do not run a second `bay deploy` against the build server at the same time.
+- A builder that was registered by hand under another user (for example the admin user) still points at the old container settings. Remove that user's registration file, `~/.docker/buildx/instances/<builder>`. Do not run `docker buildx rm` as that user: it removes the new container.
+- The first deploy that reaches `deploy_stack` recreates `zot` on the registry host and `bay-webhook` on each host that runs one, with or without `--rig`. Zot is down for a few seconds, so do not deploy the registry host during a push.
+- `tailnet-identity` rebuilds only in a rig deploy: `bay deploy --rig <env> --tags tailnet_identity,deploy_stack`.
+
 ## [2.6.1] - 2026-10-09
 
 Each release now gets a GitHub Release page with its changelog notes.
