@@ -10,6 +10,8 @@
 #
 # Traefik uses network_mode: host, so traffic hits nftables directly.
 # Static CIDR blocklist loaded from /etc/nftables.d/ (managed by crowdsec role).
+# Pre-routing table (bay_prerouting, priority -350) loaded from
+# /etc/nftables.d/bay-prerouting.conf (managed by this role, applied on its own).
 #
 # Only flush our own tables — Docker's ip family tables (DOCKER-FORWARD, etc.)
 # are created once at daemon startup and must not be destroyed.

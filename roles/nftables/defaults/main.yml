@@ -40,3 +40,38 @@ nftables_container_host_ports: []
 # apply — established/related traffic is still accepted, so do this only on a
 # host whose container networking you have verified, and out-of-band.
 nftables_forward_permissive: true
+
+# ── Pre-routing rules ───────────────────────────────────────────────────────
+# Rules that must run before routing, conntrack and Docker's DNAT, such as an
+# emergency kernel-CVE mitigation. The `input` chain cannot hold them: a
+# Docker-published port bypasses it.
+#
+# The role renders them into /etc/nftables.d/bay-prerouting.conf, as the table
+# `inet bay_prerouting` (hook prerouting, priority -350, policy accept). A
+# change loads that one table with `nft -f`. It does NOT reload nftables.conf
+# and does NOT restart Docker, so an emergency rule costs no container bounce.
+# The file is checked with `nft -c` before it is written; a bad rule fails the
+# task and leaves the live rules as they were.
+#
+# Drop IPv4 TCP packets that carry IP options. Legitimate TCP does not use
+# them, and they are attack surface (CVE-2026-98432, a use-after-free in IPv4
+# option parsing). Set false only on a host with a real need for them.
+nftables_drop_ipv4_options: true
+
+# Extra rules, one nft rule statement each, in order. `comment` is optional.
+#
+#   nftables_prerouting_rules:
+#     - comment: "drop a hostile range before conntrack"
+#       rule: "ip saddr 192.0.2.0/24 counter drop"
+nftables_prerouting_rules: []
+
+# ── Ownership of /etc/nftables.d/ ───────────────────────────────────────────
+# nftables.conf ends with `include "/etc/nftables.d/*.conf"`. Bay writes two
+# files there:
+#
+#   bay-prerouting.conf    this role (the rules above)
+#   trellis-blocklist.conf crowdsec role (ip_blocklist CIDR set)
+#
+# Any other *.conf there is unsupported. Bay does not remove it, but each run
+# of this role names it in a warning, so a hand-placed rule cannot hide. Move
+# its rules into nftables_prerouting_rules, then delete the file and its table.

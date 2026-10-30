@@ -8,6 +8,23 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.7.0] - 2026-10-30
+
+The nftables role gets a pre-routing extension point, and drops IPv4 TCP with IP options by default (GH#4). The CVE-2026-98432 mitigation no longer needs a hand-placed file.
+
+### Added
+- `nftables_prerouting_rules`: a list of `{comment, rule}` entries. The role renders them into `/etc/nftables.d/bay-prerouting.conf` as the table `inet bay_prerouting` (hook `prerouting`, priority -350). That runs before conntrack, routing and Docker's DNAT, so a Docker-published port cannot bypass it.
+- `nftables_drop_ipv4_options` (default `true`): drops IPv4 TCP packets that carry IP options (`ip hdrlength != 5`). Legitimate TCP does not use them. This mitigates CVE-2026-98432, a use-after-free in IPv4 option parsing.
+- The role warns about each `*.conf` in `/etc/nftables.d/` that no Bay role writes. Bay writes only `bay-prerouting.conf` (nftables role) and `trellis-blocklist.conf` (crowdsec role). Other files stay in place but are unsupported.
+
+### Changed
+- A change to the pre-routing rules loads only that table with `nft -f`. It does not reload `nftables.conf` and does not restart Docker. `nft -c` checks the file before it is written, so a bad rule fails the task and leaves the live rules as they were. The role also loads the table when the file is unchanged but the table is missing from the live ruleset.
+
+### Upgrade notes
+- Run `bay --fleet <path> deploy <env> --tags nftables` on each fleet. No container restarts. The only `nftables.conf` change is a comment, so nftables is not reloaded.
+- A host with the hand-placed CVE-2026-98432 file shows a warning for `/etc/nftables.d/cve-2026-98432.conf`. After the deploy, check that `nft list table inet bay_prerouting` shows the `hdrlength` rule. Then remove the old file and table: `sudo rm /etc/nftables.d/cve-2026-98432.conf && sudo nft delete table ip cve_2026_98432`.
+- A host that needs IPv4 options on inbound TCP sets `nftables_drop_ipv4_options: false`.
+
 ## [2.6.2] - 2026-10-21
 
 Security fix for the eMudhra CA incident. Three rig parts trusted the root "emSign ECC Root CA - G3", which signed eight bad intermediates.

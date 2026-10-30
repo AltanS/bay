@@ -95,6 +95,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 - **Traefik v3.6 with host networking** -- `network_mode: host` preserves real client IPs through the entire request chain (no Docker NAT)
 - **CrowdSec IDS/IPS** -- reads Traefik access logs and SSH auth logs, shares ban decisions with the nftables bouncer
 - **nftables firewall** -- kernel-level packet filtering with CrowdSec blocklist integration and VPN IP whitelisting
+- **nftables pre-routing table** -- `nftables_prerouting_rules` for rules that must run before conntrack and Docker DNAT (emergency CVE mitigations), applied without a Docker restart; drops IPv4 TCP with IP options by default (`nftables_drop_ipv4_options`). See `roles/nftables/defaults/main.yml`, which also lists the files Bay owns in `/etc/nftables.d/`
 - **Automated SSL** -- Let's Encrypt HTTP-01 challenge, per-domain certificates issued on first request (the optional tailnet ingress uses a DNS-01 wildcard cert, see [tailnet-ingress.md](tailnet-ingress.md))
 - **Ansible Vault** -- encrypted secrets in `group_vars/<env>/secrets.yml`, resolved at deploy time into per-service `.env` files
 - **SSH hardening** -- key-only auth, no root login, `MaxStartups 10:30:60` rate limiting, 30s `LoginGraceTime` (via `sshd_hardening` role supplementing geerlingguy.security)

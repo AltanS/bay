@@ -1,0 +1,35 @@
+#!/usr/sbin/nft -f
+# {{ ansible_managed }}
+# Bay pre-routing rules (nftables role). Do not edit by hand: set
+# nftables_drop_ipv4_options and nftables_prerouting_rules instead.
+#
+# Priority -350 runs before Docker's `raw` table (-300) and conntrack
+# (-200). It also runs before routing, so
+# Docker-published ports (DNAT) cannot bypass it the way they bypass the
+# `input` chain in nftables.conf.
+#
+# This file loads on its own with `nft -f`. The create-then-delete idiom
+# replaces only this table, so Docker's chains stay untouched and no Docker
+# restart is needed. nftables.conf also includes it at boot.
+
+table inet bay_prerouting {}
+delete table inet bay_prerouting
+
+table inet bay_prerouting {
+    chain prerouting {
+        type filter hook prerouting priority -350; policy accept;
+{% if nftables_drop_ipv4_options | default(true) | bool %}
+
+        # Drop IPv4 TCP that carries IP options (header longer than 20 bytes).
+        # Legitimate TCP never carries them. Mitigates CVE-2026-98432.
+        ip protocol tcp ip hdrlength != 5 counter drop
+{% endif %}
+{% for _r in nftables_prerouting_rules | default([]) %}
+
+{% if _r.comment | default('') %}
+        # {{ _r.comment }}
+{% endif %}
+        {{ _r.rule }}
+{% endfor %}
+    }
+}

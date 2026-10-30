@@ -52,6 +52,80 @@
   become: true
   become_user: root
 
+# ── Pre-routing table (/etc/nftables.d/bay-prerouting.conf) ─────────────────
+# Loaded on its own with `nft -f`, never through the reload handler: that
+# handler restarts Docker. See defaults/main.yml for the variables.
+
+- name: Check nftables_prerouting_rules entries
+  ansible.builtin.assert:
+    that:
+      - _nft_pr_rule is mapping
+      - _nft_pr_rule.rule | default('') is string
+      - _nft_pr_rule.rule | default('') | trim | length > 0
+      - "'\\n' not in _nft_pr_rule.rule | default('')"
+      - "'\\n' not in _nft_pr_rule.comment | default('') | string"
+    fail_msg: >-
+      Each nftables_prerouting_rules entry needs a one-line `rule` string and
+      an optional one-line `comment`. Bad entry: {{ _nft_pr_rule }}
+    quiet: true
+  loop: "{{ nftables_prerouting_rules | default([]) }}"
+  loop_control:
+    loop_var: _nft_pr_rule
+
+- name: Deploy nftables pre-routing rules
+  ansible.builtin.template:
+    src: bay-prerouting.conf.j2
+    dest: /etc/nftables.d/bay-prerouting.conf
+    owner: root
+    group: root
+    mode: "0644"
+    validate: nft -c -f %s
+  register: _nftables_prerouting_file
+  become: true
+  become_user: root
+
+- name: Check the live pre-routing table
+  ansible.builtin.command:
+    cmd: nft list table inet bay_prerouting
+  register: _nftables_prerouting_live
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+
+# Replaces only the bay_prerouting table. Docker's chains are untouched, so
+# no Docker restart. Skipped in check mode (command module).
+- name: Apply nftables pre-routing rules
+  ansible.builtin.command:
+    cmd: nft -f /etc/nftables.d/bay-prerouting.conf
+  changed_when: true
+  when: >-
+    _nftables_prerouting_file is changed
+    or _nftables_prerouting_live.rc != 0
+  become: true
+  become_user: root
+
+- name: Find files in /etc/nftables.d that Bay does not manage
+  ansible.builtin.find:
+    paths: /etc/nftables.d
+    patterns: "*.conf"
+    excludes:
+      - bay-prerouting.conf
+      - trellis-blocklist.conf
+  register: _nftables_d_unmanaged
+  become: true
+  become_user: root
+
+- name: Warn about unmanaged files in /etc/nftables.d
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: {{ _nftables_d_unmanaged.files | map(attribute='path') | join(', ') }}
+      is not managed by Bay, but nftables.conf loads it at every reload and
+      boot. Move its rules into nftables_prerouting_rules, then delete the
+      file and its table.
+  when: _nftables_d_unmanaged.files | length > 0
+
 - name: Read live nftables ruleset fingerprint
   ansible.builtin.shell:
     cmd: >-
