@@ -47,6 +47,17 @@
     mode: "0644"
   become: true
 
+- name: Set Multipath TCP on or off
+  ansible.posix.sysctl:
+    name: net.mptcp.enabled
+    # See common_mptcp_enabled (roles/common/defaults/main.yml).
+    value: "{{ '1' if common_mptcp_enabled | bool else '0' }}"
+    sysctl_file: /etc/sysctl.d/99-bay-mptcp.conf
+    sysctl_set: true
+    reload: true
+  become: true
+  tags: [mptcp]
+
 - name: Ensure journald drop-in directory exists
   ansible.builtin.file:
     path: /etc/systemd/journald.conf.d

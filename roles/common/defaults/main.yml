@@ -24,3 +24,12 @@ common_locale: en_US.UTF-8
 # 500M is enough to keep ~2 weeks of typical server logs while capping the
 # worst case. Override per-host in group_vars if a host needs more.
 journald_max_use: "500M"
+
+# Multipath TCP (net.mptcp.enabled) in the host network namespace. Off by
+# default: no Bay role needs it. Go 1.24+ daemons listen with MPTCP by default
+# and fall back to plain TCP when it is off. The public exploit for
+# CVE-2026-98432 needs an MPTCP listener, so this narrows that surface. It is
+# not the fix: the bug is in plain TCP, and only a patched kernel closes it.
+# The sysctl is per network namespace, so containers keep their own value, and
+# a socket that is already open keeps MPTCP until its daemon restarts.
+common_mptcp_enabled: false
