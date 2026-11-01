@@ -96,6 +96,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 - **CrowdSec IDS/IPS** -- reads Traefik access logs and SSH auth logs, shares ban decisions with the nftables bouncer
 - **nftables firewall** -- kernel-level packet filtering with CrowdSec blocklist integration and VPN IP whitelisting
 - **nftables pre-routing table** -- `nftables_prerouting_rules` for rules that must run before conntrack and Docker DNAT (emergency CVE mitigations), applied without a Docker restart; drops IPv4 TCP with IP options by default (`nftables_drop_ipv4_options`). See `roles/nftables/defaults/main.yml`, which also lists the files Bay owns in `/etc/nftables.d/`
+- **Multipath TCP off** -- `common_mptcp_enabled` (default `false`) sets `net.mptcp.enabled` to 0 in the host network namespace. This narrows the attack surface of CVE-2026-98432 until a patched kernel fixes it. Apply it alone with `bay --fleet <path> provision <env> --tags mptcp`. See `roles/common/defaults/main.yml`.
 - **Automated SSL** -- Let's Encrypt HTTP-01 challenge, per-domain certificates issued on first request (the optional tailnet ingress uses a DNS-01 wildcard cert, see [tailnet-ingress.md](tailnet-ingress.md))
 - **Ansible Vault** -- encrypted secrets in `group_vars/<env>/secrets.yml`, resolved at deploy time into per-service `.env` files
 - **SSH hardening** -- key-only auth, no root login, `MaxStartups 10:30:60` rate limiting, 30s `LoginGraceTime` (via `sshd_hardening` role supplementing geerlingguy.security)

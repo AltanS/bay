@@ -8,6 +8,20 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.7.1] - 2026-11-01
+
+Multipath TCP (MPTCP) is now off by default on the host. The public exploit for CVE-2026-98432 requires an MPTCP listener, so this change reduces exposure. It does not fix the bug: the flaw is in plain TCP, and only a patched kernel resolves it.
+
+### Added
+- `common_mptcp_enabled` (default `false`): sets `net.mptcp.enabled` in the host network namespace with `/etc/sysctl.d/99-bay-mptcp.conf`. No Bay role requires MPTCP. Go 1.24+ daemons fall back to plain TCP when MPTCP is off. The task has its own tag, `mptcp`.
+
+### Upgrade notes
+- The new default applies to every fleet that upgrades, but not at once. It takes effect during the next provision that runs the `common` or `mptcp` tag, or during a full provision. It does not run during `bay deploy`, because `provision.yml` contains the `common` role.
+- Run `bay --fleet <path> provision <env> --tags mptcp` to apply this setting immediately.
+- If a host requires MPTCP, set `common_mptcp_enabled: true`.
+- The sysctl applies per network namespace. Containers with their own network namespace keep their existing setting. Existing listeners keep MPTCP until their daemons restart.
+- Run `sudo ss -HtlnipO | grep tcp-ulp-mptcp` to list those listeners. Do not use `ss -M` for this check: without the `mptcp_diag` kernel module, it outputs nothing and exits 0, which falsely indicates no listeners.
+
 ## [2.7.0] - 2026-10-30
 
 The nftables role gets a pre-routing extension point, and drops IPv4 TCP with IP options by default (GH#4). The CVE-2026-98432 mitigation no longer needs a hand-placed file.
