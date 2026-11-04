@@ -8,6 +8,16 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.9.1] - 2026-11-04
+
+`bay provision` now works on a fresh Debian 13 minimal image.
+
+### Fixed
+- `provision.yml`: a new first task installs `python3-apt` with `raw` before the first apt task. A fresh Debian 13 image does not have the package, and the apt module could not install it for itself on Python 3.13. The first run failed and the second run worked. Ubuntu images already have the package, so the task changes nothing there.
+
+### Upgrade notes
+- No action needed. Existing hosts report the task as unchanged.
+
 ## [2.9.0] - 2026-11-04
 
 Debian 13 (trixie) is now a supported target OS for `bay provision`, next to Ubuntu.

@@ -52,6 +52,20 @@
       when: bay_minimum_version is defined
       tags: [always]
 
+    # A fresh Debian image has no python3-apt, and the apt module cannot
+    # install it for itself on Python 3.13 (its respawn fails). Install it
+    # with raw before the first apt task. Ubuntu images already have it, so
+    # the task reports no change there. check_mode is off so that a --check
+    # run on a fresh Debian host still gets the package the apt module needs.
+    - name: Bootstrap python3-apt for the apt module
+      ansible.builtin.raw: >-
+        if python3 -c 'import apt' 2>/dev/null; then echo present;
+        else apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-apt && echo installed; fi
+      register: _python3_apt_bootstrap
+      changed_when: "'installed' in _python3_apt_bootstrap.stdout"
+      check_mode: false
+      tags: [always]
+
     - name: Update apt cache
       ansible.builtin.apt:
         update_cache: true
