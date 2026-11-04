@@ -8,6 +8,16 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.9.2] - 2026-11-04
+
+The first `bay deploy --rig` on a fresh box no longer fails at the Traefik restart handler.
+
+### Fixed
+- `roles/traefik`: the "Restart traefik" handler now checks that the container exists before it restarts it. On a fresh box the config is written before `deploy_stack` creates the container, and the restart failed with "image is not specified". The handler now skips the restart in that case. `deploy_stack` then creates the container with the new config. On an existing box the restart works as before.
+
+### Upgrade notes
+- No action needed.
+
 ## [2.9.1] - 2026-11-04
 
 `bay provision` now works on a fresh Debian 13 minimal image.

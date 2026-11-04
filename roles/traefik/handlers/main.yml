@@ -1,6 +1,20 @@
 ---
+# On a fresh box the config lands before deploy_stack creates the container.
+# Restarting a container that does not exist fails with "image is not
+# specified", so look first. deploy_stack creates it with the new config.
+#
+# Ansible cannot notify a block, so this is two flat handlers. Tasks notify
+# "Restart traefik", which runs the lookup. The restart listens to the same
+# name and runs next, because handlers run in file order.
 - name: Restart traefik
+  community.docker.docker_container_info:
+    name: "{{ traefik_container_name | default('traefik') }}"
+  register: _traefik_container
+
+- name: Restart the traefik container
   community.docker.docker_container:
     name: "{{ traefik_container_name | default('traefik') }}"
     state: started
     restart: true
+  when: _traefik_container.exists
+  listen: Restart traefik
