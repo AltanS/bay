@@ -102,9 +102,23 @@
     update_cache: false
   when: crowdsec_enabled | bool
 
-- name: Add CrowdSec repository
+# Existing Ubuntu hosts carry this line. Left in place it would list the same
+# packages twice, next to the distro-independent source added below. On a
+# fresh host it matches nothing.
+- name: Remove the distro-specific signed CrowdSec repository line
   ansible.builtin.apt_repository:
     repo: "deb [signed-by={{ crowdsec_gpg_keyring }}] https://packagecloud.io/crowdsec/crowdsec/{{ ansible_distribution | lower }}/ {{ ansible_distribution_release }} main"
+    state: absent
+    filename: crowdsec
+    update_cache: false
+  when: crowdsec_enabled | bool
+
+# packagecloud has no distro source for Debian trixie (crowdsec/crowdsec issue
+# 3909). The `any` source is the one the official install script uses. It
+# serves the same package versions as the ubuntu and debian sources.
+- name: Add CrowdSec repository
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by={{ crowdsec_gpg_keyring }}] https://packagecloud.io/crowdsec/crowdsec/any/ any main"
     state: present
     filename: crowdsec
   when: crowdsec_enabled | bool

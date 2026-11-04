@@ -3,6 +3,7 @@
 
 common_timezone: UTC
 
+# software-properties-common was removed: Debian trixie has no such package and no Bay role calls add-apt-repository. `state: present` leaves it installed on existing Ubuntu hosts.
 common_packages:
   - curl
   - wget
@@ -14,7 +15,6 @@ common_packages:
   - ca-certificates
   - gnupg
   - lsb-release
-  - software-properties-common
 
 common_locale: en_US.UTF-8
 

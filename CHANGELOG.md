@@ -8,6 +8,22 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.9.0] - 2026-11-04
+
+Debian 13 (trixie) is now a supported target OS for `bay provision`, next to Ubuntu.
+
+### Changed
+- `tailscale_node`: the Tailscale apt key and repository URLs use the host distribution name (`ubuntu` or `debian`) instead of a fixed `ubuntu`. On Ubuntu the rendered URLs are the same as before.
+- `crowdsec`: the role now uses the distro-independent CrowdSec source, `https://packagecloud.io/crowdsec/crowdsec/any/`. packagecloud has no source for Debian trixie. This is the source the official install script uses. The role removes the old `ubuntu/<codename>` line.
+- `common`: `software-properties-common` is no longer in `common_packages` (not in Debian trixie, unused by Bay; existing hosts keep it installed).
+
+### Upgrade notes
+- Existing Ubuntu hosts move to the distro-independent CrowdSec source on the next `bay provision <env> --tags crowdsec`.
+- The role removes the old `ubuntu/<codename>` line, so apt does not list the packages twice.
+- Package versions are identical in both sources.
+- The `netplan` role stays off by default and must stay off on Debian hosts. Do not set `netplan_enabled` to `true` there.
+
+
 ## [2.8.0] - 2026-11-04
 
 Headscale moves to 0.29.7. Split DNS stops sending unknown names into a loop. `bay deploy --tags headscale` now also moves the Headscale container onto the pinned image.

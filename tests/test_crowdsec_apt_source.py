@@ -31,10 +31,14 @@ _OLD_REPO = (
     "deb https://packagecloud.io/crowdsec/crowdsec/"
     "{{ ansible_distribution | lower }}/ {{ ansible_distribution_release }} main"
 )
-_NEW_REPO = (
+_DISTRO_REPO = (
     "deb [signed-by={{ crowdsec_gpg_keyring }}] "
     "https://packagecloud.io/crowdsec/crowdsec/"
     "{{ ansible_distribution | lower }}/ {{ ansible_distribution_release }} main"
+)
+_NEW_REPO = (
+    "deb [signed-by={{ crowdsec_gpg_keyring }}] "
+    "https://packagecloud.io/crowdsec/crowdsec/any/ any main"
 )
 
 
@@ -46,12 +50,16 @@ def _repo_tasks() -> list[tuple[int, dict]]:
     ]
 
 
-def test_the_old_unsigned_line_is_removed():
-    absent = [
+def _absent_tasks() -> list[dict]:
+    return [
         t for _, t in _repo_tasks()
         if t["ansible.builtin.apt_repository"].get("state") == "absent"
     ]
-    assert len(absent) == 1, "exactly one removal of the legacy source line"
+
+
+def test_the_old_unsigned_line_is_removed():
+    absent = _absent_tasks()
+    assert len(absent) == 2, "two removals: legacy unsigned and distro-specific signed"
     mod = absent[0]["ansible.builtin.apt_repository"]
     assert mod["repo"] == _OLD_REPO, (
         "apt_repository matches on the exact line; the legacy one must be "
@@ -62,10 +70,19 @@ def test_the_old_unsigned_line_is_removed():
     assert "signed-by" not in mod["repo"]
 
 
+def test_the_distro_specific_signed_line_is_removed():
+    mod = _absent_tasks()[1]["ansible.builtin.apt_repository"]
+    assert mod["repo"] == _DISTRO_REPO, (
+        "Ubuntu hosts carry this line; it must go or the packages list twice"
+    )
+    assert mod["filename"] == "crowdsec"
+    assert mod["update_cache"] is False
+
+
 def test_the_removal_runs_before_the_add():
     order = _repo_tasks()
     states = [t["ansible.builtin.apt_repository"].get("state") for _, t in order]
-    assert states == ["absent", "present"], (
+    assert states == ["absent", "absent", "present"], (
         "adding the signed line first leaves both in the file for the length "
         "of the play, and the very next apt task fails"
     )
@@ -79,6 +96,7 @@ def test_the_signed_line_is_the_one_added():
     assert len(present) == 1
     mod = present[0]["ansible.builtin.apt_repository"]
     assert mod["repo"] == _NEW_REPO
+    assert "/any/ any main" in mod["repo"], "distro-independent source, works on trixie"
     assert mod["filename"] == "crowdsec", "same file, so the lines cannot split"
 
 

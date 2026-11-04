@@ -59,7 +59,7 @@ Two files are the source of truth. An app defines its identity and deployment ta
 
 ## What it does
 
-- **Provisions** a bare Ubuntu server into a hardened Docker host: users, SSH lockdown, nftables firewall, and CrowdSec IDS.
+- **Provisions** a bare Ubuntu or Debian server into a hardened Docker host: users, SSH lockdown, nftables firewall, and CrowdSec IDS.
 - **Deploys** a container stack with Traefik reverse proxy, automatic SSL, and per-service VPN access control. Bay renders a compose file to describe the stack. The reconciler (`bay_reconcile`) and `rebuild.sh` create the containers using `docker run`, not `docker compose`.
 - **Backs up** application data with [restic](https://restic.net/). Backups are deduplicated and encrypted to S3-compatible storage with per-accessory repos and systemd timers. You restore with one command (`bay backup restore <env> <accessory>`).
 - **Monitors** container images for updates with [Watchtower](https://github.com/nicholas-fedor/watchtower). It notifies by default, with opt-in auto-updates per service.
@@ -97,7 +97,7 @@ See the **[full index →](docs/README.md)** for everything. It covers build obs
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/): Python package manager. It installs Python, Ansible, and all dependencies automatically.
-- A target server running Ubuntu (tested on 22.04/24.04).
+- A target server running Ubuntu 22.04/24.04 or Debian 13 (trixie).
 - SSH access to the target as `root` (first provision) or as the fleet's `ansible_user` (`bay-admin` in `example/`, every run after). `bay provision` tests the connection as `ansible_user` and falls back to `root` when the host is unreachable as that user. You need no extra flag.
 
 Install uv if you do not have it:
