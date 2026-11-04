@@ -9,7 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BAY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TMPDIR=""
+WORK_DIR=""
 
 PASS=0
 FAIL=0
@@ -21,20 +21,20 @@ fail() { FAIL=$((FAIL + 1)); ERRORS+=("$1"); printf "  \033[31m✗\033[0m %s\n" 
 section() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 
 cleanup() {
-  if [[ -n "$TMPDIR" && -d "$TMPDIR" ]]; then
-    rm -rf "$TMPDIR"
+  if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+    rm -rf "$WORK_DIR"
   fi
 }
 trap cleanup EXIT
 
-TMPDIR=$(mktemp -d)
-FRAMEWORK="$TMPDIR/share/bay/framework"
+WORK_DIR=$(mktemp -d)
+FRAMEWORK="$WORK_DIR/share/bay/framework"
 export BAY_REPO="$BAY_DIR"
 export BAY_FRAMEWORK_DIR="$FRAMEWORK"
 # Keep uv's tool install away from the real machine.
-export UV_TOOL_DIR="$TMPDIR/uv-tools"
-export UV_TOOL_BIN_DIR="$TMPDIR/bin"
-export HOME="$TMPDIR/home"
+export UV_TOOL_DIR="$WORK_DIR/uv-tools"
+export UV_TOOL_BIN_DIR="$WORK_DIR/bin"
+export HOME="$WORK_DIR/home"
 mkdir -p "$HOME"
 unset BAY_FLEET BAY_FLEET_NAME
 

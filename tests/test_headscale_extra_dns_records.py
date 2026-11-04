@@ -99,9 +99,7 @@ class TestManualRecordAppears:
             ],
         )
         parsed = yaml.safe_load(rendered)
-        assert parsed["dns"]["nameservers"]["split"]["intranet.example.com"] == [
-            "100.100.100.100"
-        ]
+        assert parsed["dns"]["nameservers"]["split"]["intranet.example.com"] == []
 
 
 # ── dedup against an identical vpn-service domain ───────────────────────
@@ -149,12 +147,14 @@ class TestDedupAgainstVpnService:
         # A duplicate YAML mapping key would either be silently
         # collapsed by yaml.safe_load or, in Headscale's stricter Go
         # YAML parser, a hard crash — assert only one `split:` occurrence.
-        split_lines = [line for line in rendered.splitlines() if line.strip() == "intranet.example.com:"]
+        split_lines = [
+            line for line in rendered.splitlines() if line.strip().startswith("intranet.example.com:")
+        ]
         assert len(split_lines) == 1, (
             f"expected exactly one split-DNS key for intranet.example.com, got {split_lines}"
         )
         parsed = yaml.safe_load(rendered)
-        assert parsed["dns"]["nameservers"]["split"] == {"intranet.example.com": ["100.100.100.100"]}
+        assert parsed["dns"]["nameservers"]["split"] == {"intranet.example.com": []}
 
 
 # ── gate opens when only manual records exist ───────────────────────────
@@ -175,7 +175,7 @@ class TestGateOpensWithOnlyManualRecords:
             ],
         )
         parsed = yaml.safe_load(rendered)
-        assert parsed["dns"]["nameservers"]["split"] == {"intranet.example.com": ["100.100.100.100"]}
+        assert parsed["dns"]["nameservers"]["split"] == {"intranet.example.com": []}
         assert parsed["dns"]["extra_records_path"] == "/etc/headscale/extra-records.json"
 
     def test_manual_records_only_extra_records_json_nonempty(self) -> None:
@@ -203,3 +203,41 @@ class TestNoManualRecordsIsNoop:
         parsed = yaml.safe_load(rendered)
         assert isinstance(parsed, dict)
         assert not (parsed["dns"]["nameservers"] or {}).get("split")
+
+
+# ── split routes are empty, never quad-100 itself ───────────────────────
+
+
+class TestSplitRoutesAreAuthoritative:
+    """Each split route must carry an EMPTY resolver list.
+
+    An empty list tells the Tailscale client that its built-in resolver owns
+    the suffix: names in extra_records answer, other names get NXDOMAIN at
+    once (tailcfg.DNSConfig.Routes, tailscale issue 2706). Listing
+    100.100.100.100 made quad-100 forward to itself, so every name without a
+    record timed out and clients raised `dns-forward-failing`.
+    """
+
+    def test_no_split_route_forwards_to_quad_100(self) -> None:
+        rendered = _render_config(
+            hostvars={
+                "control": {
+                    "region": "",
+                    "headscale_server_tailnet_ip": "100.64.0.9",
+                    "services": {
+                        "status": {"access": "vpn", "domains": ["status.example.com"]},
+                    },
+                }
+            },
+            tailnet_proxies={"wiki": {"domains": ["wiki.ts.example.com"]}},
+            headscale_extra_dns_records=[
+                {"name": "intranet.example.com", "value": "100.64.0.20"}
+            ],
+        )
+        split = yaml.safe_load(rendered)["dns"]["nameservers"]["split"]
+        assert split == {
+            "status.example.com": [],
+            "wiki.ts.example.com": [],
+            "intranet.example.com": [],
+        }
+        assert "100.100.100.100" not in rendered.split("extra_records_path")[0].split("split:")[1]

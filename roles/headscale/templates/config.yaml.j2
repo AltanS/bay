@@ -79,11 +79,17 @@ dns:
 {% endif %}
 {% if vpn_records | length > 0 %}
     # Route queries for VPN service domains to MagicDNS so extra_records resolve.
-    # Without this, Tailscale's split-DNS won't send these queries to MagicDNS.
+    # Without a route, the client's OS resolver sends these names to public DNS.
+    #
+    # The list is EMPTY on purpose. An empty route tells the client that its
+    # built-in resolver (100.100.100.100) answers the suffix itself: a name in
+    # extra_records resolves, any other name under it gets NXDOMAIN at once
+    # (tailcfg.DNSConfig.Routes, tailscale issue 2706). Listing 100.100.100.100
+    # instead makes quad-100 forward the query to itself: unknown names time out
+    # and the client raises `dns-forward-failing`.
     split:
 {% for rec in vpn_records %}
-      {{ rec.domain }}:
-        - 100.100.100.100
+      {{ rec.domain }}: []
 {% endfor %}
   # VPN service domain → tailnet IP mappings loaded from JSON file.
   # Using extra_records_path (file watcher) instead of inline extra_records

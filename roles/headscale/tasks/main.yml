@@ -185,3 +185,53 @@
   when: headscale_acl_policy is defined
   changed_when: false
   tags: [headscale]
+
+# -- Container image ----------------------------------------------------------
+# Rendering the config does not change the running image: the container keeps
+# the image it was created from, and the "Restart headscale" handler only
+# restarts it. Before 2.8.0 a `headscale_version` bump therefore reached the
+# host only through a full `deploy_stack` run, which also reconciles Traefik and
+# every other container on the box. Reconcile the headscale container alone,
+# through the same spec deploy_stack uses (build_specs.yml), so
+# `bay deploy <env> --tags headscale` moves it onto the pinned image and a
+# current one is a NoOp. Same pattern as the webhook receiver
+# (roles/git_deploy/tasks/webhook.yml).
+#
+# Only headscale is in the bundle, so orphan removal is off. A host with no
+# headscale container yet is left to deploy_stack, which creates it with the
+# network and the rest of the rig.
+
+- name: Check whether the headscale container exists
+  ansible.builtin.command:
+    cmd: docker ps --all --filter name=^headscale$ --quiet
+  register: _headscale_container_exists
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+  tags: [headscale]
+
+- name: Bring headscale onto the pinned image
+  ansible.builtin.include_role:
+    name: container_lifecycle
+    apply:
+      tags: [headscale]
+  vars:
+    container_lifecycle_only: [headscale]
+    bay_reconciler_remove_orphans: false
+  when: (_headscale_container_exists.stdout | default('') | trim) | length > 0
+  tags: [headscale]
+
+# Tells the "Restart headscale" handler that the reconciler just recreated the
+# container, which then read the config rendered above, so a restart would be
+# a second reconnect of every node for nothing.
+- name: Record whether the reconciler changed headscale
+  ansible.builtin.set_fact:
+    _headscale_reconciled: >-
+      {{ (_reconcile_result.stdout | default('{}') | from_json).changed | default(false)
+         if (_reconcile_result is defined and _reconcile_result is not skipped
+             and (_reconcile_result.stdout | default('')) | length > 0)
+         else false }}
+  when: (_headscale_container_exists.stdout | default('') | trim) | length > 0
+  tags: [headscale]

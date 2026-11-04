@@ -8,6 +8,20 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.8.0] - 2026-11-04
+
+Headscale moves to 0.29.7. Split DNS stops sending unknown names into a loop. `bay deploy --tags headscale` now also moves the Headscale container onto the pinned image.
+
+### Changed
+- `headscale_version` 0.29.3 → 0.29.7, in both pins. 0.29.4 stops a map request that only changes endpoints, DERP region or LastSeen from resending the whole node to every peer (juanfont/headscale#3417). 0.29.6 and 0.29.7 are security releases (Go 1.27.3 for the eMudhra intermediates, and the oss-scanner and Tailworm findings). No config change and no manual database step is needed.
+- Split-DNS routes in `config.yaml` now have an empty resolver list (`domain: []`) in place of `- 100.100.100.100`. The Tailscale client treats an empty route as a suffix that its own resolver answers: names in the extra records resolve, other names get NXDOMAIN at once. The old value made the client's resolver forward the query to itself, so every name under a VPN domain without an extra record timed out, and clients showed the `dns-forward-failing` warning.
+- The headscale role runs the reconciler for the `headscale` container alone after it renders the config (`container_lifecycle_only: [headscale]`, no orphan removal). A version bump now reaches the host with `--tags headscale`. Before, only a full `deploy_stack` run moved the image, and that run also reconciles Traefik and every other container on the box. The "Restart headscale" handler is skipped when the reconciler recreated the container in the same run, so nodes reconnect once, not twice.
+
+### Upgrade notes
+- Run `bay --fleet <path> deploy --rig --tags headscale --region <control region> <env>`. The container is recreated once and every node reconnects once. Back up `/opt/headscale/data/db.sqlite` first: 0.29.7 trims stored hostnames, endpoints and routes to its new limits at startup.
+- 0.29.7 stops serving a route that is a single address inside the node ranges (for example `100.64.0.11/32`). Run `headscale nodes list-routes` before the upgrade if you approve such routes.
+- With empty routes, a public name *under* a VPN domain that has no extra record now returns NXDOMAIN on tailnet clients, where before it timed out. Give such a name its own `headscale_extra_dns_records` entry.
+
 ## [2.7.1] - 2026-11-01
 
 Multipath TCP (MPTCP) is now off by default on the host. The public exploit for CVE-2026-98432 requires an MPTCP listener, so this change reduces exposure. It does not fix the bug: the flaw is in plain TCP, and only a patched kernel resolves it.

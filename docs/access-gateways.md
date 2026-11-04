@@ -409,7 +409,11 @@ Three pieces cooperate:
 
 1. **Extra records** — the headscale role templates `extra-records.json` with an A record for every `access: vpn` service domain, mapping it to the server's tailnet IP. Headscale watches this file and pushes the records to all clients via the netmap.
 
-2. **Split DNS routes** — the headscale config adds each VPN domain to `nameservers.split`, routing those DNS queries to MagicDNS (`100.100.100.100`) on the client. Without this, the client's OS resolver would query public DNS and never see the extra records.
+2. **Split DNS routes** — the headscale config adds each VPN domain to `nameservers.split` with an **empty** resolver list (`domain: []`). An empty route tells the client that its built-in resolver (`100.100.100.100`) owns that suffix: a name in the extra records resolves, and any other name under the domain gets NXDOMAIN at once. Without a route, the client's OS resolver would query public DNS and never see the extra records.
+
+   Bay before 2.8.0 listed `100.100.100.100` as the resolver instead. That makes the built-in resolver forward the query to itself, so a name with no extra record (`nonexist.app.example.com`) timed out and the client raised the `dns-forward-failing` warning. Names with a record were unaffected.
+
+   Because the client answers the whole suffix, a public name *under* a VPN domain that has no extra record (for example `api.example.com` when `example.com` is a VPN domain) returns NXDOMAIN on tailnet clients. Give such a name its own record with `headscale_extra_dns_records`, or keep the VPN domain specific.
 
 3. **Traefik host networking** — Traefik listens on `0.0.0.0:443`, which includes the `tailscale0` interface. Requests arriving via the tailnet IP are served with the same Let's Encrypt certificate and routed to the correct service.
 

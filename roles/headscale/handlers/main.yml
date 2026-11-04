@@ -1,4 +1,7 @@
 ---
+# Skipped when the reconciler recreated the container in the same run
+# (tasks/main.yml, "Bring headscale onto the pinned image"): the new container
+# already read the new config, and a restart would reconnect every node twice.
 - name: Restart headscale
   community.docker.docker_container:
     name: headscale
@@ -6,3 +9,4 @@
     restart: true
   become: true
   become_user: root
+  when: not (_headscale_reconciled | default(false) | bool)
