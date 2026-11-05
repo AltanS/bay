@@ -191,6 +191,21 @@ def _write_services(cx: Context, text: str) -> Path:
     return target
 
 
+def _confirmed(record: Mapping[str, Any]) -> bool:
+    """Did the deploy of this env record's pin succeed? ``failed``/``pending``: no.
+
+    A record with no ``result`` (an older lock, ``bay adopt``) counts as
+    confirmed. Only a confirmed pin becomes ``previous``: an up that replaces
+    a failed or pending pin keeps the ``previous`` the record has, so
+    ``bay rollback`` goes back to the last pin that ran.
+    """
+    return record.get("result") not in ("failed", "pending")
+
+
+def _names(previous: Any, commit: str) -> bool:
+    return isinstance(previous, Mapping) and previous.get("commit") == commit
+
+
 def _previous_for(
     record: Mapping[str, Any],
     lock: Mapping[str, Any],
@@ -525,11 +540,17 @@ def _apply_plan(
         old_pin = lockfile.env_pin(proj.lock, env)
         previous = record.get("previous")
         if old_pin and old_pin != commit:
-            previous = _previous_for(
-                record,
-                proj.lock,
-                _previous_containers(before, old_data, proj, proj.lock, env, old_pin),
-            )
+            if _confirmed(record):
+                previous = _previous_for(
+                    record,
+                    proj.lock,
+                    _previous_containers(before, old_data, proj, proj.lock, env, old_pin),
+                )
+            elif _names(previous, commit):
+                # Back to the last confirmed pin (bay rollback after a failed up):
+                # a previous equal to the new pin is no history at all.
+                previous = None
+                record.pop("previous", None)
         if forced and previous is not None:
             previous = {**previous, "force_reason": str(reason).strip()}
         lock["commit"] = commit
@@ -1254,13 +1275,18 @@ def _pin_deployed(
             record = dict(envs.get(env, {}))
             old_pin = lockfile.env_pin(other.lock, env)
             if old_pin and old_pin != commit:
-                previous = _previous_for(
-                    record,
-                    other.lock,
-                    _previous_containers(before, old_data or {}, other, other.lock, env, old_pin),
-                )
-                if previous is not None:
-                    record["previous"] = previous
+                if _confirmed(record):
+                    previous = _previous_for(
+                        record,
+                        other.lock,
+                        _previous_containers(
+                            before, old_data or {}, other, other.lock, env, old_pin
+                        ),
+                    )
+                    if previous is not None:
+                        record["previous"] = previous
+                elif _names(record.get("previous"), commit):
+                    record.pop("previous", None)
             if not record.get("box") and box:
                 record["box"] = box
             names = set(

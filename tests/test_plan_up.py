@@ -5084,3 +5084,115 @@ def test_unknown_code_note_without_a_code_target() -> None:
 
 def test_up_results_carry_the_tags_the_deploy_used(world: dict[str, Path], box: FakeBox) -> None:
     assert do_up(world)["deploy_tags"] == applymod.UP_DEPLOY_TAGS
+
+
+# ── previous names the last confirmed pin (2.12.0) ──────────────────────────
+
+
+def _pin(world: dict[str, Path]) -> str:
+    return str(lock_of(world)["envs"]["production"]["commit"])
+
+
+def _previous(world: dict[str, Path]) -> str | None:
+    prev = lock_of(world)["envs"]["production"].get("previous")
+    return str(prev["commit"]) if prev else None
+
+
+def _up_that_fails(world: dict[str, Path], box: FakeBox) -> None:
+    box.fail = True
+    with pytest.raises(applymod.DeployFailed):
+        do_up(world)
+    box.fail = False
+    assert lock_of(world)["envs"]["production"]["result"] == "failed"
+
+
+def _rollback(world: dict[str, Path]) -> dict[str, Any]:
+    return applymod.rollback(project(world), planmod.PlanOptions())
+
+
+def _seq_start(world: dict[str, Path]) -> tuple[str, str]:
+    """ok W, then X committed (not yet up). Returns (W, X)."""
+    do_up(world)
+    w = _pin(world)
+    x = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "x"')
+    return w, x
+
+
+def test_previous_a_failed_up_then_rollback(world: dict[str, Path], box: FakeBox) -> None:
+    w, x = _seq_start(world)
+    _up_that_fails(world, box)
+    assert _pin(world) == x and _previous(world) == w
+    _rollback(world)
+    assert _pin(world) == w
+    # The failed X never becomes previous, and a previous equal to the pin is dropped.
+    assert _previous(world) is None
+
+
+def test_previous_b_failed_up_then_ok_up_then_rollback(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    w, x = _seq_start(world)
+    _up_that_fails(world, box)
+    y = edit_app(world, 'LOG_LEVEL = "x"', 'LOG_LEVEL = "y"')
+    do_up(world)
+    assert _pin(world) == y and _previous(world) == w  # not the failed X
+    _rollback(world)
+    assert _pin(world) == w and _previous(world) == y
+
+
+def test_previous_c_rollback_twice_swaps(world: dict[str, Path], box: FakeBox) -> None:
+    w, x = _seq_start(world)
+    do_up(world)
+    assert _pin(world) == x and _previous(world) == w
+    _rollback(world)
+    assert _pin(world) == w and _previous(world) == x
+    _rollback(world)
+    assert _pin(world) == x and _previous(world) == w
+
+
+def test_previous_d_failed_up_then_same_up_ok_then_rollback(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    w, x = _seq_start(world)
+    _up_that_fails(world, box)
+    do_up(world)
+    assert _pin(world) == x and _previous(world) == w
+    assert lock_of(world)["envs"]["production"]["result"] == "ok"
+    _rollback(world)
+    assert _pin(world) == w and _previous(world) == x
+
+
+def test_previous_of_another_project_skips_its_failed_pin(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """_pin_deployed: another project of the box env follows the same rule."""
+    status = world["fleet"] / "projects" / "status" / "bay.toml"
+    status.parent.mkdir()
+    status.write_text(STATUS_TOML)
+    s1 = commit_all(world["fleet"], "add status")
+    cx = cx_of(world)
+
+    def up_status() -> None:
+        applymod.up(planmod.load_project(cx, "status", cwd=world["fleet"]),
+                    planmod.PlanOptions())
+
+    up_status()
+    s2 = _edit_in_fleet(status, world, 'MODE = "one"', 'MODE = "two"')
+    box.fail = True
+    with pytest.raises(applymod.DeployFailed):
+        up_status()
+    box.fail = False
+    path = lockfile.lock_path(world["fleet"], "status")
+    raw = lockfile.read(path)
+    assert raw is not None and raw["envs"]["production"]["commit"] == s2
+    assert raw["envs"]["production"]["previous"]["commit"] == s1
+    # The project pin moves on without this env (as a bay up of another env does).
+    s3 = _edit_in_fleet(status, world, 'MODE = "two"', 'MODE = "three"')
+    raw["commit"] = s3
+    lockfile.write(path, raw)
+    commit_all(world["fleet"], "status pin moved by another env")
+    do_up(world)  # webapp's up deploys the whole box env and pins status at s3
+    raw = lockfile.read(path)
+    assert raw is not None and raw["envs"]["production"]["commit"] == s3
+    assert raw["envs"]["production"]["result"] == "ok"
+    assert raw["envs"]["production"]["previous"]["commit"] == s1  # not the failed s2

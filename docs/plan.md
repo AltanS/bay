@@ -1641,7 +1641,13 @@ and the next write stores version 2.
   of the `bay up` that set `pending`. Bay removes both when it writes `ok` or
   `failed`. A CLI older than 2.12 cannot write a lock that holds them, so
   update every machine.
-- `previous` is one level of history: enough for `bay rollback`.
+- `previous` is one level of history: enough for `bay rollback`. It names
+  the last pin whose deploy was confirmed. A `bay up` that replaces a pin
+  whose `result` is `failed` or `pending` keeps the `previous` the record
+  has, and drops it when it names the new pin. So after a failed up to X,
+  `bay rollback` (or an up to Y, then a rollback) goes back to the pin
+  before X. After a rollback from a failed pin, the record has no `previous`.
+  A record with no `result` counts as confirmed.
 - `previous.containers` (since 2.2.0) maps each build container of the project to the
   `commit` and `image` it ran before the `bay up` that set `previous`, from the receipt the
   plan read. `commit` is null when the receipt named none. Plain `bay rollback` takes its code

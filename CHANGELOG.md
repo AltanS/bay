@@ -27,6 +27,10 @@ One fleet can now serve several machines. Bay pulls the fleet for you, claims th
 - `bay up` exits 41 instead of 20 when only the fleet sync state blocks the plan (diverged, unreachable remote, no upstream). `bay plan` still exits 20.
 - A remote that refuses every push used to give a warning after the deploy. Now the claim stops the run before the box (exit 42).
 
+### Fixed
+- `previous` in a lock now names the last pin whose deploy was confirmed. Before, a `bay up` that replaced a failed or pending pin made that pin `previous`, so `bay rollback` went back to a commit that never ran. A rollback from a failed pin also put the failed pin back as `previous`. Now an up over a failed or pending pin keeps the `previous` the record has, and drops it when it names the new pin. A record with no `result` (an older lock, `bay adopt`) counts as confirmed. The other projects that a `bay up` pins follow the same rule.
+- The undo of a refused claim checks every git call. When a path cannot be put back, the message says the undo was partial and names the paths, and the JSON error has `undo_failed`.
+
 ### Upgrade notes
 - Update every machine that runs `bay up` on a fleet (`bay self update`). An older CLI cannot write a lock that holds `claimed_by` and `claimed_at`: its schema refuses the two keys. It meets them while a 2.12 machine deploys, and after a 2.12 `bay up` that died before its receipt. Its `bay up` then stops with a lock schema error, possibly after its deploy ran.
 - `bay deploy` and `bay provision` now refuse a fleet with uncommitted files, a diverged fleet and an unreachable remote. Commit and push first, or pass `--allow-dirty` or `--offline`. Run `bay fleet push` after an `--offline` run.
