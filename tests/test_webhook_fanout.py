@@ -1083,7 +1083,7 @@ class TestSiblingConfig:
         services = {
             "shop": _toml_svc(),
             "shop-app": _toml_svc("Dockerfile.app"),
-            "shop-ping": _toml_svc("Dockerfile.app"),
+            "shop-ping": _toml_svc("Dockerfile.ping"),
             "shop-admin": _toml_svc(shared_from="shop"),
             "docs": _toml_svc(bay_toml_path="docs/bay.toml"),
         }
@@ -1097,6 +1097,38 @@ class TestSiblingConfig:
         # Every sibling named is a service the config lists.
         for entry in config.values():
             assert set(entry.get("siblings", [])) <= set(config)
+
+
+class TestSiblingConfigAliases:
+    """A local alias pair: the primary's rebuild.sh fans out to the alias."""
+
+    def _pair(self, strategy: str | None = None) -> dict:
+        extra = {"strategy": strategy} if strategy else {}
+        return {
+            "shop": _toml_svc(**extra),
+            "shop-app": _toml_svc("Dockerfile.app", **extra),
+            "shop-ping": _toml_svc("Dockerfile.app", **extra),
+        }
+
+    def test_local_alias_gets_no_sibling_trigger(self):
+        config = _render_template(self._pair())
+        assert config["shop"]["siblings"] == ["shop-app"]
+        assert config["shop-app"]["siblings"] == ["shop"]
+        assert config["shop-ping"]["siblings"] == ["shop", "shop-app"]
+
+    def test_remote_pair_with_one_dockerfile_both_get_triggers(self):
+        config = _render_template(self._pair("remote"))
+        assert config["shop"]["siblings"] == ["shop-app", "shop-ping"]
+
+    def test_fleet_default_strategy_decides_without_a_strategy(self):
+        env = make_ansible_env(TEMPLATE_DIR)
+        env.filters["to_nice_json"] = _nice_json
+        env.filters["dict2items"] = _dict2items
+        config = json.loads(env.get_template("webhook-config.json.j2").render(
+            services=self._pair(), git_deploy_peer_webhook_urls={},
+            git_deploy_build_strategy="remote",
+        ))
+        assert config["shop"]["siblings"] == ["shop-app", "shop-ping"]
 
 
 def _sibling_config(**overrides) -> dict:
@@ -1284,23 +1316,76 @@ class TestSiblingFanOut:
         ]
         assert list(resp["siblings"]) == ["shop-app"]
 
+    @pytest.mark.parametrize(
+        "first,second", [("shop", "shop-app"), ("shop-app", "shop")],
+        ids=["hook-on-primary-first", "hook-on-sibling-first"],
+    )
     def test_second_hook_with_the_same_delivery_builds_nothing_twice(
-        self, webhook_env, fresh_delivery_cache
+        self, webhook_env, fresh_delivery_cache, first, second
     ):
+        """Two hooks, one GUID: each service gets exactly one trigger."""
         config = _sibling_config()
         server, base = _run_primary(config)
         body = _make_push_payload("main")
+        written: dict[str, int] = {}
         try:
-            _push(base, "shop", body, {"X-GitHub-Delivery": "guid-1"})
-            for p in webhook_env.iterdir():
-                p.unlink()
-            status, resp = _push(base, "shop-app", body, {"X-GitHub-Delivery": "guid-1"})
+            for name in (first, second):
+                status, resp = _push(base, name, body, {"X-GitHub-Delivery": "guid-1"})
+                assert status == 200
+                for p in webhook_env.iterdir():
+                    written[p.stem] = written.get(p.stem, 0) + 1
+                    p.unlink()
         finally:
             server.shutdown()
             server.server_close()
-        assert status == 200
+        assert written == {"shop": 1, "shop-app": 1, "shop-ping": 1}
         assert resp["status"] == "duplicate"
-        assert list(webhook_env.iterdir()) == []
+
+    def test_concurrent_second_hook_builds_nothing_twice(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        """Both deliveries in flight at once: still one trigger per service."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        from http.server import ThreadingHTTPServer
+
+        webhook_app.SERVICE_CONFIG = _sibling_config()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), webhook_app.WebhookHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+        body = _make_push_payload("main")
+        real = webhook_app.WebhookHandler._push_target
+        barrier = threading.Barrier(2, timeout=5)
+        writes: list[str] = []
+        lock = threading.Lock()
+
+        def counting(self, service, *args):
+            # Both URL services pass the front door before either fans out.
+            if service in ("shop", "shop-app") and not barrier.broken:
+                try:
+                    barrier.wait()
+                except threading.BrokenBarrierError:
+                    pass
+            out = real(self, service, *args)
+            if out.get("status") == "triggered":
+                with lock:
+                    writes.append(service)
+            return out
+
+        try:
+            with patch.object(webhook_app.WebhookHandler, "_push_target", counting):
+                with ThreadPoolExecutor(2) as pool:
+                    futures = [
+                        pool.submit(_push, base, n, body, {"X-GitHub-Delivery": "guid-2"})
+                        for n in ("shop", "shop-app")
+                    ]
+                    results = [f.result() for f in futures]
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert not barrier.broken, "the two requests did not overlap"
+        assert all(status == 200 for status, _ in results)
+        assert sorted(writes) == ["shop", "shop-app", "shop-ping"]
 
     def test_no_sibling_response_body_is_unchanged(
         self, webhook_env, fresh_delivery_cache

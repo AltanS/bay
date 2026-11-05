@@ -1177,7 +1177,7 @@ def bay_shared_toml_paths(services, svc_name):
     return sorted(paths)
 
 
-def bay_push_siblings(services, svc_name):
+def bay_push_siblings(services, svc_name, default_strategy="local"):
     """The OTHER services that one push to svc_name's repo must also build.
 
     The extra services of one bay.toml (``[services.<name>]`` with their own
@@ -1195,6 +1195,17 @@ def bay_push_siblings(services, svc_name):
     container's build, and rebuild.sh's alias fan-out (local) or the image
     pull fan-out (remote, registry) already reaches it. Only services with a
     ``build`` key count, the same selection as webhook-config.json.j2. Sorted.
+
+    A local-strategy alias is never one either. ``bay_build_dedup_map`` over
+    the local builds makes it a non-primary member of a build group, and the
+    alias fan-out at the end of its primary's rebuild.sh run triggers it.
+    A direct trigger as well would restart it once more (rebuild.sh always
+    recreates the container) and, when it runs first, build the same image
+    twice. This holds only when the primary is in the same project (the push
+    triggers it too) and has the same ``regions`` (the fan-out runs on the
+    primary's box). The dedup map does not apply to remote builds: there
+    each sibling builds on its own. ``default_strategy`` is
+    ``git_deploy_build_strategy``, for a build without ``strategy``.
     """
     own = (services.get(svc_name) or {}).get("build")
     if not isinstance(own, dict):
@@ -1214,7 +1225,39 @@ def bay_push_siblings(services, svc_name):
             continue
         if _repo_slug(build["repo"], build.get("branch", "main")) == slug:
             names.append(name)
-    return sorted(names)
+    aliases = _local_aliases(services, default_strategy)
+    group = set(names) | {svc_name}
+    return sorted(
+        n for n in names
+        if not (
+            n in aliases
+            and aliases[n] in group
+            and (services[n].get("regions") or [])
+            == (services[aliases[n]].get("regions") or [])
+        )
+    )
+
+
+def _build_strategy(build, default_strategy="local"):
+    """A build's strategy as rebuild.sh.j2 reads it: `push` is `remote`."""
+    raw = build.get("strategy") or default_strategy or "local"
+    return "remote" if raw == "push" else raw
+
+
+def _local_aliases(services, default_strategy="local"):
+    """{alias: primary} of the local builds, from ``bay_build_dedup_map``.
+
+    rebuild.sh.j2 runs the alias fan-out for local builds only, in the order
+    of the services (git_deploy_services), so the map is built over the
+    local-strategy builds in that order.
+    """
+    local = [
+        name for name, svc in services.items()
+        if isinstance(svc, dict) and isinstance(svc.get("build"), dict)
+        and _build_strategy(svc["build"], default_strategy) == "local"
+    ]
+    dedup = bay_build_dedup_map(services, local)
+    return {n: d["primary_svc"] for n, d in dedup.items() if not d["primary"]}
 
 
 def bay_build_context(build):

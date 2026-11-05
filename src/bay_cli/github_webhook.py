@@ -235,8 +235,11 @@ def push_sibling_groups(services: dict[str, Any]) -> list[list[str]]:
     writes ``siblings`` into the webhook receiver's config: a ``build`` with
     the same repo, branch (default ``main``) and non-empty ``bay_toml_path``,
     and no ``shared_from``. The receiver fans a push posted for any member out
-    to the others, so the group needs one GitHub hook, on any member. Each
-    group is sorted; the groups are sorted by their first name.
+    to the others, so the group needs one GitHub hook, on any member. A
+    local alias (``bay_push_siblings`` leaves it out of the fan-out, as the
+    alias fan-out of rebuild.sh reaches it) is still a member: a hook on it
+    builds its primary and the rest. Each group is sorted; the groups are
+    sorted by their first name.
     """
     groups: dict[tuple[str, str, str], list[str]] = {}
     for name, svc in (services or {}).items():

@@ -900,7 +900,7 @@ def _sibling_fleet():
     return {
         "shop": _toml_build(dockerfile="Dockerfile"),
         "shop-app": _toml_build(dockerfile="Dockerfile.app"),
-        "shop-ping": _toml_build(dockerfile="Dockerfile.app"),
+        "shop-ping": _toml_build(dockerfile="Dockerfile.ping"),
         # Shares the build of `shop`: the alias fan-out reaches it.
         "shop-admin": _toml_build(dockerfile="Dockerfile", shared_from="shop"),
         # Another project in the same repo: another bay.toml.
@@ -957,4 +957,51 @@ def test_push_siblings_unknown_or_imageonly_service():
     services = _sibling_fleet()
     assert bay_push_siblings(services, "nope") == []
     assert bay_push_siblings(services, "cache") == []
+
+
+def _alias_pair_fleet(strategy=None):
+    """shop-app and shop-ping build the same image (an alias pair)."""
+    extra = {"strategy": strategy} if strategy else {}
+    return {
+        "shop": _toml_build(dockerfile="Dockerfile", **extra),
+        "shop-app": _toml_build(dockerfile="Dockerfile.app", **extra),
+        "shop-ping": _toml_build(dockerfile="Dockerfile.app", **extra),
+    }
+
+
+def test_push_siblings_skip_a_local_alias_the_primary_fan_out_reaches():
+    """rebuild.sh recreates the container on every run: a direct trigger on
+    an alias restarts it twice per push (once more from the alias fan-out)."""
+    services = _alias_pair_fleet()
+    assert bay_build_dedup_map(services, list(services))["shop-ping"]["primary_svc"] == "shop-app"
+    assert bay_push_siblings(services, "shop") == ["shop-app"]
+    assert bay_push_siblings(services, "shop-app") == ["shop"]
+    # A hook on the alias: its primary still builds (and fans out to it).
+    assert bay_push_siblings(services, "shop-ping") == ["shop", "shop-app"]
+
+
+def test_push_siblings_remote_pair_with_one_dockerfile_both_build():
+    """No alias fan-out for remote builds (rebuild.sh exits before it)."""
+    services = _alias_pair_fleet("remote")
+    assert bay_push_siblings(services, "shop") == ["shop-app", "shop-ping"]
+    services = _alias_pair_fleet("push")
+    assert bay_push_siblings(services, "shop") == ["shop-app", "shop-ping"]
+    # No strategy: git_deploy_build_strategy decides.
+    services = _alias_pair_fleet()
+    assert bay_push_siblings(services, "shop", "remote") == ["shop-app", "shop-ping"]
+
+
+def test_push_siblings_keep_an_alias_in_other_regions():
+    """The alias fan-out runs on the primary's box only."""
+    services = _alias_pair_fleet()
+    services["shop-app"]["regions"] = ["eu"]
+    services["shop-ping"]["regions"] = ["na"]
+    assert bay_push_siblings(services, "shop") == ["shop-app", "shop-ping"]
+
+
+def test_push_siblings_keep_an_alias_whose_primary_is_another_project():
+    """The push does not build a primary in another bay.toml."""
+    services = _alias_pair_fleet()
+    services["shop-app"]["build"]["bay_toml_path"] = "other/bay.toml"
+    assert bay_push_siblings(services, "shop") == ["shop-ping"]
 

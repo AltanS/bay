@@ -52,9 +52,10 @@
 {#
   The extra services of the same bay.toml (same repo and branch): a push
   that GitHub posts to this service builds them too (app.py `do_POST`).
-  Absent when there are none, so such a config stays as before.
+  A local alias of a build group is left out: rebuild.sh's alias fan-out
+  reaches it. Absent when there are none, so such a config stays as before.
 #}
-{% set _siblings = services | bay_push_siblings(svc_name) %}
+{% set _siblings = services | bay_push_siblings(svc_name, git_deploy_build_strategy | default('local')) %}
 {% if _siblings %}
 {% set _ = entry.update({"siblings": _siblings}) %}
 {% endif %}
