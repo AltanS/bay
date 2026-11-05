@@ -5690,6 +5690,58 @@ def test_no_host_map_and_a_failed_box_fails_the_whole_env(
     assert rows == {"webapp": "failed", "status": "failed"}
 
 
+def _status_up(world: dict[str, Path]) -> Any:
+    cx = cx_of(world)
+    return lambda: applymod.up(
+        planmod.load_project(cx, "status", cwd=world["fleet"]), planmod.PlanOptions()
+    )
+
+
+@pytest.mark.parametrize("case", ["unreadable", "box-without-host", "per-box"])
+def test_a_failed_deploy_that_reached_no_box_keeps_the_other_records(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """review 5, C1: with no map, no receipt from this deploy stamps nothing ok."""
+    fleet = world["fleet"]
+    do_up(world)
+    if case == "box-without-host":
+        toml = (fleet / "bay.fleet.toml").read_text()
+        (fleet / "bay.fleet.toml").write_text(toml.replace(
+            '[boxes.box-1]\nenv = "production"\n',
+            '[boxes.box-1]\nenv = "production"\ngroup = "one"\n\n'
+            '[boxes.box-3]\nenv = "production"\ngroup = "three"\n',
+        ))
+        commit_all(fleet, "plan box-3; its host is not in the inventory yet")
+        do_up(world, force=True, reason="regroup")
+    status = fleet / "projects" / "status" / "bay.toml"
+    status.parent.mkdir()
+    status.write_text(STATUS_TOML)
+    commit_all(fleet, "add status")
+    up = _status_up(world)
+    up()
+    # webapp: its own deploy of a new pin failed.
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "x"')
+    box.fail = True
+    with pytest.raises(applymod.DeployFailed):
+        do_up(world)
+    before = lock_of(world)["envs"]["production"]
+    assert before["result"] == "failed"
+    if case == "unreadable":
+        _no_map(monkeypatch, None)
+    # status: a failed deploy that reached no box.
+    _edit_in_fleet(status, world, 'MODE = "one"', 'MODE = "two"')
+    box.unreached = {"box-1", "box-2", "box-3"}
+    with pytest.raises(applymod.DeployFailed) as caught:
+        up()
+    assert lock_of(world)["envs"]["production"] == before
+    rows = {r["project"]: r["result"] for r in caught.value.result["pinned"]}
+    assert rows == {"status": "failed"}
+    fallback = any(
+        n.startswith("per-box results were not available") for n in caught.value.result["notes"]
+    )
+    assert fallback == (case != "per-box")
+
+
 def test_the_inventory_is_read_once_with_the_deploy_environment(
     world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:

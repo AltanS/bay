@@ -994,7 +994,7 @@ def _apply_plan_steps(
         ]
     else:
         # No map: never take host names for box names. The rule before 2.12.
-        results = env_wide_results(entries, fleet_commit, cx, box_env, unread)
+        results = env_wide_results(entries, fleet_commit, cx, box_env, unread, run_failed)
         box_notes = [
             f"per-box results were not available ({map_problem}); every project of "
             f"{box_env} gets the result of the whole deploy, as before 2.12: ok only when "
@@ -1685,19 +1685,25 @@ def env_wide_results(
     cx: Context,
     box_env: str,
     unread: list[dict[str, Any]],
+    run_failed: bool,
 ) -> dict[str, str]:
     """The result rule before 2.12, for every box of ``box_env`` (no host-to-box map).
 
-    ``ok`` when every receipt from this deploy says ``ok``, else ``failed``, for
-    every box of the box env. A receipt that cannot be read (``unread``) leaves
-    its boxes out (with no map: every box), so their projects are failed with
-    the "could not be read" error.
+    With no receipt from this deploy, every box is left out, as a box with
+    no such receipt is in :func:`box_results`: a non-member keeps its record,
+    a member is ``failed``. Else every box is ``failed`` when the run failed or
+    any receipt from this deploy is not ``ok``, and ``ok`` otherwise. A receipt
+    that cannot be read (``unread``) leaves its boxes out (with no map: every
+    box), so their projects are failed with the "could not be read" error.
     """
     fresh = [
         e["receipt"] for e in entries
         if isinstance(e.get("receipt"), Mapping) and e["receipt"].get("fleet_commit") == fleet_commit
     ]
-    word = "ok" if all(r.get("result") == "ok" for r in fresh) else "failed"
+    if not fresh:
+        return {}
+    ok = not run_failed and all(r.get("result") == "ok" for r in fresh)
+    word = "ok" if ok else "failed"
     skip = {u["box"] for u in unread}
     return {b: word for b in _env_boxes(cx, box_env) if b not in skip}
 
