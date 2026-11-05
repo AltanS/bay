@@ -155,11 +155,13 @@ CLAIM_OWN, CLAIM_DEAD, CLAIM_LIVE = "own", "dead", "live"
 def claim_state(record: Any) -> str:
     """``own`` (this process's claim), ``dead`` (provably gone) or ``live`` (blocks).
 
-    Dead only when all hold: the ``claimed_run`` machine and pid namespace are
-    this process's, and that pid is gone or its start time differs (a reused
-    pid). Anything Bay cannot judge is live: another machine or namespace, no
-    ``claimed_run``, an empty or unparsable one, or a ``/proc`` that cannot
-    be read.
+    Dead only when all hold: ``claimed_by`` is this host name (cloned machines
+    can share a machine id, and the first pid namespace has the same inode on
+    every host), the ``claimed_run`` machine and pid namespace are this
+    process's, and that pid is gone or its start time differs (a reused pid).
+    Anything Bay cannot judge is live:
+    another machine or namespace, no ``claimed_run``, an empty or unparsable
+    one, or a ``/proc`` that cannot be read.
     """
     run = record.get("claimed_run") if isinstance(record, dict) else None
     if not isinstance(run, str) or not run:
@@ -170,7 +172,7 @@ def claim_state(record: Any) -> str:
     if run == mine:
         return CLAIM_OWN
     parts = run.split(":")
-    if len(parts) != 4:
+    if len(parts) != 4 or record.get("claimed_by") != hostname():
         return CLAIM_LIVE
     machine, ns, pid_text, start = parts
     my_machine, my_ns, _, _ = mine.split(":")

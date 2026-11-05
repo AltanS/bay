@@ -1426,10 +1426,12 @@ def _dead_pid() -> int:
     return proc.pid
 
 
-def _pending_with_run(m: dict[str, Path], run: str, message: str) -> None:
+def _pending_with_run(
+    m: dict[str, Path], run: str, message: str, *, by: str | None = None
+) -> None:
     raw = lock_at(m["a"], "webapp")
     raw["envs"]["production"].update(
-        {"result": "pending", "plan_id": "0" * 12, "claimed_by": fleetsync.hostname(),
+        {"result": "pending", "plan_id": "0" * 12, "claimed_by": by or fleetsync.hostname(),
          "claimed_at": fleetsync.now_iso(), "claimed_run": run}
     )
     lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
@@ -1518,6 +1520,16 @@ def test_a_claim_this_machine_cannot_judge_blocks(
     plan = _plan_status(m)
     assert plan["reason"] == "env_busy"
     assert plan["holder"]["claimed_by"] == fleetsync.hostname()
+
+
+def test_a_dead_run_of_another_host_name_blocks(machines: dict[str, Path], box: FakeBox) -> None:
+    """review 5, A1: a clone can share the machine id and the first pid namespace."""
+    m = machines
+    up_at(m, "a", "webapp")
+    machine, ns, _, start = _my_parts()
+    _pending_with_run(m, f"{machine}:{ns}:{_dead_pid()}:{start}", "a clone's claim", by="clone-b")
+    plan = _plan_status(m)
+    assert plan["reason"] == "env_busy" and plan["holder"]["claimed_by"] == "clone-b"
 
 
 def test_a_machine_with_no_machine_id_writes_an_empty_run_and_never_judges(
