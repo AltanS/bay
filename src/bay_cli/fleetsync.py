@@ -1181,11 +1181,32 @@ OWNED_SERVICES = "group_vars/all/services.yml"
 
 
 def bay_owned(rel: str) -> bool:
-    """True for a fleet path that only Bay writes (``--allow-dirty`` never covers it)."""
+    """True for a fleet path that only Bay writes: ``services.yml`` or a ``bay.lock``."""
     parts = Path(rel).parts
     return rel == OWNED_SERVICES or (
         len(parts) == 3 and parts[0] == "projects" and parts[2] == "bay.lock"
     )
+
+
+def hand_edited(repo: Path, rel: str) -> bool:
+    """True for an uncommitted path that ``--allow-dirty`` never covers.
+
+    Every ``bay.lock``. A ``services.yml`` only when its hash header does not
+    match its body (a hand edit, no header, or a deleted file): one that
+    ``bay compile --working-tree`` wrote is an ordinary dirty file.
+    """
+    if not bay_owned(rel):
+        return False
+    if rel != OWNED_SERVICES:
+        return True
+    from bay_cli import compiler
+
+    try:
+        text = (repo / rel).read_text()
+    except (OSError, UnicodeDecodeError):
+        return True
+    recorded, body = compiler.split_header(text)
+    return recorded is None or recorded != compiler.body_digest(body)
 
 
 def owned_dirty_message(paths: Sequence[str]) -> str:
@@ -1220,8 +1241,8 @@ def prepare_playbook(
 
     Ansible reads the work tree, so the box gets what is on disk. In order:
     an unreachable remote refuses (unless ``offline``), a diverged fleet
-    refuses, uncommitted paths refuse (unless ``allow_dirty``; an edit in a file
-    only Bay writes always refuses, :func:`bay_owned`), a fleet that
+    refuses, uncommitted paths refuse (unless ``allow_dirty``; a hand edit in a
+    file only Bay writes always refuses, :func:`hand_edited`), a fleet that
     is only behind is fast-forwarded, and a fleet that is ahead is pushed
     first (the claim; a refused push stops the run). A fleet with no remote
     or inside a bigger repo gets the dirty check only. Raises
@@ -1248,7 +1269,7 @@ def prepare_playbook(
             )
         if st.diverged:
             raise SyncError(diverged_message(st), reason=REASON_DIVERGED, next_cmd="bay fleet push")
-    owned = [p for p in st.dirty_paths if bay_owned(p)]
+    owned = [p for p in st.dirty_paths if hand_edited(repo, p)]
     if owned:
         raise SyncError(owned_dirty_message(owned), reason=REASON_DIRTY, paths=owned)
     if st.dirty_paths and not allow_dirty:

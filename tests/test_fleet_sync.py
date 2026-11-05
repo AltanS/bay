@@ -1500,6 +1500,36 @@ def test_the_restore_hint_also_undoes_a_staged_edit(
     assert git(m["a"], "status", "--porcelain", "--", path) == ""
 
 
+def test_a_compiled_working_tree_services_file_deploys_with_allow_dirty(
+    machines: dict[str, Path], box: FakeBox, playbooks: list[tuple[str, str]]
+) -> None:
+    """review 4, item 3: `bay compile --working-tree` writes a file whose header matches."""
+    m = machines
+    up_at(m, "a", "webapp")
+    toml = m["a"] / "projects" / "status" / "bay.toml"
+    toml.write_text(toml.read_text().replace('MODE = "one"', 'MODE = "two"'))
+    compiled = cli({"fleet": m["a"], "app": m["app"]}, "compile", "--working-tree")
+    assert compiled.exit_code == 0, compiled.output
+    services = "group_vars/all/services.yml"
+    assert services in git(m["a"], "status", "--porcelain")
+    refused = _op(m, "deploy")
+    assert getattr(refused.exception, "reason", None) == "dirty", refused.output
+    text = str(refused.exception) + " " + str(getattr(refused.exception, "hint", ""))
+    assert "only Bay writes" not in text
+    assert "Commit them" in text and "--allow-dirty" in text and services in text
+    assert playbooks == []
+    deployed = _op(m, "deploy", "--allow-dirty")
+    assert deployed.exit_code == 0, deployed.output
+    assert playbooks == [("deploy", "production")]
+    # A hand edit after the compile breaks the header: refused again, also with the flag.
+    path = m["a"] / services
+    path.write_text(path.read_text() + "# a hand edit\n")
+    again = _op(m, "deploy", "--allow-dirty")
+    assert getattr(again.exception, "reason", None) == "dirty", again.output
+    assert "only Bay writes" in str(again.exception)
+    assert playbooks == [("deploy", "production")]
+
+
 # ── review 3, G: a status probe cannot make a starting run busy ─────────────
 
 

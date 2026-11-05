@@ -2590,15 +2590,16 @@ def add_run_blockers(
     from bay_cli import fleetsync
 
     gates: list[dict[str, Any]] = []
-    owned = [p for p in state.dirty_paths if fleetsync.bay_owned(p)]
+    owned = [p for p in state.dirty_paths if fleetsync.hand_edited(cx.fleet_root, p)]
     if owned:
         # Never skipped: the undo of a run puts these files back, so a hand edit
-        # in them would be lost. Only Bay writes them.
+        # in them would be lost. Only Bay writes them. A services.yml whose hash
+        # header matches (bay compile --working-tree) is an ordinary dirty file.
         message = fleetsync.owned_dirty_message(owned)
         plan["blockers"].append(message)
         plan["dirty_owned"] = {"paths": owned, "message": message}
         plan["reason"] = plan.get("reason") or fleetsync.REASON_DIRTY
-    others = [p for p in state.dirty_paths if not fleetsync.bay_owned(p)]
+    others = [p for p in state.dirty_paths if p not in owned]
     if others:
         refusal = fleetsync.dirty_refusal(others)
         gates.append(
