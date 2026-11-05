@@ -926,7 +926,9 @@ def _apply_remove(
     applied: list[dict[str, Any]] = []
     for entries in by_env.values():
         applied += applymod.applied_from(entries, fleet_commit)[0]
-    notes = [f"{e}: not confirmed: {why}" for e, why in sorted(unconfirmed.items())]
+    notes = planmod.repair_notes(plan) + [
+        f"{e}: not confirmed: {why}" for e, why in sorted(unconfirmed.items())
+    ]
     if unconfirmed:
         notes.append(
             f"the lock keeps {', '.join(sorted(unconfirmed))} with result failed; "

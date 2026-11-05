@@ -2616,8 +2616,8 @@ def add_run_blockers(
     for d in dead:
         plan.setdefault("notes", []).append(
             f"{d['project']} {d['env']}: the pending claim of this machine's run (pid "
-            f"{d['run'].split(':')[2]}, {d['claimed_at']}) has no process any more; this run "
-            "repairs this host's own stopped run"
+            f"{d['run'].split(':')[2]}, {d['claimed_at']}) has no process any more; "
+            + REPAIR_NOTE
         )
     if holder is not None:
         gates.append(
@@ -2709,6 +2709,15 @@ def foreign_claim(
     if not found:
         return None
     return max(found, key=lambda h: (h["claimed_at"], h["project"]))
+
+
+#: The end of the plan note for a dead claim of this machine (:func:`repair_notes`).
+REPAIR_NOTE = "this run repairs this host's own stopped run"
+
+
+def repair_notes(plan: Mapping[str, Any]) -> list[str]:
+    """The plan notes that say this run repairs a stopped run of this machine."""
+    return [str(n) for n in plan.get("notes") or [] if str(n).endswith(REPAIR_NOTE)]
 
 
 def env_busy_message(holder: Mapping[str, Any]) -> str:

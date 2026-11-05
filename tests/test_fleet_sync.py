@@ -2053,3 +2053,21 @@ def test_an_interrupt_with_json_and_log_shows_on_stderr(
     for line in lines:
         assert line in result.stderr, result.stderr
         assert line in log.read_text()
+
+
+def test_the_repair_of_a_stopped_run_shows_in_plan_result_and_stderr(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    """item 6: the plan note reaches the up result notes and one stderr line."""
+    m = machines
+    up_at(m, "a", "webapp")
+    machine, ns, _, start = _my_parts()
+    _pending_with_run(m, f"{machine}:{ns}:{_dead_pid()}:{start}", "a stopped run")
+    here = {"fleet": m["a"], "app": m["app"]}
+    planned = cli(here, "plan", "--json")
+    assert any(n.endswith(planmod.REPAIR_NOTE) for n in json.loads(planned.stdout)["notes"])
+    result = cli(here, "up", "--json")
+    assert result.exit_code == 0, result.output
+    notes = [n for n in json.loads(result.stdout)["notes"] if n.endswith(planmod.REPAIR_NOTE)]
+    assert len(notes) == 1 and "webapp production" in notes[0]
+    assert sum(line.startswith("REPAIRING: ") for line in result.stderr.splitlines()) == 1

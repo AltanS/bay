@@ -574,14 +574,18 @@ def _gate(
         raise Refused(plan, "the plan is blocked: " + "; ".join(plan["blockers"]))
     if verdict == "stale":
         raise Refused(plan, "the plan is stale: " + "; ".join(plan["stale"]))
+    forced = False
     if verdict == "approve":
         if not force:
             raise Refused(
                 plan, f"plan {plan['plan_id']} has destructive or shared steps and no approval"
             )
         say(f"forced without approval: {reason}")
-        return True
-    return False
+        forced = True
+    repairs = planmod.repair_notes(plan)
+    if repairs:
+        fleetsync.alert("REPAIRING: " + "; ".join(repairs))
+    return forced
 
 
 def up(
@@ -1083,7 +1087,7 @@ def _apply_plan_steps(
     )
     lock_files += more_files
     pinned += more_rows
-    notes = list(adopt_notes) + box_notes
+    notes = planmod.repair_notes(plan) + list(adopt_notes) + box_notes
     notes += [
         f"{name} has no pinned commit, so this deploy left it out and its lock is unchanged"
         for name in left_out
@@ -1412,7 +1416,7 @@ def _apply_route_steps(
     ):
         failure = "the box receipt says the deploy failed"
     applied, stale_boxes = applied_from(entries, fleet_commit)
-    notes = [
+    notes = planmod.repair_notes(plan) + [
         f"box {b}: the receipt is not from this deploy, so `applied` leaves it out"
         for b in stale_boxes
     ]
