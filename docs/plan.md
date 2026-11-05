@@ -624,8 +624,10 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
    code for it (see [bay adopt](#bay-adopt)).
 3. Bay writes the lock: the project pin moves to the planned commit. The
    environment record gets `result: pending`, `claimed_by` (the host name of
-   this machine), `claimed_at` (UTC), `claimed_pid` (the process id of this
-   run) and `previous` (the pin it replaces).
+   this machine, for people only), `claimed_at` (UTC), `claimed_run` (a name
+   of this run that only this machine can judge, see
+   [Several machines, one fleet](#several-machines-one-fleet)) and `previous` (the pin it
+   replaces).
 4. Bay compiles the fleet into its services file, with the hash header.
 5. Bay commits the fleet repo: `bay: up <name> <env> <short sha>`, and
    prints the fleet commit. Then Bay pushes that commit. This is the claim:
@@ -669,6 +671,17 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
      `STOPPED AFTER THE CLAIM (...)`, names the fleet commit on the remote,
      and says to run the same command again on this machine (see
      [Several machines, one fleet](#several-machines-one-fleet)).
+   - While it puts the fleet back, Bay prints one line that says so and
+     ignores Ctrl-C, so a second Ctrl-C cannot stop it half way. To learn if
+     the claim reached the remote, Bay fetches for at most 10 seconds. When
+     that fetch fails or times out, Bay cannot tell, so it undoes nothing
+     (the commit may be on the remote). It prints
+     `STOPPED DURING THE CLAIM (...)` and what to check:
+     `git branch -r --contains <commit>`, then the same command again when
+     the remote holds it, or `git reset --keep <commit before>` when not.
+   - A deploy that fails or is refused in step 6 (for example by its own
+     validation, before Ansible starts) is not a stop. Step 7 records it as
+     `failed`, and nothing is undone.
 6. Bay runs today's deploy for the box's environment, limited to
    `--tags deploy_stack` (the same work as `bay deploy <env> --tags deploy_stack`,
    and the same tag the box check of `bay plan` runs). The `git_deploy` role
@@ -846,11 +859,21 @@ commit.
 The `box` field of a receipt is the inventory host (`inventory_hostname`,
 often an address), while the lock and the plan name a box of
 `bay.fleet.toml`. Bay maps each host to its box the way the deploy places
-containers: a host belongs to a box when it is in the box's `group`. A box
-with no group is alone in its box env and gets every host of the box env. A
-host or group named like the box belongs to it too. Bay reads the inventory
-with Ansible's own inventory code. A receipt host that maps to no box is a
-note in the result, so it never goes unseen.
+containers: a host belongs to a box when it is in the box's `group`, and
+only then. A box with no group is alone in its box env and gets every host of
+the box env. The box name places nothing. Bay reads the inventory once per
+run, the way the deploy reads it: `ansible-inventory --graph` with the
+deploy's environment, collections and folder. `--graph` loads no variables,
+so it needs no vault password. A receipt host that maps to no box is a note
+in the result, so it never goes unseen.
+
+**No map, no per-box result.** The map is missing when the inventory cannot
+be read, when it has no host in the box env, or when a box of the box env
+maps to no host. Bay then never takes a host name for a box name. It uses the
+rule from before 2.12 for the whole box env: when every receipt from this
+deploy says `ok`, every box is `ok`, else every box is `failed`. One note
+says that per-box results were not available, and why. There is no other
+exit code and no other record state.
 
 - A project of the plan is `failed` when the run failed, when its box's
   receipt says `failed`, or when its box has no receipt from this deploy.
@@ -1647,7 +1670,7 @@ machine's pin. Bay closes that gap in three ways:
   first. When the fleet also had local commits, run `bay fleet push` first.
 - **A fresh claim blocks other runs.** Between the claim and the receipt, the
   lock record of the box env says `result: pending`, with `claimed_by`,
-  `claimed_at` and `claimed_pid`. Any other plan for that box env, from any
+  `claimed_at` and `claimed_run`. Any other plan for that box env, from any
   machine, is then blocked with `reason: env_busy` (`bay up`, `bay rollback`
   and a remove exit 43). A plan checks every box env the run deploys, also
   the old box env of a move:
@@ -1658,12 +1681,23 @@ machine's pin. Bay closes that gap in three ways:
   `bay rollback --take-over` skip only this blocker. Bay prints a
   `TAKING OVER: ...` line and records `took_over` in the result. `bay plan`
   has no `--take-over`.
-- **A stopped run on this machine does not block the next one.** A pending
-  record whose `claimed_by` is this machine and whose `claimed_pid` names no
-  running process (the run was killed, or Ctrl-C after its claim) does not
-  block. The plan says in a note that this run repairs this host's own
-  stopped run. When that process still runs, it blocks as any claim does. A
-  record with no `claimed_pid` (an older Bay) is read as before.
+- **A stopped run on this machine does not block the next one.**
+  `claimed_run` is `<machine>:<pidns>:<pid>:<start>`. The machine part is
+  the first 12 hex characters of a SHA-256 over `/etc/machine-id` and a fixed
+  text, so the record never holds the raw id. The pidns part is the pid
+  namespace of the process (a container has its own). The start part is the
+  start time of the process (field 22 of `/proc/<pid>/stat`), so a reused pid
+  does not look like the old run. A pending claim is dead only when the
+  machine and the pid namespace are the same as this run's, and the pid is
+  gone or has another start time (the run was killed, or Ctrl-C after its
+  claim). Then it does not block, and a plan note says that this run repairs
+  this host's own stopped run. `claimed_by` is never compared.
+- **When Bay cannot judge a claim, it blocks.** A claim of another machine,
+  of another pid namespace, with an empty or unreadable `claimed_run`, or
+  with no `claimed_run` (an older Bay) blocks until it expires, or until
+  `--take-over`. A machine with no `/etc/machine-id` or no `/proc` writes an
+  empty `claimed_run` and never judges a claim. This run's own claim is its
+  own.
 - **Clocks.** A `claimed_at` in the future (the other machine's clock is
   ahead) is fresh until `claimed_at` plus 30 minutes. When it is more than
   2 minutes ahead, the message adds that the clocks differ, and `holder` has
@@ -1698,13 +1732,19 @@ this blocker, prints a warning and records `allowed_dirty`. The stricter rule
 for a plan with a destructive step stays. The files that the run writes
 itself (the lock, `services.yml`, the plan record) do not count.
 
-`--allow-dirty` never covers the files that only Bay writes: a
-`projects/<name>/bay.lock` and `group_vars/all/services.yml`. An uncommitted
-edit in one of them refuses `bay up`, `bay rollback`, a remove, `bay deploy`
-and `bay provision` with `reason: dirty`, also with `--allow-dirty`. The
-message names them and says to restore each with `git checkout -- <path>`.
-Change `bay.toml` or `bay.fleet.toml` instead. So the undo of a run (which
-puts these files back) can never destroy a hand edit.
+`--allow-dirty` never covers a hand edit in a file that only Bay writes: any
+uncommitted `projects/<name>/bay.lock`, and a `group_vars/all/services.yml`
+whose hash header does not match its body (a hand edit, no header, or a
+deleted file). Such a file refuses `bay up`, `bay rollback`, a remove,
+`bay deploy` and `bay provision` with `reason: dirty`, also with
+`--allow-dirty`. The message names the files and says to restore each with
+`git checkout HEAD -- <path>` (HEAD, so a staged edit goes too). Change
+`bay.toml` or `bay.fleet.toml` instead. So the undo of a run (which puts
+these files back) can never destroy a hand edit.
+
+A `services.yml` whose header matches (`bay compile --working-tree` wrote it)
+is an ordinary dirty file: refused by default, with the hint to commit it or
+pass `--allow-dirty`, and deployed with `--allow-dirty`.
 
 A git command that fails (not "no remote", not "inside a bigger repo") stops
 the command with `reason: git_failed`. Bay never reads a failed
@@ -1752,6 +1792,7 @@ and the next write stores version 2.
     "last_receipt_sha256": "<64 hex>",
     "claimed_by": "machine-a",
     "claimed_at": "2026-10-06T11:59:00Z",
+    "claimed_run": "3c9e1f0a7b42:4026531836:4121:208469623",
     "previous": {"commit": "<sha>", "deployed_at": "...", "receipt_sha256": "<64 hex>",
                  "containers": {"webapp": {"commit": "<12 hex>", "image": "<image>:<12 hex>"}}},
     "adopted": {"...": "..."}
@@ -1771,9 +1812,10 @@ and the next write stores version 2.
   each (destructive, so `approve`), and the next deploy of the staging box env
   removes them. Merge the `[deploy.<env>]` tables into every deploy branch.
 - `result` is `pending` while a deploy runs, then `ok` or `failed`.
-- `claimed_by` and `claimed_at` (since 2.12) name the machine and the time
-  of the `bay up` that set `pending`. Bay removes both when it writes `ok` or
-  `failed`. A CLI older than 2.12 cannot write a lock that holds them, so
+- `claimed_by`, `claimed_at` and `claimed_run` (since 2.12) name the
+  machine, the time and the run of the `bay up` that set `pending`.
+  `claimed_by` is for people; Bay judges a claim only by `claimed_run`. Bay
+  removes all three when it writes `ok` or `failed`. A CLI older than 2.12 cannot write a lock that holds them, so
   update every machine.
 - `previous` is one level of history: enough for `bay rollback`. It names
   the last pin whose deploy was confirmed. A `bay up` that replaces a pin
