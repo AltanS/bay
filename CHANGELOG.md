@@ -8,6 +8,31 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.12.0] - 2026-11-05
+
+One fleet can now serve several machines. Bay pulls the fleet for you, claims the fleet commit before a deploy, and lets one run at a time use a checkout.
+
+### Added
+- `bay plan`, `bay up`, `bay rollback`, `bay deploy` and `bay provision` fast-forward a fleet that is only behind its remote. They print one line on stderr: `fleet: pulled 3 commits from origin/main (a1b2c3d..d4e5f6a)`. The plan and up JSON have `fleet_sync`. `bay show` does not pull.
+- `bay up` claims before it deploys: it pushes its fleet commit first. When the remote moved, Bay undoes the commit (the lock files, `services.yml` and the plan record are as before the run, and no other path changes) and stops before the box. Exit 42, `reason: claim_refused`. Run `bay up` again: it pulls first. A push that reports a failure but did land goes on.
+- After the deploy, a refused push of the receipt runs `git pull --rebase` and pushes again, at most twice. When that fails, Bay aborts the rebase, keeps the commits local and exits 44 (`reason: receipt_unpushed`, `next: bay fleet push`).
+- A run lock per fleet checkout: `bay up`, `bay rollback`, `bay deploy`, `bay provision`, `bay fleet pull` and `bay fleet push` hold it. A second run stops at once (exit 43) and names the holder: `the fleet is busy: bay up production (pid 4121 on machine-a, since 14:01)`.
+- `bay fleet status [--json]`, `bay fleet pull` and `bay fleet push`. Status shows the branch, the upstream, ahead and behind, uncommitted paths, untracked plan records, the run lock holder and every lock record that is pending or failed.
+- Lock env records get `claimed_by` and `claimed_at` while `result` is `pending`. `bay show` says `deploying` for a claim less than 30 minutes old, and HALF with `an up from <host> at <time> never reported` after that.
+- Every `bay up --json` and `bay rollback --json` document (a result or an error) has `reason`, `box_touched`, `next` and `fleet` (`name`, `path`, `selected_by`).
+
+### Changed
+- `bay deploy` and `bay provision` check the fleet before the playbook. An unreachable remote refuses (`--offline` overrides). A diverged fleet refuses. Uncommitted files refuse and are listed (`--allow-dirty` overrides). A fleet that is ahead is pushed first. A fleet with no remote or inside a bigger repo gets the dirty check only. A dry run follows the same rules.
+- A diverged fleet now blocks `bay plan` and `bay up` with its own message (`reason: diverged`): run `bay fleet push`, and never merge `services.yml`, a `bay.lock` or a vault file by hand.
+- `bay up` exits 41 instead of 20 when only the fleet sync state blocks the plan (diverged, unreachable remote, no upstream). `bay plan` still exits 20.
+- A remote that refuses every push used to give a warning after the deploy. Now the claim stops the run before the box (exit 42).
+
+### Upgrade notes
+- Update every machine that runs `bay up` on a fleet (`bay self update`). An older CLI cannot write a lock that holds `claimed_by` and `claimed_at`: its schema refuses the two keys. It meets them while a 2.12 machine deploys, and after a 2.12 `bay up` that died before its receipt. Its `bay up` then stops with a lock schema error, possibly after its deploy ran.
+- `bay deploy` and `bay provision` now refuse a fleet with uncommitted files, a diverged fleet and an unreachable remote. Commit and push first, or pass `--allow-dirty` or `--offline`. Run `bay fleet push` after an `--offline` run.
+- New exit codes: 41 (the fleet is not in step with its remote, or dirty for the playbook verbs), 42 (claim refused), 43 (fleet busy), 44 (deployed, but the receipt is not on the remote). 40 stays the first image of `bay up`. Scripts that read the exit code of `bay up`, `bay deploy` or `bay provision` must know them.
+- No action on a box.
+
 ## [2.11.0] - 2026-11-05
 
 Bay finds the fleet from the folder you stand in. A new verb links a fleet checkout.

@@ -13,6 +13,7 @@ Bay is a command you install once per machine. It is not a clone inside your pro
 - [Make a fleet](#make-a-fleet)
   - [The vault password](#the-vault-password)
   - [The three names of a fleet](#the-three-names-of-a-fleet)
+- [Several machines, one fleet](#several-machines-one-fleet)
 - [Pick a fleet](#pick-a-fleet)
 - [Where Bay reads an app repo](#where-bay-reads-an-app-repo)
 - [Caches](#caches)
@@ -174,6 +175,41 @@ of the repo. If you clone with another folder name than the `name` in `bay.fleet
 the folder, or reach the fleet with `--fleet <path>` or `BAY_FLEET=<path>`, which skip the folder lookup.
 `bay fleet link` reads the `name` and makes the folder name equal to it. `bay fleet ls` prints
 the folders, never the `name` lines.
+
+## Several machines, one fleet
+
+Each machine has its own clone of the fleet. The fleet remote is the only
+channel between them. Three verbs show and move the clone. They find the
+fleet as `bay plan` does (see [Pick a fleet](#pick-a-fleet)), and none of them
+reads a box:
+
+```bash
+bay fleet status            # branch, upstream, ahead/behind, uncommitted files, the run that holds the fleet, pending or failed locks
+bay fleet status --json     # the same as one JSON document; exit 0 when in sync and clean, else 41
+bay fleet pull              # fetch and fast-forward; a diverged fleet refuses
+bay fleet push              # push; when the remote moved, git pull --rebase once and push again
+```
+
+The working rule:
+
+- Bay pulls for you. `bay plan`, `bay up`, `bay rollback`, `bay deploy` and
+  `bay provision` fast-forward a fleet that is only behind its remote.
+- Commit and push a config change before you deploy it. `bay deploy` and
+  `bay provision` refuse uncommitted files (`--allow-dirty` overrides), and
+  push local commits before they run.
+- Bay refuses to deploy what is not on the remote. `bay up` pushes its fleet
+  commit before the deploy, and stops before the box when the remote moved
+  (exit 42). Run it again: it pulls first.
+- Never merge generated files by hand: not `services.yml`, not a `bay.lock`,
+  not a vault file. When `bay fleet push` reports a conflict, it has undone
+  the rebase. Re-run the Bay command that wrote the file.
+
+Several agent sessions on one machine share one clone. A second `bay up`,
+`bay rollback`, `bay deploy`, `bay provision`, `bay fleet pull` or
+`bay fleet push` on the same clone stops at once (exit 43) and names the run
+that holds it. `--offline` on `bay deploy` and `bay provision` skips the fetch
+and the push, for a remote that is down. Run `bay fleet push` after it. The
+full rules are in [plan.md](plan.md#several-machines-one-fleet).
 
 ## Pick a fleet
 

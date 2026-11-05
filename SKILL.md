@@ -82,10 +82,17 @@ bay status --json --env <env>                         # read the receipt right a
 - **`bay validate` before any deploy that touches config.** An invalid
   Headscale ACL crash-loops the control server; an invalid `services.yml`
   reaches the host.
-- **`git pull` the fleet before `bay deploy` and `bay provision`.** A stale
-  local clone silently reverts remote-only config to framework defaults.
-  `bay plan` and `bay up` refuse a fleet that is behind its remote; the
-  playbook verbs do not.
+- **Several machines, one fleet: Bay pulls for you.** `bay plan`, `bay up`,
+  `bay rollback`, `bay deploy` and `bay provision` fast-forward a fleet that
+  is only behind its remote. Commit and push a config change before you
+  deploy it: `bay deploy` and `bay provision` refuse uncommitted files
+  (`--allow-dirty`) and push local commits first. `bay up` pushes its fleet
+  commit before the deploy; exit 42 (`claim_refused`) means the remote moved
+  and nothing was deployed, so run it again. Exit 41 is a diverged fleet or
+  an unreachable remote, exit 43 another run on this checkout, exit 44 a
+  receipt that is not on the remote (`bay fleet push`). Never merge
+  `services.yml`, a `bay.lock` or a vault file by hand. `bay fleet status`
+  shows the clone against its remote.
 - **A deploy ships app code, not just config.** `git_deploy` pulls each
   service's repo, so `bay deploy` can change what is running even when no
   framework or config file changed. Weigh blast radius accordingly.
@@ -161,6 +168,9 @@ to reproduce it. The flags that change what a command *means*:
 - `bay fleet init <name>` — Create a fleet at ~/.config/bay/fleets/<name>, or clone one with --from.
 - `bay fleet link [path]` — Link a fleet checkout into ~/.config/bay/fleets/<name>.
 - `bay fleet ls` — List the fleets in ~/.config/bay/fleets.
+- `bay fleet pull` — Fetch and fast-forward the fleet. Never merges: a diverged fleet refuses.
+- `bay fleet push` — Push the fleet. When the remote moved: git pull --rebase once, then push again.
+- `bay fleet status` — Show the fleet checkout against its remote. Exit 0 when in sync and clean, else 41.
 - `bay self` — Show or change the Bay version installed on this machine.
 - `bay self update` — Move this machine to the newest Bay release, or to the tag given by --to.
 - `bay self version` — Print the installed Bay version and where the checkout lives.
