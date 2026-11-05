@@ -234,9 +234,16 @@ def routed_output(as_json: bool, log: Path | None) -> Iterator[Callable[[str], N
     if log is None and not as_json:
         yield lambda m: console.info(m)
         return
+    from bay_cli import fleetsync
+
     handle: IO[str] = open(log, "a", encoding="utf-8") if log is not None else sys.stderr
     fds = (1, 2) if log is not None else (1,)
     saved: dict[int, int] = {}
+    terminal: IO[str] | None = sys.stderr if log is not None else None
+    try:
+        on_fd2 = sys.stderr.fileno() == 2
+    except (OSError, ValueError, AttributeError):
+        on_fd2 = False
     try:
         target_fd = handle.fileno()
         sys.stdout.flush()
@@ -249,6 +256,12 @@ def routed_output(as_json: bool, log: Path | None) -> Iterator[Callable[[str], N
             os.dup2(copy, fd)
             os.close(copy)
         saved = {}
+    owned = 2 in saved and on_fd2
+    if owned:
+        # sys.stderr wrote to fd 2, which is the log now: the terminal is the saved copy.
+        terminal = os.fdopen(os.dup(saved[2]), "w", encoding="utf-8")
+    if terminal is not None:
+        fleetsync.TERMINAL.append(terminal)
 
     def say(message: str) -> None:
         print(message, file=handle, flush=True)
@@ -260,6 +273,10 @@ def routed_output(as_json: bool, log: Path | None) -> Iterator[Callable[[str], N
                 stack.enter_context(contextlib.redirect_stderr(handle))
             yield say
     finally:
+        if terminal is not None:
+            fleetsync.TERMINAL.remove(terminal)
+            if owned:
+                terminal.close()
         handle.flush()
         for fd, copy in saved.items():
             os.dup2(copy, fd)

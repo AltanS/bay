@@ -2007,3 +2007,49 @@ def test_the_env_busy_plan_id_is_the_claimers_plan(
     # A record with no plan id: the text leaves the id out.
     no_id = planmod.env_busy_message({**holder, "plan_id": None})
     assert "(plan" not in no_id and "None" not in no_id
+
+
+def test_an_alert_under_log_reaches_the_terminal_too(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """item 5: with --log, fd 2 is the log; an alert also goes to the saved terminal fd."""
+    from bay_cli.commands import project_cmd
+
+    log = tmp_path / "up.log"
+    with project_cmd.routed_output(True, log):
+        fleetsync.alert("Bay is putting the fleet back.")
+        fleetsync.notice("a progress line")
+    err = capfd.readouterr().err
+    assert "Bay is putting the fleet back." in err
+    assert "a progress line" not in err
+    text = log.read_text()
+    assert "Bay is putting the fleet back." in text and "a progress line" in text
+    assert fleetsync.TERMINAL == []
+
+
+@pytest.mark.parametrize("when", ["before", "during"])
+def test_an_interrupt_with_json_and_log_shows_on_stderr(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch, when: str
+) -> None:
+    m = machines
+    log = m["tmp"] / "up.log"
+
+    def interrupted(*a: Any, **k: Any) -> Any:
+        raise KeyboardInterrupt
+
+    if when == "before":
+        monkeypatch.setattr(fleetsync, "push_upstream", interrupted)
+    else:
+        monkeypatch.setattr(applymod, "default_deploy", interrupted)
+    result = cli({"fleet": m["a"], "app": m["app"]}, "up", "--json", "--log", str(log))
+    assert result.exit_code == 130
+    doc = json.loads(result.stdout)
+    assert doc["reason"] == "interrupted"
+    again = f"bay --fleet {m['a']} up production --project webapp"
+    if when == "before":
+        lines = ["Bay is putting the fleet back", "STOPPED before the box was touched"]
+    else:
+        lines = ["INTERRUPTED DURING THE DEPLOY", "may be half deployed", "stays pending", again]
+    for line in lines:
+        assert line in result.stderr, result.stderr
+        assert line in log.read_text()

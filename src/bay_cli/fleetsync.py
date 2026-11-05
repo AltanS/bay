@@ -275,6 +275,20 @@ def notice(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
+#: The terminal's stderr while ``--log`` takes stderr (set by ``routed_output``).
+TERMINAL: list[Any] = []
+
+
+def alert(line: str) -> None:
+    """:func:`notice`, and with ``--log`` also on the terminal's stderr.
+
+    For the lines a person must see at once: an interrupt, an unwind, a repair.
+    """
+    notice(line)
+    for stream in TERMINAL:
+        print(line, file=stream, flush=True)
+
+
 def hostname() -> str:
     return socket.gethostname().split(".")[0] or "unknown"
 

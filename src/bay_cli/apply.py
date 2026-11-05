@@ -298,6 +298,12 @@ def unwind_on_error(written: Written) -> Iterator[None]:
             setattr(exc, "box_touched", touched())  # noqa: B010
             if written.root is not None:
                 setattr(exc, "next_cmd", written.again)  # noqa: B010
+            if touched() and written.root is not None:
+                fleetsync.alert(
+                    "INTERRUPTED DURING THE DEPLOY. The box may be half deployed. The lock "
+                    f"stays pending, claimed by {fleetsync.hostname()}. Run `{written.again}` "
+                    "next on this machine: it repairs this host's own stopped run."
+                )
         if (
             not touched()
             and written.root is not None
@@ -338,7 +344,7 @@ def unwind(written: Written, exc: BaseException) -> None:
     except ValueError:  # not the main thread: no handler to swap
         old = None
     try:
-        fleetsync.notice("Bay is putting the fleet back. Ctrl-C waits until it is done.")
+        fleetsync.alert("Bay is putting the fleet back. Ctrl-C waits until it is done.")
         _unwind(written, exc)
     finally:
         if old is not None:
@@ -353,7 +359,7 @@ def _unwind(written: Written, exc: BaseException) -> None:
         held, problem = fleetsync.landed(root, written.commit, timeout=UNWIND_FETCH_SECONDS)
         if problem is not None:
             commit = written.commit[:12]
-            fleetsync.notice(
+            fleetsync.alert(
                 f"STOPPED DURING THE CLAIM ({what}). Bay cannot tell if fleet commit {commit} "
                 f"reached the remote ({problem}), so it undid nothing. Nothing was deployed. "
                 f"Check with `git -C {root} fetch` and `git -C {root} branch -r --contains "
@@ -364,7 +370,7 @@ def _unwind(written: Written, exc: BaseException) -> None:
             return
         written.claimed = held
     if written.claimed and written.commit:
-        fleetsync.notice(
+        fleetsync.alert(
             f"STOPPED AFTER THE CLAIM ({what}). The fleet remote holds fleet commit "
             f"{written.commit[:12]} with the pending lock records of this run, claimed by "
             f"{fleetsync.hostname()}. Nothing was deployed. Run `{written.again}` again on "
@@ -373,7 +379,7 @@ def _unwind(written: Written, exc: BaseException) -> None:
         )
         return
     if written.before is None:
-        fleetsync.notice(f"STOPPED before the box was touched ({what}). Nothing to undo.")
+        fleetsync.alert(f"STOPPED before the box was touched ({what}). Nothing to undo.")
         return
     plan_rel = fleetsync._rel(root, written.plan_file) if written.plan_file else None
     undo = fleetsync.Undo(
@@ -384,7 +390,7 @@ def _unwind(written: Written, exc: BaseException) -> None:
         drop=[plan_rel] if plan_rel and written.prior_plan is None else [],
     )
     done = fleetsync.undo(root, written.commit or written.before, undo)
-    fleetsync.notice(
+    fleetsync.alert(
         f"STOPPED before the box was touched ({what}). Nothing was deployed. "
         + fleetsync.undo_line(done, committed=written.commit not in (None, written.before))
     )
