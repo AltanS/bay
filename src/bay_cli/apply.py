@@ -62,6 +62,7 @@ import copy
 import json
 import shutil
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -238,6 +239,105 @@ def touched() -> bool:
     return _PLAYBOOK["started"]
 
 
+@dataclass
+class Written:
+    """What an apply wrote into the fleet before Ansible started.
+
+    The apply fills it in as it goes: the paths it writes (lock files, the
+    services file), the plan record and the bytes it had before, then the
+    fleet commit, then whether the claim reached the remote.
+    :func:`unwind` reads it when the apply stops before the box.
+    """
+
+    root: Path | None = None
+    before: str | None = None
+    restore: list[Path] = field(default_factory=list)
+    plan_file: Path | None = None
+    prior_plan: bytes | None = None
+    unstage: list[Path] = field(default_factory=list)
+    commit: str | None = None
+    claim_started: bool = False
+    claimed: bool = False
+    again: str = "bay up"
+
+    def begin(
+        self,
+        root: Path,
+        before: str | None,
+        *,
+        restore: list[Path],
+        plan_file: Path,
+        prior_plan: bytes | None,
+        unstage: list[Path],
+        again: str,
+    ) -> None:
+        self.root, self.before, self.restore = root, before, list(restore)
+        self.plan_file, self.prior_plan = plan_file, prior_plan
+        self.unstage, self.again = list(unstage), again
+
+
+@contextlib.contextmanager
+def unwind_on_error(written: Written) -> Iterator[None]:
+    """Put the fleet back when the apply stops before Ansible started.
+
+    Any error, also Ctrl-C (``KeyboardInterrupt``), after the first lock write
+    and before the playbook: :func:`unwind`. A refused claim did its own undo,
+    so it passes as it is.
+    """
+    try:
+        yield
+    except BaseException as exc:
+        if not touched() and written.root is not None:
+            if not (isinstance(exc, fleetsync.SyncError) and exc.undo_failed is not None):
+                unwind(written, exc)
+        raise
+
+
+def unwind(written: Written, exc: BaseException) -> None:
+    """Undo what ``written`` lists, or say what is on the remote when the claim is.
+
+    * No claim on the remote yet (no commit, a local commit, or a claim push
+      that did not land): the lock files and the services file come back from
+      the commit before the run, the plan record is unstaged and gets its old
+      bytes back (or is removed when this run wrote it first), and a local fleet
+      commit of this run is undone. The same :func:`bay_cli.fleetsync.undo` as a
+      refused claim: no other path changes.
+    * The claim is on the remote: nothing is undone (another machine may have
+      it already). One line says what the remote holds and what to run.
+    """
+    root = written.root
+    assert root is not None
+    what = "interrupted" if isinstance(exc, KeyboardInterrupt) else f"stopped: {exc}"
+    if written.claim_started and not written.claimed and written.commit:
+        held, _ = fleetsync.landed(root, written.commit)
+        written.claimed = held
+    if written.claimed and written.commit:
+        fleetsync.notice(
+            f"STOPPED AFTER THE CLAIM ({what}). The fleet remote holds fleet commit "
+            f"{written.commit[:12]} with the pending lock records of this run, claimed by "
+            f"{fleetsync.hostname()}. Nothing was deployed. Run `{written.again}` again on "
+            "this machine: it repairs this host's own stopped run. Another machine sees the "
+            "claim for 30 minutes, or passes --take-over."
+        )
+        return
+    if written.before is None:
+        fleetsync.notice(f"STOPPED before the box was touched ({what}). Nothing to undo.")
+        return
+    plan_rel = fleetsync._rel(root, written.plan_file) if written.plan_file else None
+    undo = fleetsync.Undo(
+        before=written.before,
+        restore=[fleetsync._rel(root, p) for p in written.restore],
+        unstage=[plan_rel] * bool(plan_rel) + [fleetsync._rel(root, p) for p in written.unstage],
+        contents={plan_rel: written.prior_plan} if plan_rel else {},
+        drop=[plan_rel] if plan_rel and written.prior_plan is None else [],
+    )
+    done = fleetsync.undo(root, written.commit or written.before, undo)
+    fleetsync.notice(
+        f"STOPPED before the box was touched ({what}). Nothing was deployed. "
+        + fleetsync.undo_line(done, committed=written.commit not in (None, written.before))
+    )
+
+
 def _write_services(cx: Context, text: str) -> Path:
     target = cx.fleet_root / GENERATED_SERVICES
     _, state = planmod.current_services(cx)
@@ -385,6 +485,8 @@ def _skip_run_blockers(
             )
     if plan.get("reason") in {g["reason"] for g in skipped}:
         left = [g["reason"] for g in plan["run_blockers"]]
+        if plan.get("dirty_owned"):
+            left.insert(0, fleetsync.REASON_DIRTY)  # Bay's own files: never skipped
         plan["reason"] = left[0] if left else None
     planmod.decide(plan)
     if cx is not None:
@@ -612,9 +714,10 @@ def up_env(
 
 
 def _apply_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    """:func:`_apply_plan_steps` inside :func:`box_guard`."""
-    with box_guard():
-        return _apply_plan_steps(*args, **kwargs)
+    """:func:`_apply_plan_steps` inside :func:`box_guard` and :func:`unwind_on_error`."""
+    written = Written()
+    with box_guard(), unwind_on_error(written):
+        return _apply_plan_steps(*args, written=written, **kwargs)
 
 
 def _apply_plan_steps(
@@ -633,6 +736,7 @@ def _apply_plan_steps(
     code: Mapping[str, Any] | None = None,
     before: list[dict[str, Any]] | None = None,
     prior_plan: bytes | None = None,
+    written: Written | None = None,
 ) -> dict[str, Any]:
     """Steps 2 to 8 of ``bay up`` for the projects of an accepted plan.
 
@@ -673,8 +777,19 @@ def _apply_plan_steps(
     moves = {m["project"]: m for m in plan.get("moves") or [] if m["env"] == env}
 
     # 2. the locks
+    written = written or Written()
     head_before = gitrepo.head(cx.fleet_root)
-    claim = {"claimed_by": fleetsync.hostname(), "claimed_at": fleetsync.now_iso()}
+    approval_path = planmod.approval_file(cx, plan["plan_id"])
+    written.begin(
+        cx.fleet_root,
+        head_before,
+        restore=[p.lock_file for p, _ in members] + [cx.fleet_root / GENERATED_SERVICES],
+        plan_file=planmod.plan_file(cx, plan["plan_id"]),
+        prior_plan=prior_plan,
+        unstage=[approval_path] if approval_path.is_file() else [],
+        again=again_command(cx, action, env, plan.get("project")),
+    )
+    claim = fleetsync.claim_fields()
     locks: dict[str, dict[str, Any]] = {}
     previous_by: dict[str, dict[str, Any] | None] = {}
     # The services file before this up's compile: the old pins' build containers.
@@ -757,6 +872,7 @@ def _apply_plan_steps(
             fleet_commit = gitrepo.commit_paths(cx.fleet_root, paths, message)
         except gitrepo.GitError as exc:
             raise BayError(f"cannot commit the fleet repo: {exc}") from None
+        written.commit = fleet_commit
         say(f"fleet commit {fleet_commit}")
         _claim(
             cx,
@@ -769,6 +885,7 @@ def _apply_plan_steps(
             plan=plan,
             action=action,
             say=say,
+            written=written,
         )
 
         # 5. deploy. A move to a box of another box environment also deploys
@@ -810,18 +927,16 @@ def _apply_plan_steps(
                     say(f"not deployed after the failure: {', '.join(skipped)}")
                 break
 
-    # 6. receipt
+    # 6. receipt. After a deploy that exited 0, a receipt read that errors is tried
+    # again (read_receipts_after): "cannot read" is not "no receipt from this deploy".
     reader = read_receipts or planmod.default_receipt_reader
-    entries: list[dict[str, Any]] = []
-    try:
-        entries = reader(cx, box_env)
-    except (BayError, OSError) as exc:
-        say(f"cannot read the receipt: {exc}")
+    entries = read_receipts_after(reader, cx, box_env, retry=failure is None, say=say)
     # Results are per box (:func:`box_results`): a member is ok only when the run
     # did not fail and its own box wrote an ok receipt for this fleet commit.
     run_failed = failure is not None
     hosts, map_problem = box_names(cx, box_env)
     results, unmapped = box_results(entries, fleet_commit, hosts)
+    unread = unreadable_boxes(entries, hosts, cx, box_env)
     box_notes = [f"{map_problem}; the receipt host names are taken as box names"] * bool(
         map_problem
     ) + [
@@ -849,7 +964,16 @@ def _apply_plan_steps(
                 if w == "failed"
             }
         )
-        failure = f"no receipt from this deploy on box {', '.join(missing)}"
+        cannot = [u for u in unread if u["box"] in missing]
+        if cannot:
+            failure = (
+                "the deploy ran, but the receipt of box "
+                + ", ".join(f"{u['box']} ({u['error']})" for u in cannot)
+                + " could not be read; run the same bay up again: it confirms the deploy "
+                "with a no-op run"
+            )
+        else:
+            failure = f"no receipt from this deploy on box {', '.join(missing)}"
     word = "failed" if failure else "ok"
     for proj, commit in members:
         lock = locks[proj.name]
@@ -979,7 +1103,11 @@ def _apply_plan_steps(
         "fleet_sync": plan.get("fleet_sync"),
         "took_over": plan.get("took_over"),
         "allowed_dirty": plan.get("allowed_dirty"),
+        # The deploy ran, but these boxes' receipts could not be read (not "no receipt").
+        "receipt_unread": unread,
     }
+    if unread and failure and failure.startswith("the deploy ran, but the receipt"):
+        result["next"] = again_command(cx, action, env, plan.get("project"))
     return _finish_up(cx, result, push=push, failure=failure, first_exit=first_exit, say=say)
 
 
@@ -1007,7 +1135,7 @@ def settle(cx: Context, result: dict[str, Any], *, push: bool, failed: bool, say
     when the push failed. An unpushed receipt prints one loud line that starts
     with ``DEPLOY FAILED`` or ``DEPLOYED``, and sets ``next`` to ``bay fleet push``.
     """
-    result.update(outcome(cx, reason=None, box_touched=touched()))
+    result.update(outcome(cx, reason=None, box_touched=touched(), next_cmd=result.get("next")))
     if push:
         push_fleet(cx, result, say)
     unpushed = bool(result.get("push_error")) and not result.get("pushed")
@@ -1030,7 +1158,7 @@ def _after_deploy(exc: BayError) -> BayError:
 
 
 #: The env record keys of a pending ``bay up``: who started it and when.
-CLAIM_KEYS = ("claimed_by", "claimed_at")
+CLAIM_KEYS = ("claimed_by", "claimed_at", "claimed_pid")
 
 
 def fleet_info(cx: Context) -> dict[str, Any]:
@@ -1085,6 +1213,7 @@ def _claim(
     action: str,
     say: Echo,
     again: str | None = None,
+    written: Written | None = None,
 ) -> None:
     """Step 4, second half: push the fleet commit before the deploy.
 
@@ -1103,13 +1232,18 @@ def _claim(
         contents={plan_rel: prior_plan},
     )
     again = again or again_command(cx, action, str(plan["env"]), plan.get("project"))
+    if written is not None:
+        written.claim_started = True
     fleetsync.claim(root, commit, undo, again=again, say=say)
+    if written is not None:
+        written.claimed = True
 
 
 def _apply_route_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
-    """:func:`_apply_route_steps` inside :func:`box_guard`."""
-    with box_guard():
-        return _apply_route_steps(*args, **kwargs)
+    """:func:`_apply_route_steps` inside :func:`box_guard` and :func:`unwind_on_error`."""
+    written = Written()
+    with box_guard(), unwind_on_error(written):
+        return _apply_route_steps(*args, written=written, **kwargs)
 
 
 def _apply_route_steps(
@@ -1123,6 +1257,7 @@ def _apply_route_steps(
     say: Echo,
     push: bool,
     prior_plan: bytes | None = None,
+    written: Written | None = None,
 ) -> dict[str, Any]:
     """Apply a route-only plan: compile, commit, claim, deploy the ingress box env, push.
 
@@ -1139,6 +1274,17 @@ def _apply_route_steps(
     box_env = str(plan["box_env"])
     failure: str | None = None
     head_before = gitrepo.head(cx.fleet_root)
+    written = written or Written()
+    approval_path = planmod.approval_file(cx, plan["plan_id"])
+    written.begin(
+        cx.fleet_root,
+        head_before,
+        restore=[cx.fleet_root / GENERATED_SERVICES],
+        plan_file=planmod.plan_file(cx, plan["plan_id"]),
+        prior_plan=prior_plan,
+        unstage=[approval_path] if approval_path.is_file() else [],
+        again=again_command(cx, "up", env, None),
+    )
     with planmod.compiled_fleet(cx, cwd=cwd) as comp:
         if comp.result is None:
             raise BayError("compile failed:\n  " + "\n  ".join(comp.errors))
@@ -1151,6 +1297,7 @@ def _apply_route_steps(
             fleet_commit = gitrepo.commit_paths(cx.fleet_root, paths, f"bay: up {env} (routes)")
         except gitrepo.GitError as exc:
             raise BayError(f"cannot commit the fleet repo: {exc}") from None
+        written.commit = fleet_commit
         say(f"fleet commit {fleet_commit}")
         _claim(
             cx,
@@ -1163,6 +1310,7 @@ def _apply_route_steps(
             plan=plan,
             action="up",
             say=say,
+            written=written,
         )
 
         tags = routes.deploy_tags(plan["steps"], UP_DEPLOY_TAGS)
@@ -1243,7 +1391,22 @@ def _apply_route_steps(
 
 
 def push_fleet(cx: Context, result: dict[str, Any], say: Echo) -> None:
-    """Step 8: push the fleet repo; set ``pushed``, ``push_error`` and ``push_skipped``.
+    """Step 8: push the fleet repo (:func:`_push_fleet`). A git error never replaces the result.
+
+    Ansible ran already, so the result document stays: a git failure here (a
+    failed ``git status``, a broken remote config) sets ``pushed: false`` and
+    ``push_error``, as a refused push does.
+    """
+    try:
+        _push_fleet(cx, result, say)
+    except (BayError, OSError, gitrepo.GitError) as exc:
+        result["pushed"] = False
+        result["push_error"] = f"git failed after the deploy: {exc}"
+        say(f"warning: the fleet repo was not pushed: {result['push_error']}")
+
+
+def _push_fleet(cx: Context, result: dict[str, Any], say: Echo) -> None:
+    """Push the fleet repo; set ``pushed``, ``push_error`` and ``push_skipped``.
 
     A fleet that is a directory inside a bigger repo (a workspace with
     several fleets) shares that repo's remote and branch. Pushing it would
@@ -1351,6 +1514,75 @@ def prune_plans(cx: Context, *, keep: int = PLANS_KEEP) -> list[str]:
     if gone:
         gitrepo.remove_and_commit(cx.fleet_root, gone, f"bay: prune plans ({len(gone)} files)")
     return gone
+
+
+#: Tries and the pause between them for a receipt read that errors after a
+#: deploy that exited 0 (:func:`read_receipts_after`).
+RECEIPT_READ_TRIES = 3
+RECEIPT_READ_PAUSE = 2.0
+
+
+def read_receipts_after(
+    reader: planmod.ReceiptReader, cx: Context, box_env: str, *, retry: bool, say: Echo
+) -> list[dict[str, Any]]:
+    """The receipts after the deploy. With ``retry``, a read that errors is tried again.
+
+    An entry with an ``error`` (unreachable, the ``cat`` failed) or a reader
+    that raises means the receipt could not be read, which says nothing about
+    the deploy. After a deploy that exited 0 that read is tried up to
+    :data:`RECEIPT_READ_TRIES` times, :data:`RECEIPT_READ_PAUSE` seconds apart.
+    """
+    import time
+
+    tries = RECEIPT_READ_TRIES if retry else 1
+    entries: list[dict[str, Any]] = []
+    for attempt in range(1, tries + 1):
+        try:
+            entries = reader(cx, box_env)
+            problem = next((str(e["error"]) for e in entries if e.get("error")), None)
+        except (BayError, OSError) as exc:
+            entries, problem = [{"env": box_env, "box": None, "receipt": None,
+                                 "error": f"cannot read the receipt: {exc}"}], str(exc)
+        if problem is None or attempt == tries:
+            if problem is not None:
+                say(f"cannot read the receipt: {problem}")
+            return entries
+        say(f"cannot read the receipt ({problem}); trying again ({attempt}/{tries - 1})")
+        time.sleep(RECEIPT_READ_PAUSE)
+    return entries
+
+
+def unreadable_boxes(
+    entries: list[dict[str, Any]],
+    hosts: Mapping[str, list[str]] | None,
+    cx: Context,
+    box_env: str,
+) -> list[dict[str, Any]]:
+    """``[{"box", "host", "error"}]`` for each fleet box whose receipt could not be read.
+
+    An entry with no host (the whole read failed) counts for every box of the box env.
+    """
+    out: list[dict[str, Any]] = []
+    try:
+        all_boxes = sorted(
+            n for n, b in (planmod.load_fleet_doc(cx).get("boxes") or {}).items()
+            if b.get("env") == box_env
+        )
+    except (BayError, OSError, ValueError):
+        all_boxes = []
+    for entry in entries:
+        error = entry.get("error")
+        if not error:
+            continue
+        host = entry.get("box")
+        if host is None:
+            names = all_boxes
+        elif hosts is None:
+            names = [str(host)]
+        else:
+            names = list(hosts.get(str(host), []))
+        out += [{"box": n, "host": host, "error": str(error)} for n in names]
+    return out
 
 
 def box_names(cx: Context, box_env: str) -> tuple[dict[str, list[str]] | None, str | None]:
@@ -1508,6 +1740,9 @@ def _pin_deployed(
 
     An env whose box has no receipt from this deploy (the deploy stopped before
     it) is left exactly as it was: no stamp, no ``deployed_at``, no receipt hash.
+    So is an env whose box failed, when this stamp would not move its pin and
+    its record is ``ok``: that pin was confirmed before, and a failed box says
+    nothing new about it. A pin that moves on a failed box gets ``failed``.
     A repo project with no pinned commit was not compiled, so it is not in
     ``commits`` and its lock stays as it is. Returns the lock files written
     and one row per env pinned.
@@ -1538,6 +1773,10 @@ def _pin_deployed(
                 # The deploy did not reach this box: its record stays as it was.
                 continue
             old_pin = lockfile.env_pin(other.lock, env)
+            if result == "failed" and old_pin == commit and record.get("result") == "ok":
+                # A failed box, but this run did not move this pin, and the pin was
+                # confirmed before: the run confirmed nothing new about it.
+                continue
             if old_pin and old_pin != commit:
                 if _confirmed(record):
                     previous = _previous_for(

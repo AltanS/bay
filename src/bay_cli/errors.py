@@ -90,3 +90,45 @@ class BayError(Exception):
     def remote(cls, message: str, *, hint: str | None = None) -> BayError:
         """Remote operation failed."""
         return cls(message, code=ErrorCode.REMOTE_ERROR, hint=hint)
+
+
+#: ``reason`` of a :class:`FleetSelectionError`: no fleet could be found.
+REASON_NO_FLEET = "no_fleet"
+#: ``reason`` of a :class:`FleetSelectionError`: more than one fleet, Bay does not guess.
+REASON_FLEET_AMBIGUOUS = "fleet_ambiguous"
+
+
+class FleetSelectionError(BayError):
+    """No fleet could be selected: none was found, or several were.
+
+    ``reason`` is :data:`REASON_NO_FLEET` or :data:`REASON_FLEET_AMBIGUOUS`;
+    ``candidates`` lists the fleets found (empty for none). With ``--json`` a
+    command prints it as one JSON document, never as plain text.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str,
+        candidates: list[str] | None = None,
+        hint: str | None = None,
+    ) -> None:
+        super().__init__(message, hint=hint)
+        self.reason = reason
+        self.candidates = list(candidates or [])
+
+    def to_dict(self) -> dict[str, str | None]:
+        out: dict[str, object] = {**super().to_dict(), "reason": self.reason,
+                                  "candidates": self.candidates}
+        return out  # type: ignore[return-value]
+
+    def json_doc(self) -> dict[str, object]:
+        """The document ``--json`` prints: the fields of every JSON error, plus these two."""
+        return {
+            "error": str(self),
+            "hint": self.hint,
+            "code": self.code.value,
+            "reason": self.reason,
+            "candidates": self.candidates,
+        }

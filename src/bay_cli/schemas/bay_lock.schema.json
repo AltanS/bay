@@ -78,6 +78,11 @@
           "type": "string",
           "minLength": 1
         },
+        "claimed_pid": {
+          "description": "Since 2.12: the process id of that `bay up` on the claimed_by machine. A run on the same machine whose process is gone does not block (it was killed or interrupted). Removed with claimed_by.",
+          "type": "integer",
+          "minimum": 1
+        },
         "previous": { "$ref": "#/$defs/previous" },
         "frozen": {
           "description": "Set by `bay rollback`. While true, a push builds and tags its image but never deploys it, whatever `track` says. The next `bay up` to a commit newer than frozen_commit clears it.",

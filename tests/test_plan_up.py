@@ -136,8 +136,9 @@ class FakeBox:
     """Holds one receipt per box env. A deploy writes it from the fleet's services file.
 
     Every box of the env (bay.fleet.toml ``[boxes]``) reads that receipt with its
-    own ``box``: the inventory host of the box (:func:`fake_host`), not its name. ``fail_boxes`` makes those boxes report ``failed`` (the deploy
-    raises), ``unreached`` keeps the receipt those boxes had before the deploy
+    own ``box``: the inventory host of the box (:func:`fake_host`), not its name.
+    ``fail_boxes`` makes those boxes report ``failed`` (the deploy raises),
+    ``unreached`` keeps the receipt those boxes had before the deploy
     (Ansible stopped before them).
     """
 
@@ -3388,7 +3389,7 @@ def test_move_stops_before_old_box_when_new_box_deploy_fails(
     from bay_cli.errors import BayError
 
     (world["fleet"] / "bay.fleet.toml").write_text(TWO_BOX_ENVS)
-    (world["fleet"] / "hosts" / "edge").write_text("[edge]\nbox-2\n")
+    (world["fleet"] / "hosts" / "edge").write_text(f"[edge]\n{fake_host('box-2')}\n")
     edge = world["fleet"] / "group_vars" / "edge"
     edge.mkdir()
     shutil.copy2(world["fleet"] / "group_vars" / "production" / "secrets.yml", edge)
@@ -5496,19 +5497,64 @@ def test_a_member_whose_box_has_no_new_receipt_is_failed(
     assert raw is not None and raw["envs"]["production"]["result"] == "ok"
 
 
-def test_a_failed_box_marks_every_project_on_it_failed(
+def test_a_failed_box_keeps_the_confirmed_pins_it_did_not_move(
     world: dict[str, Path], box: FakeBox
 ) -> None:
-    """Accepted for now: one box receipt, one result for all its projects."""
+    """review 3, B: one box, one receipt. A confirmed pin this run did not move stays ok."""
     status = _two_boxes_status_on_one(world, "box-1")
     do_up(world)
     _up_status(world)
+    before = lockfile.lock_path(world["fleet"], "webapp").read_bytes()
     _edit_in_fleet(status, world, 'MODE = "one"', 'MODE = "two"')
     box.fail_boxes = {"box-1"}
-    with pytest.raises(applymod.DeployFailed):
+    with pytest.raises(applymod.DeployFailed) as err:
         _up_status(world)
     box.fail_boxes = set()
+    assert lockfile.lock_path(world["fleet"], "webapp").read_bytes() == before
+    assert [r["project"] for r in err.value.result["pinned"]] == ["status"]
+
+
+def test_a_failed_box_marks_failed_a_pin_this_run_moved(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """The limit that stays: a pin that moves on a failed box is failed."""
+    _two_boxes_status_on_one(world, "box-1")
+    do_up(world)
+    _up_status(world)
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "x"')
+    box.fail_boxes = {"box-1"}
+    with pytest.raises(applymod.DeployFailed):
+        do_up(world)
+    box.fail_boxes = set()
     assert lock_of(world)["envs"]["production"]["result"] == "failed"
+
+
+def test_the_reviewers_one_box_sequence_rolls_back_to_x(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """W ok, X ok, status fails on the same box, Y ok, rollback -> X."""
+    do_up(world)
+    w = _pin(world)
+    x = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "x"')
+    do_up(world)
+    assert _pin(world) == x and _previous(world) == w
+    status = world["fleet"] / "projects" / "status" / "bay.toml"
+    status.parent.mkdir()
+    status.write_text(STATUS_TOML)
+    commit_all(world["fleet"], "add status")
+    _up_status(world)
+    _edit_in_fleet(status, world, 'MODE = "one"', 'MODE = "two"')
+    box.fail = True
+    with pytest.raises(applymod.DeployFailed):
+        _up_status(world)
+    box.fail = False
+    record = lock_of(world)["envs"]["production"]
+    assert (record["commit"], record["result"]) == (x, "ok")
+    y = edit_app(world, 'LOG_LEVEL = "x"', 'LOG_LEVEL = "y"')
+    do_up(world)
+    assert _pin(world) == y and _previous(world) == x
+    _rollback(world)
+    assert _pin(world) == x
 
 
 # ── review 3, K: a receipt names the inventory host, the lock names the box ──
@@ -5575,3 +5621,33 @@ def test_host_boxes_follows_the_inventory_groups(tmp_path: Path) -> None:
     # A box named after its host line (no group) gets that host.
     (tmp_path / "hosts" / "production").write_text("[production]\nbox-1 ansible_host=192.0.2.11\n")
     assert receipts.host_boxes(tmp_path, one, "production") == {"box-1": ["box-1"]}
+
+
+def test_a_claim_on_the_old_box_env_of_a_move_blocks(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """review 3, D: the move also deploys its old box env, so a claim there blocks."""
+    (world["fleet"] / "bay.fleet.toml").write_text(TWO_BOX_ENVS)
+    (world["fleet"] / "hosts" / "edge").write_text(f"[edge]\n{fake_host('box-2')}\n")
+    edge = world["fleet"] / "group_vars" / "edge"
+    edge.mkdir()
+    shutil.copy2(world["fleet"] / "group_vars" / "production" / "secrets.yml", edge)
+    commit_all(world["fleet"], "two box envs")
+    edit_app(world, 'needs = ["postgres"]\n', "")
+    edit_app(world, VOLUME_MOUNT, "")
+    do_up(world)
+    path = lockfile.lock_path(world["fleet"], "webapp")
+    raw = lockfile.read(path)
+    assert raw is not None
+    from bay_cli import fleetsync
+
+    raw["envs"]["production"].update(
+        {"result": "pending", "claimed_by": "machine-z", "claimed_at": fleetsync.now_iso()}
+    )
+    lockfile.write(path, raw)
+    commit_all(world["fleet"], "machine-z deploys production")
+    edit_app(world, "[deploy.production]\n", '[deploy.production]\nbox = "box-2"\n')
+    plan = make(world)
+    assert (plan["box_env"], plan["moves"][0]["from_box_env"]) == ("edge", "production")
+    assert plan["reason"] == "env_busy"
+    assert plan["holder"]["box_env"] == "production"

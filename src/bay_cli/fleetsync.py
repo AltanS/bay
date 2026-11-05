@@ -24,6 +24,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -77,16 +78,49 @@ def claim_time(record: Any) -> datetime | None:
         return None
 
 
+def claim_fields() -> dict[str, Any]:
+    """The claim keys of a pending env record: this machine, now, this process."""
+    return {"claimed_by": hostname(), "claimed_at": now_iso(), "claimed_pid": os.getpid()}
+
+
+def pid_alive(pid: int) -> bool:
+    """True when a process ``pid`` exists on this machine (also one of another user)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
 def fresh_claim(record: Any, now: datetime | None = None) -> bool:
     """True for a pending record claimed less than :data:`CLAIM_FRESH_SECONDS` ago.
 
-    A claim a little in the future (the other machine's clock is ahead) is fresh too.
+    A claim in the future (the other machine's clock is ahead) is fresh until
+    ``claimed_at`` plus the limit. A claimer whose clock is far behind writes
+    a ``claimed_at`` that looks old: that is not detected.
     """
     when = claim_time(record)
     if when is None:
         return False
     age = ((now or datetime.now(UTC)) - when).total_seconds()
-    return -CLAIM_FRESH_SECONDS < age < CLAIM_FRESH_SECONDS
+    return age < CLAIM_FRESH_SECONDS
+
+
+#: A ``claimed_at`` more than this far ahead of this machine's clock gets a note.
+CLOCK_SKEW_NOTE_SECONDS = 120
+
+
+def clock_ahead(record: Any, now: datetime | None = None) -> int | None:
+    """Seconds the claim is ahead of this clock, when more than :data:`CLOCK_SKEW_NOTE_SECONDS`."""
+    when = claim_time(record)
+    if when is None:
+        return None
+    ahead = (when - (now or datetime.now(UTC))).total_seconds()
+    return int(ahead) if ahead > CLOCK_SKEW_NOTE_SECONDS else None
 
 
 def local_hhmm(when: datetime) -> str:
@@ -587,11 +621,31 @@ def _read_holder(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+#: How long a run tries for the run lock before it says the fleet is busy. A
+#: ``bay fleet status`` probe holds a shared lock for a moment; this wait keeps
+#: it from making a run that starts at that moment busy.
+LOCK_WAIT_SECONDS = 1.0
+
+
+def _flock_within(fd: int, seconds: float) -> bool:
+    """Take the exclusive flock on ``fd``, trying again for up to ``seconds``."""
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+
 @contextlib.contextmanager
 def run_lock(repo: Path, verb: str, env: str | None = None) -> Iterator[dict[str, Any] | None]:
     """Hold the fleet's run lock for one verb. Raises :class:`SyncError` (``fleet_busy``).
 
-    A non-blocking ``flock`` on ``<git common dir>/bay-run-<key>.lock``
+    An exclusive ``flock`` on ``<git common dir>/bay-run-<key>.lock``, tried for
+    up to :data:`LOCK_WAIT_SECONDS`
     (:func:`lock_key`: one lock per fleet folder); the holder is in the
     ``.json`` beside it. The kernel drops the flock when the holder dies, so a
     stale holder file never blocks. A fleet that is not a git repo takes no
@@ -606,9 +660,7 @@ def run_lock(repo: Path, verb: str, env: str | None = None) -> Iterator[dict[str
         yield _held[lock_path]
         return
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    if not _flock_within(fd, LOCK_WAIT_SECONDS):
         os.close(fd)
         holder = _read_holder(holder_path)
         raise SyncError(
@@ -720,6 +772,8 @@ class Undo:
     unstage: list[str] = field(default_factory=list)
     #: Work tree bytes to put back after the unstage (None: leave the file).
     contents: dict[str, bytes | None] = field(default_factory=dict)
+    #: Removed from the work tree after the unstage (a file this run wrote first).
+    drop: list[str] = field(default_factory=list)
 
 
 def _rel(repo: Path, path: Path | str) -> str:
@@ -791,7 +845,24 @@ def undo(repo: Path, commit: str, plan: Undo) -> UndoResult:
                 done = False
         if not done:
             failed.append(rel)
+    for rel in plan.drop:
+        try:
+            (repo / rel).unlink(missing_ok=True)
+        except OSError:
+            failed.append(rel)
     return UndoResult("partial" if failed else "done", failed)
+
+
+def undo_line(result: UndoResult, *, committed: bool = True) -> str:
+    """:func:`_undo_line`; ``committed=False`` when the run stopped before its commit."""
+    if not committed and result.state == "done":
+        return "The files this run wrote are back as they were."
+    if not committed and result.state == "partial":
+        return (
+            "The undo was PARTIAL: these paths could not be put back: "
+            f"{', '.join(result.failed)}. Check them with git status in the fleet."
+        )
+    return _undo_line(result)
 
 
 def _undo_line(result: UndoResult) -> str:
@@ -1014,6 +1085,27 @@ def _path_list(paths: Sequence[str]) -> str:
     return shown + (f" and {more} more" if more > 0 else "")
 
 
+#: Files only Bay writes: the generated services file and every project lock.
+OWNED_SERVICES = "group_vars/all/services.yml"
+
+
+def bay_owned(rel: str) -> bool:
+    """True for a fleet path that only Bay writes (``--allow-dirty`` never covers it)."""
+    parts = Path(rel).parts
+    return rel == OWNED_SERVICES or (
+        len(parts) == 3 and parts[0] == "projects" and parts[2] == "bay.lock"
+    )
+
+
+def owned_dirty_message(paths: Sequence[str]) -> str:
+    return (
+        f"the fleet has uncommitted edits in {len(paths)} file(s) that only Bay writes: "
+        f"{_path_list(paths)}. --allow-dirty does not cover them. Restore each with "
+        f"`git checkout -- <path>` in the fleet (git checkout -- {' '.join(paths[:3])}), "
+        "then run the command again. Change bay.toml or bay.fleet.toml instead"
+    )
+
+
 def dirty_refusal(paths: Sequence[str], flag: str = "--allow-dirty") -> SyncError:
     return SyncError(
         f"the fleet has {len(paths)} uncommitted path(s): {_path_list(paths)}. They would "
@@ -1036,7 +1128,8 @@ def prepare_playbook(
 
     Ansible reads the work tree, so the box gets what is on disk. In order:
     an unreachable remote refuses (unless ``offline``), a diverged fleet
-    refuses, uncommitted paths refuse (unless ``allow_dirty``), a fleet that
+    refuses, uncommitted paths refuse (unless ``allow_dirty``; an edit in a file
+    only Bay writes always refuses, :func:`bay_owned`), a fleet that
     is only behind is fast-forwarded, and a fleet that is ahead is pushed
     first (the claim; a refused push stops the run). A fleet with no remote
     or inside a bigger repo gets the dirty check only. Raises
@@ -1063,6 +1156,9 @@ def prepare_playbook(
             )
         if st.diverged:
             raise SyncError(diverged_message(st), reason=REASON_DIVERGED, next_cmd="bay fleet push")
+    owned = [p for p in st.dirty_paths if bay_owned(p)]
+    if owned:
+        raise SyncError(owned_dirty_message(owned), reason=REASON_DIRTY, paths=owned)
     if st.dirty_paths and not allow_dirty:
         raise dirty_refusal(st.dirty_paths)
     pulled: Pulled | None = None

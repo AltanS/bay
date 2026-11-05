@@ -24,7 +24,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from bay_cli.errors import BayError
+from bay_cli.errors import (
+    REASON_FLEET_AMBIGUOUS,
+    REASON_NO_FLEET,
+    BayError,
+    FleetSelectionError,
+)
 
 if TYPE_CHECKING:
     import typer
@@ -192,7 +197,7 @@ class Context:
         if nearby is not None:
             return nearby
 
-        raise BayError(NO_FLEET_MESSAGE, hint=NO_FLEET_HINT)
+        raise FleetSelectionError(NO_FLEET_MESSAGE, reason=REASON_NO_FLEET, hint=NO_FLEET_HINT)
 
     @classmethod
     def _from_nearby_folders(cls) -> Context | None:
@@ -325,8 +330,10 @@ def fleet_in_folder_above(start: Path) -> Path | None:
             return fleets[0]
         if len(fleets) > 1:
             names = ", ".join(str(f) for f in fleets)
-            raise BayError(
+            raise FleetSelectionError(
                 f"more than one fleet lives in {folder}: {names}",
+                reason=REASON_FLEET_AMBIGUOUS,
+                candidates=[str(f) for f in fleets],
                 hint="Pass --fleet <path> before the command, or cd into one of them.",
             )
     return None

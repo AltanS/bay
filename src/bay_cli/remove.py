@@ -43,7 +43,7 @@ from bay_cli import fleetsync, gitrepo, lockfile
 from bay_cli import plan as planmod
 from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
-from bay_cli.fleet import PROJECTS_DIR
+from bay_cli.fleet import GENERATED_SERVICES, PROJECTS_DIR
 
 #: Containers Bay deploys on every box by its own roles; never a project.
 FRAMEWORK_CONTAINERS = (
@@ -691,7 +691,12 @@ def apply_remove(
         raise BayError("--force needs --reason", hint='Pass --reason "<why>".')
     from bay_cli import apply as applymod
 
-    with fleetsync.write_run(cx.fleet_root, "up", env) as pulled, applymod.box_guard():
+    written = applymod.Written()
+    with (
+        fleetsync.write_run(cx.fleet_root, "up", env) as pulled,
+        applymod.box_guard(),
+        applymod.unwind_on_error(written),
+    ):
         return _apply_remove(
             cx,
             plan_id,
@@ -706,6 +711,7 @@ def apply_remove(
             pulled=pulled.to_dict() if pulled else None,
             take_over=take_over,
             allow_dirty=allow_dirty,
+            written=written,
         )
 
 
@@ -724,9 +730,11 @@ def _apply_remove(
     pulled: dict[str, Any] | None,
     take_over: bool = False,
     allow_dirty: bool = False,
+    written: Any = None,
 ) -> dict[str, Any]:
     from bay_cli import apply as applymod
 
+    written = written or applymod.Written()
     moved = applymod._migrate_layout(cx, say)
     saved = planmod.load_saved(cx, plan_id)
     rm0 = saved.get("remove")
@@ -754,6 +762,19 @@ def _apply_remove(
 
     # 2. the lock: every env it removes is pending.
     head_before = gitrepo.head(cx.fleet_root)
+    approval_path = planmod.approval_file(cx, plan["plan_id"])
+    again = f"bay --fleet {shlex.quote(str(cx.fleet_root))} remove {name}" + (
+        "" if rm["scope"] == "project" else " " + " ".join(f"--env {r['env']}" for r in rows)
+    )
+    written.begin(
+        cx.fleet_root,
+        head_before,
+        restore=[cx.fleet_root / GENERATED_SERVICES] + ([proj.lock_file] if lock_exists else []),
+        plan_file=planmod.plan_file(cx, plan["plan_id"]),
+        prior_plan=prior,
+        unstage=[approval_path] if approval_path.is_file() else [],
+        again=again,
+    )
     lock = copy.deepcopy(proj.lock)
     if lock_exists:
         if rm.get("commit"):
@@ -765,8 +786,7 @@ def _apply_remove(
                 {
                     "result": "pending",
                     "plan_id": plan["plan_id"],
-                    "claimed_by": fleetsync.hostname(),
-                    "claimed_at": fleetsync.now_iso(),
+                    **fleetsync.claim_fields(),
                 }
             )
             envs[row["env"]] = record
@@ -798,6 +818,7 @@ def _apply_remove(
             )
         except gitrepo.GitError as exc:
             raise BayError(f"cannot commit the fleet repo: {exc}") from None
+        written.commit = fleet_commit
         say(f"fleet commit {fleet_commit}")
         applymod._claim(
             cx,
@@ -811,8 +832,8 @@ def _apply_remove(
             action="up",
             say=say,
             # The remove plan is stale once the fleet moved: plan it again.
-            again=f"bay --fleet {shlex.quote(str(cx.fleet_root))} remove {name}"
-            + ("" if whole else " " + " ".join(f"--env {r['env']}" for r in rows)),
+            again=again,
+            written=written,
         )
         for target in box_envs:
             try:

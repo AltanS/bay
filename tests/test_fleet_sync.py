@@ -6,11 +6,14 @@ the fake box of test_plan_up. No network, no SSH, no Ansible.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import shutil
 import signal
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +40,7 @@ from bay_cli import fleetsync, gitrepo, lockfile  # noqa: E402
 from bay_cli import plan as planmod  # noqa: E402
 from bay_cli.commands import ops  # noqa: E402
 from bay_cli.context import Context  # noqa: E402
+from bay_cli.errors import BayError  # noqa: E402
 from bay_cli.fleet import GENERATED_SERVICES  # noqa: E402
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -71,6 +75,21 @@ def proj_at(fleet: Path, name: str, app: Path) -> planmod.ProjectRef:
 
 def up_at(m: dict[str, Path], which: str, name: str, **kw: Any) -> dict[str, Any]:
     return applymod.up(proj_at(m[which], name, m["app"]), planmod.PlanOptions(), **kw)
+
+
+@contextlib.contextmanager
+def as_machine(name: str) -> Iterator[None]:
+    """Run the body as another machine: its own host name.
+
+    The tests run both machines in one process, so a claim of machine A has the
+    pid of the test. Machine B on another host must not take it for its own.
+    """
+    real = fleetsync.hostname
+    fleetsync.hostname = lambda: name  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        fleetsync.hostname = real  # type: ignore[assignment]
 
 
 def services_of(fleet: Path) -> dict[str, Any]:
@@ -406,6 +425,7 @@ def test_show_says_deploying_then_half() -> None:
 
 _HOLDER = """
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 from bay_cli import fleetsync
 with fleetsync.run_lock(Path(sys.argv[1]), "up", "production"):
@@ -1038,15 +1058,16 @@ def test_b_cannot_deploy_while_a_claim_is_in_flight(
 
     def a_deploy(cx: Context, box_env: str, **kw: Any) -> None:
         # A's claim is on the remote; A has not touched the box yet.
-        with pytest.raises(applymod.Refused) as err:
-            up_at(m, "b", "status")
-        seen["refused"] = err.value
-        seen["plan"] = cli(
-            {"fleet": m["b"], "app": m["app"]}, "plan", "--project", "status", "--json"
-        )
-        seen["up"] = cli(
-            {"fleet": m["b"], "app": m["app"]}, "up", "--project", "status", "--json"
-        )
+        with as_machine("machine-b"):
+            with pytest.raises(applymod.Refused) as err:
+                up_at(m, "b", "status")
+            seen["refused"] = err.value
+            seen["plan"] = cli(
+                {"fleet": m["b"], "app": m["app"]}, "plan", "--project", "status", "--json"
+            )
+            seen["up"] = cli(
+                {"fleet": m["b"], "app": m["app"]}, "up", "--project", "status", "--json"
+            )
         box.deploy(cx, box_env, **kw)
 
     a = up_at(m, "a", "webapp", deploy=a_deploy)
@@ -1084,7 +1105,8 @@ def test_take_over_deploys_and_is_recorded(machines: dict[str, Path], box: FakeB
     seen: dict[str, Any] = {}
 
     def a_deploy(cx: Context, box_env: str, **kw: Any) -> None:
-        seen["b"] = up_at(m, "b", "status", take_over=True)
+        with as_machine("machine-b"):
+            seen["b"] = up_at(m, "b", "status", take_over=True)
 
     # A's own deployer never ran the playbook, so no receipt is from A's deploy.
     with pytest.raises(applymod.DeployFailed):
@@ -1222,3 +1244,402 @@ def test_a_failed_remove_is_deploy_failed_and_says_so(
     said = result.output + (result.stderr if result.stderr_bytes is not None else "")
     assert "DEPLOY FAILED, but the receipt is not on the remote" in said
     assert "DEPLOYED, but" not in said
+
+
+# ── review 3, A: an error before the fleet commit leaves the tree as it was ──
+
+
+def test_a_failed_fleet_commit_puts_back_what_the_run_wrote(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    (m["a"] / "notes.txt").write_text("another session's work\n")  # an untracked file
+    before = snapshot(m["a"])
+    real = gitrepo.commit_paths
+    calls: list[int] = []
+
+    def flaky(repo: Path, paths: list[Path], message: str) -> str:
+        if not calls:
+            calls.append(1)
+            raise gitrepo.GitError("Unable to create '.git/index.lock': File exists.")
+        return real(repo, paths, message)
+
+    monkeypatch.setattr(gitrepo, "commit_paths", flaky)
+    with pytest.raises(BayError) as err:
+        up_at(m, "a", "webapp", allow_dirty=True)
+    assert "cannot commit the fleet repo" in str(err.value)
+    assert snapshot(m["a"]) == before  # the plan record is gone, the locks are back
+    assert box.deploys == []
+    # The retry is not blocked by the leftover of the failed run.
+    result = up_at(m, "a", "webapp", allow_dirty=True)
+    assert result["result"] == "ok"
+
+
+def test_ctrl_c_before_the_claim_push_undoes_the_commit(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    m = machines
+    before = snapshot(m["a"])
+
+    def interrupted(repo: Path) -> tuple[bool, str | None]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(fleetsync, "push_upstream", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        up_at(m, "a", "webapp")
+    assert snapshot(m["a"]) == before
+    assert "STOPPED before the box was touched (interrupted)" in capsys.readouterr().err
+    assert box.deploys == []
+
+
+def test_ctrl_c_after_the_claim_says_what_the_remote_holds(
+    machines: dict[str, Path], box: FakeBox, capsys: pytest.CaptureFixture[str]
+) -> None:
+    m = machines
+
+    def interrupted(cx: Context, box_env: str, **kw: Any) -> None:
+        raise KeyboardInterrupt
+
+    # An injected deployer counts as the playbook start, so stop just before it.
+    real_run = applymod.run_deployer
+
+    def stop_before(deployer: Any, cx: Context, target: str, **kw: Any) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(applymod, "run_deployer", stop_before)
+        with pytest.raises(KeyboardInterrupt):
+            up_at(m, "a", "webapp", deploy=interrupted)
+    assert real_run is not None
+    err = capsys.readouterr().err
+    assert "STOPPED AFTER THE CLAIM (interrupted)" in err
+    assert "it repairs this host's own stopped run" in err
+    remote_lock = git(m["a"], "show", "@{u}:projects/webapp/bay.lock")
+    assert '"result": "pending"' in remote_lock
+    record = lock_at(m["a"], "webapp")["envs"]["production"]
+    assert record["claimed_pid"] == os.getpid()
+
+
+def _dead_pid() -> int:
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    return proc.pid
+
+
+def test_a_retry_after_a_crash_on_this_host_goes_through(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    """The reviewer's sequence: the run dies after its claim; the next run needs no flag."""
+    m = machines
+
+    class Crash(BaseException):
+        pass
+
+    def crash(cx: Context, box_env: str, **kw: Any) -> None:
+        raise Crash()
+
+    with pytest.raises(Crash):
+        up_at(m, "a", "webapp", deploy=crash)
+    raw = lock_at(m["a"], "webapp")
+    record = raw["envs"]["production"]
+    assert record["result"] == "pending" and record["claimed_by"] == fleetsync.hostname()
+    # The crashed run was another process: its pid is gone now.
+    record["claimed_pid"] = _dead_pid()
+    lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
+    commit_all(m["a"], "the crashed run's claim")
+    git(m["a"], "push", "-q")
+    plan = planmod.make_plan(proj_at(m["a"], "webapp", m["app"]), planmod.PlanOptions())
+    assert plan["holder"] is None and plan["reason"] is None
+    assert any("repairs this host's own stopped run" in n for n in plan["notes"])
+    result = up_at(m, "a", "webapp")
+    assert result["result"] == "ok"
+    # A live process of another run on this host still blocks.
+    raw = lock_at(m["a"], "webapp")
+    raw["envs"]["production"].update(
+        {"result": "pending", "plan_id": "0" * 12, **fleetsync.claim_fields()}
+    )
+    sleeper = subprocess.Popen(["sleep", "30"])
+    try:
+        raw["envs"]["production"]["claimed_pid"] = sleeper.pid
+        lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
+        commit_all(m["a"], "a live run on this host")
+        git(m["a"], "push", "-q")
+        plan = planmod.make_plan(proj_at(m["a"], "status", m["app"]), planmod.PlanOptions())
+        assert plan["reason"] == "env_busy"
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+# ── review 3, I: --allow-dirty never covers the files only Bay writes ───────
+
+
+@pytest.mark.parametrize("path", ["group_vars/all/services.yml", "projects/webapp/bay.lock"])
+def test_a_hand_edit_in_a_bay_file_refuses_even_with_allow_dirty(
+    machines: dict[str, Path], box: FakeBox, playbooks: list[tuple[str, str]], path: str
+) -> None:
+    m = machines
+    up_at(m, "a", "webapp")
+    target = m["a"] / path
+    # A hand edit that still parses (a lock must stay valid JSON to be planned).
+    edit = "\n# a hand edit\n" if path.endswith(".yml") else "\n"
+    target.write_text(target.read_text() + edit)
+
+    def without_plans(snap: dict[str, Any]) -> dict[str, Any]:
+        # A refused plan keeps its record under plans/, as every refused plan does.
+        files = {k: v for k, v in snap["files"].items() if not k.startswith("plans/")}
+        status = "\n".join(
+            line for line in snap["status"].splitlines() if not line[3:].startswith("plans/")
+        )
+        return {**snap, "files": files, "status": status}
+
+    before = without_plans(snapshot(m["a"]))
+    for flags in ({}, {"allow_dirty": True}):
+        with pytest.raises(applymod.Refused) as err:
+            up_at(m, "a", "webapp", **flags)
+        assert err.value.reason == "dirty" and err.value.exit_code == 41
+        text = str(err.value)
+        assert "only Bay writes" in text and path in text
+        assert f"git checkout -- {path}" in text
+    assert without_plans(snapshot(m["a"])) == before  # the hand edit is still there
+    # bay deploy --allow-dirty refuses it too.
+    deployed = _op(m, "deploy", "--allow-dirty")
+    assert getattr(deployed.exception, "reason", None) == "dirty", deployed.output
+    assert "only Bay writes" in str(deployed.exception)
+    assert playbooks == []
+
+
+# ── review 3, G: a status probe cannot make a starting run busy ─────────────
+
+
+def test_the_run_lock_waits_out_a_status_probe(machines: dict[str, Path]) -> None:
+    import fcntl
+    import threading
+
+    m = machines
+    with fleetsync.run_lock(m["a"], "up", "production"):
+        pass
+    lock_path, _ = fleetsync._lock_paths(m["a"])  # type: ignore[misc]
+    fd = os.open(lock_path, os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)  # what lock_holder holds for a moment
+    timer = threading.Timer(0.3, lambda: (fcntl.flock(fd, fcntl.LOCK_UN), os.close(fd)))
+    timer.start()
+    try:
+        with fleetsync.run_lock(m["a"], "up", "production") as info:
+            assert info is not None and info["pid"] == os.getpid()
+    finally:
+        timer.join()
+
+
+def test_a_run_lock_held_longer_than_the_wait_is_busy(
+    machines: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    m = machines
+    monkeypatch.setattr(fleetsync, "LOCK_WAIT_SECONDS", 0.2)
+    with fleetsync.run_lock(m["a"], "up", "production"):
+        pass
+    lock_path, _ = fleetsync._lock_paths(m["a"])  # type: ignore[misc]
+    fd = os.open(lock_path, os.O_RDONLY)
+    fcntl.flock(fd, fcntl.LOCK_SH)
+    try:
+        with pytest.raises(fleetsync.SyncError) as err:
+            with fleetsync.run_lock(m["a"], "up", "production"):
+                pass
+        assert err.value.reason == "fleet_busy"
+    finally:
+        os.close(fd)
+
+
+# ── review 3, H: a claim from a clock that is ahead ─────────────────────────
+
+
+def test_a_claim_in_the_future_blocks_until_it_expires_and_says_the_clocks_differ(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    from datetime import UTC, datetime, timedelta
+
+    m = machines
+    up_at(m, "a", "webapp")
+    raw = lock_at(m["a"], "webapp")
+    ahead = datetime.now(UTC) + timedelta(minutes=45)
+    raw["envs"]["production"].update(
+        {"result": "pending", "claimed_by": "machine-z",
+         "claimed_at": ahead.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    )
+    lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
+    commit_all(m["a"], "a claim from a clock 45 min ahead")
+    git(m["a"], "push", "-q")
+    plan = planmod.make_plan(proj_at(m["a"], "status", m["app"]), planmod.PlanOptions())
+    assert plan["reason"] == "env_busy"
+    holder = plan["holder"]
+    assert holder["expires_at"] == (ahead + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    assert holder["clock_ahead_seconds"] > 44 * 60
+    message = next(b for b in plan["blockers"] if "is deploying" in b)
+    assert "the clocks of this machine and machine-z differ" in message
+    # Past that point it no longer blocks.
+    later = ahead + timedelta(minutes=31)
+    assert planmod.foreign_claim(
+        Context.for_fleet_root(m["a"]), {"production"}, "x" * 12, now=later
+    ) is None
+
+
+# ── review 3, E: a git failure in the push step keeps the result ────────────
+
+
+def _git_breaks_on_push(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(repo: Path, **_: Any) -> Any:
+        raise fleetsync.SyncError(
+            "git status failed: fatal: bad config line 3", reason="git_failed"
+        )
+
+    monkeypatch.setattr(fleetsync, "push_with_rebase", broken)
+
+
+def test_a_git_failure_after_an_ok_deploy_is_receipt_unpushed(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    _git_breaks_on_push(monkeypatch)
+    result = cli({"fleet": m["a"], "app": m["app"]}, "up", "--json")
+    assert result.exit_code == 44, result.output
+    doc = json.loads(result.stdout)
+    assert doc["result"] == "ok" and doc["reason"] == "receipt_unpushed"
+    assert doc["pushed"] is False and "bad config line 3" in doc["push_error"]
+    assert doc["box_touched"] is True and doc["next"] == "bay fleet push"
+
+
+def test_a_git_failure_after_a_failed_deploy_keeps_deploy_failed(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    _git_breaks_on_push(monkeypatch)
+    box.fail = True
+    result = cli({"fleet": m["a"], "app": m["app"]}, "up", "--json")
+    assert result.exit_code == 1, result.output
+    doc = json.loads(result.stdout)
+    assert doc["result"] == "failed" and doc["reason"] == "deploy_failed"
+    assert "bad config line 3" in doc["push_error"]
+
+
+# ── review 3, F: a receipt that cannot be read is not a missing receipt ─────
+
+
+def test_an_unreadable_receipt_is_tried_again(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    monkeypatch.setattr(applymod, "RECEIPT_READ_PAUSE", 0)
+    real = box.read
+    calls: list[int] = []
+
+    def flaky(cx: Context, box_env: str) -> list[dict[str, Any]]:
+        if not box.deploys:  # the plan's own read
+            return real(cx, box_env)
+        calls.append(1)
+        if len(calls) < 3:
+            return [{"env": box_env, "box": "192.0.2.11", "receipt": None,
+                     "error": "unreachable: ssh timed out"}]
+        return real(cx, box_env)
+
+    monkeypatch.setattr(planmod, "default_receipt_reader", flaky)
+    result = up_at(m, "a", "webapp")
+    assert result["result"] == "ok" and len(calls) == 3
+    assert result["receipt_unread"] == []
+
+
+def test_a_receipt_that_stays_unreadable_says_the_deploy_ran(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    monkeypatch.setattr(applymod, "RECEIPT_READ_PAUSE", 0)
+    calls: list[int] = []
+
+    def never(cx: Context, box_env: str) -> list[dict[str, Any]]:
+        if box.deploys:  # not the plan's own read
+            calls.append(1)
+        return [{"env": box_env, "box": "192.0.2.11", "receipt": None,
+                 "error": "unreachable: ssh timed out"}]
+
+    monkeypatch.setattr(planmod, "default_receipt_reader", never)
+    result = cli({"fleet": m["a"], "app": m["app"]}, "up", "--json")
+    assert result.exit_code == 1, result.output
+    doc = json.loads(result.stdout)
+    assert len(calls) == applymod.RECEIPT_READ_TRIES
+    assert doc["result"] == "failed" and doc["reason"] == "deploy_failed"
+    assert doc["error"].startswith("the deploy ran, but the receipt of box box-1")
+    assert doc["receipt_unread"] == [
+        {"box": "box-1", "host": "192.0.2.11", "error": "unreachable: ssh timed out"}
+    ]
+    assert doc["next"].endswith("up production --project webapp")
+    assert box.deploys == ["production"]
+    assert lock_at(m["a"], "webapp")["envs"]["production"]["result"] == "failed"
+
+
+# ── review 3, J: no fleet or several, with --json, is a JSON document ───────
+
+
+def _two_fleets(tmp_path: Path) -> Path:
+    for name in ("alpha", "beta"):
+        (tmp_path / "many" / name).mkdir(parents=True)
+        (tmp_path / "many" / name / "bay.fleet.toml").write_text(f'name = "{name}"\n')
+    return tmp_path / "many"
+
+
+@pytest.mark.parametrize("argv", [["status", "--json"], ["fleet", "status", "--json"],
+                                  ["up", "--json"], ["plan", "--json"]])
+def test_several_fleets_with_json_is_a_json_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    from bay_cli import cli as climod
+
+    monkeypatch.chdir(_two_fleets(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["bay", *argv])
+    with pytest.raises(SystemExit) as done:
+        climod._main()
+    assert done.value.code != 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["reason"] == "fleet_ambiguous"
+    assert [Path(c).name for c in doc["candidates"]] == ["alpha", "beta"]
+    assert doc["error"].startswith("more than one fleet lives in ")
+
+
+@pytest.mark.parametrize("argv", [["status", "--json"], ["up", "--json"]])
+def test_no_fleet_with_json_is_a_json_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+) -> None:
+    from bay_cli import cli as climod
+
+    empty = tmp_path / "work" / "empty"
+    empty.mkdir(parents=True)
+    monkeypatch.chdir(empty)
+    monkeypatch.setattr(sys, "argv", ["bay", *argv])
+    with pytest.raises(SystemExit):
+        climod._main()
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["reason"] == "no_fleet" and doc["candidates"] == []
+
+
+def test_a_failed_fleet_commit_of_a_remove_puts_back_what_it_wrote(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    w = {"fleet": m["a"], "app": m["app"]}
+    up_at(m, "a", "webapp")
+    plan = json.loads(cli(w, "remove", "webapp", "--json").stdout)
+    assert cli(w, "approve", plan["plan_id"], "--reason", "retired").exit_code == 0
+    before = snapshot(m["a"])
+
+    def broken(repo: Path, paths: list[Path], message: str) -> str:
+        raise gitrepo.GitError("Unable to create '.git/index.lock': File exists.")
+
+    monkeypatch.setattr(gitrepo, "commit_paths", broken)
+    result = cli(w, "up", "production", "--plan-id", plan["plan_id"], "--json")
+    assert result.exit_code != 0
+    assert json.loads(result.stdout)["box_touched"] is False
+    assert snapshot(m["a"]) == before
+    assert box.deploys == ["production"]  # only the first up

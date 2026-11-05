@@ -9,7 +9,7 @@ from bay_cli.commands import fleet_sync_cmd
 from bay_cli.commands import compile_cmd, fleet_cmd, import_cmd, project_cmd, remove_cmd, route_cmd, self_cmd, skill_cmd, toml_cmd
 from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault
 from bay_cli.context import GlobalOptions, package_root
-from bay_cli.errors import BayError
+from bay_cli.errors import BayError, FleetSelectionError
 
 app = typer.Typer(
     name="bay",
@@ -209,6 +209,21 @@ def _main() -> None:
 
     try:
         app()
+    except FleetSelectionError as e:
+        # No fleet, or several: a verb run with --json still gets one JSON document.
+        args = sys.argv[1:]
+        if "--json" in (args[: args.index("--")] if "--" in args else args):
+            import json
+
+            print(json.dumps(e.json_doc(), indent=2))
+            sys.exit(e.exit_code)
+        if console.is_json_mode():
+            console.emit_error([e.to_dict()])
+        else:
+            console.error(str(e))
+            if e.hint:
+                console.info(f"Hint: {e.hint}")
+        sys.exit(e.exit_code)
     except BayError as e:
         if console.is_json_mode():
             console.emit_error([e.to_dict()])

@@ -44,7 +44,12 @@ from bay_cli.context import (
     context_from,
     fleet_dir_above,
 )
-from bay_cli.errors import BayError
+from bay_cli.errors import (
+    REASON_FLEET_AMBIGUOUS,
+    REASON_NO_FLEET,
+    BayError,
+    FleetSelectionError,
+)
 
 _ProjectOpt = Annotated[
     str | None,
@@ -144,8 +149,9 @@ def fleet_context(
         nearby = Context._from_nearby_folders()
         if nearby is not None:
             return nearby
-    raise BayError(
+    raise FleetSelectionError(
         "no fleet found",
+        reason=REASON_NO_FLEET,
         hint="Run inside an app repo whose bay.toml names its fleet, pass --fleet <path> "
         "before the verb, or set BAY_FLEET_NAME.",
     )
@@ -188,9 +194,12 @@ def whole_env_fleet(
         return None
     try:
         cx = fleet_context(ctx, None, allow_cwd=True)
-    except BayError:
-        raise BayError(
+    except FleetSelectionError as exc:
+        if exc.reason == REASON_FLEET_AMBIGUOUS:
+            raise  # name the fleets it found
+        raise FleetSelectionError(
             "no bay.toml here or above, and no fleet",
+            reason=REASON_NO_FLEET,
             hint="Run inside the app repo, pass --project <name>, or pass --fleet <path> "
             "(or stand in the fleet directory) to plan the whole environment.",
         ) from None
@@ -261,6 +270,8 @@ def routed_output(as_json: bool, log: Path | None) -> Iterator[Callable[[str], N
 
 def _json_error(exc: BayError, extra: dict[str, Any] | None = None) -> None:
     doc: dict[str, Any] = {"error": str(exc), "hint": exc.hint, "code": exc.code.value}
+    if isinstance(exc, FleetSelectionError):
+        doc.update(exc.json_doc())
     if extra is not None:
         doc.update(extra)
     _echo_json(doc)
