@@ -8,7 +8,7 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
-## [2.12.1] - 2026-11-05
+## [2.12.1] - 2026-11-06
 
 A push now builds every service of a `bay.toml`, and a remote build that `bay up` adds can clone its repo.
 
