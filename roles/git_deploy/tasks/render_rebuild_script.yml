@@ -45,3 +45,40 @@
         dest: "{{ stack_dir }}/bin/rebuild.sh"
         owner: "{{ app_user }}"
         mode: "0700"
+
+    # The git credential helper of each remote-strategy build, on the build
+    # server. rebuild.sh clones and fetches a remote build's repo with
+    # GIT_ASKPASS={{ git_deploy_remote_build_dir }}/.git-askpass-<service>.
+    # remote_build.yml writes that helper, but only under [build, git_deploy],
+    # so a remote build that `bay up` (deploy_stack only) adds got its path
+    # unit and its rebuild.sh block and no helper: its first clone failed
+    # with exit 128. Same file, owner and mode as remote_build.yml, which
+    # still renders it on a full deploy (same content, no change).
+    - name: Ensure the remote build directory exists (build server)
+      ansible.builtin.file:
+        path: "{{ git_deploy_remote_build_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        # 0755, same as "Ensure remote build directory exists" in main.yml.
+        mode: "0755"
+      when:
+        - _is_build_server | bool
+        - _global_remote_build_services | default([]) | length > 0
+      become: true
+      become_user: "{{ app_user }}"
+
+    - name: Install the git credential helper of each remote build (build server)
+      ansible.builtin.template:
+        src: git-askpass.sh.j2
+        dest: "{{ git_deploy_remote_build_dir }}/.git-askpass-{{ item }}"
+        owner: "{{ app_user }}"
+        mode: "0700"
+      vars:
+        _askpass_token: "{{ services[item].build.token }}"
+      loop: "{{ _global_remote_build_services | default([]) }}"
+      when:
+        - _is_build_server | bool
+        - services[item].build.token is defined
+      become: true
+      become_user: "{{ app_user }}"
+      no_log: true

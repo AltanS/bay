@@ -412,3 +412,154 @@ def test_pinned_host_keys_are_installed_outside_the_local_build_block():
 
     build_dir = [d for d, n in names(tasks) if n == "Ensure build directory exists"]
     assert build_dir == [1], "the build directory must be created at the same level"
+
+
+# ── `bay up` (deploy_stack only) installs the remote helper too ──────────
+#
+# remote_build.yml renders `.git-askpass-<service>` on the build server, but
+# only under [build, git_deploy]. A remote build that `bay up` added got its
+# trigger unit and its rebuild.sh block and no helper, so its first clone in
+# rebuild.sh failed with exit 128.
+
+
+def _walk_tasks(tasks):
+    for task in tasks or []:
+        yield task
+        for key in ("block", "rescue", "always"):
+            yield from _walk_tasks(task.get(key) or [])
+
+
+def _tag_list(value):
+    if value is None:
+        return []
+    return [value] if isinstance(value, str) else list(value)
+
+
+def _deploy_stack_task_files() -> list[str]:
+    """The task files main.yml includes with deploy_stack in tags AND apply.tags."""
+    main = yaml.safe_load((_GIT_DEPLOY / "tasks" / "main.yml").read_text())
+    out = []
+    for task in main:
+        inc = task.get("ansible.builtin.include_tasks")
+        if not isinstance(inc, dict):
+            continue
+        apply_tags = _tag_list((inc.get("apply") or {}).get("tags"))
+        if "deploy_stack" in _tag_list(task.get("tags")) and "deploy_stack" in apply_tags:
+            out.append(inc["file"])
+    return out
+
+
+def _remote_askpass_tasks_under_deploy_stack() -> list[dict]:
+    found = []
+    for name in _deploy_stack_task_files():
+        tasks = yaml.safe_load((_GIT_DEPLOY / "tasks" / name).read_text())
+        for task in _walk_tasks(tasks):
+            tmpl = task.get("ansible.builtin.template") or {}
+            if tmpl.get("src") == "git-askpass.sh.j2" and str(tmpl.get("dest", "")).startswith(
+                "{{ git_deploy_remote_build_dir }}/.git-askpass-"
+            ):
+                found.append(task)
+    return found
+
+
+def test_remote_askpass_is_rendered_under_deploy_stack():
+    """Every remote `.git-askpass-` path rebuild.sh uses has a deploy_stack task."""
+    rendered = _render_rebuild_sh(
+        _remote_service_with_sentinel(), ["animals"], git_deploy_services=["animals"]
+    )
+    import re
+
+    used = set(re.findall(r"/opt/[^/]+/push-builds/\.git-askpass-[A-Za-z0-9_.-]+", rendered))
+    assert {p.rsplit("/", 1)[1] for p in used} == {".git-askpass-animals"}
+    (task,) = _remote_askpass_tasks_under_deploy_stack()
+    env = make_ansible_env(_GIT_DEPLOY / "templates")
+    for path in used:
+        prefix, svc = path.rsplit("/.git-askpass-", 1)
+        dest = env.from_string(task["ansible.builtin.template"]["dest"]).render(
+            git_deploy_remote_build_dir=prefix, item=svc
+        )
+        assert dest == path
+    assert task["loop"] == "{{ _global_remote_build_services | default([]) }}"
+    when = [str(w) for w in _tag_list(task.get("when"))]
+    assert "_is_build_server | bool" in when
+    assert "services[item].build.token is defined" in when
+
+
+def test_remote_askpass_under_deploy_stack_is_private():
+    (task,) = _remote_askpass_tasks_under_deploy_stack()
+    assert task["ansible.builtin.template"]["mode"] == "0700"
+    assert task["ansible.builtin.template"]["owner"] == "{{ app_user }}"
+    assert task.get("no_log") is True
+    assert task.get("become_user") == "{{ app_user }}"
+    assert task["vars"]["_askpass_token"] == "{{ services[item].build.token }}"
+
+
+def _run_askpass_tasks(tmp_path: Path, *, build_server: bool) -> Path:
+    """Run the deploy_stack helper tasks on localhost, become stripped."""
+    import json
+    import os
+
+    tasks = yaml.safe_load((_GIT_DEPLOY / "tasks" / "render_rebuild_script.yml").read_text())
+    block = next(t for t in tasks if "block" in t)["block"]
+    wanted = [
+        t for t in block
+        if t["name"].startswith(("Ensure the remote build directory exists",
+                                 "Install the git credential helper of each remote build"))
+    ]
+    assert len(wanted) == 2
+    for task in wanted:
+        task.pop("become", None)
+        task.pop("become_user", None)
+        task["ansible.builtin.template" if "ansible.builtin.template" in task else "ansible.builtin.file"].pop(
+            "owner", None
+        )
+        # The template module needs a src it can find from the play.
+        if "ansible.builtin.template" in task:
+            task["ansible.builtin.template"]["src"] = str(_GIT_DEPLOY / "templates" / "git-askpass.sh.j2")
+    remote_dir = tmp_path / "push-builds"
+    extra = {
+        "app_user": "deploy",
+        "_is_build_server": build_server,
+        "_global_remote_build_services": ["animals", "plain"],
+        "git_deploy_remote_build_dir": str(remote_dir),
+        "services": {
+            "animals": {"build": {"repo": "git@github.com:acme/animals.git",
+                                  "token": _SENTINEL_PAT, "strategy": "remote"}},
+            "plain": {"build": {"repo": "git@github.com:acme/plain.git", "strategy": "remote"}},
+        },
+    }
+    (tmp_path / "vars.json").write_text(json.dumps(extra))
+    (tmp_path / "ansible.cfg").write_text("[defaults]\n")
+    (tmp_path / "play.yml").write_text(yaml.safe_dump([{
+        "hosts": "localhost", "connection": "local", "gather_facts": False, "tasks": wanted,
+    }]))
+    env = {
+        **os.environ,
+        "ANSIBLE_CONFIG": str(tmp_path / "ansible.cfg"),
+        "ANSIBLE_NOCOLOR": "1",
+        "ANSIBLE_LOCALHOST_WARNING": "0",
+        "ANSIBLE_INVENTORY_UNPARSED_WARNING": "0",
+    }
+    proc = subprocess.run(
+        [sys.executable, "-m", "ansible.cli.playbook", "-i", "localhost,",
+         "-e", f"@{tmp_path / 'vars.json'}", str(tmp_path / "play.yml")],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=180,
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _SENTINEL_PAT not in proc.stdout + proc.stderr, "no_log leaked the PAT"
+    return remote_dir
+
+
+def test_remote_askpass_written_only_for_services_with_a_token(tmp_path):
+    remote_dir = _run_askpass_tasks(tmp_path, build_server=True)
+    helper = remote_dir / ".git-askpass-animals"
+    assert helper.is_file()
+    assert oct(helper.stat().st_mode & 0o777) == "0o700"
+    assert _SENTINEL_PAT in helper.read_text()
+    assert not (remote_dir / ".git-askpass-plain").exists()
+    assert oct(remote_dir.stat().st_mode & 0o777) == "0o755"
+
+
+def test_remote_askpass_not_written_off_the_build_server(tmp_path):
+    remote_dir = _run_askpass_tasks(tmp_path, build_server=False)
+    assert not remote_dir.exists()
