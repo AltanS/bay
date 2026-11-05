@@ -682,6 +682,14 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
    - A deploy that fails or is refused in step 6 (for example by its own
      validation, before Ansible starts) is not a stop. Step 7 records it as
      `failed`, and nothing is undone.
+   - Ctrl-C after Ansible started undoes nothing. Bay prints
+     `INTERRUPTED DURING THE DEPLOY`: the box may be half deployed, the lock
+     stays pending, and the same command repairs the stopped run.
+   - These lines (the unwind, the STOPPED lines, the interrupt) always reach
+     the terminal's stderr, also with `--log`, and go to the log as well.
+     With `--json`, an interrupt also ends in one JSON document on stdout:
+     `reason: "interrupted"`, `box_touched` (true once Ansible started) and
+     `next` (the same command). The exit code is 130.
 6. Bay runs today's deploy for the box's environment, limited to
    `--tags deploy_stack` (the same work as `bay deploy <env> --tags deploy_stack`,
    and the same tag the box check of `bay plan` runs). The `git_deploy` role
@@ -870,10 +878,13 @@ in the result, so it never goes unseen.
 **No map, no per-box result.** The map is missing when the inventory cannot
 be read, when it has no host in the box env, or when a box of the box env
 maps to no host. Bay then never takes a host name for a box name. It uses the
-rule from before 2.12 for the whole box env: when every receipt from this
-deploy says `ok`, every box is `ok`, else every box is `failed`. One note
-says that per-box results were not available, and why. There is no other
-exit code and no other record state.
+rule from before 2.12 for the whole box env. With no receipt from this
+deploy, no box has a result: a project of the plan is `failed`, and any other
+project keeps its record. Else every box is `failed` when the run failed or
+a receipt from this deploy is not `ok`, and `ok` when the run did not fail
+and every receipt from this deploy says `ok`. One note says that per-box
+results were not available, and why. There is no other exit code and no
+other record state.
 
 - A project of the plan is `failed` when the run failed, when its box's
   receipt says `failed`, or when its box has no receipt from this deploy.
@@ -1674,7 +1685,10 @@ machine's pin. Bay closes that gap in three ways:
   machine, is then blocked with `reason: env_busy` (`bay up`, `bay rollback`
   and a remove exit 43). A plan checks every box env the run deploys, also
   the old box env of a move:
-  `machine-a is deploying production since 14:02 (plan a1b2c3d4e5f6). Wait for it. If that run is dead, the claim expires at 14:32, or pass --take-over.`
+  `machine-a is deploying production since 14:02 CET (plan a1b2c3d4e5f6). Wait for it. If that run is dead, the claim expires at 14:32 CET, or pass --take-over.`
+  The times are local, with their zone; the JSON holds UTC. The plan id is
+  the `plan_id` of the pending record that blocks (the claimer's plan, the
+  same as `holder.plan_id`). A record with no plan id gives no id in the text.
   `holder` in the plan JSON names the claim (`claimed_by`, `claimed_at`,
   `plan_id`, `expires_at`). A claim older than 30 minutes does not block. The
   blocker is not in the plan hash. `bay up --take-over` and
@@ -1687,11 +1701,17 @@ machine's pin. Bay closes that gap in three ways:
   text, so the record never holds the raw id. The pidns part is the pid
   namespace of the process (a container has its own). The start part is the
   start time of the process (field 22 of `/proc/<pid>/stat`), so a reused pid
-  does not look like the old run. A pending claim is dead only when the
-  machine and the pid namespace are the same as this run's, and the pid is
-  gone or has another start time (the run was killed, or Ctrl-C after its
-  claim). Then it does not block, and a plan note says that this run repairs
-  this host's own stopped run. `claimed_by` is never compared.
+  does not look like the old run. A pending claim is dead only when all of
+  these hold: `claimed_by` is this host name, the machine and the pid
+  namespace are the same as this run's, and the pid is gone or has another
+  start time (the run was killed, or Ctrl-C after its claim). Cloned
+  machines can share a machine id, and the first pid namespace has the same
+  number on every host, so the host name must match too. "Gone" means that
+  `/proc` has no entry and `kill(pid, 0)` says there is no such process: a
+  `/proc` mounted with `hidepid` hides the processes of other users. Then
+  the claim does not block. The plan notes, the `bay up` result notes and one
+  `REPAIRING: ...` line on stderr say that this run repairs this host's own
+  stopped run.
 - **When Bay cannot judge a claim, it blocks.** A claim of another machine,
   of another pid namespace, with an empty or unreadable `claimed_run`, or
   with no `claimed_run` (an older Bay) blocks until it expires, or until
