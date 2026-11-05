@@ -157,8 +157,9 @@ to reproduce it. The flags that change what a command *means*:
 
 ### Framework
 
-- `bay fleet` — Create, clone and list the fleets on this machine.
+- `bay fleet` — Create, clone, link and list the fleets on this machine.
 - `bay fleet init <name>` — Create a fleet at ~/.config/bay/fleets/<name>, or clone one with --from.
+- `bay fleet link [path]` — Link a fleet checkout into ~/.config/bay/fleets/<name>.
 - `bay fleet ls` — List the fleets in ~/.config/bay/fleets.
 - `bay self` — Show or change the Bay version installed on this machine.
 - `bay self update` — Move this machine to the newest Bay release, or to the tag given by --to.

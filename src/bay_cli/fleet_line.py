@@ -99,6 +99,7 @@ QUIET_VERBS: frozenset[str] = frozenset(
         "skill update",
         "skill uninstall",
         "fleet ls",
+        "fleet link",
         "secret missing",
         "route ls",
         "alerts list",

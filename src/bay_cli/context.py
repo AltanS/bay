@@ -351,7 +351,12 @@ def fleet_dir_for_name(name: str, *, hint: str | None = None) -> Path:
     if not candidate.is_dir():
         raise BayError(
             f"fleet '{name}' not found at {candidate}",
-            hint=hint or "Clone the fleet there, or pass --fleet <path>.",
+            hint=hint
+            or (
+                f"Clone it there (`bay fleet init {name} --from <url>`), "
+                "link a checkout that exists (`bay fleet link <path>`), "
+                "or pass --fleet <path>."
+            ),
         )
     return candidate
 

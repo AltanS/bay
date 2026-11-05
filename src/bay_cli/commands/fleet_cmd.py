@@ -1,13 +1,17 @@
-"""`bay fleet`: create, clone and list the fleets on this machine.
+"""`bay fleet`: create, clone, link and list the fleets on this machine.
 
-A fleet lives at ``~/.config/bay/fleets/<name>``. Every other command finds it
-with ``--fleet <path>``, ``BAY_FLEET=<path>`` or ``BAY_FLEET_NAME=<name>``.
+A fleet lives at ``~/.config/bay/fleets/<name>``, as a directory or as a link
+to a checkout made with ``bay fleet link``. Every other command finds it with
+``--fleet <path>``, ``BAY_FLEET=<path>`` or ``BAY_FLEET_NAME=<name>``. A
+command also finds the fleet you stand in.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 from typing import Annotated
 
@@ -18,7 +22,7 @@ from bay_cli.context import FLEET_ENV, FLEET_NAME_ENV, fleets_root
 from bay_cli.errors import BayError, ErrorCode
 from bay_cli.fleet import FLEET_FILE
 
-app = typer.Typer(help="Create, clone and list the fleets on this machine.", no_args_is_help=True)
+app = typer.Typer(help="Create, clone, link and list the fleets on this machine.", no_args_is_help=True)
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
@@ -145,6 +149,92 @@ def init(
         console.info(line)
 
 
+def _fleet_name_in(path: Path) -> str:
+    """``name`` of the ``bay.fleet.toml`` in ``path``. Raises BayError when there is none."""
+    fleet_file = path / FLEET_FILE
+    if not fleet_file.is_file():
+        raise BayError(
+            f"{path} is not a fleet: it has no {FLEET_FILE}",
+            hint="Pass the fleet folder, or cd into it and run `bay fleet link`.",
+            code=ErrorCode.VALIDATION_ERROR,
+        )
+    try:
+        name = tomllib.loads(fleet_file.read_text()).get("name")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise BayError(
+            f"cannot read {fleet_file}: {exc}", code=ErrorCode.VALIDATION_ERROR
+        ) from None
+    if not isinstance(name, str) or not name:
+        raise BayError(
+            f"{fleet_file} has no name",
+            hint='Add a line such as name = "myfleet" at the top of the file.',
+            code=ErrorCode.VALIDATION_ERROR,
+        )
+    return name
+
+
+@app.command("link")
+def link(
+    path: Annotated[
+        Path | None,
+        typer.Argument(help="The fleet folder. Default: the working directory."),
+    ] = None,
+) -> None:
+    """Link a fleet checkout into ~/.config/bay/fleets/<name>.
+
+    The name is the `name` in the bay.fleet.toml of the folder. The link points
+    to the real folder, so BAY_FLEET_NAME=<name> finds it. Bay never replaces an
+    entry that exists: remove it by hand first.
+
+    Examples:
+
+        bay fleet link ~/projects/my-fleet
+        cd ~/projects/my-fleet && bay fleet link
+    """
+    target = (path if path is not None else Path.cwd()).expanduser().resolve()
+    if not target.is_dir():
+        raise BayError(
+            f"{target} is not a directory",
+            hint="Pass the folder that holds bay.fleet.toml.",
+            code=ErrorCode.VALIDATION_ERROR,
+        )
+    name = _fleet_name_in(target)
+    _check_name(name)
+    entry = fleets_root() / name
+
+    already = False
+    if os.path.lexists(entry):
+        if entry.is_symlink() and entry.resolve() == target:
+            already = True
+        elif entry.is_symlink():
+            raise BayError(
+                f"fleet '{name}' is already linked to {entry.resolve()}, not {target}",
+                hint=f"Remove the link ({entry}) by hand if you want to move it.",
+                code=ErrorCode.CONFLICT,
+            )
+        else:
+            raise BayError(
+                f"fleet '{name}' already exists at {entry} and is not a link",
+                hint="Bay does not replace it. Move or remove that folder by hand first.",
+                code=ErrorCode.CONFLICT,
+            )
+    else:
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        entry.symlink_to(target, target_is_directory=True)
+
+    if console.is_json_mode():
+        console.emit_result(
+            {"name": name, "link": str(entry), "path": str(target), "already_linked": already},
+            command="fleet link",
+        )
+        return
+    if already:
+        console.success(f"Fleet '{name}' is already linked: {entry} -> {target}")
+        return
+    console.success(f"Linked fleet '{name}': {entry} -> {target}")
+    console.info(f"Pick it with: export {FLEET_NAME_ENV}={name}")
+
+
 @app.command("ls")
 def ls() -> None:
     """List the fleets in ~/.config/bay/fleets.
@@ -159,6 +249,8 @@ def ls() -> None:
         {
             "name": p.name,
             "path": str(p),
+            # Where a linked fleet really lives. None for a plain directory.
+            "real_path": str(p.resolve()) if p.is_symlink() else None,
             "has_fleet_file": (p / FLEET_FILE).is_file(),
         }
         for p in found
@@ -172,5 +264,6 @@ def ls() -> None:
         return
     for row in rows:
         mark = "" if row["has_fleet_file"] else f"  (no {FLEET_FILE})"
-        console.console.print(f"  {row['name']}  {row['path']}{mark}")
+        where = f"{row['path']} -> {row['real_path']}" if row["real_path"] else row["path"]
+        console.console.print(f"  {row['name']}  {where}{mark}")
 
