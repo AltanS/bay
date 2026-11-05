@@ -1532,6 +1532,30 @@ def test_a_dead_run_of_another_host_name_blocks(machines: dict[str, Path], box: 
     assert plan["reason"] == "env_busy" and plan["holder"]["claimed_by"] == "clone-b"
 
 
+@pytest.mark.parametrize("signal_says", ["permission", "alive"])
+def test_a_run_that_proc_hides_blocks(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch, signal_says: str
+) -> None:
+    """review 5, A2: hidepid hides another user's process from /proc; kill(pid, 0) still sees it."""
+    m = machines
+    up_at(m, "a", "webapp")
+    machine, ns, _, start = _my_parts()
+    hidden = _dead_pid()
+    _pending_with_run(m, f"{machine}:{ns}:{hidden}:{start}", "a hidden run")
+    real_start, real_kill = fleetsync.proc_start, os.kill
+
+    def kill(pid: int, sig: int) -> None:
+        if pid != hidden:
+            return real_kill(pid, sig)
+        if signal_says == "permission":
+            raise PermissionError(1, "Operation not permitted")
+        return None
+
+    monkeypatch.setattr(fleetsync, "proc_start", lambda pid: fleetsync.GONE if pid == hidden else real_start(pid))
+    monkeypatch.setattr(os, "kill", kill)
+    assert _plan_status(m)["reason"] == "env_busy"
+
+
 def test_a_machine_with_no_machine_id_writes_an_empty_run_and_never_judges(
     machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:

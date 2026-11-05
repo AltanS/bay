@@ -158,8 +158,9 @@ def claim_state(record: Any) -> str:
     Dead only when all hold: ``claimed_by`` is this host name (cloned machines
     can share a machine id, and the first pid namespace has the same inode on
     every host), the ``claimed_run`` machine and pid namespace are this
-    process's, and that pid is gone or its start time differs (a reused pid).
-    Anything Bay cannot judge is live:
+    process's, and that pid is gone (``/proc`` has no entry and ``kill(pid, 0)``
+    says no such process: ``hidepid`` hides the processes of other users) or
+    its start time differs (a reused pid). Anything Bay cannot judge is live:
     another machine or namespace, no ``claimed_run``, an empty or unparsable
     one, or a ``/proc`` that cannot be read.
     """
@@ -183,10 +184,21 @@ def claim_state(record: Any) -> str:
         return CLAIM_LIVE
     now_start = proc_start(pid)
     if now_start == GONE:
-        return CLAIM_DEAD
+        return CLAIM_DEAD if _no_such_process(pid) else CLAIM_LIVE
     if now_start is None:
         return CLAIM_LIVE
     return CLAIM_DEAD if now_start != start else CLAIM_LIVE
+
+
+def _no_such_process(pid: int) -> bool:
+    """True only when ``kill(pid, 0)`` raises ProcessLookupError (a denied signal is alive)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def fresh_claim(record: Any, now: datetime | None = None) -> bool:
