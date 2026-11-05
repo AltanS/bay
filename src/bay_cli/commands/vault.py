@@ -9,7 +9,7 @@ from typing import Optional
 import typer
 import yaml
 
-from bay_cli import ansible, console, runner
+from bay_cli import ansible, console
 from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError
 
@@ -98,10 +98,6 @@ def decrypt(
     ansible.vault_cmd("decrypt", _vault_file(cx, env, file), bay_dir=cx.framework_root)
 
 
-def _uv_run_cmd(bay_dir: Path) -> list[str]:
-    return ["uv", "run", "--project", str(bay_dir)]
-
-
 def _normalise_stdin_value(raw: str) -> str:
     """Normalise a value read from stdin.
 
@@ -186,8 +182,12 @@ def set_key(
 
     try:
         # Decrypt vault to temp file
-        runner.run(
-            [*_uv_run_cmd(bay_dir), "ansible-vault", "decrypt", str(vault_file), "--output", str(tmp_path)],
+        ansible.vault_cmd(
+            "decrypt",
+            str(vault_file),
+            bay_dir=bay_dir,
+            output=str(tmp_path),
+            capture=True,
             message=f"Decrypting vault for {env}...",
         )
 
@@ -199,8 +199,12 @@ def set_key(
         tmp_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False))
 
         # Re-encrypt back to original file
-        runner.run(
-            [*_uv_run_cmd(bay_dir), "ansible-vault", "encrypt", str(tmp_path), "--output", str(vault_file)],
+        ansible.vault_cmd(
+            "encrypt",
+            str(tmp_path),
+            bay_dir=bay_dir,
+            output=str(vault_file),
+            capture=True,
             message=f"Encrypting vault for {env}...",
         )
 

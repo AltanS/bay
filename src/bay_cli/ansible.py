@@ -340,10 +340,24 @@ def vault_cmd(
     vault_file: str,
     *,
     bay_dir: Path,
+    output: str | None = None,
+    capture: bool = False,
+    message: str = "",
 ) -> None:
-    """Run an ansible-vault command (interactive, streams live)."""
+    """Run an ansible-vault command for the bound fleet.
+
+    The command runs in the fleet folder with the fleet's environment, so
+    it finds the vault password from any working directory. By default it
+    is interactive and streams live. Pass ``output`` to write the result to
+    another file, and ``capture=True`` (with an optional ``message``) to
+    run it quietly behind a spinner.
+    """
+    cmd = [*_uv_run_cmd(bay_dir), "ansible-vault", action, vault_file]
+    if output is not None:
+        cmd += ["--output", output]
     runner.run(
-        [*_uv_run_cmd(bay_dir), "ansible-vault", action, vault_file],
-        capture=False,
+        cmd,
+        capture=capture,
+        message=message,
         env=_collections_env(bay_dir),
     )
