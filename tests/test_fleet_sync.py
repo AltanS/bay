@@ -1176,6 +1176,28 @@ def test_box_touched_is_false_when_validation_stops_the_deploy(
     assert err.value.result["reason"] == "deploy_failed"
 
 
+def test_a_validation_failure_in_the_deploy_step_is_not_a_stopped_claim(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """review 4, item 5: the receipt step records it; the unwind stays out."""
+    from types import SimpleNamespace
+
+    from bay_cli.commands import validate
+
+    m = machines
+    monkeypatch.setattr(applymod, "default_deploy", applymod._REAL_DEFAULT_DEPLOY)
+    monkeypatch.setattr(validate, "run_validation", lambda *a, **k: SimpleNamespace(total_issues=2))
+    monkeypatch.setattr(ops, "_run_playbook", lambda *a, **k: None)
+    with pytest.raises(applymod.DeployFailed):
+        up_at(m, "a", "webapp")
+    err = capsys.readouterr().err
+    assert "STOPPED AFTER THE CLAIM" not in err
+    assert "pending lock records" not in err
+    remote_lock = git(m["a"], "show", "@{u}:projects/webapp/bay.lock")
+    assert '"result": "failed"' in remote_lock
+
+
 def test_box_touched_is_true_for_a_failure_after_the_playbook_started(
     machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:

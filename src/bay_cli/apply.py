@@ -259,6 +259,9 @@ class Written:
     claim_started: bool = False
     claimed: bool = False
     again: str = "bay up"
+    #: Set when the deploy step is over (it ran, failed or was refused): from
+    #: then on the receipt step records the result, so nothing is unwound.
+    settled: bool = False
 
     def begin(
         self,
@@ -281,15 +284,23 @@ def unwind_on_error(written: Written) -> Iterator[None]:
     """Put the fleet back when the apply stops before Ansible started.
 
     Any error, also Ctrl-C (``KeyboardInterrupt``), after the first lock write
-    and before the playbook: :func:`unwind`. A refused claim did its own undo,
-    so it passes as it is.
+    and before the deploy step is over: :func:`unwind`. A refused claim did its
+    own undo, so it passes as it is. :class:`DeployFailed` and every error
+    after the deploy step (``written.settled``) pass too: the receipt step
+    records those itself (a deploy refused by its validation is ``failed``,
+    not a stopped claim).
     """
     try:
         yield
     except BaseException as exc:
-        if not touched() and written.root is not None:
-            if not (isinstance(exc, fleetsync.SyncError) and exc.undo_failed is not None):
-                unwind(written, exc)
+        if (
+            not touched()
+            and written.root is not None
+            and not written.settled
+            and not isinstance(exc, DeployFailed)
+            and not (isinstance(exc, fleetsync.SyncError) and exc.undo_failed is not None)
+        ):
+            unwind(written, exc)
         raise
 
 
@@ -926,6 +937,7 @@ def _apply_plan_steps(
                 if skipped:
                     say(f"not deployed after the failure: {', '.join(skipped)}")
                 break
+        written.settled = True
 
     # 6. receipt. After a deploy that exited 0, a receipt read that errors is tried
     # again (read_receipts_after): "cannot read" is not "no receipt from this deploy".
@@ -1337,6 +1349,7 @@ def _apply_route_steps(
             failure = str(exc) or type(exc).__name__
         except SystemExit as exc:
             failure = f"deploy exited with {exc.code}"
+        written.settled = True
 
     reader = read_receipts or planmod.default_receipt_reader
     entries: list[dict[str, Any]] = []

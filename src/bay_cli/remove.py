@@ -850,6 +850,7 @@ def _apply_remove(
                 if skipped:
                     say(f"not deployed after the failure: {', '.join(skipped)}")
                 break
+        written.settled = True
 
     # 6. the receipt decides.
     reader = read_receipts or planmod.default_receipt_reader
