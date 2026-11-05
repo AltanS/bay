@@ -194,20 +194,24 @@ The working rule:
 
 - Bay pulls for you. `bay plan`, `bay up`, `bay rollback`, `bay deploy` and
   `bay provision` fast-forward a fleet that is only behind its remote.
-- Commit and push a config change before you deploy it. `bay deploy` and
-  `bay provision` refuse uncommitted files (`--allow-dirty` overrides), and
-  push local commits before they run.
+- Commit and push a config change before you deploy it. `bay up`,
+  `bay rollback`, `bay deploy` and `bay provision` refuse uncommitted files
+  (`--allow-dirty` overrides). `bay deploy` and `bay provision` push local
+  commits before they run.
 - Bay refuses to deploy what is not on the remote. `bay up` pushes its fleet
   commit before the deploy, and stops before the box when the remote moved
-  (exit 42). Run it again: it pulls first.
+  (exit 42). Run it again: it pulls first. While one machine deploys a box
+  env, a plan for that box env on any machine is blocked (`env_busy`, exit 43
+  for `bay up`). Wait for it, or pass `--take-over` when that run is dead.
 - Never merge generated files by hand: not `services.yml`, not a `bay.lock`,
   not a vault file. When `bay fleet push` reports a conflict, it has undone
   the rebase. Re-run the Bay command that wrote the file.
 
 Several agent sessions on one machine share one clone. A second `bay up`,
 `bay rollback`, `bay deploy`, `bay provision`, `bay fleet pull` or
-`bay fleet push` on the same clone stops at once (exit 43) and names the run
-that holds it. `--offline` on `bay deploy` and `bay provision` skips the fetch
+`bay fleet push` on the same fleet stops at once (exit 43) and names the run
+that holds it. The lock is per fleet, so two fleets inside one bigger repo do
+not block each other. `--offline` on `bay deploy` and `bay provision` skips the fetch
 and the push, for a remote that is down. Run `bay fleet push` after it. A
 `bay deploy` still compiles the fleet, and stops when a pinned app commit is
 not in the local repo cache. The
