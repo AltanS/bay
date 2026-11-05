@@ -158,7 +158,8 @@ _OfflineOpt = typer.Option(
     False,
     "--offline",
     help="Do not fetch or push the fleet repo. The result is not on the remote: "
-    "run `bay fleet push` after it.",
+    "run `bay fleet push` after it. A deploy still compiles the fleet, and stops when "
+    "a pinned app commit is not in the local repo cache.",
 )
 _AllowDirtyOpt = typer.Option(
     False,

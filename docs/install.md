@@ -208,7 +208,9 @@ Several agent sessions on one machine share one clone. A second `bay up`,
 `bay rollback`, `bay deploy`, `bay provision`, `bay fleet pull` or
 `bay fleet push` on the same clone stops at once (exit 43) and names the run
 that holds it. `--offline` on `bay deploy` and `bay provision` skips the fetch
-and the push, for a remote that is down. Run `bay fleet push` after it. The
+and the push, for a remote that is down. Run `bay fleet push` after it. A
+`bay deploy` still compiles the fleet, and stops when a pinned app commit is
+not in the local repo cache. The
 full rules are in [plan.md](plan.md#several-machines-one-fleet).
 
 ## Pick a fleet

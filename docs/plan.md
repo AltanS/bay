@@ -1594,7 +1594,7 @@ they check the fleet first:
 | Diverged | Refuses (`diverged`, exit 41). |
 | Uncommitted files (tracked or untracked, `plans/` left out) | Refuses (`dirty`, exit 41) and lists up to 20 paths, unless `--allow-dirty`. The files would deploy, and no other machine can see them. Config files are the exception: `bay deploy` copies them from the committed fleet and the pinned project commits, also with `--allow-dirty`. |
 | Ahead | Pushes first (the claim). A refused push stops the run before the box (exit 42). |
-| `--offline` | No fetch and no push. Bay prints a warning: the result is not on the remote, so run `bay fleet push` after it. |
+| `--offline` | No fetch and no push. Bay prints a warning: the result is not on the remote, so run `bay fleet push` after it. A `bay deploy` still compiles the fleet for its config files, and stops when a pinned app commit is not in the local repo cache. |
 
 A fleet with no remote, or inside a bigger repo, gets the dirty check only.
 A dry run (`-- --check`) follows the same rules. No flag is named `--force`.
