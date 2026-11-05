@@ -309,6 +309,11 @@ def _raw(block: dict[str, Any] | None) -> dict[str, Any]:
             value = block[key]
             if key == "depends_on":
                 value = sorted(value)
+            if key == "build" and isinstance(value, dict) and "bay_project" in value:
+                # Written by the compile for a project with two own builds:
+                # only the webhook receiver reads it (sibling fan-out). An old
+                # YAML fleet has no such key, and it deploys nothing else.
+                value = {k: v for k, v in value.items() if k != "bay_project"}
             out[key] = value
     return out
 

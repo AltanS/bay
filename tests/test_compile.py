@@ -1626,3 +1626,107 @@ def test_compile_fixture_fleet_feeds_build_specs(fleet: Path, tmp_path: Path) ->
     assert lines["SHOP_DATABASE_URL"] == lines["DATABASE_URL"]
     assert lines["SESSION_SECRET"] == "pw-shop_session_secret"
     assert lines["WARMER_URL"] == "http://shop-warmer:9000"
+
+
+# ── bay_project: one push builds every service of an in-fleet project ───────
+
+
+def _gatus_with_echo(fleet: Path, *, shared: bool = False, echo: bool = True) -> None:
+    """In-fleet gatus builds from source; ``echo`` has its own build, ``admin`` shares gatus's."""
+    _gatus_builds_from_source(fleet, "https://github.com/acme/gatus.git")
+    path = fleet / GATUS
+    text = path.read_text()
+    if echo:
+        text += (
+            '\n[services.echo]\nbuild = { dockerfile = "Dockerfile.echo" }\n'
+            'port = 8081\ndomain = "echo.example.com"\n'
+        )
+    if shared:
+        text += '\n[services.admin]\nport = 8082\ndomain = "admin.example.com"\n'
+    path.write_text(text)
+
+
+def _builds(fleet: Path) -> dict[str, dict[str, Any]]:
+    s = yaml.safe_load(compiled(fleet).body())["services"]
+    return {n: e["build"] for n, e in s.items() if "build" in e}
+
+
+def test_bay_project_on_an_in_fleet_project_with_two_own_builds(fleet: Path) -> None:
+    _gatus_with_echo(fleet)
+    builds = _builds(fleet)
+    assert builds["gatus"]["bay_project"] == "gatus"
+    assert builds["gatus-echo"]["bay_project"] == "gatus"
+    assert "bay_toml_path" not in builds["gatus"] and "bay_toml_path" not in builds["gatus-echo"]
+
+
+def test_no_bay_project_for_one_build(fleet: Path) -> None:
+    _gatus_with_echo(fleet, echo=False)
+    assert "bay_project" not in _builds(fleet)["gatus"]
+
+
+def test_no_bay_project_for_an_app_repo_project(fleet: Path) -> None:
+    """shop has two own builds (shop, shop-api) and keeps bay_toml_path instead."""
+    builds = _builds(fleet)
+    for name in ("shop", "shop-api", "shop-staging"):
+        assert builds[name]["bay_toml_path"] == "bay.toml"
+        assert "bay_project" not in builds[name]
+
+
+def test_no_bay_project_on_a_shared_build(fleet: Path) -> None:
+    _gatus_with_echo(fleet, shared=True)
+    builds = _builds(fleet)
+    assert builds["gatus-admin"]["shared_from"] == "gatus"
+    assert "bay_project" not in builds["gatus-admin"]
+    assert builds["gatus"]["bay_project"] == builds["gatus-echo"]["bay_project"] == "gatus"
+    # One own build plus a shared one is not two own builds.
+    other = fleet.parent / "other"
+    shutil.copytree(FIXTURE, other)
+    _gatus_with_echo(other, shared=True, echo=False)
+    assert all("bay_project" not in b for b in _builds(other).values())
+
+
+def test_bay_project_passes_the_services_schema(fleet: Path) -> None:
+    import jsonschema
+
+    _gatus_with_echo(fleet)
+    schema = json.loads((ROOT / "src/bay_cli/schemas/services.schema.json").read_text())
+    jsonschema.validate(yaml.safe_load(compiled(fleet).body()), schema)
+
+
+def test_bay_project_is_not_build_identity_and_not_a_plan_change(fleet: Path) -> None:
+    sys.path.insert(0, str(ROOT / "filter_plugins"))
+    from bay_filters import _build_identity
+
+    from bay_cli import plan
+
+    _gatus_with_echo(fleet)
+    build = _builds(fleet)["gatus"]
+    bare = {k: v for k, v in build.items() if k != "bay_project"}
+    assert _build_identity(build) == _build_identity(bare)
+    assert plan._hold_only({"build": bare}, {"build": build})
+
+
+def test_in_fleet_project_render_lists_both_as_siblings(fleet: Path) -> None:
+    """Compile, then render the receiver config from the compiled services."""
+    from helpers import make_ansible_env
+
+    _gatus_with_echo(fleet)
+    services = yaml.safe_load(compiled(fleet).body())["services"]
+    env = make_ansible_env(ROOT / "roles" / "git_deploy" / "templates")
+    env.filters["to_nice_json"] = lambda o: json.dumps(o, indent=4, sort_keys=True)
+    env.filters["dict2items"] = lambda d: [{"key": k, "value": v} for k, v in d.items()]
+    config = json.loads(env.get_template("webhook-config.json.j2").render(
+        services=services, git_deploy_peer_webhook_urls={},
+    ))
+    assert config["gatus"]["siblings"] == ["gatus-echo"]
+    assert config["gatus-echo"]["siblings"] == ["gatus"]
+    # The app-repo project keeps its own rule: shop-api is a sibling of shop.
+    assert "shop-api" in config["shop"]["siblings"]
+
+
+def test_import_check_ignores_bay_project() -> None:
+    """An old YAML fleet has no bay_project; `bay import --check` must not report it."""
+    from bay_cli import roundtrip
+
+    build = {"repo": "https://github.com/acme/gatus.git", "branch": "main"}
+    assert roundtrip._raw({"build": {**build, "bay_project": "gatus"}}) == roundtrip._raw({"build": build})

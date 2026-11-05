@@ -491,7 +491,31 @@ class _Compiler:
         doc = unit.doc
         for service in ["web", *sorted(doc.get("services", {}))]:
             self._emit_container(unit, service)
+        self._project_key(unit)
         self._emit_jobs(unit)
+
+    def _project_key(self, unit: _Unit) -> None:
+        """``bay_project`` on the builds of a project with two or more own builds.
+
+        A push builds every service of one project: the webhook receiver
+        triggers the other services of the project too (bay_filters
+        ``bay_push_siblings``). It knows a project by ``bay_toml_path`` when
+        the bay.toml is in the app repo. A project in the fleet has no such
+        key (``_hold_keys``), so its builds get ``bay_project``, the project
+        name, instead. Only when the unit has two or more containers with
+        their own build (not ``shared_from``) and none of them has
+        ``bay_toml_path``, so every other fleet compiles byte-identically.
+        """
+        builds = []
+        for name in unit.containers.values():
+            entry = self.services.get(name) or self.accessories.get(name) or {}
+            build = entry.get("build")
+            if isinstance(build, dict) and not build.get("shared_from"):
+                builds.append(build)
+        if len(builds) < 2 or any(b.get("bay_toml_path") for b in builds):
+            return
+        for build in builds:
+            build["bay_project"] = unit.project.name
 
     def _emit_jobs(self, unit: _Unit) -> None:
         """``[[jobs]]`` -> ``jobs:``: one entry per job, keyed by its container name.

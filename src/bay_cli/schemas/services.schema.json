@@ -497,6 +497,11 @@
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true,
           "description": "The files the bay.toml mounts (from = ..., not fleet:), relative to the app repo root. A push that changes only these and bay_toml_path is config only: rebuild.sh neither builds nor deploys it; bay up does."
+        },
+        "bay_project": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Written by bay compile for a project whose bay.toml lives in the fleet and that has two or more containers with their own build. The webhook receiver builds every service with the same repo, branch and bay_project from one push (bay_push_siblings). Never next to bay_toml_path."
         }
       },
       "additionalProperties": false

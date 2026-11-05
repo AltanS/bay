@@ -1055,10 +1055,15 @@ def _changed_keys(old: Mapping[str, Any], new: Mapping[str, Any]) -> list[str]:
     return sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
 
 
-#: Build keys that only the build side reads (the hold guard, docs/plan.md).
-#: The container hash leaves the whole ``build`` table out, so a change of
-#: these alone recreates nothing; ``bay up`` still writes them to the box.
-_HOLD_KEYS = ("bay_toml_hash", "bay_build_hash", "bay_toml_path", "bay_toml_files")
+#: Build keys that only the build side reads (the hold guard, docs/plan.md,
+#: and ``bay_project``, which only the webhook receiver's sibling fan-out
+#: reads). The container hash leaves the whole ``build`` table out, so a
+#: change of these alone recreates nothing; ``bay up`` still writes them to
+#: the box. ``bay adopt`` of a project with two own builds swaps
+#: ``bay_project`` for ``bay_toml_path``.
+_HOLD_KEYS = (
+    "bay_toml_hash", "bay_build_hash", "bay_toml_path", "bay_toml_files", "bay_project",
+)
 
 
 def _hold_only(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
