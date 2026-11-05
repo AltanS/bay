@@ -205,20 +205,18 @@ def host_boxes(
     while the lock and the plan name a box of ``bay.fleet.toml``. The deploy
     puts the containers of a box on the hosts of its ``group``
     (``docs/layout-scenarios.md``, "Words"): so a host belongs to a box when
-    it is in the box's group. A box with no group is alone in its box env and
-    gets every host of the box env. A host or group whose name is the box name
-    belongs to that box too. A host in the groups of two boxes runs both, so it
-    maps to both. Raises when the inventory cannot be read.
+    it is in the box's group, and only then: the box name places nothing. A
+    box with no group is alone in its box env and gets every host of the box
+    env. A host in the groups of two boxes runs both, so it maps to both.
+    Raises when the inventory cannot be read.
     """
     names = (read_inventory or inventory_names)(fleet_root)
-    in_env = set(names.get(box_env, []))
     out: dict[str, list[str]] = {}
     for name, box in sorted(boxes.items()):
         if box.get("env") != box_env:
             continue
         group = box.get("group")
         hosts = set(names.get(str(group) if group else box_env, []))
-        hosts |= set(names.get(name, [])) & in_env
         for host in sorted(hosts):
             out.setdefault(host, []).append(name)
     return out

@@ -5623,6 +5623,21 @@ def test_host_boxes_follows_the_inventory_groups(tmp_path: Path) -> None:
     assert receipts.host_boxes(tmp_path, one, "production") == {"box-1": ["box-1"]}
 
 
+def test_a_box_with_a_group_gets_only_that_groups_hosts(tmp_path: Path) -> None:
+    """review 4, item 6: a box named like another group does not take that group's hosts."""
+    from bay_cli import receipts
+
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "production").write_text(
+        "[production:children]\neu\neu2\n\n[eu]\n192.0.2.11\n\n[eu2]\n192.0.2.12\n"
+    )
+    boxes = {"eu-1": {"env": "production", "group": "eu"},
+             "eu": {"env": "production", "group": "eu2"}}
+    assert receipts.host_boxes(tmp_path, boxes, "production") == {
+        "192.0.2.11": ["eu-1"], "192.0.2.12": ["eu"]
+    }
+
+
 def test_a_claim_on_the_old_box_env_of_a_move_blocks(
     world: dict[str, Path], box: FakeBox
 ) -> None:
