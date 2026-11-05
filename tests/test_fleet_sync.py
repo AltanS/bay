@@ -79,17 +79,21 @@ def up_at(m: dict[str, Path], which: str, name: str, **kw: Any) -> dict[str, Any
 
 @contextlib.contextmanager
 def as_machine(name: str) -> Iterator[None]:
-    """Run the body as another machine: its own host name.
+    """Run the body as another machine: its own host name and machine id.
 
-    The tests run both machines in one process, so a claim of machine A has the
-    pid of the test. Machine B on another host must not take it for its own.
+    The tests run both machines in one process, so a claim of machine A names
+    the test process. Machine B has another machine id, so it cannot judge it.
     """
-    real = fleetsync.hostname
+    import hashlib
+
+    real_host, real_tag = fleetsync.hostname, fleetsync.machine_tag
     fleetsync.hostname = lambda: name  # type: ignore[assignment]
+    fleetsync.machine_tag = lambda: hashlib.sha256(name.encode()).hexdigest()[:12]  # type: ignore[assignment]
     try:
         yield
     finally:
-        fleetsync.hostname = real  # type: ignore[assignment]
+        fleetsync.hostname = real_host  # type: ignore[assignment]
+        fleetsync.machine_tag = real_tag  # type: ignore[assignment]
 
 
 def services_of(fleet: Path) -> dict[str, Any]:
@@ -1138,13 +1142,16 @@ def test_an_old_pending_claim_does_not_block(machines: dict[str, Path], box: Fak
     git(m["a"], "push", "-q")
     plan = planmod.make_plan(proj_at(m["a"], "status", m["app"]), planmod.PlanOptions())
     assert plan["reason"] == "env_busy" and plan["holder"]["claimed_by"] == "machine-a"
-    # The same plan from this machine (a run started again) is its own record.
+    # A record with no claimed_run (an older writer) blocks, also from this host
+    # with the same plan: Bay cannot judge it.
     record.update({"claimed_by": fleetsync.hostname(), "plan_id": plan["plan_id"]})
     lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
-    holder = planmod.foreign_claim(
-        Context.for_fleet_root(m["a"]), {"production"}, str(plan["plan_id"])
-    )
-    assert holder is None
+    cx = Context.for_fleet_root(m["a"])
+    assert planmod.foreign_claim(cx, {"production"}, str(plan["plan_id"])) is not None
+    # This process's own claim is its own.
+    record["claimed_run"] = fleetsync.run_id()
+    lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
+    assert planmod.foreign_claim(cx, {"production"}, str(plan["plan_id"])) is None
 
 
 # ── review 6: box_touched means Ansible started ─────────────────────────────
@@ -1318,13 +1325,34 @@ def test_ctrl_c_after_the_claim_says_what_the_remote_holds(
     remote_lock = git(m["a"], "show", "@{u}:projects/webapp/bay.lock")
     assert '"result": "pending"' in remote_lock
     record = lock_at(m["a"], "webapp")["envs"]["production"]
-    assert record["claimed_pid"] == os.getpid()
+    assert record["claimed_run"] == fleetsync.run_id()
 
 
 def _dead_pid() -> int:
     proc = subprocess.Popen(["true"])
     proc.wait()
     return proc.pid
+
+
+def _pending_with_run(m: dict[str, Path], run: str, message: str) -> None:
+    raw = lock_at(m["a"], "webapp")
+    raw["envs"]["production"].update(
+        {"result": "pending", "plan_id": "0" * 12, "claimed_by": fleetsync.hostname(),
+         "claimed_at": fleetsync.now_iso(), "claimed_run": run}
+    )
+    lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
+    commit_all(m["a"], message)
+    git(m["a"], "push", "-q")
+
+
+def _plan_status(m: dict[str, Path]) -> dict[str, Any]:
+    return planmod.make_plan(proj_at(m["a"], "status", m["app"]), planmod.PlanOptions())
+
+
+def _my_parts() -> list[str]:
+    parts = fleetsync.run_id().split(":")
+    assert len(parts) == 4, "the test needs /etc/machine-id and /proc"
+    return parts
 
 
 def test_a_retry_after_a_crash_on_this_host_goes_through(
@@ -1343,33 +1371,73 @@ def test_a_retry_after_a_crash_on_this_host_goes_through(
         up_at(m, "a", "webapp", deploy=crash)
     raw = lock_at(m["a"], "webapp")
     record = raw["envs"]["production"]
-    assert record["result"] == "pending" and record["claimed_by"] == fleetsync.hostname()
-    # The crashed run was another process: its pid is gone now.
-    record["claimed_pid"] = _dead_pid()
+    assert record["result"] == "pending" and record["claimed_run"] == fleetsync.run_id()
+    # The crashed run was another process of this machine: its pid is gone now.
+    machine, ns, _, start = _my_parts()
+    record["claimed_run"] = f"{machine}:{ns}:{_dead_pid()}:{start}"
     lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
     commit_all(m["a"], "the crashed run's claim")
     git(m["a"], "push", "-q")
     plan = planmod.make_plan(proj_at(m["a"], "webapp", m["app"]), planmod.PlanOptions())
     assert plan["holder"] is None and plan["reason"] is None
     assert any("repairs this host's own stopped run" in n for n in plan["notes"])
-    result = up_at(m, "a", "webapp")
-    assert result["result"] == "ok"
-    # A live process of another run on this host still blocks.
-    raw = lock_at(m["a"], "webapp")
-    raw["envs"]["production"].update(
-        {"result": "pending", "plan_id": "0" * 12, **fleetsync.claim_fields()}
-    )
+    assert up_at(m, "a", "webapp")["result"] == "ok"
+
+
+def test_a_reused_pid_with_another_start_time_goes_through(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    m = machines
+    up_at(m, "a", "webapp")
+    machine, ns, pid, start = _my_parts()
+    _pending_with_run(m, f"{machine}:{ns}:{pid}:{int(start) + 1}", "a reused pid")
+    plan = _plan_status(m)
+    assert plan["holder"] is None and plan["reason"] is None
+
+
+def test_a_live_run_of_this_machine_blocks(machines: dict[str, Path], box: FakeBox) -> None:
+    m = machines
+    up_at(m, "a", "webapp")
     sleeper = subprocess.Popen(["sleep", "30"])
     try:
-        raw["envs"]["production"]["claimed_pid"] = sleeper.pid
-        lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
-        commit_all(m["a"], "a live run on this host")
-        git(m["a"], "push", "-q")
-        plan = planmod.make_plan(proj_at(m["a"], "status", m["app"]), planmod.PlanOptions())
-        assert plan["reason"] == "env_busy"
+        _pending_with_run(m, fleetsync.run_id(sleeper.pid), "a live run on this host")
+        assert _plan_status(m)["reason"] == "env_busy"
     finally:
         sleeper.kill()
         sleeper.wait()
+
+
+@pytest.mark.parametrize("change", ["machine", "pidns", "empty", "garbage"])
+def test_a_claim_this_machine_cannot_judge_blocks(
+    machines: dict[str, Path], box: FakeBox, change: str
+) -> None:
+    """Same host name, but another machine id, another pid namespace, or no run name."""
+    m = machines
+    up_at(m, "a", "webapp")
+    machine, ns, _, start = _my_parts()
+    dead = _dead_pid()
+    run = {
+        "machine": f"{'0' if machine[0] != '0' else '1'}{machine[1:]}:{ns}:{dead}:{start}",
+        "pidns": f"{machine}:{int(ns) + 1}:{dead}:{start}",
+        "empty": "",
+        "garbage": f"{machine}:{ns}:not-a-pid",
+    }[change]
+    _pending_with_run(m, run, f"a claim with {change}")
+    plan = _plan_status(m)
+    assert plan["reason"] == "env_busy"
+    assert plan["holder"]["claimed_by"] == fleetsync.hostname()
+
+
+def test_a_machine_with_no_machine_id_writes_an_empty_run_and_never_judges(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    up_at(m, "a", "webapp")
+    machine, ns, _, start = _my_parts()
+    _pending_with_run(m, f"{machine}:{ns}:{_dead_pid()}:{start}", "a dead run")
+    monkeypatch.setattr(fleetsync, "machine_tag", lambda: None)
+    assert fleetsync.claim_fields()["claimed_run"] == ""
+    assert _plan_status(m)["reason"] == "env_busy"
 
 
 # ── review 3, I: --allow-dirty never covers the files only Bay writes ───────

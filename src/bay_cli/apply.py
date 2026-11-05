@@ -1158,7 +1158,7 @@ def _after_deploy(exc: BayError) -> BayError:
 
 
 #: The env record keys of a pending ``bay up``: who started it and when.
-CLAIM_KEYS = ("claimed_by", "claimed_at", "claimed_pid")
+CLAIM_KEYS = ("claimed_by", "claimed_at", "claimed_run")
 
 
 def fleet_info(cx: Context) -> dict[str, Any]:

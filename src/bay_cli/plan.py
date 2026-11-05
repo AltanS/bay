@@ -53,7 +53,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import os
 import shutil
 import tempfile
 import tomllib
@@ -2616,8 +2615,8 @@ def add_run_blockers(
     for d in dead:
         plan.setdefault("notes", []).append(
             f"{d['project']} {d['env']}: the pending claim of this machine's run (pid "
-            f"{d['pid']}, {d['claimed_at']}) has no process any more; this run repairs "
-            "this host's own stopped run"
+            f"{d['run'].split(':')[2]}, {d['claimed_at']}) has no process any more; this run "
+            "repairs this host's own stopped run"
         )
     if holder is not None:
         gates.append(
@@ -2648,11 +2647,11 @@ def foreign_claim(
     plus ``clock_ahead_seconds`` when its ``claimed_at`` is more than two minutes
     ahead of this clock.
 
-    A record from this machine with a ``claimed_pid`` is this process's own (not
-    counted), or a run whose process is gone (killed, interrupted: not counted,
-    and appended to ``dead``), or a live other run (counted). A record from this
-    machine with no ``claimed_pid`` (an older writer) does not count when it
-    has this ``plan_id``.
+    A record whose ``claimed_run`` is this process's is its own (not counted). One
+    that this machine can prove is gone (:func:`bay_cli.fleetsync.claim_state`:
+    same machine, same pid namespace, the pid gone or reused) is not counted
+    and is appended to ``dead``. Every other fresh pending record counts.
+    ``claimed_by`` is never compared.
     """
     from datetime import timedelta
 
@@ -2664,7 +2663,6 @@ def foreign_claim(
         boxes = (load_fleet_doc(cx).get("boxes") or {})
     except (BayError, OSError, ValueError):
         boxes = {}
-    me = fleetsync.hostname()
     found: list[dict[str, Any]] = []
     for stem, path in lock_files(cx.fleet_root):
         try:
@@ -2680,20 +2678,17 @@ def foreign_claim(
             box_env = (boxes.get(box) or {}).get("env") if isinstance(box, str) else None
             if box_env not in box_envs:
                 continue
-            pid = record.get("claimed_pid")
-            if record.get("claimed_by") == me:
-                if isinstance(pid, int) and not isinstance(pid, bool):
-                    if pid == os.getpid():
-                        continue
-                    if not fleetsync.pid_alive(pid):
-                        if dead is not None:
-                            dead.append(
-                                {"project": str(raw.get("name") or stem), "env": str(env),
-                                 "pid": pid, "claimed_at": str(record.get("claimed_at"))}
-                            )
-                        continue
-                elif record.get("plan_id") == plan_id:
-                    continue
+            state = fleetsync.claim_state(record)
+            if state == fleetsync.CLAIM_OWN:
+                continue
+            if state == fleetsync.CLAIM_DEAD:
+                if dead is not None:
+                    dead.append(
+                        {"project": str(raw.get("name") or stem), "env": str(env),
+                         "run": str(record.get("claimed_run")),
+                         "claimed_at": str(record.get("claimed_at"))}
+                    )
+                continue
             when = fleetsync.claim_time(record)
             assert when is not None
             expires = when + timedelta(seconds=fleetsync.CLAIM_FRESH_SECONDS)

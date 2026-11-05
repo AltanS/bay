@@ -78,10 +78,9 @@
           "type": "string",
           "minLength": 1
         },
-        "claimed_pid": {
-          "description": "Since 2.12: the process id of that `bay up` on the claimed_by machine. A run on the same machine whose process is gone does not block (it was killed or interrupted). Removed with claimed_by.",
-          "type": "integer",
-          "minimum": 1
+        "claimed_run": {
+          "description": "Since 2.12: an opaque name of the process that set result pending: <machine>:<pid namespace>:<pid>:<start time>, where machine is a salted hash of /etc/machine-id. Only that machine can tell that the run is gone; empty when it could not be read. Removed with claimed_by.",
+          "type": "string"
         },
         "previous": { "$ref": "#/$defs/previous" },
         "frozen": {

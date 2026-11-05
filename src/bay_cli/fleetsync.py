@@ -79,21 +79,112 @@ def claim_time(record: Any) -> datetime | None:
 
 
 def claim_fields() -> dict[str, Any]:
-    """The claim keys of a pending env record: this machine, now, this process."""
-    return {"claimed_by": hostname(), "claimed_at": now_iso(), "claimed_pid": os.getpid()}
+    """The claim keys of a pending env record: this machine, now, this run.
+
+    ``claimed_by`` is the host name, for people only: Bay never compares it.
+    ``claimed_run`` names this process so that only this machine can judge it
+    (:func:`run_id`, :func:`claim_state`).
+    """
+    return {"claimed_by": hostname(), "claimed_at": now_iso(), "claimed_run": run_id()}
 
 
-def pid_alive(pid: int) -> bool:
-    """True when a process ``pid`` exists on this machine (also one of another user)."""
+#: Mixed into the machine id before the hash, so the record never holds the raw id.
+_MACHINE_SALT = b"bay-claim"
+
+
+def machine_tag() -> str | None:
+    """The first 12 hex of sha256(``/etc/machine-id`` bytes + ``bay-claim``), or None."""
+    import hashlib
+
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
+        raw = Path("/etc/machine-id").read_bytes().strip()
     except OSError:
-        return True
-    return True
+        return None
+    if not raw:
+        return None
+    return hashlib.sha256(raw + _MACHINE_SALT).hexdigest()[:12]
+
+
+def pid_namespace() -> str | None:
+    """The inode of this process's pid namespace (``readlink /proc/self/ns/pid``), or None."""
+    try:
+        link = os.readlink("/proc/self/ns/pid")
+    except OSError:
+        return None
+    inode = link.partition("[")[2].rstrip("]")
+    return inode if inode.isdigit() else None
+
+
+#: ``proc_start`` result for a pid that does not exist.
+GONE = "gone"
+
+
+def proc_start(pid: int) -> str | None:
+    """Field 22 of ``/proc/<pid>/stat`` (the start time), :data:`GONE`, or None (cannot tell)."""
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return GONE
+    except OSError:
+        return None
+    # The command name (field 2) may hold spaces and parentheses: split after the last ")".
+    rest = text.rpartition(")")[2].split()
+    # rest[0] is field 3, so field 22 is rest[19].
+    if len(rest) < 20 or not rest[19].isdigit():
+        return None
+    return rest[19]
+
+
+def run_id(pid: int | None = None) -> str:
+    """``<machine>:<pidns>:<pid>:<start>`` for ``pid`` (default: this process), or ``""``.
+
+    Empty when any part cannot be read (no ``/etc/machine-id``, no ``/proc``):
+    such a claim is never judged, it blocks until it expires.
+    """
+    pid = os.getpid() if pid is None else pid
+    machine, ns, start = machine_tag(), pid_namespace(), proc_start(pid)
+    if machine is None or ns is None or start in (None, GONE):
+        return ""
+    return f"{machine}:{ns}:{pid}:{start}"
+
+
+#: :func:`claim_state` results.
+CLAIM_OWN, CLAIM_DEAD, CLAIM_LIVE = "own", "dead", "live"
+
+
+def claim_state(record: Any) -> str:
+    """``own`` (this process's claim), ``dead`` (provably gone) or ``live`` (blocks).
+
+    Dead only when all hold: the ``claimed_run`` machine and pid namespace are
+    this process's, and that pid is gone or its start time differs (a reused
+    pid). Anything Bay cannot judge is live: another machine or namespace, no
+    ``claimed_run``, an empty or unparsable one, or a ``/proc`` that cannot
+    be read.
+    """
+    run = record.get("claimed_run") if isinstance(record, dict) else None
+    if not isinstance(run, str) or not run:
+        return CLAIM_LIVE
+    mine = run_id()
+    if not mine:
+        return CLAIM_LIVE
+    if run == mine:
+        return CLAIM_OWN
+    parts = run.split(":")
+    if len(parts) != 4:
+        return CLAIM_LIVE
+    machine, ns, pid_text, start = parts
+    my_machine, my_ns, _, _ = mine.split(":")
+    if machine != my_machine or ns != my_ns or not pid_text.isdigit() or not start.isdigit():
+        return CLAIM_LIVE
+    pid = int(pid_text)
+    if pid <= 0:
+        return CLAIM_LIVE
+    now_start = proc_start(pid)
+    if now_start == GONE:
+        return CLAIM_DEAD
+    if now_start is None:
+        return CLAIM_LIVE
+    return CLAIM_DEAD if now_start != start else CLAIM_LIVE
 
 
 def fresh_claim(record: Any, now: datetime | None = None) -> bool:
