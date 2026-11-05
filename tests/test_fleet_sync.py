@@ -1698,6 +1698,31 @@ def test_a_claim_in_the_future_blocks_until_it_expires_and_says_the_clocks_diffe
     ) is None
 
 
+def test_a_claim_far_in_the_future_names_take_over(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    """review 4, item 8: no new rule for a far clock; the way out is --take-over."""
+    from datetime import UTC, datetime, timedelta
+
+    m = machines
+    up_at(m, "a", "webapp")
+    raw = lock_at(m["a"], "webapp")
+    ahead = datetime.now(UTC) + timedelta(days=400)
+    raw["envs"]["production"].update(
+        {"result": "pending", "claimed_by": "machine-z",
+         "claimed_at": ahead.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    )
+    lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
+    commit_all(m["a"], "a claim from a clock 400 days ahead")
+    git(m["a"], "push", "-q")
+    plan = planmod.make_plan(proj_at(m["a"], "status", m["app"]), planmod.PlanOptions())
+    assert plan["reason"] == "env_busy"
+    message = next(b for b in plan["blockers"] if "is deploying" in b)
+    assert "--take-over" in message
+    assert "the clocks of this machine and machine-z differ" in message
+    assert up_at(m, "a", "webapp", take_over=True)["result"] == "ok"
+
+
 # ── review 3, E: a git failure in the push step keeps the result ────────────
 
 
