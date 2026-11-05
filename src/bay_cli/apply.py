@@ -820,7 +820,15 @@ def _apply_plan_steps(
     # Results are per box (:func:`box_results`): a member is ok only when the run
     # did not fail and its own box wrote an ok receipt for this fleet commit.
     run_failed = failure is not None
-    results = box_results(entries, fleet_commit)
+    hosts, map_problem = box_names(cx, box_env)
+    results, unmapped = box_results(entries, fleet_commit, hosts)
+    box_notes = [f"{map_problem}; the receipt host names are taken as box names"] * bool(
+        map_problem
+    ) + [
+        f"host {host}: its receipt maps to no box of {box_env} in bay.fleet.toml, so no "
+        "lock record takes its result"
+        for host in unmapped
+    ]
     if failure is None and "failed" in results.values():
         failed_boxes = sorted(b for b, r in results.items() if r == "failed")
         failure = f"the box receipt says the deploy failed on {', '.join(failed_boxes)}"
@@ -878,7 +886,7 @@ def _apply_plan_steps(
     )
     lock_files += more_files
     pinned += more_rows
-    notes = list(adopt_notes)
+    notes = list(adopt_notes) + box_notes
     notes += [
         f"{name} has no pinned commit, so this deploy left it out and its lock is unchanged"
         for name in left_out
@@ -1345,25 +1353,62 @@ def prune_plans(cx: Context, *, keep: int = PLANS_KEEP) -> list[str]:
     return gone
 
 
-def box_results(entries: list[dict[str, Any]], fleet_commit: str) -> dict[str, str]:
-    """``{box: "ok" | "failed"}`` for every box whose receipt is from this deploy.
+def box_names(cx: Context, box_env: str) -> tuple[dict[str, list[str]] | None, str | None]:
+    """``({inventory host: [fleet box]}, problem)`` for the receipts of ``box_env``.
+
+    :func:`bay_cli.receipts.host_boxes` over the fleet's ``[boxes]``. When the
+    inventory cannot be read, the map is None and ``problem`` says why.
+    """
+    from bay_cli import receipts
+
+    try:
+        boxes = planmod.load_fleet_doc(cx).get("boxes") or {}
+        return receipts.host_boxes(cx.fleet_root, boxes, box_env), None
+    except Exception as exc:  # the inventory parser raises many types
+        return None, f"cannot read the inventory of {box_env}: {exc}"
+
+
+def box_results(
+    entries: list[dict[str, Any]],
+    fleet_commit: str,
+    hosts: Mapping[str, list[str]] | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    """``({fleet box: "ok" | "failed"}, unmapped hosts)`` for this deploy.
+
+    A receipt entry names its inventory host (``box``); ``hosts`` maps it to
+    the fleet boxes of ``bay.fleet.toml`` (:func:`box_names`). With no map, the
+    host name is taken as the box name.
 
     A receipt is from this deploy when its ``fleet_commit`` is this run's fleet
-    commit (:func:`applied_from` uses the same test). Its ``result`` is ``ok``
-    or ``failed``; anything else counts as failed. A box with no such receipt
-    is not in the map: the deploy did not reach it, or it crashed before it
-    reported.
+    commit (:func:`applied_from` uses the same test). Per box: ``failed`` when
+    any of its hosts wrote a failed receipt from this deploy (any result but
+    ``ok`` counts as failed); else ``ok`` when every entry of its hosts is
+    from this deploy; else the box is not in the map: the deploy did not reach
+    it, or it crashed before it reported. A host that maps to no box is
+    returned in the second list, so the caller can say so.
     """
-    out: dict[str, str] = {}
+    words: dict[str, str] = {}
+    missing: set[str] = set()
+    unmapped: list[str] = []
     for entry in entries:
         receipt = entry.get("receipt")
-        if not isinstance(receipt, Mapping) or receipt.get("fleet_commit") != fleet_commit:
+        host = entry.get("box") or (receipt.get("box") if isinstance(receipt, Mapping) else None)
+        if host is None:
             continue
-        box = str(entry.get("box") or receipt.get("box"))
-        word = "ok" if receipt.get("result") == "ok" else "failed"
-        if out.get(box) != "failed":
-            out[box] = word
-    return out
+        names = [str(host)] if hosts is None else list(hosts.get(str(host), []))
+        if not names:
+            unmapped.append(str(host))
+            continue
+        fresh = isinstance(receipt, Mapping) and receipt.get("fleet_commit") == fleet_commit
+        for name in names:
+            if not fresh:
+                missing.add(name)
+            elif receipt.get("result") != "ok":
+                words[name] = "failed"
+            else:
+                words.setdefault(name, "ok")
+    out = {n: w for n, w in words.items() if w == "failed" or n not in missing}
+    return out, sorted(set(unmapped))
 
 
 def applied_from(

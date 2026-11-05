@@ -165,6 +165,65 @@ def _box_entry(env: str, box: str | None, result: Mapping[str, Any]) -> dict[str
     return entry
 
 
+#: ``fleet_root -> {group or host name: host names}``. Tests swap in a fake.
+InventoryReader = Callable[[Path], dict[str, list[str]]]
+
+
+def inventory_names(fleet_root: Path) -> dict[str, list[str]]:
+    """``{name: hosts}`` for every group and every host of the fleet inventory.
+
+    A group gives its hosts (children included), a host gives itself. Ansible's
+    own inventory code reads the inventory the deploy gets
+    (:func:`bay_cli.ansible._fleet_inventory`), so a host is in a group here
+    exactly when the deploy's ``group_names`` has it. Raises when the
+    inventory cannot be read.
+    """
+    from ansible.inventory.manager import InventoryManager
+    from ansible.parsing.dataloader import DataLoader
+
+    with ansible._fleet_inventory(fleet_root) as source:
+        if source is None:
+            return {}
+        manager = InventoryManager(loader=DataLoader(), sources=[str(source)])
+        out = {name: sorted(h.name for h in group.get_hosts())
+               for name, group in manager.groups.items()}
+        for host in manager.hosts:
+            out.setdefault(host, [host])
+        return out
+
+
+def host_boxes(
+    fleet_root: Path,
+    boxes: Mapping[str, Mapping[str, Any]],
+    box_env: str,
+    *,
+    read_inventory: InventoryReader | None = None,
+) -> dict[str, list[str]]:
+    """``{inventory host: [fleet box names]}`` for the boxes of ``box_env``.
+
+    A receipt's ``box`` is the ``inventory_hostname`` (often an address),
+    while the lock and the plan name a box of ``bay.fleet.toml``. The deploy
+    puts the containers of a box on the hosts of its ``group``
+    (``docs/layout-scenarios.md``, "Words"): so a host belongs to a box when
+    it is in the box's group. A box with no group is alone in its box env and
+    gets every host of the box env. A host or group whose name is the box name
+    belongs to that box too. A host in the groups of two boxes runs both, so it
+    maps to both. Raises when the inventory cannot be read.
+    """
+    names = (read_inventory or inventory_names)(fleet_root)
+    in_env = set(names.get(box_env, []))
+    out: dict[str, list[str]] = {}
+    for name, box in sorted(boxes.items()):
+        if box.get("env") != box_env:
+            continue
+        group = box.get("group")
+        hosts = set(names.get(str(group) if group else box_env, []))
+        hosts |= set(names.get(name, [])) & in_env
+        for host in sorted(hosts):
+            out.setdefault(host, []).append(name)
+    return out
+
+
 def fetch_receipts(cx: Context, env: str, *, run: Runner | None = None) -> list[dict[str, Any]]:
     """One ``cat`` per box in inventory group ``env``. Never raises for a box."""
     argv, extra_env = _adhoc_cat(cx, env)

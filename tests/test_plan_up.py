@@ -117,11 +117,26 @@ def _git_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(var, raising=False)
 
 
+#: The inventory host of each fake box. As on a real fleet, it is an address, not
+#: the box name: a receipt's ``box`` is the ``inventory_hostname``.
+FAKE_HOSTS = {"box-1": "192.0.2.11", "box-2": "192.0.2.12"}
+
+#: The fake inventory (``hosts/production``): box-1 is group ``one``, box-2 is ``two``.
+FAKE_INVENTORY = (
+    "[production:children]\none\ntwo\n\n"
+    f"[one]\n{FAKE_HOSTS['box-1']}\n\n[two]\n{FAKE_HOSTS['box-2']}\n"
+)
+
+
+def fake_host(box: str) -> str:
+    return FAKE_HOSTS.get(box, f"host-of-{box}")
+
+
 class FakeBox:
     """Holds one receipt per box env. A deploy writes it from the fleet's services file.
 
     Every box of the env (bay.fleet.toml ``[boxes]``) reads that receipt with its
-    own ``box``. ``fail_boxes`` makes those boxes report ``failed`` (the deploy
+    own ``box``: the inventory host of the box (:func:`fake_host`), not its name. ``fail_boxes`` makes those boxes report ``failed`` (the deploy
     raises), ``unreached`` keeps the receipt those boxes had before the deploy
     (Ansible stopped before them).
     """
@@ -156,7 +171,9 @@ class FakeBox:
         for b in self._boxes(cx, box_env):
             if b in self.unreached and (box_env, b) not in self.per_box:
                 self.per_box[(box_env, b)] = (
-                    None if previous is None else {**copy.deepcopy(previous), "box": b}
+                    None
+                    if previous is None
+                    else {**copy.deepcopy(previous), "box": fake_host(b)}
                 )
             elif b not in self.unreached:
                 self.per_box.pop((box_env, b), None)
@@ -185,7 +202,7 @@ class FakeBox:
         self.receipts[box_env] = {
             "receipt_version": 1,
             "env": box_env,
-            "box": "box-1",
+            "box": fake_host("box-1"),
             "deployed_at": "2026-10-06T12:00:00Z",
             "fleet_commit": gitrepo.head(cx.fleet_root),
             "result": "failed" if self.fail else "ok",
@@ -193,7 +210,11 @@ class FakeBox:
             "projects": {},
         }
         for b in self.fail_boxes:
-            self.per_box[(box_env, b)] = {**self.receipts[box_env], "box": b, "result": "failed"}
+            self.per_box[(box_env, b)] = {
+                **self.receipts[box_env],
+                "box": fake_host(b),
+                "result": "failed",
+            }
         if self.fail or self.fail_boxes:
             from bay_cli.errors import BayError
 
@@ -220,8 +241,8 @@ class FakeBox:
                 receipt = self.per_box[(box_env, b)]
             else:
                 template = self.receipts.get(box_env)
-                receipt = None if template is None else {**template, "box": b}
-            out.append({"env": box_env, "box": b, "receipt": receipt, "error": None})
+                receipt = None if template is None else {**template, "box": fake_host(b)}
+            out.append({"env": box_env, "box": fake_host(b), "receipt": receipt, "error": None})
         return out
 
 
@@ -247,7 +268,7 @@ def world(tmp_path: Path, box: FakeBox) -> dict[str, Path]:
             {"secrets": {"WEBAPP_SESSION_SECRET": SENTINEL, "WEBAPP_POSTGRES_PASSWORD": SENTINEL}}
         )
     )
-    (fleet / "hosts" / "production").write_text("[production]\nbox-1\n")
+    (fleet / "hosts" / "production").write_text(FAKE_INVENTORY)
     (fleet / "projects" / ".gitkeep").write_text("")
     git(fleet, "init", "-q")
     commit_all(fleet, "fleet")
@@ -532,7 +553,7 @@ def test_rollback_lists_code_it_kept(
     assert applymod.PREV_FALLBACK_NOTE in doc["notes"]
     assert doc["code_kept"] == [
         {
-            "box": "box-1",
+            "box": fake_host("box-1"),
             "container": "webapp",
             "reason": "the previous receipt names no commit for this container",
         }
@@ -861,14 +882,14 @@ def test_up_writes_lock_compiles_and_commits(world: dict[str, Path], box: FakeBo
     # `applied` is what the box did, from the receipt. The box had no receipt
     # before, so both containers are new.
     assert doc["applied"] == [
-        {"box": "box-1", "container": "postgres", "action": "create", "healthy": True},
-        {"box": "box-1", "container": "webapp", "action": "create", "healthy": True},
+        {"box": fake_host("box-1"), "container": "postgres", "action": "create", "healthy": True},
+        {"box": fake_host("box-1"), "container": "webapp", "action": "create", "healthy": True},
     ]
 
     edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
     again = json.loads(cli(world, "up", "--json").stdout)
     assert again["applied"] == [
-        {"box": "box-1", "container": "webapp", "action": "recreate", "healthy": True}
+        {"box": fake_host("box-1"), "container": "webapp", "action": "recreate", "healthy": True}
     ]
     assert [s["container"] for s in again["steps"]] == ["webapp"]
 
@@ -889,7 +910,7 @@ def test_up_json_leaves_out_a_receipt_from_an_earlier_deploy(
     assert result.exit_code == 1
     doc = json.loads(result.stdout)
     assert doc["result"] == "failed" and doc["applied"] == []
-    assert any("box-1: the receipt is not from this deploy" in n for n in doc["notes"])
+    assert any("192.0.2.11: the receipt is not from this deploy" in n for n in doc["notes"])
 
 
 def test_half_status_after_failed_deploy(world: dict[str, Path], box: FakeBox) -> None:
@@ -5217,7 +5238,7 @@ def test_plan_names_every_code_move(
                 continue  # the box already runs it: codepin answers noop
             moves.append(name)
             note = planmod.unknown_code_note(
-                name, "box-1", pin, strict=bool(target.get("strict"))
+                name, fake_host("box-1"), pin, strict=bool(target.get("strict"))
             )
             assert name in stepped or note in plan["notes"], (name, plan)
         by = {"step": stepped & set(moves), "note": set(moves) - stepped}
@@ -5227,8 +5248,8 @@ def test_plan_names_every_code_move(
     # Unknown: no commit label and no single commit tag. A note, not a step.
     plan = check(None, expect="note")
     assert (
-        f"code of webapp on box-1 is unknown (no commit label or tag); up will try to pin "
-        f"it to {first[:12]}" in plan["notes"]
+        f"code of webapp on {fake_host('box-1')} is unknown (no commit label or tag); "
+        f"up will try to pin it to {first[:12]}" in plan["notes"]
     )
     assert plan["steps"] == []
     # Older than WANTED (a held build): a step.
@@ -5241,8 +5262,10 @@ def test_plan_names_every_code_move(
     # Pin mode sends a strict target: the note says up may stop, not "try".
     wanted12 = lock_of(world)["envs"]["production"]["commit"][:12]
     assert (
-        f"code of webapp on box-1 is unknown (no commit label or tag); up will stop unless "
-        f"box-1 has or can pull an image tagged {wanted12} (track pin)" in plan["notes"]
+        f"code of webapp on {fake_host('box-1')} is unknown (no commit label or tag); "
+        "up will stop unless "
+        f"{fake_host('box-1')} has or can pull an image tagged {wanted12} (track pin)"
+        in plan["notes"]
     )
     assert not any("up will try to pin" in n for n in plan["notes"])
     # Config unchanged now: the step is the code step itself.
@@ -5486,3 +5509,69 @@ def test_a_failed_box_marks_every_project_on_it_failed(
         _up_status(world)
     box.fail_boxes = set()
     assert lock_of(world)["envs"]["production"]["result"] == "failed"
+
+
+# ── review 3, K: a receipt names the inventory host, the lock names the box ──
+
+
+def test_receipts_from_address_hosts_count_for_their_fleet_boxes(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """On a real fleet the receipt ``box`` is an address. The deploy is ok on both boxes."""
+    _two_boxes_status_on_one(world, "box-2")
+    result = do_up(world)
+    entries = box.read(cx_of(world), "production")
+    assert sorted(e["box"] for e in entries) == ["192.0.2.11", "192.0.2.12"]
+    assert result["result"] == "ok", result
+    rows = {r["project"]: r["result"] for r in result["pinned"]}
+    assert rows == {"webapp": "ok", "status": "ok"}
+    assert lock_of(world)["envs"]["production"]["result"] == "ok"
+    assert {r["box"] for r in result["applied"]} <= set(FAKE_HOSTS.values())
+
+
+def test_a_receipt_host_that_maps_to_no_box_is_reported(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = box.read
+
+    def read(cx: Context, box_env: str) -> list[dict[str, Any]]:
+        out = real(cx, box_env)
+        stray = copy.deepcopy(out[0])
+        stray["box"] = "198.51.100.7"
+        if stray["receipt"]:
+            stray["receipt"]["box"] = "198.51.100.7"
+        return [*out, stray]
+
+    monkeypatch.setattr(planmod, "default_receipt_reader", read)
+    result = do_up(world)
+    assert result["result"] == "ok"
+    assert any(
+        n.startswith("host 198.51.100.7: its receipt maps to no box of production")
+        for n in result["notes"]
+    ), result["notes"]
+
+
+def test_host_boxes_follows_the_inventory_groups(tmp_path: Path) -> None:
+    from bay_cli import receipts
+
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "production").write_text(FAKE_INVENTORY)
+    one = {"box-1": {"env": "production"}}
+    assert receipts.host_boxes(tmp_path, one, "production") == {
+        "192.0.2.11": ["box-1"], "192.0.2.12": ["box-1"]
+    }
+    two = {"box-1": {"env": "production", "group": "one"},
+           "box-2": {"env": "production", "group": "two"},
+           "other": {"env": "staging"}}
+    assert receipts.host_boxes(tmp_path, two, "production") == {
+        "192.0.2.11": ["box-1"], "192.0.2.12": ["box-2"]
+    }
+    # Two boxes in one group: the host runs both.
+    shared = {
+        "a": {"env": "production", "group": "one"},
+        "b": {"env": "production", "group": "one"},
+    }
+    assert receipts.host_boxes(tmp_path, shared, "production") == {"192.0.2.11": ["a", "b"]}
+    # A box named after its host line (no group) gets that host.
+    (tmp_path / "hosts" / "production").write_text("[production]\nbox-1 ansible_host=192.0.2.11\n")
+    assert receipts.host_boxes(tmp_path, one, "production") == {"box-1": ["box-1"]}
