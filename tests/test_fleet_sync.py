@@ -1954,3 +1954,28 @@ def test_a_failed_fleet_commit_of_a_remove_puts_back_what_it_wrote(
     assert json.loads(result.stdout)["box_touched"] is False
     assert snapshot(m["a"]) == before
     assert box.deploys == ["production"]  # only the first up
+
+
+# ── review 5, items 5 to 8: what a person sees ──────────────────────────────
+
+
+def test_the_env_busy_message_names_the_time_zone(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """item 7: local time with its zone, so it can be set against the UTC in the JSON."""
+    import re
+    import time
+
+    m = machines
+    up_at(m, "a", "webapp")
+    _pending_with_run(m, "", "a claim of another run")
+    monkeypatch.setenv("TZ", "EST+5")
+    time.tzset()
+    try:
+        plan = _plan_status(m)
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+    message = next(b for b in plan["blockers"] if "is deploying" in b)
+    assert re.search(r"since \d\d:\d\d EST[ .]", message), message
+    assert re.search(r"expires at \d\d:\d\d EST,", message), message

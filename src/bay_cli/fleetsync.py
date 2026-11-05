@@ -229,7 +229,9 @@ def clock_ahead(record: Any, now: datetime | None = None) -> int | None:
 
 
 def local_hhmm(when: datetime) -> str:
-    return when.astimezone().strftime("%H:%M")
+    """``HH:MM`` in local time with its zone (``14:02 CET``, else ``14:02 +0100``)."""
+    local = when.astimezone()
+    return f"{local:%H:%M} {local.strftime('%Z') or local.strftime('%z')}"
 
 
 NEVER_MERGE = (
