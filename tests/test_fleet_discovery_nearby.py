@@ -1,7 +1,8 @@
 """Fleet discovery step 5: the fleet you stand in, and the one fleet next to you.
 
 5a: the working directory or a parent holds ``bay.fleet.toml``.
-5b: only if 5a found nothing, exactly one fleet lives in a folder above you.
+5b: only if 5a found nothing, exactly one fleet lives in the folder you stand in,
+or in a folder above it.
 Steps 1 to 4 always win. The home directory, its parents, the filesystem
 root and ``~/.config/bay/fleets`` are never searched in 5b.
 """
@@ -85,7 +86,7 @@ def test_5a_wins_over_5b(home, tmp_path, monkeypatch):
     assert Context.resolve(None).fleet_root == here.resolve()
 
 
-# ── 5b: exactly one fleet lives in a folder above you ────────────────
+# ── 5b: exactly one fleet lives in or above the folder you stand in ────────────────
 
 
 def test_5b_one_fleet_next_to_the_folder(home, tmp_path, monkeypatch):
@@ -375,3 +376,21 @@ def test_fleet_line_prints_nothing_for_two_fleets(home, tmp_path, monkeypatch):
     _fleet(work, "beta")
     monkeypatch.chdir(_empty(work))
     assert fleet_line.resolve("compile", {}) is None
+
+
+# ── Wording ──────────────────────────────────────────────────────────
+
+
+def test_the_5b_source_reads_well():
+    assert SOURCE_FLEET_ABOVE == "the only fleet nearby"
+
+
+def test_missing_fleet_name_env_hint_names_clone_and_link(home, tmp_path, monkeypatch):
+    monkeypatch.chdir(_empty(tmp_path / "work"))
+    monkeypatch.setenv("BAY_FLEET_NAME", "ghost")
+    with pytest.raises(BayError) as caught:
+        Context.resolve(None)
+    hint = caught.value.hint or ""
+    assert "Unset BAY_FLEET_NAME" in hint
+    assert "bay fleet init ghost --from <url>" in hint
+    assert "bay fleet link <path>" in hint

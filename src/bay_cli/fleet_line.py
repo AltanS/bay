@@ -11,7 +11,7 @@ fails on a command in neither, so a new verb cannot skip the line by
 accident. :func:`install` wraps the callback of each mutating verb; the
 wrapper finds the fleet the same way the verb will (``--fleet``,
 ``BAY_FLEET``, the ``fleet =`` line of the bay.toml here, ``BAY_FLEET_NAME``,
-the fleet folder you stand in, the one fleet in a folder above you)
+the fleet folder you stand in, the only fleet nearby)
 without side effects, prints the line, then runs the verb. When no fleet can
 be found, nothing is printed: the verb then stops with "no fleet selected".
 """

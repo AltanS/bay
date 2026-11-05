@@ -187,7 +187,7 @@ A command that works on a fleet finds it in this order. The first rule that appl
 5. The fleet you stand in, or the one you live next to. It has two parts. Bay tries 5a first.
    - **5a. You stand in a fleet.** Bay walks from the working directory up through its
      parents. The first folder that has a `bay.fleet.toml` is the fleet.
-   - **5b. One fleet lives in a folder above you.** Bay uses this only when 5a found nothing.
+   - **5b. Exactly one fleet lives in the folder you stand in, or in a folder above it.** Bay uses this only when 5a found nothing.
      It walks from the working directory up through its parents, nearest first. For each
      folder, it looks at the direct children that are folders (a link to a folder counts)
      and have a `bay.fleet.toml`. Names that start with `.` are skipped. If a folder has
@@ -257,7 +257,7 @@ line per check, each `ok`, `warn` or `fail`, and exits 1 when a check fails:
 
 | Check | What it says |
 |---|---|
-| Fleet | The fleet Bay picked, its real path (a fleet may be a symlink), and why: `--fleet`, `BAY_FLEET`, the `fleet` line of a `bay.toml`, `BAY_FLEET_NAME`, the fleet folder you stand in, or the one fleet in a folder above you. |
+| Fleet | The fleet Bay picked, its real path (a fleet may be a symlink), and why: `--fleet`, `BAY_FLEET`, the `fleet` line of a `bay.toml`, `BAY_FLEET_NAME`, the fleet folder you stand in, or the only fleet nearby (rule 5b). |
 | Fleet format | The `format` of `bay.fleet.toml`. Format 1 is a warning; a format newer than the CLI knows fails. |
 | CLI | The installed version and the checkout it runs from, as `bay self version`. |
 | Vault | Whether the secrets of the environment open with `.vault_pass`. No name and no value is printed. |

@@ -45,8 +45,8 @@ SOURCE_FLEETS_DIR = "~/.config/bay/fleets"
 SOURCE_CWD = "cwd"
 #: Step 5a: the working directory, or a parent, holds ``bay.fleet.toml``.
 SOURCE_FLEET_HERE = "the fleet folder you stand in"
-#: Step 5b: exactly one fleet lives in a folder above the working directory.
-SOURCE_FLEET_ABOVE = "the one fleet in a folder above you"
+#: Step 5b: exactly one fleet lives in the folder you stand in, or in a folder above it.
+SOURCE_FLEET_ABOVE = "the only fleet nearby"
 
 #: The file that marks a directory as a fleet. The same name as ``bay_cli.fleet.FLEET_FILE``.
 _FLEET_MARKER = "bay.fleet.toml"
@@ -337,7 +337,14 @@ def _fleet_from_fleets_dir() -> Path | None:
     name = os.environ.get(FLEET_NAME_ENV)
     if not name:
         return None
-    return fleet_dir_for_name(name, hint=f"Unset {FLEET_NAME_ENV}, or create the fleet there.")
+    return fleet_dir_for_name(
+        name,
+        hint=(
+            f"Unset {FLEET_NAME_ENV}, clone the fleet there "
+            f"(`bay fleet init {name} --from <url>`), "
+            "or link a checkout that exists (`bay fleet link <path>`)."
+        ),
+    )
 
 
 def fleets_root() -> Path:
@@ -415,7 +422,7 @@ def context_or_cwd(ctx: typer.Context | None) -> Context:
     named on purpose (``--fleet``, ``BAY_FLEET``, ``BAY_FLEET_NAME``, or the
     ``fleet`` of a bay.toml) is never replaced by the working directory: that
     error is raised. A fleet you stand in (step 5a) wins. A fleet that only lives
-    in a folder above you (step 5b) does not: a fresh folder next to a fleet is
+    in or above the folder you stand in (step 5b) does not: a fresh folder next to a fleet is
     where a new fleet starts, so the result stays the working directory.
     """
     try:

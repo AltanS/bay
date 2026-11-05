@@ -4,7 +4,7 @@ One line per check, each ``ok``, ``warn`` or ``fail``, in this order:
 
 * the fleet Bay picked, and why (``--fleet``, ``BAY_FLEET``, the ``fleet``
   line of a bay.toml, ``BAY_FLEET_NAME``, the fleet directory you stand
-  in, or the one fleet in a folder above you), with the resolved path (a fleet may be a symlink);
+  in, or the only fleet nearby), with the resolved path (a fleet may be a symlink);
 * the fleet ``format``;
 * the CLI version and the checkout it runs from;
 * whether the vault opens (no secret is printed);
@@ -233,7 +233,7 @@ def _why(ctx: typer.Context, cx: Context) -> tuple[str, Path | None]:
     if cx.source in (SOURCE_FLEET_HERE, SOURCE_CWD):
         return "the fleet directory you stand in", None
     if cx.source == SOURCE_FLEET_ABOVE:
-        return "the one fleet in a folder above you", None
+        return "the only fleet nearby", None
     return cx.source, None
 
 

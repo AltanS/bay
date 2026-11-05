@@ -187,7 +187,7 @@ its box env may leave `group` out.
 
 Bay picks the fleet in one fixed order of five rules: `--fleet <path>`, `BAY_FLEET=<path>`,
 the `fleet = "acme"` line of the `bay.toml` you stand in, `BAY_FLEET_NAME=acme`, and last the
-fleet folder you stand in, or the one fleet in a folder above you (every verb except `init`,
+fleet folder you stand in, or the only fleet nearby (every verb except `init`,
 `adopt` and `show --routes`). The rules, and the verbs that skip the last one, are in
 [install.md](install.md#pick-a-fleet). `bay init`
 and `bay adopt` have no `bay.toml` to read yet, so they do not use the third rule. A stray

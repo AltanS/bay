@@ -53,7 +53,7 @@ No verb asks a question. No verb takes a secret on the command line.
 - The fleet is picked in one fixed order, defined once in
   [install.md](install.md#pick-a-fleet): `--fleet <path>`, `BAY_FLEET`, the `fleet =`
   line of the `bay.toml` you stand in, `BAY_FLEET_NAME`, and last the fleet you stand in
-  (rule 5a: a `bay.fleet.toml` here or above) or the one fleet that lives in a folder above you
+  (rule 5a: a `bay.fleet.toml` here or above) or the only fleet nearby
   (rule 5b). Rule 5 applies to every verb except `init`, `adopt` and `show --routes`. `service`
   and `server` edits use rule 5a and then the working directory, never 5b. The full rule is in
   [install.md](install.md#pick-a-fleet). `bay init` and `bay adopt` run in an app
