@@ -261,12 +261,17 @@ def _error_outcome(ctx: typer.Context, exc: BayError) -> dict[str, Any]:
         cx: Context | None = fleet_context(ctx, fleet_name, allow_cwd=True)
     except BayError:
         cx = None
-    return applymod.outcome(
+    doc = applymod.outcome(
         cx,
         reason=getattr(exc, "reason", None) or "error",
         box_touched=bool(getattr(exc, "box_touched", False)),
         next_cmd=getattr(exc, "next_cmd", None),
     )
+    undo_failed = getattr(exc, "undo_failed", None)
+    if undo_failed is not None:
+        # A refused claim undid its commit; these paths could not be put back.
+        doc["undo_failed"] = list(undo_failed)
+    return doc
 
 
 def _plan_pull(cx: Context) -> Any:

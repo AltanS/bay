@@ -22,6 +22,7 @@ import fcntl
 import json
 import os
 import socket
+import subprocess
 import sys
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import asdict, dataclass, field
@@ -77,6 +78,7 @@ class SyncError(BayError):
         next_cmd: str | None = None,
         hint: str | None = None,
         paths: Sequence[str] = (),
+        undo_failed: Sequence[str] | None = None,
     ) -> None:
         super().__init__(message, code=ErrorCode.CONFLICT, hint=hint)
         self.reason = reason
@@ -84,6 +86,8 @@ class SyncError(BayError):
         self.box_touched = box_touched
         self.next_cmd = next_cmd
         self.paths = list(paths)
+        #: A refused claim: the paths its undo could not put back (None: no undo ran).
+        self.undo_failed = list(undo_failed) if undo_failed is not None else None
 
     @property
     def exit_code(self) -> int:
@@ -476,38 +480,87 @@ def _rel(repo: Path, path: Path | str) -> str:
     return p.relative_to(repo).as_posix() if p.is_absolute() else p.as_posix()
 
 
-def undo(repo: Path, commit: str, plan: Undo) -> bool:
-    """Undo this run's fleet commit. False (nothing done) when HEAD moved past it.
+@dataclass
+class UndoResult:
+    """What :func:`undo` did. ``state``: ``done``, ``partial``, ``moved`` or ``reset_failed``."""
+
+    state: str
+    #: Paths that could not be put back (``partial``).
+    failed: list[str] = field(default_factory=list)
+    detail: str | None = None
+
+
+def _ok(proc: subprocess.CompletedProcess[str] | None) -> bool:
+    return proc is not None and proc.returncode == 0
+
+
+def undo(repo: Path, commit: str, plan: Undo) -> UndoResult:
+    """Undo this run's fleet commit, path by path.
 
     ``git reset --soft`` to the commit before the run, then each path of the
     run alone: no ``reset --hard``, no other path, so the uncommitted work of
-    other sessions in this checkout stays.
+    other sessions in this checkout stays. Every git call is checked. A path
+    that cannot be put back is listed in ``failed``, and the other paths are
+    still done. Nothing is done when HEAD moved past ``commit`` (``moved``) or
+    the reset fails (``reset_failed``).
     """
     if gitrepo.head(repo) != commit:
-        return False
+        return UndoResult("moved")
     if commit != plan.before:
         proc = gitrepo._run(repo, "reset", "--soft", "--quiet", plan.before)
-        if proc is None or proc.returncode != 0:
-            return False
+        if not _ok(proc):
+            detail = gitrepo._last_line(str(proc.stderr)) if proc is not None else "timed out"
+            return UndoResult("reset_failed", detail=detail or "git reset failed")
+    failed: list[str] = []
     for rel in plan.restore:
         if gitrepo.has_path(repo, plan.before, rel):
-            gitrepo._run(
+            done = _ok(gitrepo._run(
                 repo, "restore", f"--source={plan.before}", "--staged", "--worktree", "--", rel
-            )
+            ))
         else:
-            gitrepo._run(repo, "rm", "--cached", "--quiet", "--ignore-unmatch", "--", rel)
-            with contextlib.suppress(OSError):
-                (repo / rel).unlink()
+            done = _ok(
+                gitrepo._run(repo, "rm", "--cached", "--quiet", "--ignore-unmatch", "--", rel)
+            )
+            try:
+                (repo / rel).unlink(missing_ok=True)
+            except OSError:
+                done = False
+        if not done:
+            failed.append(rel)
     for rel in plan.unstage:
         if gitrepo.has_path(repo, plan.before, rel):
-            gitrepo._run(repo, "restore", f"--source={plan.before}", "--staged", "--", rel)
+            done = _ok(
+                gitrepo._run(repo, "restore", f"--source={plan.before}", "--staged", "--", rel)
+            )
         else:
-            gitrepo._run(repo, "rm", "--cached", "--quiet", "--ignore-unmatch", "--", rel)
+            done = _ok(
+                gitrepo._run(repo, "rm", "--cached", "--quiet", "--ignore-unmatch", "--", rel)
+            )
         data = plan.contents.get(rel)
         if data is not None:
-            with contextlib.suppress(OSError):
+            try:
                 (repo / rel).write_bytes(data)
-    return True
+            except OSError:
+                done = False
+        if not done:
+            failed.append(rel)
+    return UndoResult("partial" if failed else "done", failed)
+
+
+def _undo_line(result: UndoResult) -> str:
+    if result.state == "done":
+        return "The fleet commit of this run is undone."
+    if result.state == "moved":
+        return "HEAD moved after the fleet commit of this run, so it was not undone."
+    if result.state == "reset_failed":
+        return (
+            f"The fleet commit of this run was NOT undone: git reset failed ({result.detail}). "
+            "It is still the local HEAD; run `git reset --soft HEAD~1` in the fleet."
+        )
+    return (
+        "The undo was PARTIAL: the fleet commit is undone, but these paths could not be put "
+        f"back: {', '.join(result.failed)}. Check them with git status in the fleet."
+    )
 
 
 def _newest_remote(repo: Path) -> tuple[int, str]:
@@ -552,17 +605,15 @@ def claim(
             else f"The fleet remote refused the push: {problem}."
         )
     undone = undo(repo, commit, plan)
-    tail = (
-        "The fleet commit of this run is undone."
-        if undone
-        else "HEAD moved after the fleet commit of this run, so it was not undone."
-    )
+    tail = _undo_line(undone)
     again_line = (
         "Run bay up again: it pulls first." if reason == REASON_CLAIM_REFUSED and count else ""
     )
     message = f"Stopped before the box was touched. {why} Nothing was deployed. {again_line} {tail}"
     message = " ".join(message.split())
-    raise SyncError(message, reason=reason, exit_code=code, next_cmd=again)
+    raise SyncError(
+        message, reason=reason, exit_code=code, next_cmd=again, undo_failed=undone.failed
+    )
 
 
 # ── the push after the deploy, and bay fleet push ───────────────────────────

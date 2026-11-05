@@ -864,3 +864,50 @@ def test_up_json_carries_the_outcome_fields(machines: dict[str, Path], box: Fake
     assert doc["fleet"] == {"name": "testfleet", "path": str(m["a"]), "selected_by": "--fleet"}
     assert doc["fleet_sync"] is None and doc["pushed"] is True
     assert "fleet: claimed" in result.stderr
+
+
+def test_a_partial_undo_names_the_paths_it_could_not_restore(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    up_at(m, "b", "status")  # services.yml now exists at the remote; A pulls it first
+    hook = m["remote"] / "hooks" / "pre-receive"
+    services = str(GENERATED_SERVICES)
+    real_run = gitrepo._run
+    calls: list[str] = []
+
+    def run(repo: Path, *args: str, **kw: Any) -> Any:
+        if args[:1] == ("restore",) and args[-1] == services:
+            calls.append(args[-1])
+            return subprocess.CompletedProcess(["git", *args], 1, "", "error: forced by test")
+        if args[:1] == ("push",) and not hook.exists():
+            # The remote refuses this run's claim, after the start fetch and pull.
+            hook.write_text("#!/bin/sh\necho refused by test >&2\nexit 1\n")
+            hook.chmod(0o755)
+        return real_run(repo, *args, **kw)
+
+    monkeypatch.setattr(gitrepo, "_run", run)
+    result = cli({"fleet": m["a"], "app": m["app"]}, "up", "--json")
+    assert result.exit_code == 42, result.output
+    doc = json.loads(result.stdout)
+    assert calls == [services]
+    assert doc["reason"] == "claim_refused" and doc["box_touched"] is False
+    assert doc["undo_failed"] == [services]
+    assert "The undo was PARTIAL" in doc["error"] and services in doc["error"]
+    assert "is undone." not in doc["error"]
+    # The other paths were still put back: the lock file is as at HEAD.
+    assert git(m["a"], "status", "--porcelain=v1", "--", "projects/webapp/bay.lock") == ""
+    assert len(box.deploys) == 1  # only machine B's up deployed
+
+
+def test_a_full_undo_says_so_and_lists_nothing(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    m = machines
+    hook = m["remote"] / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\necho refused by test >&2\nexit 1\n")
+    hook.chmod(0o755)
+    result = cli({"fleet": m["a"], "app": m["app"]}, "up", "--json")
+    assert result.exit_code == 42, result.output
+    doc = json.loads(result.stdout)
+    assert doc["undo_failed"] == [] and "The fleet commit of this run is undone." in doc["error"]
