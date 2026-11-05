@@ -771,7 +771,7 @@ error, carries these fields:
 | `receipt_unread` | `[{"box", "host", "error"}]` for each box whose receipt could not be read after the deploy (see [The result is per box](#the-result-is-per-box)), else `[]`. |
 | `next` | The command to run next, or null. |
 | `fleet` | `{"name", "path", "selected_by"}`: the fleet and how Bay found it (`--fleet`, `BAY_FLEET`, `bay.toml`, `~/.config/bay/fleets`, "the fleet folder you stand in" or "the only fleet nearby"). These are the `fleet.source` values of `bay status --json`. |
-| `fleet_sync` | `{"pulled", "from", "to"}` when Bay fast-forwarded the fleet first, else null. The plan JSON has it too. |
+| `fleet_sync` | An object for every fleet that Bay pushes (a top-level repo with a remote), else null. `pulled`, `from`, `to`: the fast-forward before the run (`pulled` 0 and `from` equal to `to` when nothing was pulled). `claimed`: true when the claim push landed, false when the run made none (`--no-push`) or stopped before it. `claim_commit`: the fleet commit that the claim pushed, or null. `receipt_pushed`: true when the push after the deploy landed, false when it failed, null when the run did not push (`--no-push`) or did not get that far. `receipt_rebased`: how many rebases that push needed (0 for none). The plan JSON has only `pulled`, `from` and `to`, and only when `bay plan` fast-forwarded the fleet. |
 
 #### The first image
 

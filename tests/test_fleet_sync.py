@@ -743,6 +743,21 @@ def test_fleet_status(machines: dict[str, Path], box: FakeBox) -> None:
     assert "uncommitted: loose.yml" in text.stdout and "behind" in text.stdout
 
 
+def test_fleet_status_clean_ignores_being_behind(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    m = machines
+    up_at(m, "b", "status")
+    behind = _fleet(m, "status", "--json")
+    doc = json.loads(behind.stdout)
+    assert doc["behind"] >= 1 and doc["dirty_paths"] == []
+    assert doc["in_sync"] is False and doc["clean"] is True
+    assert behind.exit_code == 41  # not in sync, so the exit code still says so
+    (m["a"] / "loose.yml").write_text("x: 1\n")
+    dirty = json.loads(_fleet(m, "status", "--json").stdout)
+    assert dirty["clean"] is False
+
+
 def test_fleet_status_lists_pending_and_failed_records(
     machines: dict[str, Path], box: FakeBox
 ) -> None:
@@ -868,6 +883,55 @@ def test_no_push_skips_the_claim(machines: dict[str, Path], box: FakeBox) -> Non
     assert git(m["remote"], "rev-parse", "main") == before
 
 
+def test_fleet_sync_records_the_claim_and_the_receipt(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    m = machines
+    head = git(m["a"], "rev-parse", "HEAD")
+    result = up_at(m, "a", "webapp")
+    assert result["fleet_sync"] == {
+        "pulled": 0,
+        "from": head,
+        "to": head,
+        "claimed": True,
+        "claim_commit": result["fleet_commit"],
+        "receipt_pushed": True,
+        "receipt_rebased": 0,
+    }
+    # The plan schema lists these keys.
+    props = PLAN_SCHEMA["properties"]["fleet_sync"]["properties"]
+    assert set(result["fleet_sync"]) <= set(props)
+
+
+def test_fleet_sync_counts_the_rebase_of_the_receipt_push(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    c = m["tmp"] / "machine-c"
+
+    def elsewhere() -> None:
+        git(m["tmp"], "clone", "-q", str(m["remote"]), str(c))
+        (c / "docs.md").write_text("unrelated\n")
+        commit_all(c, "unrelated change on machine c")
+        git(c, "push", "-q")
+
+    _during_deploy(box, monkeypatch, elsewhere)
+    result = up_at(m, "a", "webapp")
+    sync = result["fleet_sync"]
+    assert sync["claimed"] is True and sync["receipt_pushed"] is True
+    assert sync["receipt_rebased"] == 1
+
+
+def test_fleet_sync_with_no_push_has_no_claim_and_no_receipt_push(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    result = up_at(machines, "a", "webapp", push=False)
+    sync = result["fleet_sync"]
+    assert sync["pulled"] == 0 and sync["from"] == sync["to"]
+    assert sync["claimed"] is False and sync["claim_commit"] is None
+    assert sync["receipt_pushed"] is None and sync["receipt_rebased"] == 0
+
+
 def test_state_reports_each_field(machines: dict[str, Path], box: FakeBox) -> None:
     m = machines
     st = fleetsync.state(m["a"])
@@ -887,7 +951,7 @@ def test_up_json_carries_the_outcome_fields(machines: dict[str, Path], box: Fake
     doc = json.loads(result.stdout)
     assert doc["reason"] is None and doc["box_touched"] is True and doc["next"] is None
     assert doc["fleet"] == {"name": "testfleet", "path": str(m["a"]), "selected_by": "--fleet"}
-    assert doc["fleet_sync"] is None and doc["pushed"] is True
+    assert doc["fleet_sync"]["claimed"] is True and doc["pushed"] is True
     assert "fleet: claimed" in result.stderr
 
 

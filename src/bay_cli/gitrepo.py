@@ -107,7 +107,7 @@ def extract(repo: Path, commit: str, rels: list[str], dest: Path) -> None:
     proc = _run_bytes(repo, "archive", "--format=tar", commit, "--", *rels, timeout=60)
     if proc is None or proc.returncode != 0:
         detail = proc.stderr.decode(errors="replace") if proc is not None else ""
-        raise GitError(_last_line(detail) or f"git archive failed in {repo}")
+        raise GitError(git_detail(detail) or f"git archive failed in {repo}")
     with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
         tar.extractall(dest, filter="data")
 
@@ -229,7 +229,7 @@ def clone_mirror(url: str, dest: Path) -> str | None:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"git clone failed: {exc}"
     if proc.returncode != 0:
-        return _last_line(proc.stderr) or "git clone failed"
+        return git_detail(proc.stderr) or "git clone failed"
     return None
 
 
@@ -239,7 +239,7 @@ def fetch_prune(repo: Path) -> str | None:
     if proc is None:
         return "git fetch timed out"
     if proc.returncode != 0:
-        return _last_line(str(proc.stderr)) or "git fetch failed"
+        return git_detail(str(proc.stderr)) or "git fetch failed"
     return None
 
 
@@ -266,20 +266,20 @@ def remove(repo: Path, rels: Sequence[str]) -> None:
         return
     done = _run(repo, "rm", "--quiet", "--", *rels)
     if done is None or done.returncode != 0:
-        raise GitError(_last_line(str(done.stderr)) if done is not None else "git rm failed")
+        raise GitError(git_detail(str(done.stderr)) if done is not None else "git rm failed")
 
 
 def move(repo: Path, old: str, new: str) -> None:
     """``git mv old new``. Raises GitError."""
     proc = _run(repo, "mv", "--", old, new)
     if proc is None or proc.returncode != 0:
-        raise GitError(_last_line(str(proc.stderr)) if proc is not None else "git mv failed")
+        raise GitError(git_detail(str(proc.stderr)) if proc is not None else "git mv failed")
 
 
 def add(repo: Path, rels: Sequence[str]) -> None:
     proc = _run(repo, "add", "--", *rels)
     if proc is None or proc.returncode != 0:
-        raise GitError(_last_line(str(proc.stderr)) if proc is not None else "git add failed")
+        raise GitError(git_detail(str(proc.stderr)) if proc is not None else "git add failed")
 
 
 def commit_staged(repo: Path, rels: Sequence[str], message: str) -> str:
@@ -335,7 +335,7 @@ def behind_remote(repo: Path) -> tuple[bool | None, str | None]:
         return False, None
     proc = _run(repo, "fetch", "--quiet", "--no-tags", timeout=60)
     if proc is None or proc.returncode != 0:
-        detail = _last_line(str(proc.stderr)) if proc is not None else "timed out"
+        detail = git_detail(str(proc.stderr)) if proc is not None else "timed out"
         return None, f"cannot fetch the fleet remote: {detail or 'no detail'}"
     upstream = _out(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     if not upstream:
@@ -364,7 +364,7 @@ def push(repo: Path) -> tuple[bool, str | None]:
     if proc is None:
         return False, "git push timed out"
     if proc.returncode != 0:
-        return False, _last_line(str(proc.stderr)) or "git push failed"
+        return False, git_detail(str(proc.stderr)) or "git push failed"
     return True, None
 
 
@@ -377,7 +377,7 @@ def commit_paths(repo: Path, paths: list[Path], message: str) -> str:
     rels = [str(p.relative_to(repo)) if p.is_absolute() else str(p) for p in paths]
     add = _run(repo, "add", "--", *rels)
     if add is None or add.returncode != 0:
-        raise GitError(_last_line(str(add.stderr)) if add is not None else "git add failed")
+        raise GitError(git_detail(str(add.stderr)) if add is not None else "git add failed")
     staged = _run(repo, "diff", "--cached", "--quiet", "--", *rels)
     if staged is not None and staged.returncode == 0:
         current = head(repo)
@@ -401,3 +401,18 @@ def _plain(rel: str) -> str:
 def _last_line(text: str) -> str:
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     return lines[-1] if lines else ""
+
+
+def git_detail(stderr: str) -> str:
+    """One line of git's stderr for a message, without the ``fatal:``/``error:`` prefix.
+
+    The first line that starts with ``fatal:`` or ``error:``, else the first
+    non-empty line. Never the last line: git ends a refusal with hint lines
+    (``hint: ...``, ``and the repository exists.``) that mean nothing alone.
+    """
+    lines = [ln.strip() for ln in stderr.strip().splitlines() if ln.strip()]
+    for ln in lines:
+        for prefix in ("fatal:", "error:"):
+            if ln.startswith(prefix):
+                return ln[len(prefix) :].strip()
+    return lines[0] if lines else ""

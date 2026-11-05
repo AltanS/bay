@@ -640,7 +640,7 @@ def up(
             plan = planmod.recheck(proj, saved, opts, read_receipts=seen, check_box=check_box)
         else:
             plan = planmod.make_plan(proj, opts, read_receipts=seen)
-        plan["fleet_sync"] = pulled.to_dict() if pulled else None
+        plan["fleet_sync"] = fleetsync.sync_record(cx.fleet_root, pulled)
         prior = _save_plan(cx, plan)
         forced = _gate(
             plan, force, reason, say, cx=cx, take_over=take_over, allow_dirty=allow_dirty
@@ -734,7 +734,7 @@ def up_env(
             )
         else:
             plan = planmod.make_env_plan(cx, opts, cwd=cwd, read_receipts=seen)
-        plan["fleet_sync"] = pulled.to_dict() if pulled else None
+        plan["fleet_sync"] = fleetsync.sync_record(cx.fleet_root, pulled)
         prior = _save_plan(cx, plan)
         if not plan["projects"] and not plan.get("box_env"):
             raise BayError(
@@ -1312,6 +1312,7 @@ def _claim(
     if written is not None:
         written.claim_started = True
     fleetsync.claim(root, commit, undo, again=again, say=say)
+    fleetsync.mark_claimed(plan.get("fleet_sync"), commit)
     if written is not None:
         written.claimed = True
 
@@ -1507,6 +1508,7 @@ def _push_fleet(cx: Context, result: dict[str, Any], say: Echo) -> None:
     local = (gitrepo._out(root, "rev-list", "@{u}..HEAD") or "").split()
     done = fleetsync.push_with_rebase(root)
     result["pushed"], result["push_error"] = done.pushed, done.problem
+    fleetsync.mark_receipt(result.get("fleet_sync"), done)
     receipt = result.get("receipt_commit")
     if done.pushed and done.rebased and receipt in local:
         # The rebase gave the receipt commit a new id: report the one on the remote.

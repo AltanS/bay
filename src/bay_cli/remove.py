@@ -708,7 +708,7 @@ def apply_remove(
             deploy=deploy,
             say=say,
             push=push,
-            pulled=pulled.to_dict() if pulled else None,
+            pulled=fleetsync.sync_record(cx.fleet_root, pulled),
             take_over=take_over,
             allow_dirty=allow_dirty,
             written=written,

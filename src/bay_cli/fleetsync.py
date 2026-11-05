@@ -307,7 +307,7 @@ class State:
     is_git: bool = True
     no_remote: bool = False
     not_toplevel: bool = False
-    #: The fetch failed: git's last line.
+    #: The fetch failed: the first error line of git (:func:`gitrepo.git_detail`).
     unreachable: str | None = None
     branch: str | None = None
     upstream: str | None = None
@@ -365,7 +365,7 @@ def git_failed(args: Sequence[str], proc: subprocess.CompletedProcess[str] | Non
     if proc is None:
         why = "timed out"
     else:
-        why = gitrepo._last_line(str(proc.stderr)) or f"exited with {proc.returncode}"
+        why = gitrepo.git_detail(str(proc.stderr)) or f"exited with {proc.returncode}"
     return SyncError(
         f"cannot read the fleet repo: {_cmd(args)} {why}",
         reason=REASON_GIT_FAILED,
@@ -454,7 +454,7 @@ def push_upstream(repo: Path) -> tuple[bool, str | None]:
     if proc is None:
         return False, "git push timed out"
     if proc.returncode != 0:
-        return False, gitrepo._last_line(str(proc.stderr)) or "git push failed"
+        return False, gitrepo.git_detail(str(proc.stderr)) or "git push failed"
     return True, None
 
 
@@ -481,7 +481,7 @@ def _fetch(repo: Path, *, timeout: int = 60) -> str | None:
     if proc is None:
         return "git fetch timed out"
     if proc.returncode != 0:
-        return gitrepo._last_line(str(proc.stderr)) or "git fetch failed"
+        return gitrepo.git_detail(str(proc.stderr)) or "git fetch failed"
     return None
 
 
@@ -584,7 +584,7 @@ def _git_refusal(stderr: str) -> str:
     for ln in lines:
         if ln.startswith(("error:", "fatal:")) or ln.startswith(("\t", "  ")):
             keep.append(ln.strip())
-    return "; ".join(keep[:12]) or (lines[-1] if lines else "git refused")
+    return "; ".join(keep[:12]) or (lines[0] if lines else "git refused")
 
 
 #: The folder of plan records: the only place a fast-forward ever deletes a file.
@@ -688,6 +688,43 @@ def pull_if_behind(repo: Path, say: Echo = notice) -> Pulled | None:
         say(pulled.line())
         return pulled
     return None
+
+
+def sync_record(repo: Path, pulled: Pulled | None) -> dict[str, Any] | None:
+    """The ``fleet_sync`` object of a ``bay up``, ``bay rollback`` or remove result.
+
+    An object for every fleet that Bay pushes (a top-level repo with a remote),
+    else None. It starts with the fast-forward (``pulled`` 0 and ``from`` equal
+    to ``to`` when nothing was pulled) and the apply fills in the claim and the
+    receipt push as they happen (:func:`mark_claimed`, :func:`mark_receipt`).
+    """
+    try:
+        pushable = can_push(repo)
+    except SyncError:
+        pushable = pulled is not None  # the plan reports the git failure
+    if not pushable:
+        return None
+    head = gitrepo.head(repo)
+    doc = pulled.to_dict() if pulled else {"pulled": 0, "from": head, "to": head}
+    return {
+        **doc,
+        "claimed": False,
+        "claim_commit": None,
+        "receipt_pushed": None,
+        "receipt_rebased": 0,
+    }
+
+
+def mark_claimed(record: Any, commit: str) -> None:
+    """The claim push landed: ``claimed`` and ``claim_commit`` in a ``fleet_sync`` object."""
+    if isinstance(record, dict):
+        record.update(claimed=True, claim_commit=commit)
+
+
+def mark_receipt(record: Any, push: PushResult) -> None:
+    """The push after the deploy ended: ``receipt_pushed`` and ``receipt_rebased``."""
+    if isinstance(record, dict):
+        record.update(receipt_pushed=push.pushed, receipt_rebased=push.rebased)
 
 
 # ── run lock ────────────────────────────────────────────────────────────────
@@ -935,7 +972,7 @@ def undo(repo: Path, commit: str, plan: Undo) -> UndoResult:
     if commit != plan.before:
         proc = gitrepo._run(repo, "reset", "--soft", "--quiet", plan.before)
         if not _ok(proc):
-            detail = gitrepo._last_line(str(proc.stderr)) if proc is not None else "timed out"
+            detail = gitrepo.git_detail(str(proc.stderr)) if proc is not None else "timed out"
             return UndoResult("reset_failed", detail=detail or "git reset failed")
     failed: list[str] = []
     for rel in plan.restore:
@@ -1110,7 +1147,7 @@ def _abort_rebase(repo: Path) -> str | None:
     proc = gitrepo._run(repo, "rebase", "--abort", timeout=60)
     if _ok(proc) and not _rebase_in_progress(repo):
         return None
-    why = "timed out" if proc is None else (gitrepo._last_line(str(proc.stderr)) or "failed")
+    why = "timed out" if proc is None else (gitrepo.git_detail(str(proc.stderr)) or "failed")
     return (
         f"git rebase --abort {why}: the fleet is still in the middle of a rebase. "
         f"Finish it by hand: git -C {repo} rebase --abort, then git -C {repo} status"

@@ -259,14 +259,18 @@
     },
     "stale": { "type": "array", "items": { "type": "string" } },
     "fleet_sync": {
-      "description": "Since 2.12, not hashed: the fast-forward of the fleet before this plan, or null.",
+      "description": "Since 2.12, not hashed: the fast-forward of the fleet before this plan, or null. A bay up, bay rollback or remove result has it for every fleet that Bay pushes (pulled 0 when nothing was pulled) and adds the claim and the receipt push.",
       "type": ["object", "null"],
       "additionalProperties": false,
       "required": ["pulled", "from", "to"],
       "properties": {
-        "pulled": { "type": "integer", "minimum": 1 },
+        "pulled": { "type": "integer", "minimum": 0 },
         "from": { "type": "string" },
-        "to": { "type": "string" }
+        "to": { "type": "string" },
+        "claimed": { "type": "boolean", "description": "The claim push landed before the deploy." },
+        "claim_commit": { "type": ["string", "null"], "description": "The fleet commit that the claim pushed." },
+        "receipt_pushed": { "type": ["boolean", "null"], "description": "The push after the deploy landed; null when the run did not push." },
+        "receipt_rebased": { "type": "integer", "minimum": 0, "description": "How many rebases the push after the deploy needed." }
       }
     },
     "reason": {

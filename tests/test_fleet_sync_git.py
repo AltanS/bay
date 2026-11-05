@@ -361,7 +361,7 @@ def test_a_failed_rebase_abort_is_reported_with_the_fix(
     monkeypatch.setattr(gitrepo, "_run", run)
     ok, problem, conflicts = fleetsync.pull_rebase(a)
     assert not ok and conflicts == ["lock"]
-    assert "git rebase --abort error: cannot abort" in str(problem)
+    assert "git rebase --abort cannot abort" in str(problem)
     assert f"Finish it by hand: git -C {a} rebase --abort" in str(problem)
     monkeypatch.setattr(gitrepo, "_run", real)
     g(a, "rebase", "--abort")
@@ -379,3 +379,33 @@ def test_a_fast_forward_that_times_out_says_so(
     assert "timed out" in str(err.value)
     assert "Local edits are in the way" not in (err.value.hint or "")
     assert err.value.reason == "git_failed"
+
+
+# ── git's message: the first error line, not the last hint line ─────────────
+
+
+def test_an_unreachable_remote_message_keeps_the_fatal_line(repos: dict[str, Path]) -> None:
+    a = repos["a"]
+    gone = repos["tmp"] / "no-such-remote.git"
+    g(a, "remote", "set-url", "origin", str(gone))
+    st = fleetsync.state(a)
+    assert st.unreachable is not None
+    assert "does not appear to be a git repository" in st.unreachable
+    assert not st.unreachable.startswith(("fatal:", "error:"))
+    assert not st.unreachable.endswith("and the repository exists.")
+    behind, problem = gitrepo.behind_remote(a)
+    assert behind is None and problem is not None
+    assert "does not appear to be a git repository" in problem
+    pushed, why = fleetsync.push_upstream(a)
+    assert pushed is False and why is not None and "does not appear" in why
+
+
+def test_git_detail_rules() -> None:
+    hints = (
+        "hint: Updates were rejected\nhint: see the note\n"
+        "error: failed to push some refs to 'x'\nhint: tail\n"
+    )
+    assert gitrepo.git_detail(hints) == "failed to push some refs to 'x'"
+    assert gitrepo.git_detail("\n  plain first\nplain last\n") == "plain first"
+    assert gitrepo.git_detail("") == ""
+
