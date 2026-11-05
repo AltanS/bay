@@ -977,3 +977,50 @@ def test_a_colliding_non_plan_file_still_refuses(
     # The merge did not run, so the plan record B removed for it is back.
     assert (m["b"] / "plans" / "aaaaaaaaaaaa.json").read_text() == '{"from": "b"}\n'
     assert "removed" not in result.stderr
+
+
+# ── discovery step 5 meets the fleet verbs ──────────────────────────────────
+
+
+def _invoke_in(monkeypatch: pytest.MonkeyPatch, cwd: Path, *args: str) -> Any:
+    from typer.testing import CliRunner
+
+    from bay_cli.cli import app
+
+    monkeypatch.chdir(cwd)
+    return CliRunner().invoke(app, list(args))
+
+
+def _status_json(monkeypatch: pytest.MonkeyPatch, cwd: Path) -> dict[str, Any]:
+    result = _invoke_in(monkeypatch, cwd, "fleet", "status", "--json")
+    assert result.exit_code == 0, result.output
+    return json.loads(result.stdout)
+
+
+def test_fleet_verbs_find_the_fleet_by_discovery_step_5(
+    machines: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("BAY_FLEET", raising=False)
+    monkeypatch.delenv("BAY_FLEET_NAME", raising=False)
+    # 5a: a folder inside the fleet. (Not projects/status: its bay.toml names
+    # the fleet, and step 3 looks for that name under ~/.config/bay/fleets.)
+    doc = _status_json(monkeypatch, m["a"] / "group_vars")
+    assert doc["fleet"]["path"] == str(m["a"].resolve())
+    assert doc["fleet"]["selected_by"] == "the fleet folder you stand in"
+    # 5b: a folder next to the only fleet nearby.
+    lone = tmp_path / "lone"
+    git(tmp_path, "clone", "-q", str(m["remote"]), str(lone / "fleet"))
+    (lone / "work").mkdir()
+    doc = _status_json(monkeypatch, lone / "work")
+    assert doc["fleet"]["path"] == str((lone / "fleet").resolve())
+    assert doc["fleet"]["selected_by"] == "the only fleet nearby"
+    # bay up carries the same value in its JSON outcome.
+    m["remote"].rename(m["tmp"] / "gone.git")
+    result = _invoke_in(monkeypatch, m["a"], "up", "--project", "status", "--json")
+    assert result.exit_code == 41, result.output
+    up = json.loads(result.stdout)
+    assert up["fleet"]["selected_by"] == "the fleet folder you stand in"

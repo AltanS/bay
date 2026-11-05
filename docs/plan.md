@@ -714,7 +714,7 @@ error, carries these fields:
 | `reason` | Null on success. Else one of `receipt_unpushed`, `deploy_failed`, `claim_refused`, `remote_unreachable`, `diverged`, `no_upstream`, `fleet_busy`, `dirty`, `blocked`, `stale`, `approve`, or `error` for any other error. |
 | `box_touched` | True when the deploy ran. False when Bay stopped before it. |
 | `next` | The command to run next, or null. |
-| `fleet` | `{"name", "path", "selected_by"}`: the fleet and how Bay found it (`--fleet`, `BAY_FLEET`, `bay.toml`, `~/.config/bay/fleets`, `cwd`). |
+| `fleet` | `{"name", "path", "selected_by"}`: the fleet and how Bay found it (`--fleet`, `BAY_FLEET`, `bay.toml`, `~/.config/bay/fleets`, "the fleet folder you stand in" or "the only fleet nearby"). These are the `fleet.source` values of `bay status --json`. |
 | `fleet_sync` | `{"pulled", "from", "to"}` when Bay fast-forwarded the fleet first, else null. The plan JSON has it too. |
 
 #### The first image
