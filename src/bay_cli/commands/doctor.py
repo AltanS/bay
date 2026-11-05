@@ -3,8 +3,8 @@
 One line per check, each ``ok``, ``warn`` or ``fail``, in this order:
 
 * the fleet Bay picked, and why (``--fleet``, ``BAY_FLEET``, the ``fleet``
-  line of a bay.toml, ``BAY_FLEET_NAME``, or the fleet directory you stand
-  in), with the resolved path (a fleet may be a symlink);
+  line of a bay.toml, ``BAY_FLEET_NAME``, the fleet directory you stand
+  in, or the one fleet in a folder above you), with the resolved path (a fleet may be a symlink);
 * the fleet ``format``;
 * the CLI version and the checkout it runs from;
 * whether the vault opens (no secret is printed);

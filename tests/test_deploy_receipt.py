@@ -229,7 +229,11 @@ def test_status_schema_fleet_source_values() -> None:
 
     from bay_cli import context
 
-    used = set(re.findall(r"\bSOURCE_[A-Z_]+\b", inspect.getsource(context.Context.resolve)))
+    # Step 5 lives in _from_nearby_folders, which resolve calls.
+    text = inspect.getsource(context.Context.resolve) + inspect.getsource(
+        context.Context._from_nearby_folders
+    )
+    used = set(re.findall(r"\bSOURCE_[A-Z_]+\b", text))
     assert used, "Context.resolve names no SOURCE_* constant"
     expected = {getattr(context, name) for name in used}
     enum = _SCHEMA["properties"]["fleet"]["properties"]["source"]["enum"]

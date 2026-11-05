@@ -10,8 +10,9 @@ Which project and which fleet:
   ``--fleet``, ``BAY_FLEET`` or ``BAY_FLEET_NAME``.
 * With no ``bay.toml`` here or above and no ``--project``, ``bay plan <env>``
   and ``bay up <env>`` cover the whole environment of the fleet: the one
-  ``--fleet``, ``BAY_FLEET`` or ``BAY_FLEET_NAME`` names, or the fleet
-  directory you stand in (a ``bay.fleet.toml`` here or above).
+  ``--fleet``, ``BAY_FLEET`` or ``BAY_FLEET_NAME`` names, the fleet
+  directory you stand in (a ``bay.fleet.toml`` here or above), or the one
+  fleet in a folder above you.
 
 No verb asks a question. Secrets never travel on the command line.
 Plan exit codes: 0 auto, 10 approve, 20 blocked, 30 stale. ``bay up`` also
@@ -158,8 +159,8 @@ def whole_env_fleet(
 
     One project when ``--project`` is given or a bay.toml with a ``name`` is
     here or above (an app repo, or a project folder of a fleet). Otherwise
-    the fleet must be known: ``--fleet``, ``BAY_FLEET``, ``BAY_FLEET_NAME`` or
-    the fleet directory you stand in.
+    the fleet must be known: ``--fleet``, ``BAY_FLEET``, ``BAY_FLEET_NAME``,
+    the fleet directory you stand in, or the one fleet in a folder above you.
     """
     if project is not None:
         return None

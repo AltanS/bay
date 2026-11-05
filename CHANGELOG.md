@@ -8,6 +8,23 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.11.0] - 2026-11-05
+
+Bay finds the fleet from the folder you stand in. A new verb links a fleet checkout.
+
+### Added
+- Fleet discovery has a new rule 5, after `BAY_FLEET_NAME`. Rule 5a: the nearest folder at or above the working directory that holds `bay.fleet.toml` is the fleet. Rule 5b: if 5a finds nothing, Bay walks up from the working directory. A folder that holds exactly one fleet gives that fleet. A folder with more than one fleet is an error that lists them. Bay never searches your home folder, its parents, the root folder or `~/.config/bay/fleets`. A `bay.toml` that names a fleet which is not there still stops with "fleet not found".
+- Every verb that finds the fleet in the usual way uses rule 5 now, not only `plan`, `up`, `approve`, `rollback`, `remove` and `doctor`. `init`, `adopt` and `show --routes` still need rules 1 to 4. `bay server add|remove` and `bay service prune-webhooks` use rule 5a, then the working directory, and ignore 5b.
+- `bay fleet link [PATH]` makes the link `~/.config/bay/fleets/<name>` to a fleet checkout. `<name>` is the `name` in its `bay.fleet.toml`. `PATH` defaults to the working directory. Bay never replaces an entry that exists. `bay fleet ls` shows the real path of a link.
+- The "fleet not found" hint names three ways: `bay fleet init <name> --from <url>`, `bay fleet link <path>`, or `--fleet <path>`.
+
+### Fixed
+- `bay vault set` failed outside the fleet folder. It ran `ansible-vault` in the working directory, so Ansible did not find the vault password file and asked for a password. It now runs for the fleet, as `vault edit`, `view`, `encrypt` and `decrypt` do.
+
+### Upgrade notes
+- A command run in a folder next to exactly one fleet now acts on that fleet. Before, it stopped with "no fleet selected". Name the fleet with `--fleet` in scripts that must not guess.
+- `fleet.source` in `bay status --json` and the `source` in `bay doctor --json` can now be "the fleet folder you stand in" or "the one fleet in a folder above you". The `status.schema.json` enum has both values.
+
 ## [2.10.1] - 2026-11-05
 
 The test suite now passes on NixOS. No change on a box.

@@ -465,8 +465,8 @@ In `rebuild.sh`, for a trigger that got through:
   correctly wrote the trigger); the CB guard in rebuild.sh exits early.
   This is the incident pattern: webhook looks healthy, service is stuck.
 - **Recovery:** `bay --fleet <path> build reset <svc>` on your machine
-  (see `--help` for flags). `build` does not take the fleet from the
-  directory you stand in, so name it with `--fleet` or `BAY_FLEET`. See "Webhook Auto-Build Troubleshooting" below
+  (see `--help` for flags). Name the fleet with `--fleet` or
+  `BAY_FLEET`, or run it from inside the fleet folder. See "Webhook Auto-Build Troubleshooting" below
   for the manual JSON fallback.
 - **Incident (2026-04-16)** — `blog` on the `demo` NA region. Build failed,
   rollback succeeded, but CB counter reached 3 (old threshold). 2+ hours

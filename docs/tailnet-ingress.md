@@ -270,9 +270,9 @@ bay --fleet $F route import      # the file from before 2.1, once per fleet
 bay --fleet $F show --routes     # WANTED (fleet file), PINNED (compiled), RUNNING (box)
 ```
 
-Without `--fleet`, these verbs find the fleet through `BAY_FLEET`, `BAY_FLEET_NAME`, or the `fleet =`
-line of the `bay.toml` of an app repo you stand in. From inside the fleet directory they stop with
-"no fleet selected" (rule 5 of [install.md](install.md#pick-a-fleet) does not cover them).
+Without `--fleet`, these verbs find the fleet through `BAY_FLEET`, `BAY_FLEET_NAME`, the `fleet =`
+line of the `bay.toml` of an app repo you stand in, or the fleet folder you stand in (rule 5 of
+[install.md](install.md#pick-a-fleet)).
 
 Options of `add`: `--domain`, `--upstream`, `--host client|upstream`, `--identity`,
 `--alias` (repeatable), `--entrypoint`, `--ingress-box`, `--cert-domain`, `--no-commit`.
@@ -288,8 +288,7 @@ would take them along.
 ### Add a route, in order
 
 One list. Do every step in this order. Run the `bay` commands with `--fleet <path>` (or
-`BAY_FLEET`): `route`, `deploy` and `validate` do not use the fleet directory you stand in
-(rule 5 of [install.md](install.md#pick-a-fleet)).
+`BAY_FLEET`), or from inside the fleet folder (rule 5 of [install.md](install.md#pick-a-fleet)).
 
 1. **Pull the fleet.** `git pull` in the fleet repo. A clone that is behind its remote makes the
    plan block, and an old clone could deploy old group_vars.

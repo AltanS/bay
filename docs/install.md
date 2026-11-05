@@ -122,8 +122,15 @@ A fleet is the repo that holds your boxes and the apps on them. Bay keeps each f
 ```bash
 bay fleet init prod                                       # a new fleet with a minimal bay.fleet.toml
 bay fleet init prod --from git@example.com:me/fleet.git   # or clone one you already have
+bay fleet link ~/projects/my-fleet                        # or link a checkout you already have
 bay fleet ls                                              # list the fleets on this machine
 ```
+
+`bay fleet link [PATH]` makes the link `~/.config/bay/fleets/<name>` to the real folder.
+`PATH` defaults to the working directory. The folder must hold a `bay.fleet.toml` with a
+`name`, and `<name>` is that name. If the link exists and points to the same folder, Bay says
+so and exits 0. If the entry points elsewhere, or is a real folder, Bay stops and changes
+nothing. Remove the old entry by hand first. `bay fleet ls` shows the real path of a link.
 
 A new fleet holds only `bay.fleet.toml` and a `.gitignore`. The `.gitignore` lists `.bay-cache/` and
 `.vault_pass`. The file names the fleet, sets
@@ -165,7 +172,8 @@ The three must be equal. `bay fleet init <name>` makes the folder and the `name`
 of the repo. If you clone with another folder name than the `name` in `bay.fleet.toml`, then `bay init` writes
 `fleet = "<name in the file>"`, and the lookup of that name fails with "fleet not found". Use the same name in
 the folder, or reach the fleet with `--fleet <path>` or `BAY_FLEET=<path>`, which skip the folder lookup.
-`bay fleet ls` prints the folders, never the `name` lines.
+`bay fleet link` reads the `name` and makes the folder name equal to it. `bay fleet ls` prints
+the folders, never the `name` lines.
 
 ## Pick a fleet
 
@@ -176,14 +184,29 @@ A command that works on a fleet finds it in this order. The first rule that appl
 3. The fleet that the `bay.toml` of the app repo you are in names (`fleet = "prod"`). Bay
    looks in the working directory and above it.
 4. `BAY_FLEET_NAME=<name>`, a fleet in `~/.config/bay/fleets`.
-5. The fleet directory you stand in: the nearest directory at or above the working directory that has
-   a `bay.fleet.toml`. These verbs use rule 5: `plan`, `up`, `approve`, `rollback`, `remove`,
-   `doctor` and `show <name>` (not `show --routes`). This is the one list; the other docs repeat it.
-   Every other verb (`init`, `adopt`, `deploy`, `provision`, `vault`, `secret`, `status`, `route`,
-   `compile` and the rest) skips rule 5: from inside a fleet directory, pass `--fleet <path>` or
-   set `BAY_FLEET`. A few older verbs take the working directory as the fleet when rules 1 to 4
-   find none: `service prune-webhooks` (it deletes GitHub hooks), and `server add|remove` (they
-   write the hosts files and `group_vars/`).
+5. The fleet you stand in, or the one you live next to. It has two parts. Bay tries 5a first.
+   - **5a. You stand in a fleet.** Bay walks from the working directory up through its
+     parents. The first folder that has a `bay.fleet.toml` is the fleet.
+   - **5b. One fleet lives in a folder above you.** Bay uses this only when 5a found nothing.
+     It walks from the working directory up through its parents, nearest first. For each
+     folder, it looks at the direct children that are folders (a link to a folder counts)
+     and have a `bay.fleet.toml`. Names that start with `.` are skipped. If a folder has
+     exactly one such fleet, that is the fleet. If it has more than one, Bay stops, names the
+     folder, and lists the fleets. Pass `--fleet <path>` or `cd` into one. If it has none,
+     Bay goes one folder up. A folder that Bay cannot list counts as having none. Bay never
+     looks in your home folder, in any parent of it, in the root folder, or in
+     `~/.config/bay/fleets`. A lone fleet in `~/.config/bay/fleets` is never picked by itself:
+     use `BAY_FLEET_NAME`.
+
+   Rule 5 applies to every verb that finds the fleet in the usual way. Three verbs skip it:
+   `init`, `adopt` and `show --routes` need rule 1, 2, 3 or 4. A few older verbs work in a fresh
+   folder, before any fleet exists: `service prune-webhooks` (it deletes GitHub hooks), and
+   `server add|remove` (they write the hosts files and `group_vars/`). They use 5a. If 5a
+   finds nothing, they take the working directory as the fleet. They ignore 5b, so a fresh
+   folder next to a fleet stays a fresh folder.
+
+   A `bay.toml` that names a fleet which is not in `~/.config/bay/fleets` stops at rule 3 with
+   "fleet not found". Bay does not go on to rule 5.
 
 With none of these, the command stops and lists the ways to pick one.
 
@@ -234,7 +257,7 @@ line per check, each `ok`, `warn` or `fail`, and exits 1 when a check fails:
 
 | Check | What it says |
 |---|---|
-| Fleet | The fleet Bay picked, its real path (a fleet may be a symlink), and why: `--fleet`, `BAY_FLEET`, the `fleet` line of a `bay.toml`, `BAY_FLEET_NAME`, or the fleet directory you stand in. |
+| Fleet | The fleet Bay picked, its real path (a fleet may be a symlink), and why: `--fleet`, `BAY_FLEET`, the `fleet` line of a `bay.toml`, `BAY_FLEET_NAME`, the fleet folder you stand in, or the one fleet in a folder above you. |
 | Fleet format | The `format` of `bay.fleet.toml`. Format 1 is a warning; a format newer than the CLI knows fails. |
 | CLI | The installed version and the checkout it runs from, as `bay self version`. |
 | Vault | Whether the secrets of the environment open with `.vault_pass`. No name and no value is printed. |

@@ -52,12 +52,11 @@ No verb asks a question. No verb takes a secret on the command line.
   above it. `name` is the project. `fleet` names the fleet.
 - The fleet is picked in one fixed order, defined once in
   [install.md](install.md#pick-a-fleet): `--fleet <path>`, `BAY_FLEET`, the `fleet =`
-  line of the `bay.toml` you stand in, `BAY_FLEET_NAME`, and last the fleet directory
-  you stand in (a `bay.fleet.toml` here or above). That last rule (rule 5) applies to these
-  verbs only: `plan`, `up`, `approve`, `rollback`, `remove`, `doctor` and `show <name>`. Every
-  other verb (`deploy`, `provision`, `vault`, `secret`, `route`, `status`, `compile` and the
-  rest) needs `--fleet <path>` or `BAY_FLEET` when you stand in the fleet directory (`service` and
-  `server` edits are the one exception). The full rule is in [install.md](install.md#pick-a-fleet). `bay init` and `bay adopt` run in an app
+  line of the `bay.toml` you stand in, `BAY_FLEET_NAME`, and last the fleet you stand in
+  (rule 5a: a `bay.fleet.toml` here or above) or the one fleet that lives in a folder above you
+  (rule 5b). Rule 5 applies to every verb except `init`, `adopt` and `show --routes`. `service`
+  and `server` edits use rule 5a and then the working directory, never 5b. The full rule is in
+  [install.md](install.md#pick-a-fleet). `bay init` and `bay adopt` run in an app
   repo that has no `bay.toml` yet, so they cannot use the `fleet =` line (see
   [bay init](#bay-init)).
 - `--project <name>` works from any directory. The fleet then comes from the order above.
@@ -160,7 +159,7 @@ a project with no repo see [Projects with no repo](#projects-with-no-repo).
 **The fleet.** There is no `bay.toml` yet, so there is no `fleet =` line to read. `bay init`
 takes the fleet from, in this order: the global `--fleet <path>` (before the verb), `BAY_FLEET`,
 its own `--fleet <name>` (a folder name under `~/.config/bay/fleets`), `BAY_FLEET_NAME`. It
-does not use the fleet directory you stand in. The rest of the order is in
+does not use rule 5 (the fleet you stand in, or the one next to you). The rest of the order is in
 [install.md](install.md#pick-a-fleet). The draft gets `fleet = "<name>"` from the `name` key
 of `bay.fleet.toml`.
 

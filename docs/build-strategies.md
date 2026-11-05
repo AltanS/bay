@@ -575,7 +575,7 @@ cat /opt/<stack>/webhook/image-map.json
 
 ### Circuit breaker
 
-Auto-builds stop after `git_deploy_cb_max_failures` consecutive failures (default: 5). While the breaker is OPEN, pushes are silently ignored by `rebuild.sh` even though the webhook keeps logging "triggered". Inspect and reset it from your machine with `bay --fleet <path> build status` / `bay --fleet <path> build reset` (see `bay build --help`). `build` does not take the fleet from the directory you stand in. The state schema, alert rate-limiting, and manual fallback live in [build-pipeline.md](build-pipeline.md#circuit-breaker-state-rebuildsh).
+Auto-builds stop after `git_deploy_cb_max_failures` consecutive failures (default: 5). While the breaker is OPEN, pushes are silently ignored by `rebuild.sh` even though the webhook keeps logging "triggered". Inspect and reset it from your machine with `bay --fleet <path> build status` / `bay --fleet <path> build reset` (see `bay build --help`). Name the fleet with `--fleet`, or run it from inside the fleet folder. The state schema, alert rate-limiting, and manual fallback live in [build-pipeline.md](build-pipeline.md#circuit-breaker-state-rebuildsh).
 
 ### Health check and rollback (v0.75.0+)
 

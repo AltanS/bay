@@ -153,15 +153,15 @@ bare container names. Its default is `production`.
 | `bay status --env <env>` | box env | the receipts to read |
 | The receipt file | box env | `/var/lib/bay/receipts/<box env>.json`, written by every deploy of that box env, one per box env |
 
-**Which verbs find the fleet from the directory you stand in.** Only `plan`, `up`, `approve`,
-`rollback`, `remove`, `doctor` and `show <name>` do (rule 5 of [install.md](install.md#pick-a-fleet)).
-Inside the fleet directory, every other verb (`deploy`, `provision`, `vault`, `secret`, `validate`,
-`status`, `route`, `compile`, `adopt`, `init`) stops with "no fleet selected" unless you name the fleet
-with `--fleet <path>` or `BAY_FLEET`. The commands below that start with `bay --fleet $F` do that.
-One exception: a few older verbs take the working directory as the fleet when nothing else names
-one: `bay service prune-webhooks` and `bay server add|remove` (they write the hosts files and
-`group_vars/`). See rule 5 of
-[install.md](install.md#pick-a-fleet).
+**Which verbs find the fleet from the directory you stand in.** Every verb does, except `init`,
+`adopt` and `show --routes` (rule 5 of [install.md](install.md#pick-a-fleet)). Inside the fleet
+directory, Bay uses that fleet (rule 5a). In a folder that has exactly one fleet next to it or
+next to a parent, Bay uses that fleet (rule 5b). `init`, `adopt` and `show --routes` stop with
+"no fleet selected" unless you name the fleet with `--fleet <path>`, `BAY_FLEET` or
+`BAY_FLEET_NAME`. The commands below that start with `bay --fleet $F` name it on purpose, so they
+work from any folder. A few older verbs work in a fresh folder: `bay service prune-webhooks` and
+`bay server add|remove` (they write the hosts files and `group_vars/`). They use rule 5a, and
+then the working directory. They ignore rule 5b.
 
 **Secret values are per box env.** They live in `group_vars/<box env>/secrets.yml`, one
 encrypted file for the whole box env. Two deploy envs on one box env share that file: one key
@@ -187,8 +187,8 @@ its box env may leave `group` out.
 
 Bay picks the fleet in one fixed order of five rules: `--fleet <path>`, `BAY_FLEET=<path>`,
 the `fleet = "acme"` line of the `bay.toml` you stand in, `BAY_FLEET_NAME=acme`, and last the
-fleet directory you stand in (for `plan`, `up`, `approve`, `rollback`, `remove`, `doctor` and
-`show <name>` only). The rules, and the list of verbs that use the last one, are in
+fleet folder you stand in, or the one fleet in a folder above you (every verb except `init`,
+`adopt` and `show --routes`). The rules, and the verbs that skip the last one, are in
 [install.md](install.md#pick-a-fleet). `bay init`
 and `bay adopt` have no `bay.toml` to read yet, so they do not use the third rule. A stray
 `BAY_FLEET` in your shell profile beats the `bay.toml` line. A command that changes something
@@ -548,9 +548,8 @@ Container names. The primary env (`production`) has no suffix. Other envs add `-
 Missing secrets: `bay secret missing staging` lists the names (add `--fleet <path>` when you stand in the fleet directory). It never prints a value.
 
 **A second env on a new box, in order.** Do the fleet first, then the app repo. Every command of
-steps 3 and 4 runs on the fleet, and none of them reads the fleet directory you stand in (rule 5 of
-[install.md](install.md#pick-a-fleet)), so each one names it: `F=~/.config/bay/fleets/acme`, then
-`bay --fleet $F ...`.
+steps 3 and 4 runs on the fleet. Each one names it, so it works from any folder:
+`F=~/.config/bay/fleets/acme`, then `bay --fleet $F ...`.
 
 1. `hosts/staging`, one heading per group, and a `staging` group that holds them (the box env is
    the Ansible host pattern):
@@ -1248,10 +1247,9 @@ sidecar) are listed in
 [tailnet-ingress.md](tailnet-ingress.md#before-the-first-route-the-ingress-box-prerequisites), and the
 route's `bay up` deploys them. `bay route add` needs `--ingress-box` and `--cert-domain` the first time.
 
-The `route` verbs skip the fleet directory you stand in (rule 5 of
-[install.md](install.md#pick-a-fleet)), so each command here names the fleet with `--fleet`. You may
-leave it out when `BAY_FLEET` is set, or when you run from an app repo whose `bay.toml` names the
-fleet. `add` and `rm` keep the comments of `bay.fleet.toml` and commit the fleet repo (`--no-commit`
+Each command here names the fleet with `--fleet`. You may leave it out when `BAY_FLEET` is set,
+when you run from an app repo whose `bay.toml` names the fleet, or when you stand in the fleet
+(rule 5 of [install.md](install.md#pick-a-fleet)). `add` and `rm` keep the comments of `bay.fleet.toml` and commit the fleet repo (`--no-commit`
 only edits):
 
 ```

@@ -34,7 +34,7 @@ def test_readme_and_install_page_use_the_one_checkout_path() -> None:
 
 def test_install_page_documents_the_self_and_fleet_commands() -> None:
     text = _text("docs/install.md")
-    for command in ("bay self update", "bay self version", "bay fleet init", "bay fleet ls", "--fleet"):
+    for command in ("bay self update", "bay self version", "bay fleet init", "bay fleet link", "bay fleet ls", "--fleet"):
         assert command in text, command
 
 
