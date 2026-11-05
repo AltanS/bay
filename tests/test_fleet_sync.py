@@ -1469,13 +1469,35 @@ def test_a_hand_edit_in_a_bay_file_refuses_even_with_allow_dirty(
         assert err.value.reason == "dirty" and err.value.exit_code == 41
         text = str(err.value)
         assert "only Bay writes" in text and path in text
-        assert f"git checkout -- {path}" in text
+        assert f"git checkout HEAD -- {path}" in text
     assert without_plans(snapshot(m["a"])) == before  # the hand edit is still there
     # bay deploy --allow-dirty refuses it too.
     deployed = _op(m, "deploy", "--allow-dirty")
     assert getattr(deployed.exception, "reason", None) == "dirty", deployed.output
     assert "only Bay writes" in str(deployed.exception)
     assert playbooks == []
+
+
+@pytest.mark.parametrize("path", ["group_vars/all/services.yml", "projects/webapp/bay.lock"])
+def test_the_restore_hint_also_undoes_a_staged_edit(
+    machines: dict[str, Path], box: FakeBox, path: str
+) -> None:
+    """review 4, item 4: `git checkout -- <path>` restores from the index, so it keeps a staged edit."""
+    import re
+
+    m = machines
+    up_at(m, "a", "webapp")
+    target = m["a"] / path
+    clean = target.read_text()
+    target.write_text(clean + ("\n# a hand edit\n" if path.endswith(".yml") else "\n"))
+    git(m["a"], "add", path)
+    with pytest.raises(applymod.Refused) as err:
+        up_at(m, "a", "webapp")
+    hint = re.search(r"\(git checkout HEAD -- ([^)]*)\)", str(err.value))
+    assert hint is not None, str(err.value)
+    git(m["a"], "checkout", "HEAD", "--", *hint.group(1).split())
+    assert target.read_text() == clean
+    assert git(m["a"], "status", "--porcelain", "--", path) == ""
 
 
 # ── review 3, G: a status probe cannot make a starting run busy ─────────────

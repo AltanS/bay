@@ -1192,8 +1192,9 @@ def owned_dirty_message(paths: Sequence[str]) -> str:
     return (
         f"the fleet has uncommitted edits in {len(paths)} file(s) that only Bay writes: "
         f"{_path_list(paths)}. --allow-dirty does not cover them. Restore each with "
-        f"`git checkout -- <path>` in the fleet (git checkout -- {' '.join(paths[:3])}), "
-        "then run the command again. Change bay.toml or bay.fleet.toml instead"
+        f"`git checkout HEAD -- <path>` in the fleet (git checkout HEAD -- "
+        f"{' '.join(paths[:3])}), then run the command again. Change bay.toml or "
+        "bay.fleet.toml instead"
     )
 
 
