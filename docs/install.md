@@ -250,7 +250,10 @@ A command that works on a fleet finds it in this order. The first rule that appl
    A `bay.toml` that names a fleet which is not in `~/.config/bay/fleets` stops at rule 3 with
    "fleet not found". Bay does not go on to rule 5.
 
-With none of these, the command stops and lists the ways to pick one.
+With none of these, the command stops and lists the ways to pick one. With `--json`, the
+command prints that error as one JSON document on stdout: `error`, `hint`, `code`, `reason`
+(`no_fleet`, or `fleet_ambiguous` when a folder holds more than one fleet) and `candidates`
+(the fleets it found, empty for none).
 
 `bay init` and `bay adopt` run in an app repo that has no `bay.toml` yet, so rule 3 has nothing
 to read. They use rules 1, 2 and 4. `bay init` also takes its own `--fleet <name>` (a folder name, not

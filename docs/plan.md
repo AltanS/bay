@@ -624,7 +624,8 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
    code for it (see [bay adopt](#bay-adopt)).
 3. Bay writes the lock: the project pin moves to the planned commit. The
    environment record gets `result: pending`, `claimed_by` (the host name of
-   this machine), `claimed_at` (UTC) and `previous` (the pin it replaces).
+   this machine), `claimed_at` (UTC), `claimed_pid` (the process id of this
+   run) and `previous` (the pin it replaces).
 4. Bay compiles the fleet into its services file, with the hash header.
 5. Bay commits the fleet repo: `bay: up <name> <env> <short sha>`, and
    prints the fleet commit. Then Bay pushes that commit. This is the claim:
@@ -657,6 +658,17 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
      HEAD moved after the fleet commit, Bay undoes nothing and says so.
    - `--no-push`, a fleet with no remote and a fleet inside a bigger repo
      skip the claim, as they skip step 9.
+   - Any other error from step 3 to the start of Ansible, also Ctrl-C, gets
+     the same undo: the lock files and `services.yml` come back from the
+     commit before the run, the plan record is unstaged and gets its old
+     bytes back (or is removed when this run wrote it first), and a local
+     fleet commit of this run is undone. Bay touches no other path, and prints
+     `STOPPED before the box was touched (...)`. The tree is then as before
+     the run. When the claim is already on the remote, Bay undoes nothing
+     (another machine may have read it). It prints
+     `STOPPED AFTER THE CLAIM (...)`, names the fleet commit on the remote,
+     and says to run the same command again on this machine (see
+     [Several machines, one fleet](#several-machines-one-fleet)).
 6. Bay runs today's deploy for the box's environment, limited to
    `--tags deploy_stack` (the same work as `bay deploy <env> --tags deploy_stack`,
    and the same tag the box check of `bay plan` runs). The `git_deploy` role
@@ -715,7 +727,9 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
    `pushed: false`, `reason: receipt_unpushed`, `box_touched: true`,
    `next: "bay fleet push"`, and `push_conflicts` lists the files. Bay prints
    `DEPLOYED, but the receipt is not on the remote. Run: bay fleet push` on
-   stderr and exits 44. After a failed deploy the line starts with
+   stderr and exits 44. A git error in this step (for example a failed
+   `git status`) does the same: the result document stays, `push_error` names
+   the git error. After a failed deploy the line starts with
    `DEPLOY FAILED`, the reason stays `deploy_failed`, and the deploy keeps its
    own exit code. A remove plan uses the same step. When `git rebase --abort`
    fails too, Bay says so and prints the commands to finish it by hand. Bay pushes
@@ -733,6 +747,7 @@ error, carries these fields:
 | `box_touched` | True exactly when Ansible started against a box. False when Bay stopped before it, also in the validation before the playbook. Any error after the start, also one that is not a Bay error, still gives one JSON document with `box_touched: true`. |
 | `took_over` | The claim that `--take-over` skipped (`claimed_by`, `claimed_at`, `plan_id`, `expires_at`, ...), else null. |
 | `allowed_dirty` | The uncommitted fleet paths that `--allow-dirty` deployed, else null. |
+| `receipt_unread` | `[{"box", "host", "error"}]` for each box whose receipt could not be read after the deploy (see [The result is per box](#the-result-is-per-box)), else `[]`. |
 | `next` | The command to run next, or null. |
 | `fleet` | `{"name", "path", "selected_by"}`: the fleet and how Bay found it (`--fleet`, `BAY_FLEET`, `bay.toml`, `~/.config/bay/fleets`, "the fleet folder you stand in" or "the only fleet nearby"). These are the `fleet.source` values of `bay status --json`. |
 | `fleet_sync` | `{"pulled", "from", "to"}` when Bay fast-forwarded the fleet first, else null. The plan JSON has it too. |
@@ -828,19 +843,39 @@ A box env can have several boxes, and each box writes its own receipt. A
 receipt is "from this deploy" when its `fleet_commit` is this run's fleet
 commit.
 
+The `box` field of a receipt is the inventory host (`inventory_hostname`,
+often an address), while the lock and the plan name a box of
+`bay.fleet.toml`. Bay maps each host to its box the way the deploy places
+containers: a host belongs to a box when it is in the box's `group`. A box
+with no group is alone in its box env and gets every host of the box env. A
+host or group named like the box belongs to it too. Bay reads the inventory
+with Ansible's own inventory code. A receipt host that maps to no box is a
+note in the result, so it never goes unseen.
+
 - A project of the plan is `failed` when the run failed, when its box's
   receipt says `failed`, or when its box has no receipt from this deploy.
   Else it is `ok`.
 - Any other project that the deploy covered gets the result of its own box,
   when that box has a receipt from this deploy. When it has none, Bay does
   not touch that project's record at all.
+- On a failed box, such a project keeps its record exactly as it was when
+  this run did not move its pin and the record is `ok`. Its pin was
+  confirmed before, and the failed box says nothing new about it.
 - The command exits non-zero when anything failed.
 
-So a failed deploy of a project on box-1 does not mark a project on box-2
-`failed`, and its confirmed pin stays the `previous` target of a later
-rollback. One box has one receipt: when the box receipt says `failed`, every
-project on that box is `failed`, also one that did not change. This is a
-known limit.
+So a failed deploy of one project does not mark a confirmed pin of another
+project `failed`, on another box or on the same box, and that pin stays the
+`previous` target of a later rollback. The limit that stays: one box has one
+receipt, so on a failed box every project whose pin this run moved is
+`failed`.
+
+**A receipt that cannot be read is not a missing receipt.** After a deploy
+that exited 0, Bay reads the receipts again when the read errors (an
+unreachable box, a failed `cat`): up to 3 tries, 2 seconds apart. When a box
+stays unreadable, its projects are `failed`, but the error says
+`the deploy ran, but the receipt of box <box> (<error>) could not be read`,
+`receipt_unread` lists it, and `next` is the same `bay up`. That run is a
+no-op deploy that confirms the result.
 
 Each pinned environment gets `result`, `deployed_at`, `plan_id` and its own
 `last_receipt_sha256`. When the commit replaces a different earlier pin,
@@ -1611,10 +1646,11 @@ machine's pin. Bay closes that gap in three ways:
   box (exit 42). Run `bay up` again: it pulls the other machine's commit
   first. When the fleet also had local commits, run `bay fleet push` first.
 - **A fresh claim blocks other runs.** Between the claim and the receipt, the
-  lock record of the box env says `result: pending`, with `claimed_by` and
-  `claimed_at`. Any other plan for that box env, from any machine, is then
-  blocked with `reason: env_busy` (`bay up`, `bay rollback` and a remove exit
-  43):
+  lock record of the box env says `result: pending`, with `claimed_by`,
+  `claimed_at` and `claimed_pid`. Any other plan for that box env, from any
+  machine, is then blocked with `reason: env_busy` (`bay up`, `bay rollback`
+  and a remove exit 43). A plan checks every box env the run deploys, also
+  the old box env of a move:
   `machine-a is deploying production since 14:02 (plan a1b2c3d4e5f6). Wait for it. If that run is dead, the claim expires at 14:32, or pass --take-over.`
   `holder` in the plan JSON names the claim (`claimed_by`, `claimed_at`,
   `plan_id`, `expires_at`). A claim older than 30 minutes does not block. The
@@ -1622,13 +1658,27 @@ machine's pin. Bay closes that gap in three ways:
   `bay rollback --take-over` skip only this blocker. Bay prints a
   `TAKING OVER: ...` line and records `took_over` in the result. `bay plan`
   has no `--take-over`.
+- **A stopped run on this machine does not block the next one.** A pending
+  record whose `claimed_by` is this machine and whose `claimed_pid` names no
+  running process (the run was killed, or Ctrl-C after its claim) does not
+  block. The plan says in a note that this run repairs this host's own
+  stopped run. When that process still runs, it blocks as any claim does. A
+  record with no `claimed_pid` (an older Bay) is read as before.
+- **Clocks.** A `claimed_at` in the future (the other machine's clock is
+  ahead) is fresh until `claimed_at` plus 30 minutes. When it is more than
+  2 minutes ahead, the message adds that the clocks differ, and `holder` has
+  `clock_ahead_seconds`. A claimer whose clock is far behind writes a
+  `claimed_at` that looks old. Bay cannot detect that, so keep the clocks of
+  your machines in sync.
 - **One run per checkout.** Several agent sessions on one machine share one
   fleet checkout. `bay up`, `bay rollback`, `bay deploy`, `bay provision`,
   `bay fleet pull` and `bay fleet push` hold a lock on it for the whole run
   (`bay-run-<key>.lock` in the git common directory of the repo, where
   `<key>` is a hash of the fleet's path in the repo). So two fleets inside one
   bigger repo do not block each other, while a worktree or a second path to
-  the same fleet shares the lock. A second run stops at once
+  the same fleet shares the lock. A run tries for the lock for up to 1 second,
+  so a `bay fleet status` that looks at the lock at that moment does not make
+  it busy. A second run stops after that
   (exit 43) and names the holder:
   `the fleet is busy: bay up production (pid 4121 on machine-a, since 14:01)`.
   When the holder dies, the kernel drops the lock. `bay plan` takes the lock
@@ -1648,6 +1698,14 @@ this blocker, prints a warning and records `allowed_dirty`. The stricter rule
 for a plan with a destructive step stays. The files that the run writes
 itself (the lock, `services.yml`, the plan record) do not count.
 
+`--allow-dirty` never covers the files that only Bay writes: a
+`projects/<name>/bay.lock` and `group_vars/all/services.yml`. An uncommitted
+edit in one of them refuses `bay up`, `bay rollback`, a remove, `bay deploy`
+and `bay provision` with `reason: dirty`, also with `--allow-dirty`. The
+message names them and says to restore each with `git checkout -- <path>`.
+Change `bay.toml` or `bay.fleet.toml` instead. So the undo of a run (which
+puts these files back) can never destroy a hand edit.
+
 A git command that fails (not "no remote", not "inside a bigger repo") stops
 the command with `reason: git_failed`. Bay never reads a failed
 `git status` as a clean fleet. A fast-forward that runs longer than 120 s
@@ -1661,7 +1719,7 @@ they check the fleet first:
 | Remote cannot be read | Refuses (`remote_unreachable`, exit 41), unless `--offline`. |
 | Only behind | Fast-forwards, then runs. |
 | Diverged | Refuses (`diverged`, exit 41). |
-| Uncommitted files (tracked or untracked, `plans/` left out) | Refuses (`dirty`, exit 41) and lists up to 20 paths, unless `--allow-dirty`. The files would deploy, and no other machine can see them. Config files are the exception: `bay deploy` copies them from the committed fleet and the pinned project commits, also with `--allow-dirty`. |
+| Uncommitted files (tracked or untracked, `plans/` left out) | Refuses (`dirty`, exit 41) and lists up to 20 paths, unless `--allow-dirty`. An edit in a lock or in `services.yml` refuses also with `--allow-dirty`. The files would deploy, and no other machine can see them. Config files are the exception: `bay deploy` copies them from the committed fleet and the pinned project commits, also with `--allow-dirty`. |
 | Ahead | Pushes first (the claim). A refused push stops the run before the box (exit 42). |
 | `--offline` | No fetch and no push. Bay prints a warning: the result is not on the remote, so run `bay fleet push` after it. A `bay deploy` still compiles the fleet for its config files, and stops when a pinned app commit is not in the local repo cache. |
 
