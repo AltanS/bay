@@ -211,6 +211,7 @@ class FilterModule:
             "bay_repo_slug": bay_repo_slug,
             "bay_repo_groups": bay_repo_groups,
             "bay_shared_toml_paths": bay_shared_toml_paths,
+            "bay_push_siblings": bay_push_siblings,
             "bay_build_context": bay_build_context,
             "bay_build_dedup_map": bay_build_dedup_map,
             "bay_token_url": bay_token_url,
@@ -1174,6 +1175,46 @@ def bay_shared_toml_paths(services, svc_name):
         if _repo_slug(build["repo"], build.get("branch", "main")) == slug:
             paths.add(path)
     return sorted(paths)
+
+
+def bay_push_siblings(services, svc_name):
+    """The OTHER services that one push to svc_name's repo must also build.
+
+    The extra services of one bay.toml (``[services.<name>]`` with their own
+    ``build``) compile to separate services, ``<project>-<name>``, from the
+    same repo, branch and bay.toml. GitHub posts a push to one hook URL,
+    ``/webhook/<service>``. The receiver writes a trigger for that service and
+    for each name this returns (app.py ``do_POST``), so every service of the
+    project builds from the push.
+
+    A sibling has a ``build`` with the same repo and branch (default ``main``,
+    compared the way ``bay_shared_toml_paths`` compares them) and the same
+    non-empty ``bay_toml_path``. A service with no ``bay_toml_path`` has no
+    siblings. Another project in the same repo (another bay.toml) is not a
+    sibling. A service with ``shared_from`` is never one: it shares the main
+    container's build, and rebuild.sh's alias fan-out (local) or the image
+    pull fan-out (remote, registry) already reaches it. Only services with a
+    ``build`` key count, the same selection as webhook-config.json.j2. Sorted.
+    """
+    own = (services.get(svc_name) or {}).get("build")
+    if not isinstance(own, dict):
+        return []
+    own_path = own.get("bay_toml_path") or ""
+    if not own_path or not own.get("repo"):
+        return []
+    slug = _repo_slug(own["repo"], own.get("branch", "main"))
+    names = []
+    for name, svc in services.items():
+        if name == svc_name or not isinstance(svc, dict) or "build" not in svc:
+            continue
+        build = svc.get("build")
+        if not isinstance(build, dict) or build.get("shared_from"):
+            continue
+        if (build.get("bay_toml_path") or "") != own_path or not build.get("repo"):
+            continue
+        if _repo_slug(build["repo"], build.get("branch", "main")) == slug:
+            names.append(name)
+    return sorted(names)
 
 
 def bay_build_context(build):

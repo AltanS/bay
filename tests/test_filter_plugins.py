@@ -16,6 +16,7 @@ from bay_filters import (
     bay_build_dedup_map,
     bay_healthcheck,
     bay_prefix_volumes,
+    bay_push_siblings,
     bay_repo_groups,
     bay_repo_slug,
     bay_traefik_global_labels,
@@ -884,3 +885,76 @@ class TestPathRoutedService:
     def test_root_path_is_a_plain_prefix(self):
         labels = bay_traefik_labels({**self.MAIN, "path": "/"}, "x", _BASE_CONFIG)
         assert labels["traefik.http.routers.x.rule"].endswith("&& PathPrefix(`/`)")
+
+
+# ── bay_push_siblings: extra services of one bay.toml ──────────────────
+
+
+def _toml_build(repo="git@github.com:acme/shop.git", path="bay.toml", **extra):
+    build = {"repo": repo, "branch": "main", "bay_toml_path": path}
+    build.update(extra)
+    return {"build": build}
+
+
+def _sibling_fleet():
+    return {
+        "shop": _toml_build(dockerfile="Dockerfile"),
+        "shop-app": _toml_build(dockerfile="Dockerfile.app"),
+        "shop-ping": _toml_build(dockerfile="Dockerfile.app"),
+        # Shares the build of `shop`: the alias fan-out reaches it.
+        "shop-admin": _toml_build(dockerfile="Dockerfile", shared_from="shop"),
+        # Another project in the same repo: another bay.toml.
+        "docs": _toml_build(path="docs/bay.toml"),
+        # Same repo, no bay.toml path (a fleet-file project).
+        "legacy": {"build": {"repo": "git@github.com:acme/shop.git", "branch": "main"}},
+        "cache": {"image": "redis:7"},
+    }
+
+
+def test_push_siblings_same_repo_branch_and_toml():
+    services = _sibling_fleet()
+    assert bay_push_siblings(services, "shop") == ["shop-app", "shop-ping"]
+    assert bay_push_siblings(services, "shop-app") == ["shop", "shop-ping"]
+    assert bay_push_siblings(services, "shop-ping") == ["shop", "shop-app"]
+
+
+def test_push_siblings_none_without_bay_toml_path():
+    services = _sibling_fleet()
+    assert bay_push_siblings(services, "legacy") == []
+    assert "legacy" not in bay_push_siblings(services, "shop")
+
+
+def test_push_siblings_other_project_in_same_repo_is_not_a_sibling():
+    services = _sibling_fleet()
+    assert bay_push_siblings(services, "docs") == []
+    assert "docs" not in bay_push_siblings(services, "shop")
+
+
+def test_push_siblings_branch_mismatch_is_not_a_sibling():
+    services = _sibling_fleet()
+    services["shop-app"]["build"]["branch"] = "staging"
+    assert bay_push_siblings(services, "shop") == ["shop-ping"]
+    assert bay_push_siblings(services, "shop-app") == []
+    # No branch means main.
+    del services["shop-ping"]["build"]["branch"]
+    assert bay_push_siblings(services, "shop") == ["shop-ping"]
+
+
+def test_push_siblings_other_repo_is_not_a_sibling():
+    services = _sibling_fleet()
+    services["shop-app"]["build"]["repo"] = "git@github.com:acme/other.git"
+    assert bay_push_siblings(services, "shop") == ["shop-ping"]
+
+
+def test_push_siblings_never_lists_a_shared_build():
+    """A `shared_from` service re-tags the main build (alias or pull fan-out)."""
+    services = _sibling_fleet()
+    for name in ("shop", "shop-app", "shop-ping"):
+        assert "shop-admin" not in bay_push_siblings(services, name)
+
+
+def test_push_siblings_unknown_or_imageonly_service():
+    services = _sibling_fleet()
+    assert bay_push_siblings(services, "nope") == []
+    assert bay_push_siblings(services, "cache") == []
+

@@ -1001,3 +1001,379 @@ class TestImageLevelPullSignal:
 
         assert status == 200
         assert resp_body["status"] == "ignored"
+
+
+# ── Extra services of one bay.toml: sibling fan-out ─────────────────────
+#
+# GitHub has one hook per repo, on one service. The extra services of the
+# same bay.toml compile to separate services; the receiver config lists them
+# as `siblings`, and a push posted for any of them writes a trigger for each.
+
+
+def _toml_svc(dockerfile: str = "Dockerfile", **extra) -> dict:
+    build = {
+        "repo": "git@github.com:acme/shop.git",
+        "branch": "main",
+        "bay_toml_path": "bay.toml",
+        "bay_build_hash": "sha256:aa",
+        "dockerfile": dockerfile,
+    }
+    build.update(extra)
+    return {"build": build, "regions": ["eu"]}
+
+
+# Rendered by the template from before the sibling fan-out (2.12.0), for the
+# fleet in `_no_sibling_fleet`. A fleet without siblings must render to these
+# exact bytes, so its receiver config hash and its `bay-webhook` stay as they
+# were.
+_NO_SIBLING_GOLDEN = (
+    '{\n    "api": {\n        "bay_toml_path": "api/bay.toml",\n        "branch": "main",\n'
+    '        "peer_urls": {\n            "eu": "https://hooks-eu.example.com"\n        },\n'
+    '        "regions": [],\n        "shared_toml_paths": [\n            "web/bay.toml"\n'
+    '        ],\n        "strategy": "remote"\n    },\n    "blog": {\n        "branch": "main",\n'
+    '        "context": "site",\n        "dockerfile": "site/Dockerfile",\n        "peer_urls": {\n'
+    '            "eu": "https://hooks-eu.example.com"\n        },\n        "regions": [],\n'
+    '        "strategy": "local"\n    },\n    "shop": {\n        "bay_toml_path": "bay.toml",\n'
+    '        "branch": "main",\n        "paths": {\n            "exclude": [\n'
+    '                "*.md"\n            ]\n        },\n        "peer_urls": {\n'
+    '            "eu": "https://hooks-eu.example.com"\n        },\n        "regions": [\n'
+    '            "eu"\n        ],\n        "strategy": "local"\n    },\n    "web": {\n'
+    '        "bay_toml_path": "web/bay.toml",\n        "branch": "main",\n        "peer_urls": {\n'
+    '            "eu": "https://hooks-eu.example.com"\n        },\n        "regions": [],\n'
+    '        "shared_toml_paths": [\n            "api/bay.toml"\n        ],\n'
+    '        "strategy": "local"\n    }\n}\n'
+)
+
+
+def _no_sibling_fleet() -> dict:
+    return {
+        "shop": {"build": {"repo": "git@github.com:acme/shop.git", "branch": "main",
+                           "bay_toml_path": "bay.toml", "bay_build_hash": "sha256:aa",
+                           "paths": {"exclude": ["*.md"]}}, "regions": ["eu"]},
+        "blog": {"build": {"repo": "https://github.com/acme/blog.git", "context": "site",
+                           "dockerfile": "site/Dockerfile"}},
+        # Two projects in one repo: shared_toml_paths, but no siblings.
+        "api": {"build": {"repo": "git@github.com:acme/mono.git", "branch": "main",
+                          "bay_toml_path": "api/bay.toml", "bay_build_hash": "sha256:bb",
+                          "strategy": "remote"}},
+        "web": {"build": {"repo": "git@github.com:acme/mono.git", "branch": "main",
+                          "bay_toml_path": "web/bay.toml", "bay_build_hash": "sha256:cc"}},
+        "cache": {"image": "redis:7"},
+    }
+
+
+def _render_raw(services: dict, peer_urls: dict | None = None) -> str:
+    env = make_ansible_env(TEMPLATE_DIR)
+    env.filters["to_nice_json"] = _nice_json
+    env.filters["dict2items"] = _dict2items
+    return env.get_template("webhook-config.json.j2").render(
+        services=services, git_deploy_peer_webhook_urls=peer_urls or {},
+    )
+
+
+class TestSiblingConfig:
+    def test_no_sibling_fleet_renders_byte_identical(self):
+        rendered = _render_raw(
+            _no_sibling_fleet(), {"eu": "https://hooks-eu.example.com"}
+        )
+        assert rendered == _NO_SIBLING_GOLDEN
+        assert "siblings" not in rendered
+
+    def test_siblings_listed_only_when_non_empty(self):
+        services = {
+            "shop": _toml_svc(),
+            "shop-app": _toml_svc("Dockerfile.app"),
+            "shop-ping": _toml_svc("Dockerfile.app"),
+            "shop-admin": _toml_svc(shared_from="shop"),
+            "docs": _toml_svc(bay_toml_path="docs/bay.toml"),
+        }
+        config = _render_template(services)
+        assert config["shop"]["siblings"] == ["shop-app", "shop-ping"]
+        assert config["shop-app"]["siblings"] == ["shop", "shop-ping"]
+        assert config["shop-ping"]["siblings"] == ["shop", "shop-app"]
+        # Shares the main build: listed itself, never a sibling of the others.
+        assert config["shop-admin"]["siblings"] == ["shop", "shop-app", "shop-ping"]
+        assert "siblings" not in config["docs"]
+        # Every sibling named is a service the config lists.
+        for entry in config.values():
+            assert set(entry.get("siblings", [])) <= set(config)
+
+
+def _sibling_config(**overrides) -> dict:
+    """A receiver config with one project of three services, all in region eu."""
+    base = {"branch": "main", "regions": ["eu"], "peer_urls": {}}
+    config = {
+        "shop": {**base, "siblings": ["shop-app", "shop-ping"]},
+        "shop-app": {**base, "siblings": ["shop", "shop-ping"]},
+        "shop-ping": {**base, "siblings": ["shop", "shop-app"]},
+    }
+    for name, extra in overrides.items():
+        config[name.replace("_", "-")] = {**config[name.replace("_", "-")], **extra}
+    return config
+
+
+def _post_raw(url: str, body: bytes, headers: dict):
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+
+
+def _push(base: str, service: str, body: bytes, extra_headers=None):
+    headers = {
+        "Content-Type": "application/json",
+        "X-Hub-Signature-256": _hmac_sign("testsecret", body),
+        "X-GitHub-Event": "push",
+    }
+    headers.update(extra_headers or {})
+    return _post_raw(f"{base}/webhook/{service}", body, headers)
+
+
+def _corr(trigger: Path) -> str:
+    return trigger.read_text().split("\n")[0]
+
+
+@pytest.fixture
+def fresh_delivery_cache(monkeypatch):
+    from collections import OrderedDict
+
+    monkeypatch.setattr(webhook_app, "_delivery_seen", OrderedDict())
+
+
+class TestSiblingFanOut:
+    def _run(self, config, service, body=None, extra_headers=None):
+        server, base = _run_primary(config)
+        try:
+            return _push(base, service, body or _make_push_payload("main"), extra_headers)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_push_to_primary_triggers_each_sibling_with_its_own_corr_id(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        status, resp = self._run(_sibling_config(), "shop")
+        assert status == 200
+        names = sorted(p.name for p in webhook_env.iterdir())
+        assert names == ["shop-app.trigger", "shop-ping.trigger", "shop.trigger"]
+        corr = {p.stem: _corr(p) for p in webhook_env.iterdir()}
+        assert len(set(corr.values())) == 3, corr
+        # The URL service's fields stay as before; each sibling has its own.
+        assert resp["status"] == "triggered"
+        assert resp["service"] == "shop"
+        assert resp["corr_id"] == corr["shop"]
+        assert set(resp["siblings"]) == {"shop-app", "shop-ping"}
+        for name, entry in resp["siblings"].items():
+            assert entry["status"] == "triggered"
+            assert entry["service"] == name
+            assert entry["corr_id"] == corr[name]
+
+    def test_push_to_an_extra_service_reaches_the_primary(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        status, resp = self._run(_sibling_config(), "shop-app")
+        assert status == 200
+        assert (webhook_env / "shop.trigger").exists()
+        assert (webhook_env / "shop-ping.trigger").exists()
+        assert (webhook_env / "shop-app.trigger").exists()
+        assert resp["service"] == "shop-app"
+        assert set(resp["siblings"]) == {"shop", "shop-ping"}
+
+    def test_bad_signature_writes_nothing(self, webhook_env, fresh_delivery_cache):
+        body = _make_push_payload("main")
+        status, _ = self._run(
+            _sibling_config(), "shop", body,
+            extra_headers={"X-Hub-Signature-256": _hmac_sign("wrong", body)},
+        )
+        assert status == 403
+        assert list(webhook_env.iterdir()) == []
+
+    def test_forwarded_request_writes_only_its_own_service(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        status, resp = self._run(
+            _sibling_config(), "shop",
+            extra_headers={"X-Bay-Webhook-Forwarded": "1"},
+        )
+        assert status == 200
+        assert [p.name for p in webhook_env.iterdir()] == ["shop.trigger"]
+        assert "siblings" not in resp
+
+    def test_legacy_forward_header_also_stops_the_fan_out(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        self._run(
+            _sibling_config(), "shop",
+            extra_headers={"X-Argo-Webhook-Forwarded": "1"},  # kept-argo: dual-read, remove in a future major release
+        )
+        assert [p.name for p in webhook_env.iterdir()] == ["shop.trigger"]
+
+    def test_sibling_on_another_branch_is_skipped_others_written(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        status, resp = self._run(
+            _sibling_config(shop_ping={"branch": "staging"}), "shop"
+        )
+        assert status == 200
+        assert sorted(p.name for p in webhook_env.iterdir()) == [
+            "shop-app.trigger", "shop.trigger",
+        ]
+        assert resp["siblings"]["shop-ping"]["status"] == "ignored"
+        assert resp["siblings"]["shop-app"]["status"] == "triggered"
+
+    def test_sibling_push_filter_runs_on_its_own_config(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        # The push changes src/foo.ts. shop-ping watches only ping/: for it
+        # the push changes no build input, so it gets a tag-only trigger.
+        status, resp = self._run(
+            _sibling_config(shop_ping={"paths": {"include": ["ping/**"]}}), "shop"
+        )
+        assert status == 200
+        assert (webhook_env / "shop-ping.trigger").read_text().split("\n")[1] == (
+            webhook_app.NO_INPUT_CHANGE
+        )
+        assert (webhook_env / "shop.trigger").read_text().split("\n")[1] == ""
+        assert (webhook_env / "shop-app.trigger").read_text().split("\n")[1] == ""
+        assert resp["siblings"]["shop-ping"]["mode"] == webhook_app.NO_INPUT_CHANGE
+        assert "mode" not in resp
+
+    def test_url_service_skipped_but_sibling_triggered_answers_200(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        status, resp = self._run(_sibling_config(shop={"branch": "staging"}), "shop")
+        assert status == 200
+        assert resp["status"] == "ignored"
+        assert not (webhook_env / "shop.trigger").exists()
+        assert (webhook_env / "shop-app.trigger").exists()
+        assert resp["siblings"]["shop-app"]["status"] == "triggered"
+
+    def test_one_failing_target_does_not_stop_the_others(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        real = webhook_app.WebhookHandler._push_target
+
+        def flaky(self, service, *args):
+            if service in ("shop", "shop-app"):
+                raise OSError("disk full")
+            return real(self, service, *args)
+
+        with patch.object(webhook_app.WebhookHandler, "_push_target", flaky):
+            status, resp = self._run(_sibling_config(), "shop")
+        assert status == 200
+        assert [p.name for p in webhook_env.iterdir()] == ["shop-ping.trigger"]
+        assert resp["status"] == "error"
+        assert resp["siblings"]["shop-app"]["status"] == "error"
+        assert resp["siblings"]["shop-ping"]["status"] == "triggered"
+
+    def test_sibling_missing_from_config_is_never_emitted(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        config = _sibling_config()
+        config["shop"]["siblings"] = ["shop-app", "gone", "shop", "shop-app"]
+        del config["shop-ping"]
+        status, resp = self._run(config, "shop")
+        assert status == 200
+        assert sorted(p.name for p in webhook_env.iterdir()) == [
+            "shop-app.trigger", "shop.trigger",
+        ]
+        assert list(resp["siblings"]) == ["shop-app"]
+
+    def test_second_hook_with_the_same_delivery_builds_nothing_twice(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        config = _sibling_config()
+        server, base = _run_primary(config)
+        body = _make_push_payload("main")
+        try:
+            _push(base, "shop", body, {"X-GitHub-Delivery": "guid-1"})
+            for p in webhook_env.iterdir():
+                p.unlink()
+            status, resp = _push(base, "shop-app", body, {"X-GitHub-Delivery": "guid-1"})
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert status == 200
+        assert resp["status"] == "duplicate"
+        assert list(webhook_env.iterdir()) == []
+
+    def test_no_sibling_response_body_is_unchanged(
+        self, webhook_env, fresh_delivery_cache
+    ):
+        config = {"shop": {"branch": "main", "regions": ["eu"], "peer_urls": {}}}
+        status, resp = self._run(config, "shop")
+        assert status == 200
+        assert set(resp) == {
+            "status", "service", "corr_id", "files_changed", "local",
+            "forwarded", "forward_failures",
+        }
+        assert resp["status"] == "triggered"
+        assert resp["files_changed"] == 1
+        assert resp["local"] is True
+        assert resp["forwarded"] == [] and resp["forward_failures"] == []
+        assert resp["corr_id"] == _corr(webhook_env / "shop.trigger")
+
+
+@pytest.fixture
+def verifying_peer():
+    """A peer receiver that checks each forward with the real front door.
+
+    `_read_verified_body` is the receiver's own signature and replay check,
+    with the same `WEBHOOK_SECRET` (one per fleet, `webhook.secret`). A
+    forward it refuses gets 403, which the origin reports as a failure.
+    """
+    received: list[dict] = []
+
+    class Peer(webhook_app.WebhookHandler):
+        def do_POST(self):
+            service = self.path.strip("/").split("/")[1]
+            verified = self._read_verified_body(service)
+            received.append({
+                "service": service,
+                "verified": verified is not None,
+                "forwarded_flag": self.headers.get("X-Bay-Webhook-Forwarded"),
+            })
+            if verified is not None:
+                self._respond_json(200, {"status": "triggered", "service": service})
+
+        def log_message(self, *args, **kwargs):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Peer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}", received
+    server.shutdown()
+    server.server_close()
+
+
+def test_sibling_in_another_region_is_forwarded_and_the_peer_accepts_it(
+    webhook_env, verifying_peer, fresh_delivery_cache
+):
+    peer_url, received = verifying_peer
+    config = _sibling_config(
+        shop_ping={"regions": ["na"], "peer_urls": {"na": peer_url}},
+    )
+    server, base = _run_primary(config)
+    try:
+        # No delivery id: origin and peer share one replay cache in this test.
+        status, resp = _push(base, "shop", _make_push_payload("main"))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert status == 200
+    assert sorted(p.name for p in webhook_env.iterdir()) == [
+        "shop-app.trigger", "shop.trigger",
+    ]
+    assert received == [
+        {"service": "shop-ping", "verified": True, "forwarded_flag": "1"}
+    ]
+    assert resp["siblings"]["shop-ping"]["status"] == "forwarded"
+    assert resp["siblings"]["shop-ping"]["forwarded"] == ["na"]
+    assert resp["siblings"]["shop-ping"]["forward_failures"] == []

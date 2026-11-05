@@ -49,6 +49,15 @@
 {% set _ = entry.update({"regions": svc.regions | default([])}) %}
 {% set _ = entry.update({"peer_urls": git_deploy_peer_webhook_urls | default({})}) %}
 {% set _ = entry.update({"strategy": build.strategy | default(git_deploy_build_strategy | default('local'))}) %}
+{#
+  The extra services of the same bay.toml (same repo and branch): a push
+  that GitHub posts to this service builds them too (app.py `do_POST`).
+  Absent when there are none, so such a config stays as before.
+#}
+{% set _siblings = services | bay_push_siblings(svc_name) %}
+{% if _siblings %}
+{% set _ = entry.update({"siblings": _siblings}) %}
+{% endif %}
 {% set _ = config.update({svc_name: entry}) %}
 {% endfor %}
 {{ config | to_nice_json }}

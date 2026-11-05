@@ -428,6 +428,36 @@ def compute_routing(
     return write_local, forward_targets
 
 
+def _push_siblings(service: str) -> list[str]:
+    """The other services that a push posted for ``service`` must build too.
+
+    From the config entry's ``siblings`` (bay_filters `bay_push_siblings`):
+    the extra services of the same bay.toml, same repo and branch. GitHub has
+    one hook per repo, on one of them. Only names this receiver has a config
+    entry for count; order kept, each name once, never ``service`` itself.
+    """
+    out: list[str] = []
+    for name in (SERVICE_CONFIG.get(service) or {}).get("siblings") or []:
+        if isinstance(name, str) and name in SERVICE_CONFIG and name != service and name not in out:
+            out.append(name)
+    return out
+
+
+def _target_error(service: str, corr_id: str, exc: Exception) -> dict:
+    """The response entry of a push target whose handling raised."""
+    print(
+        f"[webhook] [{corr_id}] {service}: push handling failed: "
+        f"{type(exc).__name__}: {exc}",
+        flush=True,
+    )
+    return {
+        "status": "error",
+        "service": service,
+        "corr_id": corr_id,
+        "reason": f"{type(exc).__name__}: {exc}",
+    }
+
+
 def format_timestamp():
     return datetime.now(timezone.utc).strftime("%b %d, %H:%M UTC")
 
@@ -581,9 +611,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
             self.send_error(404, f"Unknown service: {service}")
             return
 
-        svc_config = SERVICE_CONFIG[service]
-        expected_branch = svc_config.get("branch", "main")
-
         verified = self._read_verified_body(service)
         if verified is None:
             return
@@ -621,30 +648,98 @@ class WebhookHandler(BaseHTTPRequestHandler):
             })
             return
 
-        # Parse payload and check branch
+        # Parse payload
         try:
             payload = json.loads(body)
         except json.JSONDecodeError:
             self.send_error(400, "Invalid JSON")
             return
 
+        is_forwarded = (
+            self.headers.get(FORWARD_HEADER) == "1"
+            or self.headers.get(LEGACY_FORWARD_HEADER) == "1"  # kept-argo: dual-read, remove in a future major release
+        )
+
+        # The extra services of the same bay.toml build from this push too
+        # (`siblings`, bay_filters `bay_push_siblings`). A forwarded request
+        # handles its own service only: the receiver that forwarded it has
+        # already handled the siblings, and fanning out again on the peer
+        # would build them twice or bounce between regions.
+        siblings = [] if is_forwarded else _push_siblings(service)
+        if not siblings:
+            self._respond_json(200, self._push_target(
+                service, payload, body, signature_header, is_forwarded, corr_id
+            ))
+            return
+
+        # Each target runs on its own config entry with its own correlation
+        # id. A failure of one target does not stop the others.
+        url_failed = False
+        try:
+            response = self._push_target(
+                service, payload, body, signature_header, is_forwarded, corr_id
+            )
+        except Exception as exc:  # noqa: BLE001 - the siblings must still run
+            url_failed = True
+            response = _target_error(service, corr_id, exc)
+
+        delivery_id = self.headers.get("X-GitHub-Delivery", "")
+        results: dict[str, dict] = {}
+        for sibling in siblings:
+            # Same replay key as the front door (delivery and service). A
+            # second hook on the sibling, with the same delivery id, then
+            # finds it taken and does not build it again.
+            if _delivery_is_duplicate(delivery_id, sibling):
+                results[sibling] = {"status": "duplicate", "service": sibling}
+                continue
+            sibling_corr_id = str(uuid.uuid4())
+            try:
+                results[sibling] = self._push_target(
+                    sibling, payload, body, signature_header, False, sibling_corr_id
+                )
+            except Exception as exc:  # noqa: BLE001 - the other siblings must still run
+                results[sibling] = _target_error(sibling, sibling_corr_id, exc)
+        response["siblings"] = results
+
+        accepted = any(
+            r.get("status") in ("triggered", "forwarded") for r in results.values()
+        )
+        self._respond_json(500 if url_failed and not accepted else 200, response)
+
+    def _push_target(
+        self,
+        service: str,
+        payload: dict,
+        body: bytes,
+        signature_header: str,
+        is_forwarded: bool,
+        corr_id: str,
+    ) -> dict:
+        """Handle one authenticated push for one service. Returns the response body.
+
+        ``service`` is the service of the hook URL, or one of its siblings.
+        Every check reads that service's own SERVICE_CONFIG entry: branch,
+        push_filter, input_filter, regions and peer_urls. Writes the trigger,
+        forwards to the peers and sends the alerts; sends no HTTP response.
+        """
+        svc_config = SERVICE_CONFIG[service]
+        expected_branch = svc_config.get("branch", "main")
+
         # Branch deletion — skip entirely
         if payload.get("deleted"):
-            self._respond_json(200, {
+            return {
                 "status": "skipped",
                 "reason": "branch deleted",
                 "service": service,
-            })
-            return
+            }
 
         ref = payload.get("ref", "")
         if ref != f"refs/heads/{expected_branch}":
-            self._respond_json(200, {
+            return {
                 "status": "ignored",
                 "reason": f"push to {ref}, tracking {expected_branch}",
                 "service": service,
-            })
-            return
+            }
 
         # Safety heuristics — always rebuild for force pushes and truncated commits
         force_rebuild = False
@@ -695,10 +790,6 @@ class WebhookHandler(BaseHTTPRequestHandler):
         else:
             service_regions = svc_config.get("regions") or [LOCAL_REGION]
             peer_urls = svc_config.get("peer_urls") or {}
-            is_forwarded = (
-                self.headers.get(FORWARD_HEADER) == "1"
-                or self.headers.get(LEGACY_FORWARD_HEADER) == "1"  # kept-argo: dual-read, remove in a future major release
-            )
             write_local, forward_targets = compute_routing(
                 LOCAL_REGION, service_regions, peer_urls, is_forwarded
             )
@@ -709,14 +800,13 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 f"and no peer URL configured — dropping",
                 flush=True,
             )
-            self._respond_json(200, {
+            return {
                 "status": "ignored",
                 "reason": (
                     f"service not in region {LOCAL_REGION!r} and no peer URL"
                 ),
                 "service": service,
-            })
-            return
+            }
 
         # Extract commit context once for notifications.
         head_commit = payload.get("head_commit", {})
@@ -834,7 +924,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         if mode:
             response["mode"] = mode
             response["reason"] = reason
-        self._respond_json(200, response)
+        return response
 
     def _handle_pull_image(self):
         """Handle image-level pull signal at /webhook/pull-image.
