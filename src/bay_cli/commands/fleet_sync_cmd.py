@@ -85,19 +85,21 @@ def status(ctx: typer.Context, as_json: _JsonOpt = False) -> None:
         "lock_holder": fleetsync.lock_holder(cx.fleet_root),
         "open_records": _open_records(cx),
     }
-    clean = st.in_sync and not st.dirty_paths
+    # ``clean`` means no uncommitted file. Behind or ahead is ``in_sync``, not ``clean``.
+    clean = not st.dirty_paths
+    ok = st.in_sync and clean
     if st.no_remote or st.not_toplevel:
         # Nothing to be in step with (or bay never pushes it): clean is enough.
-        clean = not st.dirty_paths and not st.unreachable
+        ok = clean and not st.unreachable
     doc["clean"] = clean
     if as_json:
         typer.echo(json.dumps(doc, indent=2))
     else:
-        typer.echo(_render_status(doc, st))
-    raise typer.Exit(0 if clean else fleetsync.EXIT_NOT_IN_SYNC)
+        typer.echo(_render_status(doc, st, ok))
+    raise typer.Exit(0 if ok else fleetsync.EXIT_NOT_IN_SYNC)
 
 
-def _render_status(doc: dict[str, Any], st: fleetsync.State) -> str:
+def _render_status(doc: dict[str, Any], st: fleetsync.State, ok: bool) -> str:
     fleet = doc["fleet"]
     lines = [f"fleet {fleet['name']}  {fleet['path']}  (selected by {fleet['selected_by']})"]
     if st.no_remote:
@@ -129,7 +131,7 @@ def _render_status(doc: dict[str, Any], st: fleetsync.State) -> str:
         lines.append(f"  {row['project']} {row['env']}: {row['result']}{who}")
     if st.diverged:
         lines.append(f"  {fleetsync.diverged_message(st)}")
-    lines.append("  in sync and clean" if doc["clean"] else "  not in sync or not clean")
+    lines.append("  in sync and clean" if ok else "  not in sync or not clean")
     return "\n".join(lines)
 
 

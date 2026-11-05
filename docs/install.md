@@ -185,7 +185,7 @@ reads a box:
 
 ```bash
 bay fleet status            # branch, upstream, ahead/behind, uncommitted files, the run that holds the fleet, pending or failed locks
-bay fleet status --json     # the same as one JSON document; exit 0 when in sync and clean, else 41
+bay fleet status --json     # the same as one JSON document; exit 0 when in sync and clean, else 41 (`clean` is true when no fleet file is uncommitted; `in_sync` says ahead or behind)
 bay fleet pull              # fetch and fast-forward; a diverged fleet refuses
 bay fleet push              # push; when the remote moved, git pull --rebase once and push again
 ```
