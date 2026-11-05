@@ -131,7 +131,7 @@ def test_b_pulls_first_and_its_compile_holds_a_pin(
 
 def _land_a_before_b_claims(m: dict[str, Path], monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """B's first push (its claim) runs after A's commits reach the remote."""
-    real_push = gitrepo.push
+    real_push = fleetsync.push_upstream
     calls: list[str] = []
 
     def push(repo: Path) -> tuple[bool, str | None]:
@@ -140,7 +140,7 @@ def _land_a_before_b_claims(m: dict[str, Path], monkeypatch: pytest.MonkeyPatch)
             git(m["a"], "push", "-q")  # A's claim lands between B's commit and B's claim
         return real_push(repo)
 
-    monkeypatch.setattr(gitrepo, "push", push)
+    monkeypatch.setattr(fleetsync, "push_upstream", push)
     return calls
 
 
@@ -159,7 +159,7 @@ def test_b_claim_refused_when_a_lands_after_b_committed(
     before = snapshot(m["b"])
     assert f"plans/{plan['plan_id']}.json" in before["files"]
 
-    real_push = gitrepo.push
+    real_push = fleetsync.push_upstream
     calls = _land_a_before_b_claims(m, monkeypatch)
     deployed: list[str] = []
 
@@ -174,13 +174,13 @@ def test_b_claim_refused_when_a_lands_after_b_committed(
     assert exc.box_touched is False
     assert exc.next_cmd is not None and "up production --project status" in exc.next_cmd
     assert str(exc).startswith("Stopped before the box was touched. The fleet remote moved: ")
-    assert "Nothing was deployed. Run bay up again: it pulls first." in str(exc)
+    assert "Nothing was deployed. Run `" in str(exc) and "` again: it pulls first." in str(exc)
     assert deployed == []  # the box was never touched
     assert snapshot(m["b"]) == before  # HEAD, index, status and bytes as before
     assert git(m["remote"], "rev-parse", "main") == a_head
 
     # The next bay up pulls A's commits first, and its compile holds A's pin.
-    monkeypatch.setattr(gitrepo, "push", real_push)
+    monkeypatch.setattr(fleetsync, "push_upstream", real_push)
     again = up_at(m, "b", "status")
     assert again["fleet_sync"]["pulled"] >= 1
     assert {"webapp", "status"} <= set(services_of(m["b"]))
@@ -198,7 +198,7 @@ def test_push_that_reports_failure_but_landed_goes_on(
     machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     m = machines
-    real_push = gitrepo.push
+    real_push = fleetsync.push_upstream
     calls: list[str] = []
 
     def push(repo: Path) -> tuple[bool, str | None]:
@@ -209,7 +209,7 @@ def test_push_that_reports_failure_but_landed_goes_on(
             return False, "git push timed out"
         return pushed, problem
 
-    monkeypatch.setattr(gitrepo, "push", push)
+    monkeypatch.setattr(fleetsync, "push_upstream", push)
     result = up_at(m, "a", "webapp")
     assert result["result"] == "ok" and box.deploys == ["production"]
     assert result["reason"] is None and result["pushed"] is True
@@ -228,7 +228,7 @@ def test_unreachable_remote_at_the_claim_restores_the_checkout(
         m["remote"].rename(away)  # the network drops after the start fetch
         return False, "fatal: could not read from remote repository"
 
-    monkeypatch.setattr(gitrepo, "push", push)
+    monkeypatch.setattr(fleetsync, "push_upstream", push)
     with pytest.raises(fleetsync.SyncError) as err:
         up_at(m, "a", "webapp")
     away.rename(m["remote"])
@@ -456,7 +456,7 @@ def test_a_dead_holder_does_not_block(machines: dict[str, Path], box: FakeBox) -
     holder = _hold(m["a"])
     holder.send_signal(signal.SIGKILL)
     holder.wait(timeout=10)
-    sidecar = m["a"] / ".git" / fleetsync.HOLDER_NAME
+    sidecar = fleetsync._lock_paths(m["a"])[1]
     assert json.loads(sidecar.read_text())["pid"] == holder.pid  # stale, left behind
     assert fleetsync.lock_holder(m["a"]) is None
     assert up_at(m, "a", "webapp")["result"] == "ok"
@@ -792,13 +792,13 @@ def test_fleet_without_a_remote_ups_as_before(
     world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pushes: list[str] = []
-    real = gitrepo.push
+    real = fleetsync.push_upstream
 
     def push(repo: Path) -> tuple[bool, str | None]:
         pushes.append(str(repo))
         return real(repo)
 
-    monkeypatch.setattr(gitrepo, "push", push)
+    monkeypatch.setattr(fleetsync, "push_upstream", push)
     result = applymod.up(
         planmod.load_project(Context.for_fleet_root(world["fleet"]), "webapp", cwd=world["app"]),
         planmod.PlanOptions(),

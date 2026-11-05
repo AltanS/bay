@@ -47,13 +47,16 @@ REASON_CLAIM_REFUSED = "claim_refused"
 REASON_BUSY = "fleet_busy"
 REASON_RECEIPT_UNPUSHED = "receipt_unpushed"
 REASON_DEPLOY_FAILED = "deploy_failed"
+#: A git call on the fleet failed or timed out: Bay cannot tell the state, so it stops.
+REASON_GIT_FAILED = "git_failed"
 
 #: Not counted as local edits: plan records (``bay plan`` writes them, untracked)
 #: and the marker ``bay deploy`` writes after the first deploy.
 DIRTY_EXCLUDE = ("plans", ".first_deploy_done")
 
-LOCK_NAME = "bay-run.lock"
-HOLDER_NAME = "bay-run.json"
+#: The run lock and its holder file, per fleet: ``bay-run-<key>.lock`` and
+#: ``bay-run-<key>.json`` in the git common dir (:func:`lock_key`).
+LOCK_PREFIX = "bay-run"
 
 #: A pending env record younger than this shows as ``deploying`` in ``bay show``.
 CLAIM_FRESH_SECONDS = 30 * 60
@@ -153,6 +156,134 @@ def _out(repo: Path, *args: str, timeout: int = 30) -> str | None:
     return gitrepo._out(repo, *args, timeout=timeout)
 
 
+def _cmd(args: Sequence[str]) -> str:
+    """``git <subcommand>`` for a message (the ``-c key=value`` options left out)."""
+    words: list[str] = []
+    skip = False
+    for arg in args:
+        if skip:
+            skip = False
+            continue
+        if arg == "-c":
+            skip = True
+            continue
+        words.append(arg)
+        if not arg.startswith("-"):
+            break
+    return "git " + " ".join(words)
+
+
+def git_failed(args: Sequence[str], proc: subprocess.CompletedProcess[str] | None) -> SyncError:
+    """The refusal for a git call that failed or timed out. It names the git error."""
+    if proc is None:
+        why = "timed out"
+    else:
+        why = gitrepo._last_line(str(proc.stderr)) or f"exited with {proc.returncode}"
+    return SyncError(
+        f"cannot read the fleet repo: {_cmd(args)} {why}",
+        reason=REASON_GIT_FAILED,
+        hint="Fix the git problem in the fleet checkout, then run the command again.",
+    )
+
+
+def _must(
+    repo: Path, *args: str, ok: Sequence[int] = (0,), timeout: int = 30
+) -> subprocess.CompletedProcess[str]:
+    """Run git; raise :func:`git_failed` when it times out or exits with a code not in ``ok``."""
+    proc = gitrepo._run(repo, *args, timeout=timeout)
+    if proc is None or proc.returncode not in ok:
+        raise git_failed(args, proc)
+    return proc
+
+
+#: :func:`where` values.
+NOT_GIT, TOPLEVEL, INSIDE = "not_git", "toplevel", "inside"
+
+
+def where(repo: Path) -> str:
+    """Where the fleet sits: :data:`NOT_GIT`, :data:`TOPLEVEL` or :data:`INSIDE` a bigger repo.
+
+    Raises :class:`SyncError` (``git_failed``) when git fails for another
+    reason than "not a git repository": a failed git is never read as "no repo".
+    """
+    if not repo.is_dir():
+        return NOT_GIT
+    proc = gitrepo._run(repo, "rev-parse", "--show-toplevel")
+    if proc is None:
+        raise git_failed(("rev-parse", "--show-toplevel"), proc)
+    if proc.returncode != 0:
+        if "not a git repository" in str(proc.stderr):
+            return NOT_GIT
+        raise git_failed(("rev-parse", "--show-toplevel"), proc)
+    top = Path(str(proc.stdout).strip())
+    return TOPLEVEL if top.resolve() == repo.resolve() else INSIDE
+
+
+def remotes(repo: Path) -> list[str]:
+    """The remotes of the fleet repo. Raises :class:`SyncError` when git fails."""
+    return str(_must(repo, "remote").stdout).split()
+
+
+def has_head(repo: Path) -> bool:
+    """True when the repo has a commit. Raises :class:`SyncError` when git fails."""
+    proc = _must(repo, "rev-parse", "--verify", "--quiet", "HEAD", ok=(0, 1, 128))
+    return proc.returncode == 0 and bool(str(proc.stdout).strip())
+
+
+def upstream_target(repo: Path) -> tuple[str, str] | None:
+    """``(remote, refs/heads/<branch>)`` that ``@{u}`` names, or None: no upstream.
+
+    Read from git's own branch config, so a push goes there and nowhere else:
+    ``push.default``, ``branch.<name>.pushRemote`` and ``remote.pushDefault``
+    play no part. A branch that tracks a local branch has no remote: None.
+    """
+    branch = _must(repo, "symbolic-ref", "--quiet", "HEAD", ok=(0, 1))
+    ref = str(branch.stdout).strip()
+    if branch.returncode != 0 or not ref:
+        return None
+    proc = _must(
+        repo,
+        "for-each-ref",
+        "--format=%(upstream:remotename)%00%(upstream:remoteref)",
+        ref,
+    )
+    remote, _, target = str(proc.stdout).strip().partition("\0")
+    if not remote or remote == "." or not target.startswith("refs/heads/"):
+        return None
+    return remote, target
+
+
+def push_upstream(repo: Path) -> tuple[bool, str | None]:
+    """``git push <remote> HEAD:<branch>`` to the branch ``@{u}`` names. ``(pushed, problem)``.
+
+    The remote and the branch are named on the command line (:func:`upstream_target`).
+    A ``remote.<name>.pushurl`` still applies: :func:`landed` checks the result.
+    """
+    target = upstream_target(repo)
+    if target is None:
+        return False, "the fleet branch tracks no remote branch"
+    remote, ref = target
+    proc = gitrepo._run(repo, "push", "--quiet", remote, f"HEAD:{ref}", timeout=120)
+    if proc is None:
+        return False, "git push timed out"
+    if proc.returncode != 0:
+        return False, gitrepo._last_line(str(proc.stderr)) or "git push failed"
+    return True, None
+
+
+def landed(repo: Path, commit: str) -> tuple[bool, str | None]:
+    """Fetch, then: does the tracked branch hold ``commit``? ``(held, fetch problem)``."""
+    problem = _fetch(repo)
+    if problem is not None:
+        return False, problem
+    return gitrepo.is_ancestor(repo, commit, "@{u}") is True, None
+
+
+def _upstream_name(repo: Path) -> str:
+    target = upstream_target(repo)
+    return f"{target[0]}/{target[1].removeprefix('refs/heads/')}" if target else "@{u}"
+
+
 def _fetch(repo: Path) -> str | None:
     """``git fetch`` (no prompt, 60 s). A problem line, or None when it worked."""
     proc = gitrepo._run(repo, "fetch", "--quiet", "--no-tags", timeout=60)
@@ -178,7 +309,8 @@ def dirty_paths(repo: Path) -> list[str]:
         *spec,
     )
     if proc is None or proc.returncode != 0:
-        return []
+        # Fail closed: an unreadable status is never "nothing uncommitted".
+        raise git_failed(("status",), proc)
     out: list[str] = []
     parts = proc.stdout.split("\0")
     i = 0
@@ -191,8 +323,8 @@ def dirty_paths(repo: Path) -> list[str]:
         if "R" in status or "C" in status:
             i += 1  # the source path of a rename follows
         out.append(path)
-    top = gitrepo.toplevel(repo)
-    if top is not None and top.resolve() != repo.resolve():
+    top = Path(str(_must(repo, "rev-parse", "--show-toplevel").stdout).strip())
+    if top.resolve() != repo.resolve():
         prefix = repo.resolve().relative_to(top.resolve()).as_posix() + "/"
         out = [p[len(prefix) :] if p.startswith(prefix) else p for p in out]
     return sorted(set(out))
@@ -200,13 +332,14 @@ def dirty_paths(repo: Path) -> list[str]:
 
 def state(repo: Path, *, fetch: bool = True) -> State:
     """The sync state of the fleet at ``repo``. ``fetch=False`` reads the last fetch."""
-    if not gitrepo.is_repo(repo) or gitrepo.head(repo) is None:
+    kind = where(repo)
+    if kind == NOT_GIT or not has_head(repo):
         return State(is_git=False)
-    st = State(not_toplevel=not gitrepo.is_toplevel(repo))
+    st = State(not_toplevel=kind == INSIDE)
     st.dirty_paths = dirty_paths(repo)
-    st.branch = _out(repo, "symbolic-ref", "--short", "-q", "HEAD") or None
-    remotes = _out(repo, "remote")
-    if not remotes:
+    branch = _must(repo, "symbolic-ref", "--short", "-q", "HEAD", ok=(0, 1))
+    st.branch = str(branch.stdout).strip() or None
+    if not remotes(repo):
         st.no_remote = True
         return st
     if fetch:
@@ -215,15 +348,13 @@ def state(repo: Path, *, fetch: bool = True) -> State:
             st.unreachable = problem
             return st
         st.fetched = True
-    st.upstream = (
-        _out(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") or None
-    )
-    if st.upstream is None:
+    if upstream_target(repo) is None:
         return st
-    counts = _out(repo, "rev-list", "--left-right", "--count", "HEAD...@{u}")
-    if counts:
-        ahead, behind = counts.split()
-        st.ahead, st.behind = int(ahead), int(behind)
+    st.upstream = _upstream_name(repo)
+    counts = str(
+        _must(repo, "rev-list", "--left-right", "--count", "HEAD...@{u}").stdout
+    ).split()
+    st.ahead, st.behind = int(counts[0]), int(counts[1])
     return st
 
 
@@ -288,6 +419,37 @@ def _plan_collisions(repo: Path) -> list[str]:
     )
 
 
+def _set_aside_plans(repo: Path) -> dict[str, bytes]:
+    """Remove the untracked plan records the upstream holds (:func:`_plan_collisions`).
+
+    Returns their bytes, so :func:`_settle_plans` can put them back.
+    """
+    removed: dict[str, bytes] = {}
+    for rel in _plan_collisions(repo):
+        path = repo / rel
+        try:
+            removed[rel] = path.read_bytes()
+            path.unlink()
+        except OSError:
+            removed.pop(rel, None)
+    return removed
+
+
+def _settle_plans(repo: Path, removed: dict[str, bytes], *, ok: bool) -> None:
+    """After the merge or the rebase: put the records back when it failed, else say so."""
+    if not removed:
+        return
+    if not ok:
+        for rel, data in removed.items():
+            with contextlib.suppress(OSError):
+                if not (repo / rel).exists():
+                    # git may have removed the emptied plans/ folder.
+                    (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (repo / rel).write_bytes(data)
+        return
+    notice(f"fleet: removed {len(removed)} local plan record(s) that the remote now holds")
+
+
 def fast_forward(repo: Path) -> Pulled:
     """``git merge --ff-only @{u}``. Raises :class:`SyncError` when git refuses.
 
@@ -298,24 +460,18 @@ def fast_forward(repo: Path) -> Pulled:
     old = gitrepo.head(repo) or ""
     upstream = _out(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") or "@{u}"
     count = int(_out(repo, "rev-list", "--count", "HEAD..@{u}") or 0)
-    removed: dict[str, bytes] = {}
-    for rel in _plan_collisions(repo):
-        path = repo / rel
-        try:
-            removed[rel] = path.read_bytes()
-            path.unlink()
-        except OSError:
-            removed.pop(rel, None)
+    removed = _set_aside_plans(repo)
     proc = gitrepo._run(repo, "merge", "--ff-only", "--quiet", "--no-stat", "@{u}", timeout=120)
-    if (proc is None or proc.returncode != 0) and removed:
-        for rel, data in removed.items():
-            with contextlib.suppress(OSError):
-                if not (repo / rel).exists():
-                    (repo / rel).write_bytes(data)
-    elif removed:
-        notice(f"fleet: removed {len(removed)} local plan record(s) that the remote now holds")
-    if proc is None or proc.returncode != 0:
-        detail = _git_refusal(str(proc.stderr) if proc is not None else "git merge timed out")
+    _settle_plans(repo, removed, ok=proc is not None and proc.returncode == 0)
+    if proc is None:
+        raise SyncError(
+            f"cannot fast-forward the fleet to {upstream}: git merge timed out after 120 s",
+            reason=REASON_GIT_FAILED,
+            hint="Check the fleet checkout (a slow disk, a git lock held by another "
+            "process), then run the command again.",
+        )
+    if proc.returncode != 0:
+        detail = _git_refusal(str(proc.stderr))
         raise SyncError(
             f"cannot fast-forward the fleet to {upstream}: {detail}",
             reason=REASON_DIRTY,
@@ -331,9 +487,7 @@ def pull_if_behind(repo: Path, say: Echo = notice) -> Pulled | None:
     A fleet with no remote or inside a bigger repo is left alone, and so is
     one that is unreachable, ahead or diverged: the plan reports those.
     """
-    if not gitrepo.is_repo(repo) or gitrepo.head(repo) is None:
-        return None
-    if not gitrepo.is_toplevel(repo):
+    if where(repo) != TOPLEVEL or not has_head(repo):
         return None
     st = state(repo)
     if st.no_remote or st.unreachable or st.upstream is None:
@@ -351,14 +505,28 @@ def pull_if_behind(repo: Path, say: Echo = notice) -> Pulled | None:
 _held: dict[Path, dict[str, Any]] = {}
 
 
-def _lock_dir(repo: Path) -> Path | None:
-    if not gitrepo.is_repo(repo):
+def lock_key(repo: Path) -> str:
+    """A short, stable hash of the fleet's real path inside its repo.
+
+    Two fleets that are folders of one bigger repo get two keys, so they never
+    block each other. Every worktree of the repo, and every path that resolves
+    to the same folder (a symlink), gets the same key, so they share one lock.
+    """
+    import hashlib
+
+    top = Path(str(_must(repo, "rev-parse", "--show-toplevel").stdout).strip()).resolve()
+    rel = repo.resolve().relative_to(top).as_posix()
+    return hashlib.sha256(rel.encode("utf-8")).hexdigest()[:12]
+
+
+def _lock_paths(repo: Path) -> tuple[Path, Path] | None:
+    """``(lock file, holder file)`` of the fleet at ``repo``, or None: not a git repo."""
+    if where(repo) == NOT_GIT:
         return None
-    common = _out(repo, "rev-parse", "--git-common-dir")
-    if not common:
-        return None
-    path = Path(common)
-    return path if path.is_absolute() else (repo / path).resolve()
+    common = Path(str(_must(repo, "rev-parse", "--git-common-dir").stdout).strip())
+    base = common if common.is_absolute() else (repo / common).resolve()
+    stem = f"{LOCK_PREFIX}-{lock_key(repo)}"
+    return base / f"{stem}.lock", base / f"{stem}.json"
 
 
 def _since(started_at: str) -> str:
@@ -391,16 +559,17 @@ def _read_holder(path: Path) -> dict[str, Any] | None:
 def run_lock(repo: Path, verb: str, env: str | None = None) -> Iterator[dict[str, Any] | None]:
     """Hold the fleet's run lock for one verb. Raises :class:`SyncError` (``fleet_busy``).
 
-    A non-blocking ``flock`` on ``<git common dir>/bay-run.lock``; the holder
-    is in ``bay-run.json`` beside it. The kernel drops the flock when the
-    holder dies, so a stale holder file never blocks. A fleet that is not a
-    git repo takes no lock (yields None).
+    A non-blocking ``flock`` on ``<git common dir>/bay-run-<key>.lock``
+    (:func:`lock_key`: one lock per fleet folder); the holder is in the
+    ``.json`` beside it. The kernel drops the flock when the holder dies, so a
+    stale holder file never blocks. A fleet that is not a git repo takes no
+    lock (yields None).
     """
-    lock_dir = _lock_dir(repo)
-    if lock_dir is None:
+    paths = _lock_paths(repo)
+    if paths is None:
         yield None
         return
-    lock_path = lock_dir / LOCK_NAME
+    lock_path, holder_path = paths
     if lock_path in _held:
         yield _held[lock_path]
         return
@@ -409,7 +578,7 @@ def run_lock(repo: Path, verb: str, env: str | None = None) -> Iterator[dict[str
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         os.close(fd)
-        holder = _read_holder(lock_dir / HOLDER_NAME)
+        holder = _read_holder(holder_path)
         raise SyncError(
             busy_message(holder),
             reason=REASON_BUSY,
@@ -424,7 +593,6 @@ def run_lock(repo: Path, verb: str, env: str | None = None) -> Iterator[dict[str
         "started_at": now_iso(),
         "cwd": str(Path.cwd()),
     }
-    holder_path = lock_dir / HOLDER_NAME
     try:
         tmp = holder_path.with_name(holder_path.name + f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(info) + "\n")
@@ -445,20 +613,24 @@ def run_lock(repo: Path, verb: str, env: str | None = None) -> Iterator[dict[str
 
 
 def lock_holder(repo: Path) -> dict[str, Any] | None:
-    """The holder of the run lock, or None when no run holds it."""
-    lock_dir = _lock_dir(repo)
-    if lock_dir is None:
+    """The holder of the run lock, or None when no run holds it.
+
+    Looks with a shared, non-blocking probe: it never takes the lock a run
+    would take, so a ``bay fleet status`` cannot make a ``bay up`` busy.
+    """
+    paths = _lock_paths(repo)
+    if paths is None:
         return None
-    lock_path = lock_dir / LOCK_NAME
+    lock_path, holder_path = paths
     if lock_path in _held:
         return _held[lock_path]
     if not lock_path.exists():
         return None
-    fd = os.open(lock_path, os.O_RDWR)
+    fd = os.open(lock_path, os.O_RDONLY)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
     except OSError:
-        return _read_holder(lock_dir / HOLDER_NAME) or {}
+        return _read_holder(holder_path) or {}
     else:
         fcntl.flock(fd, fcntl.LOCK_UN)
         return None
@@ -477,8 +649,8 @@ def write_run(repo: Path, verb: str, env: str | None) -> Iterator[Pulled | None]
     Nested in the same process (``bay rollback`` runs ``bay up``), it takes
     nothing and fetches nothing: it yields what the outer run pulled.
     """
-    lock_dir = _lock_dir(repo)
-    key = lock_dir / LOCK_NAME if lock_dir is not None else None
+    paths = _lock_paths(repo)
+    key = paths[0] if paths is not None else None
     if key is not None and key in _held:
         yield _pulled.get(key)
         return
@@ -497,12 +669,12 @@ def write_run(repo: Path, verb: str, env: str | None) -> Iterator[Pulled | None]
 
 
 def can_push(repo: Path) -> bool:
-    """True when ``bay up`` pushes this fleet: a top-level repo with a remote."""
-    return (
-        gitrepo.is_repo(repo)
-        and gitrepo.is_toplevel(repo)
-        and bool((_out(repo, "remote") or "").split())
-    )
+    """True when ``bay up`` pushes this fleet: a top-level repo with a remote.
+
+    False for no repo, no remote, or a fleet inside a bigger repo. A git call
+    that fails raises :class:`SyncError` (``git_failed``): it never skips the claim.
+    """
+    return where(repo) == TOPLEVEL and bool(remotes(repo))
 
 
 @dataclass
@@ -624,38 +796,58 @@ def claim(
 ) -> None:
     """Push the fleet commit before the deploy. Raises :class:`SyncError` after an undo.
 
-    A refused push is checked with a fetch: when the remote branch already
-    holds ``commit`` the push landed (a timeout hid it) and the run goes on.
+    The push names the remote and the branch of ``@{u}`` (:func:`push_upstream`).
+    After every push, also one that reports success, a fetch checks that the
+    tracked branch holds ``commit`` (:func:`landed`). Only then is the claim
+    made. A refused push whose commit the remote already holds (a timeout hid
+    it) goes on too.
     """
-    pushed, problem = gitrepo.push(repo)
-    if pushed:
-        say("fleet: claimed (pushed the fleet commit before the deploy)")
-        return
-    fetch_problem = _fetch(repo)
-    if fetch_problem is None and gitrepo.is_ancestor(repo, commit, "@{u}") is True:
-        say(f"fleet: the push said `{problem}`, but the remote has the commit; going on")
+    pushed, problem = push_upstream(repo)
+    held, fetch_problem = landed(repo, commit)
+    if held:
+        if pushed:
+            say("fleet: claimed (pushed the fleet commit before the deploy)")
+        else:
+            say(f"fleet: the push said `{problem}`, but the remote has the commit; going on")
         return
     count = 0
+    next_cmd: str | None = again
     if fetch_problem is not None:
         reason, code = REASON_UNREACHABLE, EXIT_NOT_IN_SYNC
         why = f"The fleet remote cannot be reached: {fetch_problem}."
     else:
         reason, code = REASON_CLAIM_REFUSED, EXIT_CLAIM_REFUSED
         count, newest = _newest_remote(repo)
-        why = (
-            f"The fleet remote moved: {count} new commit(s) ({newest})."
-            if count
-            else f"The fleet remote refused the push: {problem}."
-        )
+        if pushed:
+            why = (
+                f"The push reported success, but {_upstream_name(repo)} does not hold the "
+                "fleet commit: the push did not reach the tracked branch. Check "
+                "remote.<name>.pushurl in the fleet's git config."
+            )
+            next_cmd = None
+        elif count:
+            why = f"The fleet remote moved: {count} new commit(s) ({newest})."
+        else:
+            why = f"The fleet remote refused the push: {problem}."
+            next_cmd = None
     undone = undo(repo, commit, plan)
     tail = _undo_line(undone)
-    again_line = (
-        "Run bay up again: it pulls first." if reason == REASON_CLAIM_REFUSED and count else ""
-    )
+    again_line = ""
+    if reason == REASON_CLAIM_REFUSED and count and not pushed:
+        if gitrepo.is_ancestor(repo, plan.before, "@{u}") is True:
+            again_line = f"Run `{again}` again: it pulls first."
+        else:
+            # The fleet had local commits before this run: it is diverged now,
+            # and the same command would be blocked. Push them first.
+            again_line = (
+                "The fleet also has local commits that the remote does not have. "
+                f"Run `bay fleet push` (it rebases them), then `{again}`."
+            )
+            next_cmd = "bay fleet push"
     message = f"Stopped before the box was touched. {why} Nothing was deployed. {again_line} {tail}"
     message = " ".join(message.split())
     raise SyncError(
-        message, reason=reason, exit_code=code, next_cmd=again, undo_failed=undone.failed
+        message, reason=reason, exit_code=code, next_cmd=next_cmd, undo_failed=undone.failed
     )
 
 
@@ -683,28 +875,84 @@ def _rebase_in_progress(repo: Path) -> bool:
     return (path / "rebase-merge").exists() or (path / "rebase-apply").exists()
 
 
-def pull_rebase(repo: Path) -> tuple[bool, str | None, list[str]]:
-    """``git pull --rebase`` once. ``(ok, problem, conflicting files)``; aborts on refusal."""
-    proc = gitrepo._run(
-        repo, "pull", "--rebase", "--no-autostash", "--quiet", "--no-tags", timeout=180
+def _abort_rebase(repo: Path) -> str | None:
+    """``git rebase --abort`` when a rebase is in progress. A problem line, or None."""
+    if not _rebase_in_progress(repo):
+        return None
+    proc = gitrepo._run(repo, "rebase", "--abort", timeout=60)
+    if _ok(proc) and not _rebase_in_progress(repo):
+        return None
+    why = "timed out" if proc is None else (gitrepo._last_line(str(proc.stderr)) or "failed")
+    return (
+        f"git rebase --abort {why}: the fleet is still in the middle of a rebase. "
+        f"Finish it by hand: git -C {repo} rebase --abort, then git -C {repo} status"
     )
-    if proc is not None and proc.returncode == 0:
+
+
+def pull_rebase(repo: Path) -> tuple[bool, str | None, list[str]]:
+    """Fetch and rebase onto ``@{u}`` once. ``(ok, problem, conflicting files)``.
+
+    Like :func:`fast_forward`, it first removes the untracked plan records
+    that the upstream holds, and puts them back when the rebase fails. A
+    refused or conflicting rebase is aborted; when the abort fails too, the
+    problem says so and names the command to finish it.
+    """
+    if upstream_target(repo) is None:
+        return False, "the fleet branch tracks no remote branch", []
+    problem = _fetch(repo)
+    if problem is not None:
+        return False, problem, []
+    removed = _set_aside_plans(repo)
+    proc = gitrepo._run(repo, "rebase", "--no-autostash", "--quiet", "@{u}", timeout=180)
+    if _ok(proc):
+        _settle_plans(repo, removed, ok=True)
         return True, None, []
     detail = _git_refusal(
-        (str(proc.stderr) + "\n" + str(proc.stdout)) if proc is not None else "git pull timed out"
+        (str(proc.stderr) + "\n" + str(proc.stdout)) if proc is not None else "git rebase timed out"
     )
     conflicts = _conflicts(repo)
-    if _rebase_in_progress(repo):
-        gitrepo._run(repo, "rebase", "--abort")
+    abort_problem = _abort_rebase(repo)
+    _settle_plans(repo, removed, ok=False)
+    if abort_problem:
+        detail = f"{detail}; {abort_problem}"
     return False, detail, conflicts
 
 
+def _push_checked(repo: Path) -> tuple[bool, str | None, bool]:
+    """Push to the tracked branch and check that it holds HEAD.
+
+    ``(pushed, problem, refused)``: ``refused`` is True when git refused the
+    push (a rebase may help), False when it went somewhere else.
+    """
+    pushed, problem = push_upstream(repo)
+    if not pushed:
+        return False, problem, True
+    head = gitrepo.head(repo) or "HEAD"
+    held, fetch_problem = landed(repo, head)
+    if held:
+        return True, None, False
+    if fetch_problem is not None:
+        return False, f"pushed, but the fetch to check it failed: {fetch_problem}", False
+    return (
+        False,
+        f"the push reported success, but {_upstream_name(repo)} does not hold the commit: "
+        "the push did not reach the tracked branch (check remote.<name>.pushurl)",
+        False,
+    )
+
+
 def push_with_rebase(repo: Path, *, attempts: int = 2) -> PushResult:
-    """Push; on a refusal, ``git pull --rebase`` and push again, at most ``attempts`` times."""
-    pushed, problem = gitrepo.push(repo)
+    """Push; on a refusal, rebase onto the remote and push again, at most ``attempts`` times.
+
+    Every push names the remote and branch of ``@{u}`` and is checked with a
+    fetch (:func:`_push_checked`).
+    """
+    pushed, problem, refused = _push_checked(repo)
     if pushed:
         return PushResult(True)
     result = PushResult(False, problem)
+    if not refused:
+        return result
     for _ in range(attempts):
         ok, rebase_problem, conflicts = pull_rebase(repo)
         if not ok:
@@ -712,11 +960,13 @@ def push_with_rebase(repo: Path, *, attempts: int = 2) -> PushResult:
             result.conflicts = conflicts
             return result
         result.rebased += 1
-        pushed, problem = gitrepo.push(repo)
+        pushed, problem, refused = _push_checked(repo)
         if pushed:
             result.pushed, result.problem = True, None
             return result
         result.problem = problem
+        if not refused:
+            return result
     return result
 
 
@@ -760,9 +1010,10 @@ def prepare_playbook(
     or inside a bigger repo gets the dirty check only. Raises
     :class:`SyncError`; returns the fast-forward, if one ran.
     """
-    if not gitrepo.is_repo(repo) or gitrepo.head(repo) is None:
+    kind = where(repo)
+    if kind == NOT_GIT or not has_head(repo):
         return None
-    remote = not offline and gitrepo.is_toplevel(repo)
+    remote = not offline and kind == TOPLEVEL
     st = state(repo, fetch=remote)
     remote = remote and not st.no_remote
     if remote:
@@ -798,15 +1049,24 @@ def prepare_playbook(
 
 def _push_ahead(repo: Path, st: State, verb: str, say: Echo) -> None:
     """Push the local commits before the playbook. Raises :class:`SyncError` when refused."""
-    pushed, problem = gitrepo.push(repo)
-    if pushed:
-        say(f"fleet: pushed {st.ahead} local commit(s) to {st.upstream} before the {verb}")
-        return
+    pushed, problem = push_upstream(repo)
     head = gitrepo.head(repo) or "HEAD"
-    fetch_problem = _fetch(repo)
-    if fetch_problem is None and gitrepo.is_ancestor(repo, head, "@{u}") is True:
-        say(f"fleet: the push said `{problem}`, but the remote has the commits; going on")
+    held, fetch_problem = landed(repo, head)
+    if held:
+        if pushed:
+            say(f"fleet: pushed {st.ahead} local commit(s) to {st.upstream} before the {verb}")
+        else:
+            say(f"fleet: the push said `{problem}`, but the remote has the commits; going on")
         return
+    if pushed and fetch_problem is None:
+        raise SyncError(
+            f"Stopped before the box was touched. The push reported success, but "
+            f"{_upstream_name(repo)} does not hold the fleet commits: the push did not "
+            "reach the tracked branch. Nothing was deployed.",
+            reason=REASON_CLAIM_REFUSED,
+            exit_code=EXIT_CLAIM_REFUSED,
+            hint="Check remote.<name>.pushurl in the fleet's git config.",
+        )
     if fetch_problem is not None:
         raise SyncError(
             f"Stopped before the box was touched. The fleet remote cannot be reached: "

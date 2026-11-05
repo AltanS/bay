@@ -1055,14 +1055,15 @@ def push_fleet(cx: Context, result: dict[str, Any], say: Echo) -> None:
     pushes again, at most twice (:func:`bay_cli.fleetsync.push_with_rebase`);
     a rebase git refuses is aborted and the commits stay local.
     """
-    if not gitrepo.is_toplevel(cx.fleet_root):
+    kind = fleetsync.where(cx.fleet_root)
+    if kind == fleetsync.INSIDE:
         top = gitrepo.toplevel(cx.fleet_root)
         result["push_skipped"] = (
             f"the fleet lives inside a larger repo ({top}); it was committed, not pushed"
         )
         say(f"warning: {result['push_skipped']}")
         return
-    if not fleetsync.can_push(cx.fleet_root):
+    if kind == fleetsync.NOT_GIT or not fleetsync.remotes(cx.fleet_root):
         return
     root = cx.fleet_root
     local = (gitrepo._out(root, "rev-list", "@{u}..HEAD") or "").split()
