@@ -19,6 +19,7 @@ formal exit-path/severity contract enforced by CI, see
   - [Migration: upgrading past the image-map.json fix](#migration-upgrading-past-the-image-mapjson-fix)
   - [Historical context (GH #13)](#historical-context-gh-13)
 - [GitHub Webhook / Cross-Region Fan-out](#github-webhook--cross-region-fan-out)
+- [Extra services of one repo](#extra-services-of-one-repo)
 <!-- /toc -->
 
 For the high-level "which strategy do I want" question, see
@@ -810,3 +811,48 @@ on actual content change.
   to NA. Without EU's webhook receiver, NA would never see pushes that
   hit the EU URL first. Do not remove regional webhook receivers just
   because a service uses `strategy: remote`.
+
+## Extra services of one repo
+
+A `bay.toml` can hold extra services, `[services.<name>]`, each with its own
+`build` and Dockerfile, from the same repo as the main service. The compile
+emits each one as a separate service, `<project>-<name>`. All of them build
+from one push.
+
+- **One GitHub hook per repo.** Point it at any service of the project, for
+  example `https://<webhook_domain>/webhook/shop`. You do not need a hook for
+  `shop-app` or `shop-worker`.
+- **The receiver fans the push out to the siblings.** The receiver config
+  (`webhook-config.json.j2`) gives each service a `siblings` list: the other
+  services with the same repo, branch and `bay_toml_path`
+  (`bay_push_siblings` in `filter_plugins/bay_filters.py`). A service with no
+  siblings has no `siblings` key, so its config is the same as before. After
+  the signature check, the receiver runs the normal push handling for the
+  hook's service and then for each sibling.
+- **Each sibling builds on its own.** It uses its own config entry: branch,
+  `watch` and `ignore`, build context, regions and peers. It gets its own
+  trigger file and its own correlation id. A sibling in another region is
+  forwarded to that region's receiver, like any other service. A sibling that
+  fails or that its filters skip does not stop the others. The HTTP answer
+  keeps the fields of the hook's service and adds a `siblings` object with
+  the result of each one.
+- **A forwarded push does not fan out again.** A request with
+  `X-Bay-Webhook-Forwarded: 1` handles only the service in its URL. The
+  receiver that forwarded it already handled the siblings.
+- **The alias retag does not apply.** The alias fan-out of `rebuild.sh`
+  (`bay_build_dedup_map`) re-tags services with the same build identity. A
+  service that shares the main build (`shared_from`, a service with neither
+  `image` nor `build`) still gets its image that way, or through the image
+  pull fan-out, and is never a sibling. Extra services with their own `build`
+  build one by one.
+- **The builds on one box run one at a time.** `rebuild.sh` holds a box-wide
+  `flock` for each build. The systemd unit `bay-build@.service` stops a build
+  after `git_deploy_build_timeout` seconds (default 1200), and that time
+  includes the wait for the lock. With several siblings, the last build in
+  the queue can time out when the builds before it are slow. Set
+  `git_deploy_build_timeout` to cover the builds of the whole group.
+- **`bay validate --check-webhook-health` checks the group.** A hook on any
+  sibling is enough. With no hook, it reports one failure that names every
+  service of the group. With two or more hooks, it warns: each push then
+  builds every service of the group once per hook. Keep one hook and delete
+  the others.

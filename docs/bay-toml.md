@@ -173,6 +173,13 @@ Jobs and release:
 - A systemd timer on the box of the main container starts the job, in UTC. A run that is
   still busy is not started a second time. A missed run is not made up.
 - A failed `release` aborts the deploy before traffic moves.
+- A project or service `command` (a string) replaces the image CMD, and no shell runs it.
+  Bay splits the string into words, with shell quoting rules (`"a b"` stays one word), and
+  passes the words to the image ENTRYPOINT as its arguments. With no ENTRYPOINT, the first
+  word is the program. So `exec`, `&&`, `;`, pipes and `$VAR` do not work:
+  `command = "exec bun server/start.ts"` runs `exec` as a program and fails with
+  `exec: not found`. Write `command = "bun server/start.ts"`. This differs from `release`
+  and a job `command` below.
 - `release` and a job `command` are a string or a list of strings. A string is a shell
   command: it runs as `/bin/sh -c`, with the image entrypoint overridden. A list keeps the
   image ENTRYPOINT and is passed to it as the arguments, so `release = ["bin/migrate", "up"]`
@@ -410,7 +417,7 @@ These keys sit at the top level. Every key in this table may also be set in a
 |-----|------|---------|---------|
 | `image` | string | none | Pull this image instead of building. Not together with `[build]`. |
 | `port` | integer 1-65535 | none | Container port that receives traffic. |
-| `command` | string | image CMD | Command to run. |
+| `command` | string | image CMD | Replaces the image CMD. The string is split into words, with shell quoting rules. The words go to the image ENTRYPOINT as its arguments; with no ENTRYPOINT, the first word is the program. No shell runs it, so `exec`, `&&`, pipes and `$VAR` do not work. |
 | `release` | string or list of strings | none | Runs once per environment per deploy, in a one-shot container of the new image, before traffic moves. A string runs as `/bin/sh -c`; a list keeps the image ENTRYPOINT and is passed to it as the arguments. A failure stops the deploy and the old container stays. |
 | `health` | string | `"/"` when there is a port, else `"none"` | Health check path, or `"none"`. Bay probes it on the container, not through the route. A failed check removes the new container and starts the previous one again. A path other than `/` on an internal container (no `domain`, no `path`) is (validated, not deployed yet). |
 | `replicas` | integer >= 1 | `1` | Number of containers. More than 1 on an internal container is (validated, not deployed yet). |
