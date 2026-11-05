@@ -152,6 +152,43 @@ def _run_playbook(
     )
 
 
+_OfflineOpt = typer.Option(
+    False,
+    "--offline",
+    help="Do not fetch or push the fleet repo. The result is not on the remote: "
+    "run `bay fleet push` after it.",
+)
+_AllowDirtyOpt = typer.Option(
+    False,
+    "--allow-dirty",
+    help="Run even when the fleet has uncommitted files. They deploy, and no other "
+    "machine can see them.",
+)
+
+
+def _fleet_gate(
+    ctx: typer.Context, cx: Context, verb: str, env: str, *, offline: bool, allow_dirty: bool
+) -> None:
+    """Hold the run lock for the command and check the fleet against its remote.
+
+    Here, not in :func:`_run_playbook`: ``bay up`` runs that too, and has its
+    own claim. The lock is released when the command's context closes.
+    """
+    from bay_cli import fleetsync
+
+    for flag in ("--offline", "--allow-dirty"):
+        if flag in (ctx.args or []):
+            ctx.args = [a for a in ctx.args if a != flag]
+            if flag == "--offline":
+                offline = True
+            else:
+                allow_dirty = True
+    ctx.with_resource(fleetsync.run_lock(cx.fleet_root, verb, env))
+    fleetsync.prepare_playbook(
+        cx.fleet_root, verb=verb, offline=offline, allow_dirty=allow_dirty
+    )
+
+
 def _show_headscale_onboarding(cx: Context) -> None:
     """Print first-deploy onboarding steps for headscale gateway."""
     marker = cx.fleet_root / ".first_deploy_done"
@@ -441,6 +478,8 @@ def deploy(
         "--profile",
         help="Print per-task timings and a total runtime (ansible.posix profile_tasks + timer).",
     ),
+    offline: bool = _OfflineOpt,
+    allow_dirty: bool = _AllowDirtyOpt,
 ) -> None:
     """Deploy services to the target environment.
 
@@ -448,6 +487,11 @@ def deploy(
     forces them). Pre-deploy validation runs first; a post-deploy HTTPS
     reachability audit runs after. Extra args after `--` pass straight
     through to ansible-playbook.
+
+    The fleet first: a fleet that is only behind its remote is pulled, one
+    that is ahead is pushed first, and a diverged fleet, an unreachable
+    remote or uncommitted files refuse (--offline, --allow-dirty). A dry run
+    follows the same rules.
 
     Put options BEFORE the environment argument \u2014 flags placed after it
     land in the ansible passthrough (known flags are rescued with a
@@ -488,6 +532,7 @@ def deploy(
         check_token_scope = True
     if "--profile" in (ctx.args or []):
         profile = True
+    _fleet_gate(ctx, cx, "deploy", env, offline=offline, allow_dirty=allow_dirty)
 
     _validate_env(env, root)
 
@@ -656,6 +701,8 @@ def provision(
         "--profile",
         help="Print per-task timings and a total runtime (ansible.posix profile_tasks + timer).",
     ),
+    offline: bool = _OfflineOpt,
+    allow_dirty: bool = _AllowDirtyOpt,
 ) -> None:
     """Provision and harden a server (base OS, users, firewall, Docker).
 
@@ -665,6 +712,8 @@ def provision(
 
     Note: the netplan tag intentionally fails when connecting over the
     tailnet \u2014 a safety assertion rejects netplan_address != ansible_host.
+
+    The fleet is checked first, as for bay deploy (--offline, --allow-dirty).
 
     Examples:
 
@@ -679,6 +728,7 @@ def provision(
     # strip it either way so it is never forwarded to ansible-playbook.
     if "--profile" in (ctx.args or []):
         profile = True
+    _fleet_gate(ctx, cx, "provision", env, offline=offline, allow_dirty=allow_dirty)
     passthrough = [a for a in (ctx.args or []) if a != "--profile"]
     extra_args = _region_extra_args(cx, region, env, passthrough)
     _run_playbook(cx, "provision", env, tags, extra_args, profile=profile)
