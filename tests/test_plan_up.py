@@ -2661,19 +2661,131 @@ def test_up_and_box_check_pass_bay_config_files_root(
         assert not call["root"].exists()
 
 
-def test_plain_bay_deploy_passes_no_config_files_root(
-    world: dict[str, Path], monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _fleet_bytes(fleet: Path) -> dict[str, Any]:
+    """HEAD, status and every work tree byte (git and the repo cache left out)."""
+    files = {
+        p.relative_to(fleet).as_posix(): p.read_bytes()
+        for p in sorted(fleet.rglob("*"))
+        if p.is_file() and p.relative_to(fleet).parts[0] not in (".git", ".bay-cache")
+    }
+    return {
+        "head": git(fleet, "rev-parse", "HEAD"),
+        "status": git(fleet, "status", "--porcelain=v1", "--untracked-files=all"),
+        "files": files,
+    }
+
+
+def _plain_deploy(
+    world: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    *before: str,
+    after: tuple[str, ...] = (),
+) -> tuple[Any, list[dict[str, Any]], list[Path | None]]:
+    """``bay deploy [before] production [after]`` with the playbook, the validation
+    and the rig check faked. Returns the result, the playbook calls and the
+    ``config_files_root`` of each validation."""
+    from types import SimpleNamespace
+
+    from bay_cli.commands import ops, validate
+
     calls = _capture_playbook(monkeypatch)
+    roots: list[Path | None] = []
+
+    def fake_validation(*_: Any, config_files_root: Path | None = None, **__: Any) -> Any:
+        roots.append(config_files_root)
+        return SimpleNamespace(total_issues=0)
+
+    monkeypatch.setattr(validate, "run_validation", fake_validation)
+    monkeypatch.setattr(ops, "_check_rig_state", lambda *_: False)
+    monkeypatch.setattr(ops, "_record_rig_matched", lambda *_: None)
     result = runner.invoke(
         app,
-        ["--fleet", str(world["fleet"]), "deploy", "production", "--skip-validate",
-         "--skip-healthcheck", "--tags", "deploy_stack"],
+        ["--fleet", str(world["fleet"]), "deploy", *before, "--skip-healthcheck", "production",
+         *after],
     )
+    return result, calls, roots
+
+
+@pytest.mark.parametrize(
+    "flags", [(), ("--rig",), ("--tags", "deploy_stack"), ("--tags", "traefik,all")]
+)
+def test_plain_bay_deploy_ships_a_file_beside_the_toml(
+    world: dict[str, Path], monkeypatch: pytest.MonkeyPatch, flags: tuple[str, ...]
+) -> None:
+    # The file lives only beside the toml (the gatus case): the fleet's own
+    # files/ has no copy, so the role default `<fleet>/files` misses it.
+    _in_fleet_with_file(
+        world, "board", {"site.conf": "new\n"}, MOUNT.format(leaf="site.conf", src="site.conf")
+    )
+    assert not (world["fleet"] / "files" / "board").exists()
+    before = _fleet_bytes(world["fleet"])
+    result, calls, roots = _plain_deploy(world, monkeypatch, *flags)
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    (call,) = calls
+    # The playbook got the scratch files/, and it held the mapped file while it ran.
+    assert call["root"] is not None and call["root"].name == "files"
+    assert call["files"] == ["board/site.conf"]
+    assert not call["root"].is_relative_to(world["fleet"])
+    # The validation checked the same folder.
+    assert roots == [call["root"]]
+    # It is removed when the command ends.
+    assert not call["root"].exists()
+    # The compile wrote nothing into the fleet: no services.yml, no plan record.
+    assert _fleet_bytes(world["fleet"]) == before
+
+
+def _break_the_compile(world: dict[str, Path]) -> None:
+    folder = world["fleet"] / "projects" / "broken"
+    folder.mkdir(parents=True)
+    (folder / "bay.toml").write_text("this is = [not toml\n")
+    commit_all(world["fleet"], "a broken project")
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (("--tags", "headscale"), ()),
+        (("--tags", "traefik"), ()),
+        (("--tags", "headscale,traefik"), ()),
+        ((), ("--", "--skip-tags", "deploy_stack")),
+        ((), ("--", "--skip-tags=deploy_stack")),
+    ],
+)
+def test_deploy_that_skips_deploy_stack_does_not_compile(
+    world: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    before: tuple[str, ...],
+    after: tuple[str, ...],
+) -> None:
+    # The compile is broken, and a run that never reaches the task still deploys.
+    _break_the_compile(world)
+
+    def no_compile(*_: Any, **__: Any) -> Any:
+        raise AssertionError("compiled for a run that skips deploy_stack")
+
+    monkeypatch.setattr(planmod, "compiled_fleet", no_compile)
+    result, calls, roots = _plain_deploy(world, monkeypatch, *before, after=after)
     assert result.exit_code == 0, result.output
     assert len(calls) == 1
     assert calls[0]["root"] is None
     assert not any("bay_config_files_root" in a for a in calls[0]["extra"])
+    assert roots == [None]
+
+
+@pytest.mark.parametrize("flags", [(), ("--tags", "deploy_stack"), ("--skip-validate",)])
+def test_deploy_stops_before_the_playbook_when_the_compile_fails(
+    world: dict[str, Path], monkeypatch: pytest.MonkeyPatch, flags: tuple[str, ...]
+) -> None:
+    _break_the_compile(world)
+    before = _fleet_bytes(world["fleet"])
+    result, calls, roots = _plain_deploy(world, monkeypatch, *flags)
+    assert result.exit_code != 0
+    assert "compile failed" in str(result.exception) + result.output
+    assert "projects/broken/bay.toml" in result.output
+    # No fallback to <fleet>/files: nothing ran at all.
+    assert calls == [] and roots == []
+    assert _fleet_bytes(world["fleet"]) == before
 
 
 def test_config_files_task_reads_the_var_with_the_fleet_default() -> None:

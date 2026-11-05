@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shlex
 import shutil
 import subprocess
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Optional
 
@@ -162,8 +164,74 @@ _AllowDirtyOpt = typer.Option(
     False,
     "--allow-dirty",
     help="Run even when the fleet has uncommitted files. They deploy, and no other "
-    "machine can see them.",
+    "machine can see them. Config files are the exception: a deploy copies them from "
+    "the committed fleet and the pinned project commits.",
 )
+
+
+#: Tags that select the ``deploy_stack : Deploy config files`` task.
+_CONFIG_FILES_TAGS = frozenset({"deploy_stack", "all"})
+
+
+def _tag_values(args: Sequence[str], *names: str) -> set[str]:
+    """Every tag given to the options ``names`` in ``args`` (``--x a,b`` or ``--x=a,b``)."""
+    out: set[str] = set()
+    for i, arg in enumerate(args):
+        for name in names:
+            if arg == name and i + 1 < len(args):
+                value = args[i + 1]
+            elif arg.startswith(name + "="):
+                value = arg[len(name) + 1 :]
+            else:
+                continue
+            out.update(t.strip() for t in value.split(",") if t.strip())
+    return out
+
+
+def _reaches_config_files(tags: str | None, passthrough: Sequence[str]) -> bool:
+    """True when the run can reach ``deploy_stack : Deploy config files``.
+
+    No tag at all runs every task. Otherwise a tag must select deploy_stack.
+    A ``--skip-tags`` in the passthrough that names it turns the task off.
+    """
+    wanted = _tag_values([*(["--tags", tags] if tags else []), *passthrough], "--tags", "-t")
+    if wanted and not wanted & _CONFIG_FILES_TAGS:
+        return False
+    return not _tag_values(passthrough, "--skip-tags") & _CONFIG_FILES_TAGS
+
+
+@contextlib.contextmanager
+def _config_files_root(cx: Context, reach: bool) -> Iterator[Path | None]:
+    """The ``files/`` a plain deploy copies config files from, or None.
+
+    ``bay up`` deploys from the ``files/`` of its scratch compile
+    (:attr:`bay_cli.plan.Compiled.files_root`): the fleet's files/ at its
+    commit plus each file a bay.toml mounts from beside it. A plain deploy
+    uses the same compile, so a file in ``projects/<name>/`` reaches the box.
+    The compile writes nothing into the fleet. The folder lives until the
+    ``with`` ends, so keep it open through the playbook and the healthcheck.
+
+    ``reach`` False (the tags skip deploy_stack) yields None and compiles
+    nothing. A compile that fails stops the deploy: there is no fallback
+    to the fleet's own ``files/``.
+    """
+    if not reach:
+        yield None
+        return
+    from bay_cli import plan as planmod
+
+    with planmod.compiled_fleet(cx, cwd=Path.cwd()) as comp:
+        for note in [*comp.notes, *comp.uncommitted]:
+            typer.echo(f"note: {note}", err=True)
+        if comp.result is None:
+            for line in comp.errors:
+                typer.echo(line, err=True)
+            raise BayError(
+                f"compile failed with {len(comp.errors)} problem(s), nothing was deployed",
+                hint="The deploy copies config files from the compiled fleet. Fix the "
+                "problems above, or deploy only tags outside deploy_stack.",
+            )
+        yield comp.files_root
 
 
 def _fleet_gate(
@@ -493,6 +561,11 @@ def deploy(
     remote or uncommitted files refuse (--offline, --allow-dirty). A dry run
     follows the same rules.
 
+    Config files come from a scratch compile, as in `bay up`: the committed
+    fleet and the pinned project commits, also with --allow-dirty. A file
+    beside a bay.toml ships too. A run whose tags skip deploy_stack does not
+    compile. A compile that fails stops the deploy before the playbook.
+
     Put options BEFORE the environment argument \u2014 flags placed after it
     land in the ansible passthrough (known flags are rescued with a
     warning, unknown ones are forwarded).
@@ -536,6 +609,15 @@ def deploy(
 
     _validate_env(env, root)
 
+    # ── Config files ─────────────────────────────────────────────────
+    # deploy_stack copies them from the files/ of a scratch compile, as
+    # `bay up` does, so a file beside a bay.toml reaches the box. Tags that
+    # skip deploy_stack compile nothing. The folder lives until the command
+    # ends: through the playbook and the healthcheck.
+    files_root = ctx.with_resource(
+        _config_files_root(cx, _reaches_config_files(tags, ctx.args or []))
+    )
+
     # ── Rig state check ──────────────────────────────────────────────
     if not rig and not tags:
         rig_needed = _check_rig_state(env, bay_dir, root)
@@ -551,7 +633,14 @@ def deploy(
     else:
         from bay_cli.commands.validate import run_validation
 
-        result = run_validation(root, env, bay_dir=bay_dir, show_banner=False, check_token_scope=check_token_scope)
+        result = run_validation(
+            root,
+            env,
+            bay_dir=bay_dir,
+            show_banner=False,
+            check_token_scope=check_token_scope,
+            config_files_root=files_root,
+        )
 
         if result.total_issues:
             console.console.print()
@@ -572,12 +661,14 @@ def deploy(
     extra_args = [a for a in (ctx.args or []) if a not in ("--", "--rig", "--skip-validate", "--skip-healthcheck", "--check-token-scope", "--profile")]
     # The deploy receipt on each box records which fleet and framework
     # commits this run came from (docs/deploy-receipt.md).
+    from bay_cli import plan as planmod
     from bay_cli.receipts import deploy_extra_vars
 
     extra_args = [
         "-e", f"_rig_mode={'true' if rig_mode else 'false'}",
         "-e", f"_rig_write={'true' if rig_write else 'false'}",
         *deploy_extra_vars(cx),
+        *planmod.config_files_vars(files_root),
     ] + extra_args
 
     if region:

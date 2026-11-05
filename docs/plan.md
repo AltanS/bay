@@ -1399,8 +1399,15 @@ keeps the temporary fleet until its deploy has finished and passes its
 `files/` as `bay_config_files_root`. The box check of `bay plan --remote` passes
 the same, so the prediction and the deploy read the same bytes. The plan lists
 each uncommitted file under `files/` or in a project folder in a note:
-`uncommitted file <path> is not deployed`. A plain `bay deploy` passes no such
-variable and copies from the fleet's `files/` as before.
+`uncommitted file <path> is not deployed`. A plain `bay deploy` (with or
+without `--rig`) makes the same scratch compile when its tags reach
+`deploy_stack`, and passes its `files/` the same way. It keeps the copy until
+the playbook and the healthcheck have finished. The compile writes nothing
+into the fleet: no `services.yml` and no plan record. A compile that fails
+stops the deploy before the playbook, with the problems. Bay does not fall
+back to the fleet's `files/`. A run whose tags skip `deploy_stack` (for
+example `--tags headscale`, or `-- --skip-tags deploy_stack`) does not
+compile, so it also works on a fleet whose compile is broken.
 
 **One release of overlap.** Both places work in 2.1. A file that is not beside
 the toml is read from its old place, `files/<name>/<from>`, with a note that
@@ -1585,7 +1592,7 @@ they check the fleet first:
 | Remote cannot be read | Refuses (`remote_unreachable`, exit 41), unless `--offline`. |
 | Only behind | Fast-forwards, then runs. |
 | Diverged | Refuses (`diverged`, exit 41). |
-| Uncommitted files (tracked or untracked, `plans/` left out) | Refuses (`dirty`, exit 41) and lists up to 20 paths, unless `--allow-dirty`. The files would deploy, and no other machine can see them. |
+| Uncommitted files (tracked or untracked, `plans/` left out) | Refuses (`dirty`, exit 41) and lists up to 20 paths, unless `--allow-dirty`. The files would deploy, and no other machine can see them. Config files are the exception: `bay deploy` copies them from the committed fleet and the pinned project commits, also with `--allow-dirty`. |
 | Ahead | Pushes first (the claim). A refused push stops the run before the box (exit 42). |
 | `--offline` | No fetch and no push. Bay prints a warning: the result is not on the remote, so run `bay fleet push` after it. |
 
