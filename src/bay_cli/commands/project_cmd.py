@@ -278,7 +278,7 @@ def _json_error(exc: BayError, extra: dict[str, Any] | None = None) -> None:
     raise typer.Exit(exc.exit_code)
 
 
-def _error_outcome(ctx: typer.Context, exc: BayError) -> dict[str, Any]:
+def _error_outcome(ctx: typer.Context, exc: BaseException) -> dict[str, Any]:
     """``reason``, ``box_touched``, ``next`` and ``fleet`` for a JSON error of up and rollback."""
     from bay_cli import apply as applymod
 
@@ -692,6 +692,15 @@ def _apply(
                     if note.startswith("first deploy of "):
                         console.info(note)
         raise typer.Exit(exc.exit_code) from None
+    except KeyboardInterrupt as exc:
+        # Ctrl-C. Before the box: the unwind ran. After: the lock stays pending,
+        # and the same command repairs the stopped run. With --json: one document.
+        if not as_json:
+            raise
+        doc = _error_outcome(ctx, exc)
+        doc.update({"error": "interrupted", "hint": None, "reason": "interrupted"})
+        _echo_json(doc)
+        raise typer.Exit(130) from None
     except Exception as exc:
         # Any other error (a lock that breaks its schema, an OSError): with --json
         # it is still one JSON document, never only a traceback.

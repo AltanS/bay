@@ -1392,6 +1392,44 @@ def test_an_unwind_that_cannot_tell_if_the_claim_landed_undoes_nothing(
     assert "STOPPED before the box was touched" not in err
 
 
+def test_ctrl_c_during_the_deploy_with_json_is_one_document(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """review 5, item 4: after the box was touched, exit 130 and one JSON document."""
+    m = machines
+
+    def interrupted(cx: Context, box_env: str, **kw: Any) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(applymod, "default_deploy", interrupted)
+    result = cli({"fleet": m["a"], "app": m["app"]}, "up", "--json")
+    assert result.exit_code == 130, result.output
+    doc = json.loads(result.stdout)
+    assert doc["reason"] == "interrupted" and doc["box_touched"] is True
+    assert doc["next"] == f"bay --fleet {m['a']} up production --project webapp"
+    assert doc["fleet"]["name"] == "testfleet"
+    assert lock_at(m["a"], "webapp")["envs"]["production"]["result"] == "pending"
+    assert '"result": "pending"' in git(m["a"], "show", "@{u}:projects/webapp/bay.lock")
+
+
+def test_ctrl_c_before_the_box_with_json_is_one_document(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    before = snapshot(m["a"])
+
+    def interrupted(repo: Path) -> tuple[bool, str | None]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(fleetsync, "push_upstream", interrupted)
+    result = cli({"fleet": m["a"], "app": m["app"]}, "up", "--json")
+    assert result.exit_code == 130, result.output
+    doc = json.loads(result.stdout)
+    assert doc["reason"] == "interrupted" and doc["box_touched"] is False
+    assert snapshot(m["a"]) == before
+    assert box.deploys == []
+
+
 def test_ctrl_c_after_the_claim_says_what_the_remote_holds(
     machines: dict[str, Path], box: FakeBox, capsys: pytest.CaptureFixture[str]
 ) -> None:

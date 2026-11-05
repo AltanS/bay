@@ -293,6 +293,11 @@ def unwind_on_error(written: Written) -> Iterator[None]:
     try:
         yield
     except BaseException as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            # For the one JSON document of an interrupt (bay up --json).
+            setattr(exc, "box_touched", touched())  # noqa: B010
+            if written.root is not None:
+                setattr(exc, "next_cmd", written.again)  # noqa: B010
         if (
             not touched()
             and written.root is not None
