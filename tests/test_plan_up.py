@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -117,12 +118,22 @@ def _git_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class FakeBox:
-    """Holds one receipt per box env. A deploy writes it from the fleet's services file."""
+    """Holds one receipt per box env. A deploy writes it from the fleet's services file.
+
+    Every box of the env (bay.fleet.toml ``[boxes]``) reads that receipt with its
+    own ``box``. ``fail_boxes`` makes those boxes report ``failed`` (the deploy
+    raises), ``unreached`` keeps the receipt those boxes had before the deploy
+    (Ansible stopped before them).
+    """
 
     def __init__(self) -> None:
         self.receipts: dict[str, dict[str, Any]] = {}
         self.deploys: list[str] = []
         self.fail = False
+        self.fail_boxes: set[str] = set()
+        self.unreached: set[str] = set()
+        #: ``(box env, box) -> receipt`` where a box differs from the env's receipt.
+        self.per_box: dict[tuple[str, str], dict[str, Any] | None] = {}
         #: Per deploy: the config files the deploy would copy, relative path -> bytes.
         self.config_files: list[dict[str, bytes] | None] = []
 
@@ -141,6 +152,14 @@ class FakeBox:
         )
         data = yaml.safe_load((cx.fleet_root / GENERATED_SERVICES).read_text().split("\n", 1)[1])
         entries = {**(data.get("accessories") or {}), **(data.get("services") or {})}
+        previous = self.receipts.get(box_env)
+        for b in self._boxes(cx, box_env):
+            if b in self.unreached and (box_env, b) not in self.per_box:
+                self.per_box[(box_env, b)] = (
+                    None if previous is None else {**copy.deepcopy(previous), "box": b}
+                )
+            elif b not in self.unreached:
+                self.per_box.pop((box_env, b), None)
         before = {
             c["name"]: c for c in (self.receipts.get(box_env) or {}).get("containers", [])
         }
@@ -173,7 +192,9 @@ class FakeBox:
             "containers": [row(name, entry) for name, entry in sorted(entries.items())],
             "projects": {},
         }
-        if self.fail:
+        for b in self.fail_boxes:
+            self.per_box[(box_env, b)] = {**self.receipts[box_env], "box": b, "result": "failed"}
+        if self.fail or self.fail_boxes:
             from bay_cli.errors import BayError
 
             raise BayError("the deploy failed on the box")
@@ -181,10 +202,27 @@ class FakeBox:
     def container(self, name: str, env: str = "production") -> dict[str, Any]:
         return next(c for c in self.receipts[env]["containers"] if c["name"] == name)
 
+    @staticmethod
+    def _boxes(cx: Context, box_env: str) -> list[str]:
+        try:
+            doc = tomllib.loads((cx.fleet_root / "bay.fleet.toml").read_text())
+        except (OSError, tomllib.TOMLDecodeError):
+            return ["box-1"]
+        found = sorted(
+            name for name, b in (doc.get("boxes") or {}).items() if b.get("env") == box_env
+        )
+        return found or ["box-1"]
+
     def read(self, cx: Context, box_env: str) -> list[dict[str, Any]]:
-        return [
-            {"env": box_env, "box": "box-1", "receipt": self.receipts.get(box_env), "error": None}
-        ]
+        out = []
+        for b in self._boxes(cx, box_env):
+            if (box_env, b) in self.per_box:
+                receipt = self.per_box[(box_env, b)]
+            else:
+                template = self.receipts.get(box_env)
+                receipt = None if template is None else {**template, "box": b}
+            out.append({"env": box_env, "box": b, "receipt": receipt, "error": None})
+        return out
 
 
 @pytest.fixture
@@ -258,8 +296,14 @@ def do_up(world: dict[str, Path], **kw: Any) -> dict[str, Any]:
     force = kw.pop("force", False)
     reason = kw.pop("reason", None)
     plan_id = kw.pop("plan_id", None)
+    flags = {k: kw.pop(k) for k in ("allow_dirty", "take_over") if k in kw}
     return applymod.up(
-        project(world), planmod.PlanOptions(**kw), force=force, reason=reason, plan_id=plan_id
+        project(world),
+        planmod.PlanOptions(**kw),
+        force=force,
+        reason=reason,
+        plan_id=plan_id,
+        **flags,
     )
 
 
@@ -325,6 +369,7 @@ def test_plan_verdict_exit_codes(world: dict[str, Path], box: FakeBox) -> None:
     raw = lock_of(world)
     raw["envs"]["production"]["deployed_at"] = "2026-10-07T00:00:00Z"
     lockfile.write(lockfile.lock_path(world["fleet"], "webapp"), raw)
+    commit_all(world["fleet"], "the pin moves")  # a dirty fleet would block first
     result = cli(world, "plan", "--json", "--plan-id", saved["plan_id"])
     plan = json.loads(result.stdout)
     assert (plan["verdict"], result.exit_code) == ("stale", 30)
@@ -702,6 +747,10 @@ def test_tailnet_allowlist_change_is_shared(world: dict[str, Path], box: FakeBox
     path.write_text(path.read_text().replace("100.64.0.0/10", "100.64.0.0/16"))
     plan = make(world)
     assert ("tailnet", "shared") in {(s["kind"], s["risk"]) for s in plan["steps"]}
+    # The step reads the uncommitted bay.fleet.toml, so the fleet is dirty (since
+    # 2.12 a blocker). Without that blocker the step needs an approval.
+    assert plan["reason"] == "dirty"
+    applymod._skip_run_blockers(None, plan, take_over=False, allow_dirty=True)
     assert plan["verdict"] == "approve"
 
 
@@ -745,17 +794,33 @@ def test_invalid_bay_toml_blocks(world: dict[str, Path], box: FakeBox) -> None:
     assert any("port" in b for b in plan["blockers"])
 
 
-def test_dirty_fleet_refuses_only_destructive(world: dict[str, Path], box: FakeBox) -> None:
+def test_dirty_fleet_blocks_and_allow_dirty_skips_only_that(
+    world: dict[str, Path], box: FakeBox
+) -> None:
     do_up(world)
     (world["fleet"] / "scratch.txt").write_text("uncommitted\n")
     edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
     safe = make(world)
-    assert safe["fleet"]["dirty"] is True and safe["verdict"] == "auto"
+    assert safe["fleet"]["dirty"] is True and safe["verdict"] == "blocked"
+    assert safe["reason"] == "dirty"
+    assert [g["reason"] for g in safe["run_blockers"]] == ["dirty"]
+    assert safe["run_blockers"][0]["paths"] == ["scratch.txt"]
+    # The blocker text (the path list) is not hashed.
+    assert planmod.body_sha256(safe) == safe["plan_sha256"]
+    with pytest.raises(applymod.Refused) as err:
+        do_up(world)
+    assert err.value.reason == "dirty" and err.value.exit_code == 41
+    up = do_up(world, allow_dirty=True)
+    assert up["result"] == "ok" and up["allowed_dirty"] == ["scratch.txt"]
 
+    # The stricter rule stays: a destructive step on a dirty fleet blocks, and
+    # --allow-dirty does not skip it.
     edit_app(world, 'volume = "data"', 'volume = "files"')
     risky = make(world)
     assert risky["verdict"] == "blocked"
-    assert any("uncommitted" in b for b in risky["blockers"])
+    assert any("a step is destructive" in b for b in risky["blockers"])
+    with pytest.raises(applymod.Refused):
+        do_up(world, allow_dirty=True, force=True, reason="test")
 
 
 def test_dirty_project_is_recorded_not_gated(world: dict[str, Path], box: FakeBox) -> None:
@@ -2106,6 +2171,7 @@ def test_lock_v2_has_no_local_path(world: dict[str, Path], box: FakeBox) -> None
     # The schema has no local_path any more: a lock that carries one is refused.
     with pytest.raises(lockfile.LockWriteError, match="local_path"):
         lockfile.write(lockfile.lock_path(world["fleet"], "demo"), {**raw, "local_path": "/x"})
+    commit_all(world["fleet"], "a demo lock")
     do_up(world)
     assert "local_path" not in lock_of(world) and lock_of(world)["lock_version"] == 2
 
@@ -2601,14 +2667,24 @@ def test_uncommitted_file_is_a_note_not_deployed(world: dict[str, Path], box: Fa
     (world["fleet"] / "files" / "extra").mkdir(parents=True)
     (world["fleet"] / "files" / "extra" / "new.yaml").write_text("x\n")
     plan = planmod.make_plan(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
-    assert plan["blockers"] == []
+    # The only blocker is the dirty fleet (since 2.12), which --allow-dirty skips.
+    assert [g["reason"] for g in plan["run_blockers"]] == ["dirty"]
+    assert plan["blockers"] == [plan["run_blockers"][0]["message"]]
     assert "uncommitted file projects/board/site.conf is not deployed; commit it first" in plan["notes"]
     assert "uncommitted file files/extra/new.yaml is not deployed; commit it first" in plan["notes"]
-    applymod.up(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
+    # bay up refuses the dirty fleet; with --allow-dirty the committed file deploys.
+    with pytest.raises(applymod.Refused) as err:
+        applymod.up(planmod.load_project(cx_of(world), "board"), planmod.PlanOptions())
+    assert err.value.reason == "dirty"
+    applymod.up(
+        planmod.load_project(cx_of(world), "board"), planmod.PlanOptions(), allow_dirty=True
+    )
     assert box.config_files[-1] == {"board/site.conf": b"committed\n"}
 
 
-def _capture_playbook(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+def _capture_playbook(
+    monkeypatch: pytest.MonkeyPatch, on_deploy: Any = None
+) -> list[dict[str, Any]]:
     from types import SimpleNamespace
 
     from bay_cli.commands import ops, validate
@@ -2616,6 +2692,8 @@ def _capture_playbook(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
 
     def fake_run(cx: Context, playbook: str, env: str, tags: Any, extra: list[str], **kw: Any) -> None:
+        if on_deploy is not None and playbook == "deploy" and "--check" not in extra:
+            on_deploy(cx, env)  # the box writes its receipt
         root = None
         for i, arg in enumerate(extra):
             if arg == "-e" and "bay_config_files_root" in extra[i + 1]:
@@ -2644,7 +2722,7 @@ def test_up_and_box_check_pass_bay_config_files_root(
     _in_fleet_with_file(
         world, "board", {"site.conf": "new\n"}, MOUNT.format(leaf="site.conf", src="site.conf")
     )
-    calls = _capture_playbook(monkeypatch)
+    calls = _capture_playbook(monkeypatch, on_deploy=box.deploy)
     monkeypatch.setattr(applymod, "default_deploy", _REAL_DEFAULT_DEPLOY)
     monkeypatch.setattr(planmod, "read_box_predictions", lambda _d: [])
     proj = planmod.load_project(cx_of(world), "board")
@@ -5308,3 +5386,103 @@ def test_previous_of_another_project_skips_its_failed_pin(
     assert raw is not None and raw["envs"]["production"]["commit"] == s3
     assert raw["envs"]["production"]["result"] == "ok"
     assert raw["envs"]["production"]["previous"]["commit"] == s1  # not the failed s2
+
+
+# ── review 4: results are per box ───────────────────────────────────────────
+
+
+def _two_boxes_status_on_one(world: dict[str, Path], webapp_box: str) -> Path:
+    """Two boxes in one box env: status (in the fleet) on box-1, webapp on ``webapp_box``."""
+    (world["fleet"] / "bay.fleet.toml").write_text(TWO_BOXES)
+    commit_all(world["fleet"], "two boxes")
+    _recompile(world, "compile two boxes")
+    if webapp_box != "box-1":
+        edit_app(world, "[deploy.production]\n", f'[deploy.production]\nbox = "{webapp_box}"\n')
+    status = world["fleet"] / "projects" / "status" / "bay.toml"
+    status.parent.mkdir()
+    status.write_text(STATUS_TOML)
+    commit_all(world["fleet"], "add status")
+    return status
+
+
+def _up_status(world: dict[str, Path]) -> dict[str, Any]:
+    proj = planmod.load_project(cx_of(world), "status", cwd=world["fleet"])
+    return applymod.up(proj, planmod.PlanOptions())
+
+
+def test_unrelated_failure_on_another_box_keeps_a_confirmed_pin(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """The reviewer's sequence: W ok, X ok, status fails on box-1, Y ok, rollback -> X."""
+    status = _two_boxes_status_on_one(world, "box-2")
+    do_up(world)
+    w = _pin(world)
+    assert lock_of(world)["envs"]["production"]["box"] == "box-2"
+    x = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "x"')
+    do_up(world)
+    assert _pin(world) == x and _previous(world) == w
+    _up_status(world)
+    _edit_in_fleet(status, world, 'MODE = "one"', 'MODE = "two"')
+    box.fail_boxes = {"box-1"}
+    with pytest.raises(applymod.DeployFailed) as err:
+        _up_status(world)
+    box.fail_boxes = set()
+    assert err.value.exit_code == 1 and err.value.result["result"] == "failed"
+    rows = {r["project"]: r["result"] for r in err.value.result["pinned"]}
+    assert rows == {"status": "failed", "webapp": "ok"}
+    record = lock_of(world)["envs"]["production"]
+    assert (record["commit"], record["result"]) == (x, "ok")
+    y = edit_app(world, 'LOG_LEVEL = "x"', 'LOG_LEVEL = "y"')
+    do_up(world)
+    assert _pin(world) == y and _previous(world) == x
+    _rollback(world)
+    assert _pin(world) == x
+
+
+def test_a_box_the_deploy_never_reached_keeps_its_records(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    status = _two_boxes_status_on_one(world, "box-2")
+    do_up(world)
+    _up_status(world)
+    before = lockfile.lock_path(world["fleet"], "webapp").read_bytes()
+    _edit_in_fleet(status, world, 'MODE = "one"', 'MODE = "two"')
+    box.fail_boxes, box.unreached = {"box-1"}, {"box-2"}
+    with pytest.raises(applymod.DeployFailed) as err:
+        _up_status(world)
+    box.fail_boxes, box.unreached = set(), set()
+    # No stamp, no deployed_at, no receipt hash: the record is as it was.
+    assert lockfile.lock_path(world["fleet"], "webapp").read_bytes() == before
+    assert [r["project"] for r in err.value.result["pinned"]] == ["status"]
+
+
+def test_a_member_whose_box_has_no_new_receipt_is_failed(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    _two_boxes_status_on_one(world, "box-2")
+    do_up(world)
+    edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "x"')
+    box.unreached = {"box-2"}  # the run reports no error, but box-2 never wrote a receipt
+    with pytest.raises(applymod.DeployFailed) as err:
+        do_up(world)
+    box.unreached = set()
+    assert "no receipt from this deploy on box box-2" in str(err.value.result["error"])
+    assert lock_of(world)["envs"]["production"]["result"] == "failed"
+    # status on box-1 got the new receipt: ok.
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "status"))
+    assert raw is not None and raw["envs"]["production"]["result"] == "ok"
+
+
+def test_a_failed_box_marks_every_project_on_it_failed(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """Accepted for now: one box receipt, one result for all its projects."""
+    status = _two_boxes_status_on_one(world, "box-1")
+    do_up(world)
+    _up_status(world)
+    _edit_in_fleet(status, world, 'MODE = "one"', 'MODE = "two"')
+    box.fail_boxes = {"box-1"}
+    with pytest.raises(applymod.DeployFailed):
+        _up_status(world)
+    box.fail_boxes = set()
+    assert lock_of(world)["envs"]["production"]["result"] == "failed"

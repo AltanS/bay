@@ -2280,11 +2280,21 @@ _UNHASHED = (
     # Since 2.12: what the run did to the fleet checkout, not a plan input.
     "fleet_sync",
     "reason",
+    # Since 2.12: who else deploys the box env now, and what this run skipped.
+    "run_blockers",
+    "holder",
+    "took_over",
+    "allowed_dirty",
 )
 
 
 def body_sha256(plan: Mapping[str, Any]) -> str:
+    """The hash of the plan inputs. The run blockers (:func:`add_run_blockers`) are left out:
+    a claim of another machine or a stray file says nothing about what the plan does."""
     body = {k: v for k, v in plan.items() if k not in _UNHASHED}
+    run_messages = {str(b.get("message")) for b in plan.get("run_blockers") or []}
+    if run_messages and isinstance(body.get("blockers"), list):
+        body["blockers"] = [b for b in body["blockers"] if b not in run_messages]
     canon = json.dumps(body, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
@@ -2302,6 +2312,8 @@ class _FleetState:
     blockers: list[str]
     #: Why the fleet blocks the plan (:mod:`bay_cli.fleetsync` reasons), or None.
     reason: str | None = None
+    #: Uncommitted paths (:func:`bay_cli.fleetsync.dirty_paths`): the ``dirty`` run blocker.
+    dirty_paths: list[str] = field(default_factory=list)
 
 
 def _fleet_state(cx: Context) -> _FleetState:
@@ -2338,7 +2350,7 @@ def _fleet_state(cx: Context) -> _FleetState:
         behind = st.behind > 0
         if behind:
             blockers.append("the fleet repo is behind its remote; pull it first")
-    return _FleetState(is_git, head, dirty, behind, blockers, reason)
+    return _FleetState(is_git, head, dirty, behind, blockers, reason, list(st.dirty_paths))
 
 
 def _env_names(proj: ProjectRef, docs: list[dict[str, Any] | None]) -> dict[str, dict[str, str]]:
@@ -2538,8 +2550,132 @@ def _finish(
     plan["plan_sha256"] = sha
     plan["plan_id"] = sha[:12]
     plan["approval"] = find_approval(cx, plan)
+    add_run_blockers(cx, plan, state, [plan.get("box_env")])
     decide(plan)
     return plan
+
+
+def add_run_blockers(
+    cx: Context,
+    plan: dict[str, Any],
+    state: _FleetState,
+    box_envs: Sequence[str | None],
+    *,
+    now: datetime | None = None,
+) -> None:
+    """The two blockers that ``bay up --allow-dirty`` and ``--take-over`` may skip.
+
+    * ``dirty``: the fleet has uncommitted paths (:func:`bay_cli.fleetsync.dirty_paths`:
+      ``plans/`` and the first-deploy marker left out). Ansible reads the work tree,
+      so they would deploy, and no other machine can see them.
+    * ``env_busy``: another run deploys the box env now. A lock env record of any
+      project on one of ``box_envs`` is ``pending`` with a ``claimed_at`` younger than
+      :data:`bay_cli.fleetsync.CLAIM_FRESH_SECONDS`. A record of this very plan
+      from this machine (the same run, started again) does not count. ``holder``
+      names the claim. An older pending record does not block: it is HALF.
+
+    Each goes into ``blockers`` (as text) and ``run_blockers`` (as a dict). Neither
+    is hashed (:func:`body_sha256`), so the plan id stays the same. Call it after
+    the plan id is set.
+    """
+    from bay_cli import fleetsync
+
+    gates: list[dict[str, Any]] = []
+    if state.dirty_paths:
+        refusal = fleetsync.dirty_refusal(state.dirty_paths)
+        gates.append(
+            {
+                "reason": fleetsync.REASON_DIRTY,
+                "message": str(refusal),
+                "paths": list(state.dirty_paths),
+            }
+        )
+    holder = foreign_claim(cx, {b for b in box_envs if b}, str(plan["plan_id"]), now=now)
+    if holder is not None:
+        gates.append(
+            {
+                "reason": fleetsync.REASON_ENV_BUSY,
+                "message": env_busy_message(holder),
+                "holder": holder,
+            }
+        )
+    plan["run_blockers"] = gates
+    plan["holder"] = holder
+    plan["blockers"].extend(g["message"] for g in gates)
+    if gates and plan.get("reason") is None:
+        plan["reason"] = gates[0]["reason"]
+
+
+def foreign_claim(
+    cx: Context, box_envs: set[str], plan_id: str, *, now: datetime | None = None
+) -> dict[str, Any] | None:
+    """The newest fresh claim of another run on ``box_envs``, or None.
+
+    ``{"project", "env", "box_env", "claimed_by", "claimed_at", "plan_id", "expires_at"}``.
+    """
+    from datetime import timedelta
+
+    from bay_cli import fleetsync
+
+    if not box_envs:
+        return None
+    try:
+        boxes = (load_fleet_doc(cx).get("boxes") or {})
+    except (BayError, OSError, ValueError):
+        boxes = {}
+    me = fleetsync.hostname()
+    found: list[dict[str, Any]] = []
+    for stem, path in lock_files(cx.fleet_root):
+        try:
+            raw = lockfile.read(path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        for env, record in sorted((raw.get("envs") or {}).items()):
+            if not fleetsync.fresh_claim(record, now):
+                continue
+            box = record.get("box")
+            box_env = (boxes.get(box) or {}).get("env") if isinstance(box, str) else None
+            if box_env not in box_envs:
+                continue
+            if record.get("plan_id") == plan_id and record.get("claimed_by") == me:
+                continue
+            when = fleetsync.claim_time(record)
+            assert when is not None
+            expires = when + timedelta(seconds=fleetsync.CLAIM_FRESH_SECONDS)
+            found.append(
+                {
+                    "project": str(raw.get("name") or stem),
+                    "env": str(env),
+                    "box_env": str(box_env),
+                    "claimed_by": str(record.get("claimed_by") or "another machine"),
+                    "claimed_at": str(record.get("claimed_at")),
+                    "plan_id": record.get("plan_id"),
+                    "expires_at": expires.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+            )
+    if not found:
+        return None
+    return max(found, key=lambda h: (h["claimed_at"], h["project"]))
+
+
+def env_busy_message(holder: Mapping[str, Any]) -> str:
+    from bay_cli import fleetsync
+
+    def hhmm(stamp: str) -> str:
+        try:
+            when = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+        except ValueError:
+            return stamp
+        return fleetsync.local_hhmm(when)
+
+    return (
+        f"{holder['claimed_by']} is deploying {holder['box_env']} since "
+        f"{hhmm(str(holder['claimed_at']))} (plan {holder.get('plan_id')}). Wait for it. "
+        f"If that run is dead, the claim expires at {hhmm(str(holder['expires_at']))}, "
+        "or pass --take-over."
+    )
 
 
 def _apply_moves(

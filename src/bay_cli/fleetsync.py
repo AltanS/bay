@@ -61,6 +61,38 @@ LOCK_PREFIX = "bay-run"
 #: A pending env record younger than this shows as ``deploying`` in ``bay show``.
 CLAIM_FRESH_SECONDS = 30 * 60
 
+#: Plan and up reasons for the two run blockers (:func:`bay_cli.plan.add_run_blockers`).
+REASON_ENV_BUSY = "env_busy"
+
+
+def claim_time(record: Any) -> datetime | None:
+    """``claimed_at`` of a pending env record as a time, or None."""
+    if not isinstance(record, dict) or record.get("result") != "pending":
+        return None
+    try:
+        return datetime.strptime(str(record.get("claimed_at")), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=UTC
+        )
+    except ValueError:
+        return None
+
+
+def fresh_claim(record: Any, now: datetime | None = None) -> bool:
+    """True for a pending record claimed less than :data:`CLAIM_FRESH_SECONDS` ago.
+
+    A claim a little in the future (the other machine's clock is ahead) is fresh too.
+    """
+    when = claim_time(record)
+    if when is None:
+        return False
+    age = ((now or datetime.now(UTC)) - when).total_seconds()
+    return -CLAIM_FRESH_SECONDS < age < CLAIM_FRESH_SECONDS
+
+
+def local_hhmm(when: datetime) -> str:
+    return when.astimezone().strftime("%H:%M")
+
+
 NEVER_MERGE = (
     "never merge services.yml, a bay.lock or a vault file by hand"
 )

@@ -20,6 +20,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from test_plan_up import (  # noqa: E402,F401  (fixtures are used by name)
+    PLAN_SCHEMA,
     STATUS_TOML,
     FakeBox,
     _git_identity,
@@ -167,7 +168,7 @@ def test_b_claim_refused_when_a_lands_after_b_committed(
         deployed.append(box_env)
 
     with pytest.raises(fleetsync.SyncError) as err:
-        up_at(m, "b", "status", deploy=b_deploy)
+        up_at(m, "b", "status", deploy=b_deploy, allow_dirty=True)
     assert calls == ["claim"]
     exc = err.value
     assert exc.reason == "claim_refused" and exc.exit_code == 42
@@ -181,7 +182,7 @@ def test_b_claim_refused_when_a_lands_after_b_committed(
 
     # The next bay up pulls A's commits first, and its compile holds A's pin.
     monkeypatch.setattr(fleetsync, "push_upstream", real_push)
-    again = up_at(m, "b", "status")
+    again = up_at(m, "b", "status", allow_dirty=True)
     assert again["fleet_sync"]["pulled"] >= 1
     assert {"webapp", "status"} <= set(services_of(m["b"]))
     assert again["pushed"] is True
@@ -230,7 +231,7 @@ def test_unreachable_remote_at_the_claim_restores_the_checkout(
 
     monkeypatch.setattr(fleetsync, "push_upstream", push)
     with pytest.raises(fleetsync.SyncError) as err:
-        up_at(m, "a", "webapp")
+        up_at(m, "a", "webapp", allow_dirty=True)
     away.rename(m["remote"])
     assert err.value.reason == "remote_unreachable" and err.value.exit_code == 41
     assert box.deploys == []
@@ -1024,3 +1025,200 @@ def test_fleet_verbs_find_the_fleet_by_discovery_step_5(
     assert result.exit_code == 41, result.output
     up = json.loads(result.stdout)
     assert up["fleet"]["selected_by"] == "the fleet folder you stand in"
+
+
+# ── review 1: a fresh claim of another machine keeps the box env ────────────
+
+
+def test_b_cannot_deploy_while_a_claim_is_in_flight(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    m = machines
+    seen: dict[str, Any] = {}
+
+    def a_deploy(cx: Context, box_env: str, **kw: Any) -> None:
+        # A's claim is on the remote; A has not touched the box yet.
+        with pytest.raises(applymod.Refused) as err:
+            up_at(m, "b", "status")
+        seen["refused"] = err.value
+        seen["plan"] = cli(
+            {"fleet": m["b"], "app": m["app"]}, "plan", "--project", "status", "--json"
+        )
+        seen["up"] = cli(
+            {"fleet": m["b"], "app": m["app"]}, "up", "--project", "status", "--json"
+        )
+        box.deploy(cx, box_env, **kw)
+
+    a = up_at(m, "a", "webapp", deploy=a_deploy)
+    assert a["result"] == "ok" and a["pushed"] is True
+    refused = seen["refused"]
+    assert refused.reason == "env_busy" and refused.exit_code == 43
+    holder = refused.plan["holder"]
+    assert holder["claimed_by"] == fleetsync.hostname()
+    assert holder["project"] == "webapp" and holder["box_env"] == "production"
+    assert holder["plan_id"] == a["plan_id"]
+    assert set(holder) >= {"claimed_by", "claimed_at", "plan_id", "expires_at"}
+    message = next(b for b in refused.plan["blockers"] if "is deploying" in b)
+    assert message.startswith(f"{fleetsync.hostname()} is deploying production since ")
+    assert f"(plan {a['plan_id']}). Wait for it. If that run is dead, the claim expires at " in (
+        message
+    )
+    assert message.endswith(", or pass --take-over.")
+    # bay plan shows it; bay up --json refuses with exit 43 and names the holder.
+    plan = json.loads(seen["plan"].stdout)
+    assert plan["reason"] == "env_busy" and plan["holder"]["plan_id"] == a["plan_id"]
+    import jsonschema
+
+    jsonschema.validate(plan, PLAN_SCHEMA)
+    up = json.loads(seen["up"].stdout)
+    assert seen["up"].exit_code == 43 and up["reason"] == "env_busy"
+    assert up["holder"]["claimed_by"] == fleetsync.hostname() and up["box_touched"] is False
+    # B never touched the box: A deployed once.
+    assert box.deploys == ["production"]
+    # The claim is not hashed: the refused plan keeps its own id.
+    assert planmod.body_sha256(refused.plan) == refused.plan["plan_sha256"]
+
+
+def test_take_over_deploys_and_is_recorded(machines: dict[str, Path], box: FakeBox) -> None:
+    m = machines
+    seen: dict[str, Any] = {}
+
+    def a_deploy(cx: Context, box_env: str, **kw: Any) -> None:
+        seen["b"] = up_at(m, "b", "status", take_over=True)
+
+    # A's own deployer never ran the playbook, so no receipt is from A's deploy.
+    with pytest.raises(applymod.DeployFailed):
+        up_at(m, "a", "webapp", deploy=a_deploy)
+    b = seen["b"]
+    assert b["result"] == "ok"
+    assert b["took_over"]["project"] == "webapp"
+    assert b["took_over"]["claimed_by"] == fleetsync.hostname()
+    assert box.deploys == ["production"]  # only B deployed (A's deployer did not)
+
+
+def test_an_old_pending_claim_does_not_block(machines: dict[str, Path], box: FakeBox) -> None:
+    m = machines
+    up_at(m, "a", "webapp")
+    raw = lock_at(m["a"], "webapp")
+    record = raw["envs"]["production"]
+    record.update(
+        {"result": "pending", "claimed_by": "machine-a", "claimed_at": "2026-01-01T00:00:00Z"}
+    )
+    lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
+    commit_all(m["a"], "a pending claim from long ago")
+    git(m["a"], "push", "-q")
+    plan = planmod.make_plan(proj_at(m["a"], "status", m["app"]), planmod.PlanOptions())
+    assert plan["holder"] is None and plan["reason"] is None
+    # A fresh one does.
+    record["claimed_at"] = fleetsync.now_iso()
+    lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
+    commit_all(m["a"], "a fresh pending claim")
+    git(m["a"], "push", "-q")
+    plan = planmod.make_plan(proj_at(m["a"], "status", m["app"]), planmod.PlanOptions())
+    assert plan["reason"] == "env_busy" and plan["holder"]["claimed_by"] == "machine-a"
+    # The same plan from this machine (a run started again) is its own record.
+    record.update({"claimed_by": fleetsync.hostname(), "plan_id": plan["plan_id"]})
+    lockfile.write(lockfile.lock_path(m["a"], "webapp"), raw)
+    holder = planmod.foreign_claim(
+        Context.for_fleet_root(m["a"]), {"production"}, str(plan["plan_id"])
+    )
+    assert holder is None
+
+
+# ── review 6: box_touched means Ansible started ─────────────────────────────
+
+
+def test_box_touched_is_false_when_validation_stops_the_deploy(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from bay_cli.commands import validate
+
+    m = machines
+    started: list[str] = []
+    monkeypatch.setattr(applymod, "default_deploy", applymod._REAL_DEFAULT_DEPLOY)
+    monkeypatch.setattr(validate, "run_validation", lambda *a, **k: SimpleNamespace(total_issues=2))
+    monkeypatch.setattr(ops, "_run_playbook", lambda *a, **k: started.append("playbook"))
+    with pytest.raises(applymod.DeployFailed) as err:
+        up_at(m, "a", "webapp")
+    assert started == []
+    assert err.value.result["box_touched"] is False
+    assert err.value.result["reason"] == "deploy_failed"
+
+
+def test_box_touched_is_true_for_a_failure_after_the_playbook_started(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from bay_cli.commands import validate
+
+    m = machines
+    real_write = lockfile.write
+
+    def playbook(cx: Context, playbook: str, env: str, *_: Any, **__: Any) -> None:
+        box.deploy(cx, env)
+
+        def broken(path: Path, data: Any) -> None:
+            raise lockfile.LockWriteError("the lock breaks its schema (test)")
+
+        monkeypatch.setattr(lockfile, "write", broken)
+
+    monkeypatch.setattr(applymod, "default_deploy", applymod._REAL_DEFAULT_DEPLOY)
+    monkeypatch.setattr(validate, "run_validation", lambda *a, **k: SimpleNamespace(total_issues=0))
+    monkeypatch.setattr(ops, "_run_playbook", playbook)
+    monkeypatch.setattr(ops, "_invalidate_rig_cache", lambda *_: None)
+    monkeypatch.setattr(ops, "_run_post_deploy_healthcheck", lambda *a, **k: None)
+    result = cli({"fleet": m["a"], "app": m["app"]}, "up", "--json")
+    monkeypatch.setattr(lockfile, "write", real_write)
+    assert result.exit_code != 0
+    doc = json.loads(result.stdout)
+    assert doc["box_touched"] is True
+    assert doc["error"].startswith("LockWriteError after the deploy started:")
+    assert box.deploys == ["production"]
+
+
+# ── review 7 and 8: reasons ─────────────────────────────────────────────────
+
+
+def test_an_unpushed_app_commit_has_its_own_reason(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    m = machines
+    app_toml = m["app"] / "bay.toml"
+    app_toml.write_text(app_toml.read_text().replace('LOG_LEVEL = "info"', 'LOG_LEVEL = "x"'))
+    commit_all(m["app"], "not pushed")
+    result = cli({"fleet": m["a"], "app": m["app"]}, "up", "--json")
+    assert result.exit_code == 1, result.output
+    doc = json.loads(result.stdout)
+    assert doc["reason"] == "app_commit_unpushed"
+    assert doc["next"] == f"git -C {m['app']} push"
+    assert doc["box_touched"] is False
+    assert box.deploys == []
+
+
+def test_a_failed_remove_is_deploy_failed_and_says_so(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    m = machines
+    w = {"fleet": m["a"], "app": m["app"]}
+    up_at(m, "a", "webapp")
+    plan = json.loads(cli(w, "remove", "webapp", "--json").stdout)
+    assert cli(w, "approve", plan["plan_id"], "--reason", "retired").exit_code == 0
+    box.fail = True
+    monkeypatch.setattr(
+        fleetsync,
+        "push_with_rebase",
+        lambda repo, **_: fleetsync.PushResult(False, "the remote refused (test)"),
+    )
+    result = cli(w, "up", "production", "--plan-id", plan["plan_id"], "--json")
+    box.fail = False
+    assert result.exit_code != 0
+    doc = json.loads(result.stdout)
+    assert doc["result"] == "failed"
+    assert doc["reason"] == "deploy_failed"
+    assert doc["next"] == "bay fleet push" and doc["box_touched"] is True
+    said = result.output + (result.stderr if result.stderr_bytes is not None else "")
+    assert "DEPLOY FAILED, but the receipt is not on the remote" in said
+    assert "DEPLOYED, but" not in said

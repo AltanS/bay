@@ -59,6 +59,22 @@ _LogOpt = Annotated[
         help="Append progress and deploy output to this file instead of the terminal.",
     ),
 ]
+_TakeOverOpt = Annotated[
+    bool,
+    typer.Option(
+        "--take-over",
+        help="Deploy although another run claimed this box env less than 30 minutes ago "
+        "(env_busy). Only for a run you know is dead.",
+    ),
+]
+_AllowDirtyOpt = Annotated[
+    bool,
+    typer.Option(
+        "--allow-dirty",
+        help="Deploy although the fleet has uncommitted files. Ansible reads them, and no "
+        "other machine can see them.",
+    ),
+]
 _NoPushOpt = Annotated[
     bool, typer.Option("--no-push", help="Do not push the fleet repo after the last commit.")
 ]
@@ -571,6 +587,8 @@ def _apply(
     log: Path | None,
     data: str | None = None,
     force_code: bool = False,
+    take_over: bool = False,
+    allow_dirty: bool = False,
 ) -> None:
     from bay_cli import apply as applymod
     from bay_cli import plan as planmod
@@ -579,7 +597,14 @@ def _apply(
     try:
         planmod.check_data_mode(data)
         with routed_output(as_json, log) as say:
-            common: dict[str, Any] = {"force": force, "reason": reason, "echo": say, "push": push}
+            common: dict[str, Any] = {
+                "force": force,
+                "reason": reason,
+                "echo": say,
+                "push": push,
+                "take_over": take_over,
+                "allow_dirty": allow_dirty,
+            }
             removal = _saved_remove(ctx, plan_id) if which == "up" and plan_id else None
             if removal is not None:
                 from bay_cli import remove as removemod
@@ -626,7 +651,7 @@ def _apply(
             doc = dict(exc.plan)
             doc.update(_error_outcome(ctx, BayError(str(exc))))
             doc["reason"] = exc.reason
-            doc["next"] = _refused_next(exc)
+            doc["next"] = exc.next_cmd or _refused_next(exc)
             _echo_json(doc)
         else:
             typer.echo(_render(exc.plan))
@@ -656,6 +681,17 @@ def _apply(
                     if note.startswith("first deploy of "):
                         console.info(note)
         raise typer.Exit(exc.exit_code) from None
+    except Exception as exc:
+        # Any other error (a lock that breaks its schema, an OSError): with --json
+        # it is still one JSON document, never only a traceback.
+        import click
+
+        if not as_json or isinstance(exc, (click.exceptions.Exit, click.ClickException)):
+            raise
+        wrapped = BayError(f"{type(exc).__name__}: {exc}")
+        doc = _error_outcome(ctx, wrapped)
+        doc["box_touched"] = bool(getattr(exc, "box_touched", False))
+        _json_error(wrapped, doc)
     from bay_cli import fleetsync
 
     unpushed = (removed or result).get("reason") == fleetsync.REASON_RECEIPT_UNPUSHED
@@ -708,6 +744,10 @@ def _refused_next(exc: Any) -> str | None:
     plan = exc.plan
     if exc.reason == fleetsync.REASON_DIVERGED:
         return "bay fleet push"
+    if exc.reason == fleetsync.REASON_DIRTY:
+        return "bay fleet status"
+    if exc.reason == fleetsync.REASON_ENV_BUSY:
+        return "bay show"
     if exc.reason == "approve":
         return f'bay approve {plan["plan_id"]} --reason "<why>"'
     if exc.reason == "stale":
@@ -755,6 +795,8 @@ def up(
     as_json: _JsonOpt = False,
     no_push: _NoPushOpt = False,
     log: _LogOpt = None,
+    take_over: _TakeOverOpt = False,
+    allow_dirty: _AllowDirtyOpt = False,
 ) -> None:
     """Pin the project's commit in the fleet and deploy it.
 
@@ -767,8 +809,10 @@ def up(
     fails). --no-push skips both pushes. A failed deploy exits 1, or 40 when
     the only failure is a build container with no image yet (the first
     deploy of a build app: push so the webhook builds it, then bay up again).
-    Exit 41: the fleet and its remote diverged, or the remote is down. Exit
-    43: another bay run holds this fleet checkout.
+    Exit 41: the fleet and its remote diverged, the remote is down, or the
+    fleet has uncommitted files (--allow-dirty deploys them). Exit 43:
+    another bay run holds this fleet checkout, or another machine claimed this
+    box env less than 30 minutes ago (env_busy; --take-over deploys anyway).
 
     In a fleet directory (or with --fleet and no bay.toml here), with no
     --project, it applies a whole-environment plan: every project of the
@@ -796,6 +840,8 @@ def up(
         log,
         data,
         force_code=force_code,
+        take_over=take_over,
+        allow_dirty=allow_dirty,
     )
 
 
@@ -820,6 +866,8 @@ def rollback(
     as_json: _JsonOpt = False,
     no_push: _NoPushOpt = False,
     log: _LogOpt = None,
+    take_over: _TakeOverOpt = False,
+    allow_dirty: _AllowDirtyOpt = False,
 ) -> None:
     """Return an environment to its previous pin and its previous code, and freeze it.
 
@@ -852,6 +900,8 @@ def rollback(
         not no_push,
         log,
         data,
+        take_over=take_over,
+        allow_dirty=allow_dirty,
     )
 
 

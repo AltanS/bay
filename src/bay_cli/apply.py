@@ -57,10 +57,11 @@ A failed deploy keeps the new pin and records ``result: failed``, so
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import shutil
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -80,29 +81,46 @@ TagLister = Callable[[Context, str, str], dict[str, list[str]]]
 Echo = Callable[[str], None]
 
 
-#: Plan reasons that are about the fleet checkout, not the plan: exit 41.
-_SYNC_REASONS = (
-    fleetsync.REASON_DIVERGED,
-    fleetsync.REASON_UNREACHABLE,
-    fleetsync.REASON_NO_UPSTREAM,
-)
+#: Plan reasons about the fleet checkout or the box env, not the plan: their exit code.
+_SYNC_REASONS = {
+    fleetsync.REASON_DIVERGED: fleetsync.EXIT_NOT_IN_SYNC,
+    fleetsync.REASON_UNREACHABLE: fleetsync.EXIT_NOT_IN_SYNC,
+    fleetsync.REASON_NO_UPSTREAM: fleetsync.EXIT_NOT_IN_SYNC,
+    fleetsync.REASON_DIRTY: fleetsync.EXIT_NOT_IN_SYNC,
+    fleetsync.REASON_GIT_FAILED: fleetsync.EXIT_NOT_IN_SYNC,
+    fleetsync.REASON_ENV_BUSY: fleetsync.EXIT_BUSY,
+}
+
+#: The refusal of a commit that is on no branch of its repo.
+REASON_APP_COMMIT_UNPUSHED = "app_commit_unpushed"
 
 
 class Refused(Exception):
     """``bay up`` will not apply the plan. ``exit_code`` is the verdict's code.
 
-    A plan blocked by the fleet sync state (diverged, unreachable) exits 41
-    and carries that ``reason``. Otherwise ``reason`` is the verdict.
+    A plan blocked by the fleet sync state (diverged, unreachable, dirty) exits
+    41, one blocked by another run's fresh claim (``env_busy``) exits 43, and
+    each carries that ``reason``. A refusal with its own ``reason`` (an app
+    commit that is not pushed) exits 1. Otherwise ``reason`` is the verdict.
     """
 
-    def __init__(self, plan: dict[str, Any], message: str) -> None:
+    def __init__(
+        self,
+        plan: dict[str, Any],
+        message: str,
+        *,
+        reason: str | None = None,
+        next_cmd: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.plan = plan
-        self.reason = str(plan.get("verdict") or "refused")
-        self.exit_code = int(plan["exit_code"]) or 1
-        if plan.get("verdict") == "blocked" and plan.get("reason") in _SYNC_REASONS:
+        self.next_cmd = next_cmd
+        self.reason = reason or str(plan.get("verdict") or "refused")
+        self.exit_code = 1 if reason else (int(plan["exit_code"]) or 1)
+        blocked = plan.get("verdict") == "blocked"
+        if reason is None and blocked and plan.get("reason") in _SYNC_REASONS:
             self.reason = str(plan["reason"])
-            self.exit_code = fleetsync.EXIT_NOT_IN_SYNC
+            self.exit_code = _SYNC_REASONS[self.reason]
 
 
 #: The tags ``bay up`` runs. They are the tags ``bay plan``'s box check runs, so
@@ -163,6 +181,8 @@ def default_deploy(
         ]
         if code_targets:
             extra += ["-e", json.dumps({"bay_code_targets": dict(code_targets)})]
+        # From here on Ansible runs against the box: box_touched is true.
+        _PLAYBOOK["started"] = True
         ops._run_playbook(cx, "deploy", box_env, tags, extra)
         ops._invalidate_rig_cache(cx.cache_dir)
         ops._run_post_deploy_healthcheck(
@@ -170,6 +190,52 @@ def default_deploy(
         )
     finally:
         shutil.rmtree(report_dir, ignore_errors=True)
+
+
+_REAL_DEFAULT_DEPLOY = default_deploy
+
+#: ``started`` is set right before Ansible runs against a box (:func:`default_deploy`).
+#: The apply steps read it for ``box_touched`` (:func:`box_guard`).
+_PLAYBOOK: dict[str, bool] = {"started": False}
+
+
+def run_deployer(deployer: Deployer, cx: Context, target: str, **kw: Any) -> None:
+    """Call the deployer. One that is not :func:`default_deploy` (injected by a
+    caller or a test) cannot say when Ansible starts, so its call counts as the start."""
+    if deployer is not _REAL_DEFAULT_DEPLOY:
+        _PLAYBOOK["started"] = True
+    deployer(cx, target, **kw)
+
+
+@contextlib.contextmanager
+def box_guard() -> Iterator[None]:
+    """``box_touched`` for every error of an apply: true once the playbook started.
+
+    A :class:`BayError` raised after the start gets ``box_touched``; any other
+    error after the start (a :class:`bay_cli.lockfile.LockWriteError`, an
+    ``OSError``) becomes a BayError that has it, so ``--json`` prints a
+    document. Before the start, errors pass as they are.
+    """
+    _PLAYBOOK["started"] = False
+    try:
+        yield
+    except (Refused, DeployFailed):
+        raise
+    except BayError as exc:
+        if _PLAYBOOK["started"]:
+            _after_deploy(exc)
+        raise
+    except Exception as exc:
+        if not _PLAYBOOK["started"]:
+            raise
+        raise _after_deploy(
+            BayError(f"{type(exc).__name__} after the deploy started: {exc}")
+        ) from exc
+
+
+def touched() -> bool:
+    """True when this apply started Ansible against a box."""
+    return _PLAYBOOK["started"]
 
 
 def _write_services(cx: Context, text: str) -> Path:
@@ -281,8 +347,66 @@ class _SeenReceipts:
         return self._seen.get(box_env)
 
 
-def _gate(plan: dict[str, Any], force: bool, reason: str | None, say: Echo) -> bool:
-    """Refuse blocked, stale and unapproved plans. True when ``--force`` overrode approve."""
+def _skip_run_blockers(
+    cx: Context | None, plan: dict[str, Any], *, take_over: bool, allow_dirty: bool
+) -> None:
+    """Drop the run blockers the operator skipped: ``--take-over`` and ``--allow-dirty``.
+
+    Each skip prints one loud line and is recorded in the plan (``took_over``,
+    ``allowed_dirty``), and from there in the result. The verdict is decided
+    again, and the plan record is saved again so it shows what ran.
+    """
+    gates = list(plan.get("run_blockers") or [])
+    skipped = [
+        g
+        for g in gates
+        if (take_over and g["reason"] == fleetsync.REASON_ENV_BUSY)
+        or (allow_dirty and g["reason"] == fleetsync.REASON_DIRTY)
+    ]
+    if not skipped:
+        return
+    messages = {g["message"] for g in skipped}
+    plan["blockers"] = [b for b in plan["blockers"] if b not in messages]
+    plan["run_blockers"] = [g for g in gates if g not in skipped]
+    for gate in skipped:
+        if gate["reason"] == fleetsync.REASON_ENV_BUSY:
+            holder = dict(gate["holder"])
+            plan["took_over"] = holder
+            fleetsync.notice(
+                f"TAKING OVER: {holder['claimed_by']} claimed {holder['box_env']} at "
+                f"{holder['claimed_at']} (plan {holder.get('plan_id')}) and has not reported. "
+                "This run deploys anyway (--take-over)."
+            )
+        else:
+            plan["allowed_dirty"] = list(gate.get("paths") or [])
+            fleetsync.notice(
+                f"WARNING: --allow-dirty: {len(plan['allowed_dirty'])} uncommitted fleet "
+                "path(s) deploy, and no other machine can see them."
+            )
+    if plan.get("reason") in {g["reason"] for g in skipped}:
+        left = [g["reason"] for g in plan["run_blockers"]]
+        plan["reason"] = left[0] if left else None
+    planmod.decide(plan)
+    if cx is not None:
+        planmod.save(cx, plan)
+
+
+def _gate(
+    plan: dict[str, Any],
+    force: bool,
+    reason: str | None,
+    say: Echo,
+    *,
+    cx: Context | None = None,
+    take_over: bool = False,
+    allow_dirty: bool = False,
+) -> bool:
+    """Refuse blocked, stale and unapproved plans. True when ``--force`` overrode approve.
+
+    ``take_over`` and ``allow_dirty`` first drop those run blockers
+    (:func:`_skip_run_blockers`); nothing else skips a blocker.
+    """
+    _skip_run_blockers(cx, plan, take_over=take_over, allow_dirty=allow_dirty)
     verdict = plan["verdict"]
     if verdict == "blocked":
         raise Refused(plan, "the plan is blocked: " + "; ".join(plan["blockers"]))
@@ -312,8 +436,13 @@ def up(
     echo: Echo | None = None,
     push: bool = True,
     code: Mapping[str, Any] | None = None,
+    take_over: bool = False,
+    allow_dirty: bool = False,
 ) -> dict[str, Any]:
     """Apply a plan. Returns a result document; raises :class:`Refused` or BayError.
+
+    ``take_over`` skips the ``env_busy`` blocker (another run's fresh claim on
+    the box env), ``allow_dirty`` the ``dirty`` one (uncommitted fleet paths).
 
     With ``push`` (the default) the fleet repo is pushed after the last lock
     commit when it has a remote. A failed push is a warning, never a failed
@@ -347,7 +476,9 @@ def up(
             plan = planmod.make_plan(proj, opts, read_receipts=seen)
         plan["fleet_sync"] = pulled.to_dict() if pulled else None
         prior = _save_plan(cx, plan)
-        forced = _gate(plan, force, reason, say)
+        forced = _gate(
+            plan, force, reason, say, cx=cx, take_over=take_over, allow_dirty=allow_dirty
+        )
         commit = str(plan["wanted"]["commit"])
         return _with_layout_notes(moved, _apply_plan(
             cx,
@@ -414,6 +545,8 @@ def up_env(
     deploy: Deployer | None = None,
     echo: Echo | None = None,
     push: bool = True,
+    take_over: bool = False,
+    allow_dirty: bool = False,
 ) -> dict[str, Any]:
     """Apply a whole-environment plan (``bay up <env>`` in a fleet, no ``--project``).
 
@@ -442,7 +575,9 @@ def up_env(
                 f"no project has [deploy.{plan['env']}], so there is nothing to deploy",
                 code=ErrorCode.NOT_FOUND,
             )
-        forced = _gate(plan, force, reason, say)
+        forced = _gate(
+            plan, force, reason, say, cx=cx, take_over=take_over, allow_dirty=allow_dirty
+        )
         if not plan["projects"]:
             return _with_layout_notes(moved, _apply_route_plan(
                 cx,
@@ -476,7 +611,13 @@ def up_env(
         ))
 
 
-def _apply_plan(
+def _apply_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """:func:`_apply_plan_steps` inside :func:`box_guard`."""
+    with box_guard():
+        return _apply_plan_steps(*args, **kwargs)
+
+
+def _apply_plan_steps(
     cx: Context,
     plan: dict[str, Any],
     members: list[tuple[planmod.ProjectRef, str]],
@@ -523,6 +664,11 @@ def _apply_plan(
                 plan,
                 f"commit {commit[:12]} of {proj.name} {why} on a branch of {proj.repo}; "
                 "push first",
+                reason=REASON_APP_COMMIT_UNPUSHED,
+                # Push the app repo, not the fleet. The repo cache is no place to push from.
+                next_cmd=f"git -C {proj.checkout} push"
+                if proj.source == "checkout"
+                else f"git push (in your checkout of {proj.repo})",
             )
     moves = {m["project"]: m for m in plan.get("moves") or [] if m["env"] == env}
 
@@ -649,8 +795,8 @@ def _apply_plan(
             if target == box_env and tags != UP_DEPLOY_TAGS:
                 extra["tags"] = tags
             try:
-                (deploy or default_deploy)(
-                    cx, target, config_files_root=comp.files_root, **extra
+                run_deployer(
+                    deploy or default_deploy, cx, target, config_files_root=comp.files_root, **extra
                 )
             except (BayError, OSError) as exc:
                 failure = str(exc) or type(exc).__name__
@@ -671,16 +817,32 @@ def _apply_plan(
         entries = reader(cx, box_env)
     except (BayError, OSError) as exc:
         say(f"cannot read the receipt: {exc}")
-    receipt_failed = any(
-        isinstance(e.get("receipt"), Mapping) and e["receipt"].get("result") == "failed"
-        for e in entries
-    )
-    if failure is None and receipt_failed:
-        failure = "the box receipt says the deploy failed"
-    word = "failed" if failure else "ok"
+    # Results are per box (:func:`box_results`): a member is ok only when the run
+    # did not fail and its own box wrote an ok receipt for this fleet commit.
+    run_failed = failure is not None
+    results = box_results(entries, fleet_commit)
+    if failure is None and "failed" in results.values():
+        failed_boxes = sorted(b for b, r in results.items() if r == "failed")
+        failure = f"the box receipt says the deploy failed on {', '.join(failed_boxes)}"
     deployed_at = planmod._now()
     pinned: list[dict[str, Any]] = []
     lock_files: list[Path] = []
+    member_words: dict[str, str] = {}
+    for proj, _ in members:
+        box = locks[proj.name]["envs"][env].get("box")
+        member_words[proj.name] = (
+            "ok" if not run_failed and results.get(str(box)) == "ok" else "failed"
+        )
+    if failure is None and "failed" in member_words.values():
+        missing = sorted(
+            {
+                str(locks[name]["envs"][env].get("box"))
+                for name, w in member_words.items()
+                if w == "failed"
+            }
+        )
+        failure = f"no receipt from this deploy on box {', '.join(missing)}"
+    word = "failed" if failure else "ok"
     for proj, commit in members:
         lock = locks[proj.name]
         names = set(
@@ -692,14 +854,16 @@ def _apply_plan(
         )
         slice_ = planmod.running_slice(entries, names)
         record = dict(lock["envs"][env])
-        record["result"] = word
+        record["result"] = member_words[proj.name]
         record["deployed_at"] = deployed_at
         for key in CLAIM_KEYS:
             record.pop(key, None)
         record["last_receipt_sha256"] = slice_["receipt_sha256"]
         lock["envs"][env] = record
         lockfile.write(proj.lock_file, lock)
-        pinned.append({"project": proj.name, "env": env, "commit": commit, "result": word})
+        pinned.append(
+            {"project": proj.name, "env": env, "commit": commit, "result": member_words[proj.name]}
+        )
         lock_files.append(proj.lock_file)
     more_files, more_rows = _pin_deployed(
         cx,
@@ -707,7 +871,8 @@ def _apply_plan(
         box_env=box_env,
         commits=compiled_commits,
         entries=entries,
-        stamp={"result": word, "deployed_at": deployed_at, "plan_id": plan["plan_id"]},
+        stamp={"deployed_at": deployed_at, "plan_id": plan["plan_id"]},
+        results=results,
         before=before,
         old_data=old_data,
     )
@@ -804,6 +969,8 @@ def _apply_plan(
         "deploy_tags": tags,
         "frozen": any(bool(locks[p.name]["envs"][env].get("frozen")) for p, _ in members),
         "fleet_sync": plan.get("fleet_sync"),
+        "took_over": plan.get("took_over"),
+        "allowed_dirty": plan.get("allowed_dirty"),
     }
     return _finish_up(cx, result, push=push, failure=failure, first_exit=first_exit, say=say)
 
@@ -817,23 +984,35 @@ def _finish_up(
     first_exit: bool,
     say: Echo,
 ) -> dict[str, Any]:
-    """Step 8 and the outcome fields: push, then ``reason``, ``box_touched``, ``next``."""
-    result.update(outcome(cx, reason=None, box_touched=True))
+    """Step 8 and the outcome fields (:func:`settle`); a failure raises :class:`DeployFailed`."""
+    settle(cx, result, push=push, failed=failure is not None, say=say)
+    if failure:
+        raise DeployFailed(result, exit_code=FIRST_IMAGE_EXIT if first_exit else 1)
+    return result
+
+
+def settle(cx: Context, result: dict[str, Any], *, push: bool, failed: bool, say: Echo) -> None:
+    """Step 8 of every apply (``bay up``, ``bay rollback``, a remove): push, then
+    ``reason``, ``box_touched`` and ``next``.
+
+    ``reason`` is ``deploy_failed`` when ``failed``, else ``receipt_unpushed``
+    when the push failed. An unpushed receipt prints one loud line that starts
+    with ``DEPLOY FAILED`` or ``DEPLOYED``, and sets ``next`` to ``bay fleet push``.
+    """
+    result.update(outcome(cx, reason=None, box_touched=touched()))
     if push:
         push_fleet(cx, result, say)
     unpushed = bool(result.get("push_error")) and not result.get("pushed")
     if unpushed:
         result["next"] = "bay fleet push"
         fleetsync.notice(
-            f"{'DEPLOY FAILED' if failure else 'DEPLOYED'}, but the receipt is not on the "
+            f"{'DEPLOY FAILED' if failed else 'DEPLOYED'}, but the receipt is not on the "
             "remote. Run: bay fleet push"
         )
-    if failure:
+    if failed:
         result["reason"] = fleetsync.REASON_DEPLOY_FAILED
-        raise DeployFailed(result, exit_code=FIRST_IMAGE_EXIT if first_exit else 1)
-    if unpushed:
+    elif unpushed:
         result["reason"] = fleetsync.REASON_RECEIPT_UNPUSHED
-    return result
 
 
 def _after_deploy(exc: BayError) -> BayError:
@@ -919,7 +1098,13 @@ def _claim(
     fleetsync.claim(root, commit, undo, again=again, say=say)
 
 
-def _apply_route_plan(
+def _apply_route_plan(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """:func:`_apply_route_steps` inside :func:`box_guard`."""
+    with box_guard():
+        return _apply_route_steps(*args, **kwargs)
+
+
+def _apply_route_steps(
     cx: Context,
     plan: dict[str, Any],
     *,
@@ -977,7 +1162,9 @@ def _apply_route_plan(
             say(f"deploy tags: {tags} (the plan changes a tailnet route)")
         extra: dict[str, Any] = {"tags": tags} if tags != UP_DEPLOY_TAGS else {}
         try:
-            (deploy or default_deploy)(cx, box_env, config_files_root=comp.files_root, **extra)
+            run_deployer(
+                deploy or default_deploy, cx, box_env, config_files_root=comp.files_root, **extra
+            )
         except (BayError, OSError) as exc:
             failure = str(exc) or type(exc).__name__
         except SystemExit as exc:
@@ -1041,6 +1228,8 @@ def _apply_route_plan(
         "frozen": False,
         "route_only": True,
         "fleet_sync": plan.get("fleet_sync"),
+        "took_over": plan.get("took_over"),
+        "allowed_dirty": plan.get("allowed_dirty"),
     }
     return _finish_up(cx, result, push=push, failure=failure, first_exit=False, say=say)
 
@@ -1156,6 +1345,27 @@ def prune_plans(cx: Context, *, keep: int = PLANS_KEEP) -> list[str]:
     return gone
 
 
+def box_results(entries: list[dict[str, Any]], fleet_commit: str) -> dict[str, str]:
+    """``{box: "ok" | "failed"}`` for every box whose receipt is from this deploy.
+
+    A receipt is from this deploy when its ``fleet_commit`` is this run's fleet
+    commit (:func:`applied_from` uses the same test). Its ``result`` is ``ok``
+    or ``failed``; anything else counts as failed. A box with no such receipt
+    is not in the map: the deploy did not reach it, or it crashed before it
+    reported.
+    """
+    out: dict[str, str] = {}
+    for entry in entries:
+        receipt = entry.get("receipt")
+        if not isinstance(receipt, Mapping) or receipt.get("fleet_commit") != fleet_commit:
+            continue
+        box = str(entry.get("box") or receipt.get("box"))
+        word = "ok" if receipt.get("result") == "ok" else "failed"
+        if out.get(box) != "failed":
+            out[box] = word
+    return out
+
+
 def applied_from(
     entries: list[dict[str, Any]], fleet_commit: str
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1231,6 +1441,7 @@ def _pin_deployed(
     commits: Mapping[str, str],
     entries: list[dict[str, Any]],
     stamp: Mapping[str, Any],
+    results: Mapping[str, str],
     before: list[dict[str, Any]] | None = None,
     old_data: Mapping[str, Any] | None = None,
 ) -> tuple[list[Path], list[dict[str, Any]]]:
@@ -1246,9 +1457,12 @@ def _pin_deployed(
       top-level ``commit`` moves with it.
     * ``previous``: the pin it replaces, when there was one and it differs,
       with ``containers`` read from ``before`` (:func:`_previous_containers`).
-    * ``result``, ``deployed_at``, ``plan_id`` from ``stamp``, and
-      ``last_receipt_sha256`` from this project's part of the receipt.
+    * ``result``: the result of its own box (``results``, :func:`box_results`);
+      ``deployed_at`` and ``plan_id`` from ``stamp``; ``last_receipt_sha256``
+      from this project's part of the receipt.
 
+    An env whose box has no receipt from this deploy (the deploy stopped before
+    it) is left exactly as it was: no stamp, no ``deployed_at``, no receipt hash.
     A repo project with no pinned commit was not compiled, so it is not in
     ``commits`` and its lock stays as it is. Returns the lock files written
     and one row per env pinned.
@@ -1274,6 +1488,10 @@ def _pin_deployed(
             if env_box_env != box_env:
                 continue
             record = dict(envs.get(env, {}))
+            result = results.get(str(record.get("box") or box))
+            if result is None:
+                # The deploy did not reach this box: its record stays as it was.
+                continue
             old_pin = lockfile.env_pin(other.lock, env)
             if old_pin and old_pin != commit:
                 if _confirmed(record):
@@ -1299,6 +1517,7 @@ def _pin_deployed(
                 {
                     "commit": commit,
                     **stamp,
+                    "result": result,
                     "last_receipt_sha256": planmod.running_slice(entries, names)[
                         "receipt_sha256"
                     ],
@@ -1307,7 +1526,7 @@ def _pin_deployed(
             for key in CLAIM_KEYS:
                 record.pop(key, None)
             envs[env] = record
-            rows.append({"project": name, "env": env, "commit": commit, "result": stamp["result"]})
+            rows.append({"project": name, "env": env, "commit": commit, "result": result})
             touched = True
         if touched:
             lock["commit"] = commit
@@ -1753,12 +1972,9 @@ def _claim_status(record: Mapping[str, Any], now: datetime | None) -> tuple[str,
     if record.get("result") != "pending" or not claimed_at:
         return None
     who = record.get("claimed_by") or "another machine"
-    try:
-        when = datetime.strptime(str(claimed_at), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-    except ValueError:
-        return "HALF", f"an up from {who} at {claimed_at} never reported"
-    age = ((now or datetime.now(UTC)) - when).total_seconds()
-    if 0 <= age < fleetsync.CLAIM_FRESH_SECONDS:
+    when = fleetsync.claim_time(record)
+    if when is not None and fleetsync.fresh_claim(record, now):
+        age = max(0.0, ((now or datetime.now(UTC)) - when).total_seconds())
         return "deploying", f"claimed by {who} {int(age // 60)} min ago"
     return "HALF", f"an up from {who} at {claimed_at} never reported"
 

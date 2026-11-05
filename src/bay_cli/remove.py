@@ -604,6 +604,7 @@ def make_remove_plan(
     plan["plan_sha256"] = sha
     plan["plan_id"] = sha[:12]
     plan["approval"] = planmod.find_approval(cx, plan)
+    planmod.add_run_blockers(cx, plan, state, [r.get("box_env") for r in rm["envs"]])
     planmod.decide(plan)
     return plan
 
@@ -675,6 +676,8 @@ def apply_remove(
     deploy: Any = None,
     echo: Echo | None = None,
     push: bool = True,
+    take_over: bool = False,
+    allow_dirty: bool = False,
 ) -> dict[str, Any]:
     """``bay up --plan-id`` for a remove plan. Returns the result; ``result`` is ok or failed.
 
@@ -686,7 +689,9 @@ def apply_remove(
     say = echo or (lambda _msg: None)
     if force and not (reason and reason.strip()):
         raise BayError("--force needs --reason", hint='Pass --reason "<why>".')
-    with fleetsync.write_run(cx.fleet_root, "up", env) as pulled:
+    from bay_cli import apply as applymod
+
+    with fleetsync.write_run(cx.fleet_root, "up", env) as pulled, applymod.box_guard():
         return _apply_remove(
             cx,
             plan_id,
@@ -699,6 +704,8 @@ def apply_remove(
             say=say,
             push=push,
             pulled=pulled.to_dict() if pulled else None,
+            take_over=take_over,
+            allow_dirty=allow_dirty,
         )
 
 
@@ -715,6 +722,8 @@ def _apply_remove(
     say: Echo,
     push: bool,
     pulled: dict[str, Any] | None,
+    take_over: bool = False,
+    allow_dirty: bool = False,
 ) -> dict[str, Any]:
     from bay_cli import apply as applymod
 
@@ -733,7 +742,9 @@ def _apply_remove(
     plan = recheck_remove(cx, saved, cwd=cwd, read_receipts=read_receipts)
     plan["fleet_sync"] = pulled
     prior = applymod._save_plan(cx, plan)
-    forced = applymod._gate(plan, force, reason, say)
+    forced = applymod._gate(
+        plan, force, reason, say, cx=cx, take_over=take_over, allow_dirty=allow_dirty
+    )
     rm = plan["remove"]
     name = str(plan["project"])
     proj = planmod.load_project(cx, name, cwd=cwd, fetch=False)
@@ -750,7 +761,14 @@ def _apply_remove(
         envs = lock.setdefault("envs", {})
         for row in rows:
             record = dict(envs.get(row["env"]) or {})
-            record.update({"result": "pending", "plan_id": plan["plan_id"]})
+            record.update(
+                {
+                    "result": "pending",
+                    "plan_id": plan["plan_id"],
+                    "claimed_by": fleetsync.hostname(),
+                    "claimed_at": fleetsync.now_iso(),
+                }
+            )
             envs[row["env"]] = record
         lockfile.write(proj.lock_file, lock)
 
@@ -798,8 +816,8 @@ def _apply_remove(
         )
         for target in box_envs:
             try:
-                (deploy or applymod.default_deploy)(
-                    cx, target, config_files_root=comp.files_root
+                applymod.run_deployer(
+                    deploy or applymod.default_deploy, cx, target, config_files_root=comp.files_root
                 )
             except (BayError, OSError) as exc:
                 failure = str(exc) or type(exc).__name__
@@ -864,6 +882,8 @@ def _apply_remove(
             for e in unconfirmed:
                 record = dict(envs.get(e) or {})
                 record.update({"result": "failed", "deployed_at": stamp})
+                for key in applymod.CLAIM_KEYS:
+                    record.pop(key, None)
                 envs[e] = record
             lockfile.write(proj.lock_file, lock)
             what = "receipt" if unconfirmed else "removed"
@@ -919,14 +939,11 @@ def _apply_remove(
         "push_error": None,
         "push_skipped": None,
         "fleet_sync": plan.get("fleet_sync"),
+        "took_over": plan.get("took_over"),
+        "allowed_dirty": plan.get("allowed_dirty"),
     }
-    result.update(applymod.outcome(cx, reason=None, box_touched=bool(box_envs)))
-    if push:
-        applymod.push_fleet(cx, result, say)
-    if result["push_error"] and not result["pushed"]:
-        result["reason"] = fleetsync.REASON_RECEIPT_UNPUSHED
-        result["next"] = "bay fleet push"
-        fleetsync.notice("DEPLOYED, but the receipt is not on the remote. Run: bay fleet push")
+    # The same step 8 as bay up: a remove that is not confirmed is deploy_failed.
+    applymod.settle(cx, result, push=push, failed=bool(unconfirmed), say=say)
     return applymod._with_layout_notes(moved, result)
 
 

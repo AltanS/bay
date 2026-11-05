@@ -270,8 +270,35 @@
       }
     },
     "reason": {
-      "description": "Since 2.12, not hashed: why the fleet blocks the plan (diverged, remote_unreachable, no_upstream), or null.",
+      "description": "Since 2.12, not hashed: why the fleet or the box env blocks the plan (diverged, remote_unreachable, no_upstream, git_failed, dirty, env_busy), or null.",
       "type": ["string", "null"]
+    },
+    "run_blockers": {
+      "description": "Since 2.12, not hashed: the blockers that bay up --allow-dirty (dirty) and --take-over (env_busy) may skip. Their text is in blockers too.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["reason", "message"],
+        "properties": {
+          "reason": { "enum": ["dirty", "env_busy"] },
+          "message": { "type": "string" },
+          "paths": { "type": "array", "items": { "type": "string" } },
+          "holder": { "$ref": "#/$defs/claim" }
+        }
+      }
+    },
+    "holder": {
+      "description": "Since 2.12, not hashed: the fresh claim of another run on the box env (env_busy), or null.",
+      "anyOf": [{ "$ref": "#/$defs/claim" }, { "type": "null" }]
+    },
+    "took_over": {
+      "description": "Since 2.12, not hashed: the claim that bay up --take-over skipped, or null.",
+      "anyOf": [{ "$ref": "#/$defs/claim" }, { "type": "null" }]
+    },
+    "allowed_dirty": {
+      "description": "Since 2.12, not hashed: the uncommitted fleet paths that bay up --allow-dirty deployed, or null.",
+      "type": ["array", "null"],
+      "items": { "type": "string" }
     }
   },
   "allOf": [
@@ -286,6 +313,19 @@
     { "if": { "properties": { "verdict": { "const": "stale" } } }, "then": { "properties": { "exit_code": { "const": 30 } } } }
   ],
   "$defs": {
+    "claim": {
+      "type": "object",
+      "required": ["project", "env", "box_env", "claimed_by", "claimed_at", "plan_id", "expires_at"],
+      "properties": {
+        "project": { "type": "string" },
+        "env": { "type": "string" },
+        "box_env": { "type": "string" },
+        "claimed_by": { "type": "string" },
+        "claimed_at": { "type": "string" },
+        "plan_id": { "type": ["string", "null"] },
+        "expires_at": { "type": "string" }
+      }
+    },
     "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "sha256_or_null": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
