@@ -1134,16 +1134,24 @@ def test_no_push_leaves_the_remote(world: dict[str, Path], tmp_path: Path, box: 
     assert git(remote, "rev-parse", "main") == before
 
 
-def test_failed_push_is_a_warning(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:
+def test_refused_claim_push_stops_before_the_box(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    # Since 2.12 bay up pushes its fleet commit before the deploy (the claim).
+    # A remote that refuses every push stops the run there: nothing deployed,
+    # the fleet commit undone.
     remote = _with_remote(world, tmp_path)
+    head = git(world["fleet"], "rev-parse", "HEAD")
     hook = remote / "hooks" / "pre-receive"
     hook.write_text("#!/bin/sh\necho refused by test >&2\nexit 1\n")
     hook.chmod(0o755)
     result = cli(world, "up", "--json")
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 42, result.output
     doc = json.loads(result.stdout)
-    assert doc["result"] == "ok" and doc["pushed"] is False and doc["push_error"]
-    assert lock_of(world)["envs"]["production"]["result"] == "ok"
+    assert doc["reason"] == "claim_refused" and doc["box_touched"] is False
+    assert box.deploys == []
+    assert git(world["fleet"], "rev-parse", "HEAD") == head
+    assert "production" not in lock_of(world)["envs"]
 
 
 def test_failed_deploy_is_still_pushed(
@@ -2788,16 +2796,16 @@ def test_up_migrates_after_behind_check(
     git(other, "push", "-q", "origin", "main")
 
     head = git(fleet, "rev-parse", "HEAD")
-    with pytest.raises(BayError, match="behind its remote; pull it first"):
-        do_up(world)
     compiled = cli(world, "compile", cwd=fleet)
     assert compiled.exit_code != 0 and "behind its remote" in str(compiled.exception)
+    assert isinstance(compiled.exception, BayError)
     assert git(fleet, "rev-parse", "HEAD") == head
     assert (fleet / "projects" / "webapp.lock").is_file()
 
-    git(fleet, "pull", "-q", "--ff-only")
+    # Since 2.12 bay up fast-forwards a fleet that is only behind, then migrates.
     up = do_up(world)
     assert up["result"] == "ok"
+    assert up["fleet_sync"]["pulled"] == 1 and up["fleet_sync"]["from"] == head
     assert up["notes"][0].startswith("fleet layout: moved projects/webapp.lock")
     assert (fleet / "projects" / "webapp" / "bay.lock").is_file()
     log = git(fleet, "log", "--format=%s").splitlines()

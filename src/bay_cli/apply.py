@@ -11,9 +11,14 @@
    ``bay adopt`` commit (``adopted.app_commit``): it is taken unpushed and
    moves no code, so the push after ``bay up`` is config only.
 2. Write the lock: the project pin moves to the planned commit, the env
-   record gets ``result: pending`` and ``previous`` (the pin it replaces).
+   record gets ``result: pending``, ``claimed_by`` and ``claimed_at`` (this
+   machine, now) and ``previous`` (the pin it replaces).
 3. Compile the fleet into its services file (hash header).
-4. Commit the fleet repo: ``bay: up <name> <env> <short sha>``.
+4. Commit the fleet repo: ``bay: up <name> <env> <short sha>``. Then claim:
+   push that commit (:func:`bay_cli.fleetsync.claim`). A refused push (the
+   remote moved) or an unreachable remote undoes the commit and stops before
+   the box is touched (exit 42, or 41). No claim with ``--no-push``, with no
+   remote, or for a fleet inside a bigger repo.
 5. Run today's deploy for the box env, limited to the ``deploy_stack`` tag.
    The deploy copies config files from the ``files/`` of the scratch fleet
    step 3 compiled (``bay_config_files_root``): the committed files, with
@@ -22,15 +27,22 @@
 6. Read the receipt back. The deploy covered the whole box env, so every
    project the compile read that has a ``[deploy.<env>]`` on that box env is
    pinned (:func:`_pin_deployed`): ``commit``, ``result``, ``deployed_at``,
-   ``plan_id``, ``last_receipt_sha256`` and ``previous``. One commit:
-   ``bay: receipt <box env> (<n> projects)``.
+   ``plan_id``, ``last_receipt_sha256`` and ``previous``; ``claimed_by`` and
+   ``claimed_at`` go. One commit: ``bay: receipt <box env> (<n> projects)``.
 7. Report what the deploy did: ``applied`` lists, per box, every container
    whose receipt action is not ``noop`` (:func:`applied_from`). ``steps`` is
    still the plan. Prune ``plans/`` to the newest records plus every record
    a lock names (:func:`prune_plans`): ``bay: prune plans (<n> files)``.
 8. Push the fleet repo when it has a remote (not with ``--no-push``). A
-   failed push is a warning. A fleet that is a subdirectory of a larger repo
-   is committed but never pushed (``push_skipped`` says why).
+   refused push runs ``git pull --rebase`` and pushes again, at most twice.
+   When that fails too, the commits stay local: ``reason:
+   receipt_unpushed``, exit 44, ``next: bay fleet push``. A fleet that is a
+   subdirectory of a larger repo is committed but never pushed
+   (``push_skipped`` says why).
+
+Before step 1, ``bay up`` takes the fleet's run lock (one run per checkout,
+:func:`bay_cli.fleetsync.run_lock`) and fast-forwards a fleet that is only
+behind its remote (``fleet_sync`` in the result).
 
 A plan with a box move (``moves``) writes the new box into the lock in step
 2. When the old box is in another box environment, step 5 deploys that one
@@ -49,10 +61,11 @@ import copy
 import json
 import shutil
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bay_cli import gitrepo, layout, lockfile
+from bay_cli import fleetsync, gitrepo, layout, lockfile
 from bay_cli import plan as planmod
 from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
@@ -67,13 +80,29 @@ TagLister = Callable[[Context, str, str], dict[str, list[str]]]
 Echo = Callable[[str], None]
 
 
+#: Plan reasons that are about the fleet checkout, not the plan: exit 41.
+_SYNC_REASONS = (
+    fleetsync.REASON_DIVERGED,
+    fleetsync.REASON_UNREACHABLE,
+    fleetsync.REASON_NO_UPSTREAM,
+)
+
+
 class Refused(Exception):
-    """``bay up`` will not apply the plan. ``exit_code`` is the verdict's code."""
+    """``bay up`` will not apply the plan. ``exit_code`` is the verdict's code.
+
+    A plan blocked by the fleet sync state (diverged, unreachable) exits 41
+    and carries that ``reason``. Otherwise ``reason`` is the verdict.
+    """
 
     def __init__(self, plan: dict[str, Any], message: str) -> None:
         super().__init__(message)
         self.plan = plan
+        self.reason = str(plan.get("verdict") or "refused")
         self.exit_code = int(plan["exit_code"]) or 1
+        if plan.get("verdict") == "blocked" and plan.get("reason") in _SYNC_REASONS:
+            self.reason = str(plan["reason"])
+            self.exit_code = fleetsync.EXIT_NOT_IN_SYNC
 
 
 #: The tags ``bay up`` runs. They are the tags ``bay plan``'s box check runs, so
@@ -287,34 +316,54 @@ def up(
     cx = proj.cx
     if force and not (reason and reason.strip()):
         raise BayError("--force needs --reason", hint='Pass --reason "<why>".')
-    moved = _migrate_layout(cx, say)
-    if moved:
-        proj = planmod.load_project(cx, proj.name, cwd=proj.cwd)
+    env_name = opts.env or proj.primary_env
+    with fleetsync.write_run(cx.fleet_root, action, env_name) as pulled:
+        if pulled is not None:
+            proj = planmod.load_project(cx, proj.name, cwd=proj.cwd)
+        moved = _migrate_layout(cx, say)
+        if moved:
+            proj = planmod.load_project(cx, proj.name, cwd=proj.cwd)
 
-    seen = _SeenReceipts(read_receipts)
-    if plan_id:
-        saved = planmod.load_saved(cx, plan_id)
-        plan = planmod.recheck(proj, saved, opts, read_receipts=seen, check_box=check_box)
-    else:
-        plan = planmod.make_plan(proj, opts, read_receipts=seen)
+        seen = _SeenReceipts(read_receipts)
+        if plan_id:
+            saved = planmod.load_saved(cx, plan_id)
+            plan = planmod.recheck(proj, saved, opts, read_receipts=seen, check_box=check_box)
+        else:
+            plan = planmod.make_plan(proj, opts, read_receipts=seen)
+        plan["fleet_sync"] = pulled.to_dict() if pulled else None
+        prior = _save_plan(cx, plan)
+        forced = _gate(plan, force, reason, say)
+        commit = str(plan["wanted"]["commit"])
+        return _with_layout_notes(moved, _apply_plan(
+            cx,
+            plan,
+            [(proj, commit)],
+            forced=forced,
+            reason=reason,
+            message=f"bay: {action} {proj.name} {plan['env']} {commit[:12]}",
+            action=action,
+            read_receipts=read_receipts,
+            deploy=deploy,
+            say=say,
+            push=push,
+            code=code,
+            before=seen.get(str(plan.get("box_env"))),
+            prior_plan=prior,
+        ))
+
+
+def _save_plan(cx: Context, plan: Mapping[str, Any]) -> bytes | None:
+    """Save the plan record; return the bytes the file had before (None: it was new).
+
+    A refused claim puts those bytes back (:class:`bay_cli.fleetsync.Undo`).
+    """
+    path = planmod.plan_file(cx, str(plan["plan_id"]))
+    try:
+        prior = path.read_bytes() if path.is_file() else None
+    except OSError:
+        prior = None
     planmod.save(cx, plan)
-    forced = _gate(plan, force, reason, say)
-    commit = str(plan["wanted"]["commit"])
-    return _with_layout_notes(moved, _apply_plan(
-        cx,
-        plan,
-        [(proj, commit)],
-        forced=forced,
-        reason=reason,
-        message=f"bay: {action} {proj.name} {plan['env']} {commit[:12]}",
-        action=action,
-        read_receipts=read_receipts,
-        deploy=deploy,
-        say=say,
-        push=push,
-        code=code,
-        before=seen.get(str(plan.get("box_env"))),
-    ))
+    return prior
 
 
 def _migrate_layout(cx: Context, say: Echo) -> list[str]:
@@ -361,51 +410,55 @@ def up_env(
     say = echo or (lambda _msg: None)
     if force and not (reason and reason.strip()):
         raise BayError("--force needs --reason", hint='Pass --reason "<why>".')
-    moved = _migrate_layout(cx, say)
-    seen = _SeenReceipts(read_receipts)
-    if plan_id:
-        saved = planmod.load_saved(cx, plan_id)
-        plan = planmod.recheck_env(
-            cx, saved, opts, cwd=cwd, read_receipts=seen, check_box=check_box
-        )
-    else:
-        plan = planmod.make_env_plan(cx, opts, cwd=cwd, read_receipts=seen)
-    planmod.save(cx, plan)
-    if not plan["projects"] and not plan.get("box_env"):
-        raise BayError(
-            f"no project has [deploy.{plan['env']}], so there is nothing to deploy",
-            code=ErrorCode.NOT_FOUND,
-        )
-    forced = _gate(plan, force, reason, say)
-    if not plan["projects"]:
-        return _with_layout_notes(moved, _apply_route_plan(
+    with fleetsync.write_run(cx.fleet_root, "up", opts.env) as pulled:
+        moved = _migrate_layout(cx, say)
+        seen = _SeenReceipts(read_receipts)
+        if plan_id:
+            saved = planmod.load_saved(cx, plan_id)
+            plan = planmod.recheck_env(
+                cx, saved, opts, cwd=cwd, read_receipts=seen, check_box=check_box
+            )
+        else:
+            plan = planmod.make_env_plan(cx, opts, cwd=cwd, read_receipts=seen)
+        plan["fleet_sync"] = pulled.to_dict() if pulled else None
+        prior = _save_plan(cx, plan)
+        if not plan["projects"] and not plan.get("box_env"):
+            raise BayError(
+                f"no project has [deploy.{plan['env']}], so there is nothing to deploy",
+                code=ErrorCode.NOT_FOUND,
+            )
+        forced = _gate(plan, force, reason, say)
+        if not plan["projects"]:
+            return _with_layout_notes(moved, _apply_route_plan(
+                cx,
+                plan,
+                forced=forced,
+                cwd=cwd,
+                read_receipts=read_receipts,
+                deploy=deploy,
+                say=say,
+                push=push,
+                prior_plan=prior,
+            ))
+        members = [
+            (planmod.load_project(cx, p["name"], cwd=cwd, fetch=False), str(p["wanted"]["commit"]))
+            for p in plan["projects"]
+        ]
+        return _with_layout_notes(moved, _apply_plan(
             cx,
             plan,
+            members,
             forced=forced,
-            cwd=cwd,
+            reason=reason,
+            message=f"bay: up {plan['env']} ({len(members)} projects)",
+            action="up",
             read_receipts=read_receipts,
             deploy=deploy,
             say=say,
             push=push,
+            before=seen.get(str(plan.get("box_env"))),
+            prior_plan=prior,
         ))
-    members = [
-        (planmod.load_project(cx, p["name"], cwd=cwd, fetch=False), str(p["wanted"]["commit"]))
-        for p in plan["projects"]
-    ]
-    return _with_layout_notes(moved, _apply_plan(
-        cx,
-        plan,
-        members,
-        forced=forced,
-        reason=reason,
-        message=f"bay: up {plan['env']} ({len(members)} projects)",
-        action="up",
-        read_receipts=read_receipts,
-        deploy=deploy,
-        say=say,
-        push=push,
-        before=seen.get(str(plan.get("box_env"))),
-    ))
 
 
 def _apply_plan(
@@ -423,13 +476,15 @@ def _apply_plan(
     push: bool,
     code: Mapping[str, Any] | None = None,
     before: list[dict[str, Any]] | None = None,
+    prior_plan: bytes | None = None,
 ) -> dict[str, Any]:
     """Steps 2 to 8 of ``bay up`` for the projects of an accepted plan.
 
     ``code`` goes to :func:`_code_targets` for every project (``bay rollback``).
     ``before`` is the receipt of the plan's box env as the plan read it (None
     when it did not): it fills the lock's ``previous.containers`` and the
-    first image check (:func:`first_image`).
+    first image check (:func:`first_image`). ``prior_plan`` is what the plan
+    record held before this run saved it; a refused claim puts it back.
     """
     env = str(plan["env"])
     box_env = str(plan["box_env"])
@@ -457,6 +512,8 @@ def _apply_plan(
     moves = {m["project"]: m for m in plan.get("moves") or [] if m["env"] == env}
 
     # 2. the locks
+    head_before = gitrepo.head(cx.fleet_root)
+    claim = {"claimed_by": fleetsync.hostname(), "claimed_at": fleetsync.now_iso()}
     locks: dict[str, dict[str, Any]] = {}
     previous_by: dict[str, dict[str, Any] | None] = {}
     # The services file before this up's compile: the old pins' build containers.
@@ -487,7 +544,9 @@ def _apply_plan(
             )
             if box:
                 record["box"] = box
-        record.update({"commit": commit, "result": "pending", "plan_id": plan["plan_id"]})
+        record.update(
+            {"commit": commit, "result": "pending", "plan_id": plan["plan_id"], **claim}
+        )
         if previous is not None:
             record["previous"] = previous
         freeze_note = _freeze(proj, record, commit, rollback=action == "rollback")
@@ -532,6 +591,18 @@ def _apply_plan(
         except gitrepo.GitError as exc:
             raise BayError(f"cannot commit the fleet repo: {exc}") from None
         say(f"fleet commit {fleet_commit}")
+        _claim(
+            cx,
+            push=push,
+            before=head_before,
+            commit=fleet_commit,
+            restore=[p.lock_file for p, _ in members] + [services],
+            unstage=paths[len(members) + 1 :],
+            prior_plan=prior_plan,
+            plan=plan,
+            action=action,
+            say=say,
+        )
 
         # 5. deploy. A move to a box of another box environment also deploys
         # the old one, so its reconciler removes the moved containers there.
@@ -602,6 +673,8 @@ def _apply_plan(
         record = dict(lock["envs"][env])
         record["result"] = word
         record["deployed_at"] = deployed_at
+        for key in CLAIM_KEYS:
+            record.pop(key, None)
         record["last_receipt_sha256"] = slice_["receipt_sha256"]
         lock["envs"][env] = record
         lockfile.write(proj.lock_file, lock)
@@ -666,7 +739,7 @@ def _apply_plan(
             cx.fleet_root, lock_files, f"bay: receipt {box_env} ({len(lock_files)} projects)"
         )
     except gitrepo.GitError as exc:
-        raise BayError(f"cannot commit the fleet repo: {exc}") from None
+        raise _after_deploy(BayError(f"cannot commit the fleet repo: {exc}")) from None
 
     # 7. plans/ prune: the newest records plus every record a lock names.
     pruned: list[str] = []
@@ -709,12 +782,120 @@ def _apply_plan(
         "first_image": first,
         "deploy_tags": tags,
         "frozen": any(bool(locks[p.name]["envs"][env].get("frozen")) for p, _ in members),
+        "fleet_sync": plan.get("fleet_sync"),
     }
+    return _finish_up(cx, result, push=push, failure=failure, first_exit=first_exit, say=say)
+
+
+def _finish_up(
+    cx: Context,
+    result: dict[str, Any],
+    *,
+    push: bool,
+    failure: str | None,
+    first_exit: bool,
+    say: Echo,
+) -> dict[str, Any]:
+    """Step 8 and the outcome fields: push, then ``reason``, ``box_touched``, ``next``."""
+    result.update(outcome(cx, reason=None, box_touched=True))
     if push:
         push_fleet(cx, result, say)
+    unpushed = bool(result.get("push_error")) and not result.get("pushed")
+    if unpushed:
+        result["next"] = "bay fleet push"
+        fleetsync.notice(
+            f"{'DEPLOY FAILED' if failure else 'DEPLOYED'}, but the receipt is not on the "
+            "remote. Run: bay fleet push"
+        )
     if failure:
+        result["reason"] = fleetsync.REASON_DEPLOY_FAILED
         raise DeployFailed(result, exit_code=FIRST_IMAGE_EXIT if first_exit else 1)
+    if unpushed:
+        result["reason"] = fleetsync.REASON_RECEIPT_UNPUSHED
     return result
+
+
+def _after_deploy(exc: BayError) -> BayError:
+    """Mark an error raised after the deploy ran: its JSON says ``box_touched: true``."""
+    setattr(exc, "box_touched", True)  # noqa: B010  (BayError has no such field)
+    return exc
+
+
+#: The env record keys of a pending ``bay up``: who started it and when.
+CLAIM_KEYS = ("claimed_by", "claimed_at")
+
+
+def fleet_info(cx: Context) -> dict[str, Any]:
+    """``{"name", "path", "selected_by"}`` of the fleet a verb ran on."""
+    try:
+        name = planmod.load_fleet_doc(cx).get("name")
+    except (BayError, OSError, ValueError):
+        name = None
+    return {
+        "name": name or cx.fleet_root.name,
+        "path": str(cx.fleet_root),
+        "selected_by": cx.source,
+    }
+
+
+def outcome(
+    cx: Context | None,
+    *,
+    reason: str | None,
+    box_touched: bool,
+    next_cmd: str | None = None,
+) -> dict[str, Any]:
+    """The fields every ``bay up`` and ``bay rollback`` JSON document carries."""
+    return {
+        "reason": reason,
+        "box_touched": box_touched,
+        "next": next_cmd,
+        "fleet": fleet_info(cx) if cx is not None else None,
+    }
+
+
+def again_command(cx: Context, action: str, env: str, project: str | None) -> str:
+    """The command that runs this ``bay up`` (or rollback) again."""
+    import shlex
+
+    cmd = ["bay", "--fleet", str(cx.fleet_root), action, env]
+    if project:
+        cmd += ["--project", project]
+    return " ".join(shlex.quote(c) for c in cmd)
+
+
+def _claim(
+    cx: Context,
+    *,
+    push: bool,
+    before: str | None,
+    commit: str,
+    restore: list[Path],
+    unstage: list[Path],
+    prior_plan: bytes | None,
+    plan: Mapping[str, Any],
+    action: str,
+    say: Echo,
+    again: str | None = None,
+) -> None:
+    """Step 4, second half: push the fleet commit before the deploy.
+
+    Skipped where step 8 skips the push: ``--no-push``, no remote, a fleet
+    inside a bigger repo. Raises :class:`bay_cli.fleetsync.SyncError` after it
+    undid the commit (``claim_refused``, ``remote_unreachable``).
+    """
+    if not push or before is None or not fleetsync.can_push(cx.fleet_root):
+        return
+    root = cx.fleet_root
+    plan_rel = fleetsync._rel(root, planmod.plan_file(cx, str(plan["plan_id"])))
+    undo = fleetsync.Undo(
+        before=before,
+        restore=[fleetsync._rel(root, p) for p in restore],
+        unstage=[fleetsync._rel(root, p) for p in unstage],
+        contents={plan_rel: prior_plan},
+    )
+    again = again or again_command(cx, action, str(plan["env"]), plan.get("project"))
+    fleetsync.claim(root, commit, undo, again=again, say=say)
 
 
 def _apply_route_plan(
@@ -727,8 +908,9 @@ def _apply_route_plan(
     deploy: Deployer | None,
     say: Echo,
     push: bool,
+    prior_plan: bytes | None = None,
 ) -> dict[str, Any]:
-    """Apply a route-only plan: compile, commit, deploy the ingress box env, push.
+    """Apply a route-only plan: compile, commit, claim, deploy the ingress box env, push.
 
     No lock is read for a pin move and none is written: the compile is the
     one ``bay compile`` makes (every project at its pin), so the services
@@ -742,6 +924,7 @@ def _apply_route_plan(
     env = str(plan["env"])
     box_env = str(plan["box_env"])
     failure: str | None = None
+    head_before = gitrepo.head(cx.fleet_root)
     with planmod.compiled_fleet(cx, cwd=cwd) as comp:
         if comp.result is None:
             raise BayError("compile failed:\n  " + "\n  ".join(comp.errors))
@@ -755,6 +938,18 @@ def _apply_route_plan(
         except gitrepo.GitError as exc:
             raise BayError(f"cannot commit the fleet repo: {exc}") from None
         say(f"fleet commit {fleet_commit}")
+        _claim(
+            cx,
+            push=push,
+            before=head_before,
+            commit=fleet_commit,
+            restore=[services],
+            unstage=paths[1:],
+            prior_plan=prior_plan,
+            plan=plan,
+            action="up",
+            say=say,
+        )
 
         tags = routes.deploy_tags(plan["steps"], UP_DEPLOY_TAGS)
         if tags != UP_DEPLOY_TAGS:
@@ -824,12 +1019,9 @@ def _apply_route_plan(
         "deploy_tags": tags,
         "frozen": False,
         "route_only": True,
+        "fleet_sync": plan.get("fleet_sync"),
     }
-    if push:
-        push_fleet(cx, result, say)
-    if failure:
-        raise DeployFailed(result, exit_code=1)
-    return result
+    return _finish_up(cx, result, push=push, failure=failure, first_exit=False, say=say)
 
 
 def push_fleet(cx: Context, result: dict[str, Any], say: Echo) -> None:
@@ -838,7 +1030,9 @@ def push_fleet(cx: Context, result: dict[str, Any], say: Echo) -> None:
     A fleet that is a directory inside a bigger repo (a workspace with
     several fleets) shares that repo's remote and branch. Pushing it would
     publish everything else committed there too, so bay commits and leaves
-    the push to the operator. A failed push is a warning.
+    the push to the operator. A refused push runs ``git pull --rebase`` and
+    pushes again, at most twice (:func:`bay_cli.fleetsync.push_with_rebase`);
+    a rebase git refuses is aborted and the commits stay local.
     """
     if not gitrepo.is_toplevel(cx.fleet_root):
         top = gitrepo.toplevel(cx.fleet_root)
@@ -847,12 +1041,26 @@ def push_fleet(cx: Context, result: dict[str, Any], say: Echo) -> None:
         )
         say(f"warning: {result['push_skipped']}")
         return
-    pushed, problem = gitrepo.push(cx.fleet_root)
-    result["pushed"], result["push_error"] = pushed, problem
-    if problem:
-        say(f"warning: the fleet repo was not pushed: {problem}")
-    elif pushed:
-        say("pushed the fleet repo")
+    if not fleetsync.can_push(cx.fleet_root):
+        return
+    root = cx.fleet_root
+    local = (gitrepo._out(root, "rev-list", "@{u}..HEAD") or "").split()
+    done = fleetsync.push_with_rebase(root)
+    result["pushed"], result["push_error"] = done.pushed, done.problem
+    receipt = result.get("receipt_commit")
+    if done.pushed and done.rebased and receipt in local:
+        # The rebase gave the receipt commit a new id: report the one on the remote.
+        at = local.index(str(receipt))
+        now = (gitrepo._out(root, "rev-list", "-n", str(at + 1), "HEAD") or "").split()
+        if len(now) == at + 1:
+            result["receipt_commit"] = now[at]
+    if done.conflicts:
+        result["push_conflicts"] = done.conflicts
+    if done.problem:
+        say(f"warning: the fleet repo was not pushed: {done.problem}")
+    elif done.pushed:
+        rebased = f" (rebased {done.rebased} time(s) onto the remote)" if done.rebased else ""
+        say(f"pushed the fleet repo{rebased}")
 
 
 #: ``plans/`` keeps this many of the newest plan records, plus every record a
@@ -1069,6 +1277,8 @@ def _pin_deployed(
                     ],
                 }
             )
+            for key in CLAIM_KEYS:
+                record.pop(key, None)
             envs[env] = record
             rows.append({"project": name, "env": env, "commit": commit, "result": stamp["result"]})
             touched = True
@@ -1338,6 +1548,21 @@ def rollback(
     its pin (its pin is a fleet commit) and only the code moves.
     """
     env = opts.env or proj.primary_env
+    with fleetsync.write_run(proj.cx.fleet_root, "rollback", env) as pulled:
+        if pulled is not None:
+            proj = planmod.load_project(proj.cx, proj.name, cwd=proj.cwd)
+        return _rollback(proj, opts, env, to=to, list_tags=list_tags, **kwargs)
+
+
+def _rollback(
+    proj: planmod.ProjectRef,
+    opts: planmod.PlanOptions,
+    env: str,
+    *,
+    to: str | None,
+    list_tags: TagLister | None,
+    **kwargs: Any,
+) -> dict[str, Any]:
     record = (proj.lock.get("envs") or {}).get(env, {})
     if to:
         reader = kwargs.get("read_receipts")
@@ -1489,7 +1714,26 @@ def default_image_tags(cx: Context, box_env: str, repo: str) -> dict[str, list[s
 
 # ── show ────────────────────────────────────────────────────────────────────
 
-STATUS_WORDS = ("ok", "ahead", "behind", "drift", "unknown", "HALF")
+STATUS_WORDS = ("ok", "ahead", "behind", "drift", "unknown", "HALF", "deploying")
+
+
+def _claim_status(record: Mapping[str, Any], now: datetime | None) -> tuple[str, str] | None:
+    """``deploying`` for a pending record claimed less than 30 minutes ago; else HALF.
+
+    None for a record with no ``claimed_at`` (written before 2.12).
+    """
+    claimed_at = record.get("claimed_at")
+    if record.get("result") != "pending" or not claimed_at:
+        return None
+    who = record.get("claimed_by") or "another machine"
+    try:
+        when = datetime.strptime(str(claimed_at), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return "HALF", f"an up from {who} at {claimed_at} never reported"
+    age = ((now or datetime.now(UTC)) - when).total_seconds()
+    if 0 <= age < fleetsync.CLAIM_FRESH_SECONDS:
+        return "deploying", f"claimed by {who} {int(age // 60)} min ago"
+    return "HALF", f"an up from {who} at {claimed_at} never reported"
 
 
 def env_status(
@@ -1500,8 +1744,12 @@ def env_status(
     commits: Mapping[str, str | None] | None = None,
     *,
     in_fleet: bool = False,
+    now: datetime | None = None,
 ) -> tuple[str, str]:
     """``(status word, reason)`` for one env. Order: HALF, unknown, drift, ahead, behind, ok.
+
+    A ``pending`` record with ``claimed_at`` less than 30 minutes old is
+    ``deploying``: a ``bay up`` on another machine (``claimed_by``) runs.
 
     ``commits`` is ``{build container: running commit12 or None}`` of the
     project in RUNNING. ``ahead``: WANTED is not the pin, and every build
@@ -1510,6 +1758,9 @@ def env_status(
     fleet, WANTED is a fleet commit and no container runs it: ``ahead`` never
     applies, and ``behind`` says only that the fleet moved past the pin.
     """
+    claimed = _claim_status(record, now)
+    if claimed is not None:
+        return claimed
     if record.get("result") in ("failed", "pending"):
         return "HALF", (
             "the last bay up failed; the pin moved but the box may not run it"
@@ -1628,6 +1879,8 @@ def show(
                     "commit": record.get("commit"),
                     "deployed_at": record.get("deployed_at"),
                     "result": record.get("result"),
+                    "claimed_by": record.get("claimed_by"),
+                    "claimed_at": record.get("claimed_at"),
                     "previous": record.get("previous"),
                     "adopted": record.get("adopted") or {},
                 },

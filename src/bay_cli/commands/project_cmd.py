@@ -16,7 +16,10 @@ Which project and which fleet:
 
 No verb asks a question. Secrets never travel on the command line.
 Plan exit codes: 0 auto, 10 approve, 20 blocked, 30 stale. ``bay up`` also
-exits 40 when the deploy failed only for a first image.
+exits 40 when the deploy failed only for a first image, 41 when the fleet is
+not in step with its remote (diverged, unreachable), 42 when its claim push
+was refused, 43 when another run holds the fleet, and 44 when it deployed but
+could not push the receipt.
 """
 
 from __future__ import annotations
@@ -240,9 +243,48 @@ def routed_output(as_json: bool, log: Path | None) -> Iterator[Callable[[str], N
             handle.close()
 
 
-def _json_error(exc: BayError) -> None:
-    _echo_json({"error": str(exc), "hint": exc.hint, "code": exc.code.value})
+def _json_error(exc: BayError, extra: dict[str, Any] | None = None) -> None:
+    doc: dict[str, Any] = {"error": str(exc), "hint": exc.hint, "code": exc.code.value}
+    if extra is not None:
+        doc.update(extra)
+    _echo_json(doc)
     raise typer.Exit(exc.exit_code)
+
+
+def _error_outcome(ctx: typer.Context, exc: BayError) -> dict[str, Any]:
+    """``reason``, ``box_touched``, ``next`` and ``fleet`` for a JSON error of up and rollback."""
+    from bay_cli import apply as applymod
+
+    try:
+        here = find_bay_toml(Path.cwd())
+        _, fleet_name = _read_identity(here) if here else (None, None)
+        cx: Context | None = fleet_context(ctx, fleet_name, allow_cwd=True)
+    except BayError:
+        cx = None
+    return applymod.outcome(
+        cx,
+        reason=getattr(exc, "reason", None) or "error",
+        box_touched=bool(getattr(exc, "box_touched", False)),
+        next_cmd=getattr(exc, "next_cmd", None),
+    )
+
+
+def _plan_pull(cx: Context) -> Any:
+    """``bay plan``: fast-forward a fleet that is only behind, under the run lock.
+
+    When another run holds the lock, skip the pull: the plan then says the
+    fleet is behind, as before 2.12.
+    """
+    from bay_cli import fleetsync
+
+    try:
+        with fleetsync.run_lock(cx.fleet_root, "plan"):
+            return fleetsync.pull_if_behind(cx.fleet_root)
+    except fleetsync.SyncError as exc:
+        if exc.reason != fleetsync.REASON_BUSY:
+            raise
+        fleetsync.notice(f"fleet: not pulled, {exc}")
+        return None
 
 
 # ── verbs ───────────────────────────────────────────────────────────────────
@@ -433,6 +475,7 @@ def plan(
                 result = _plan_remove(removal)
                 raise _Done
             env_cx = whole_env_fleet(ctx, project, at)
+            pulled = _plan_pull(env_cx) if env_cx is not None else None
             saved = planmod.load_saved(env_cx, plan_id) if env_cx and plan_id else None
             if env_cx is not None and saved is not None and saved.get("project"):
                 project = str(saved["project"])  # a one-project plan, checked from the fleet
@@ -449,9 +492,13 @@ def plan(
                     result = planmod.recheck_env(env_cx, saved, opts, cwd=Path.cwd())
                 else:
                     result = planmod.make_env_plan(env_cx, opts, cwd=Path.cwd())
+                result["fleet_sync"] = pulled.to_dict() if pulled else None
                 planmod.save(env_cx, result)
             else:
                 proj, cwd_repo = resolve(ctx, project)
+                pulled = _plan_pull(proj.cx)
+                if pulled is not None:
+                    proj, cwd_repo = resolve(ctx, project)
                 opts = planmod.PlanOptions(
                     env=env,
                     at=at,
@@ -466,6 +513,7 @@ def plan(
                     result = planmod.recheck(proj, planmod.load_saved(proj.cx, plan_id), opts)
                 else:
                     result = planmod.make_plan(proj, opts)
+                result["fleet_sync"] = pulled.to_dict() if pulled else None
                 planmod.save(proj.cx, result)
     except _Done:
         pass
@@ -567,10 +615,14 @@ def _apply(
     except BayError as exc:
         if not as_json:
             raise
-        _json_error(exc)
+        _json_error(exc, _error_outcome(ctx, exc))
     except applymod.Refused as exc:
         if as_json:
-            _echo_json(exc.plan)
+            doc = dict(exc.plan)
+            doc.update(_error_outcome(ctx, BayError(str(exc))))
+            doc["reason"] = exc.reason
+            doc["next"] = _refused_next(exc)
+            _echo_json(doc)
         else:
             typer.echo(_render(exc.plan))
             console.error(str(exc))
@@ -599,11 +651,18 @@ def _apply(
                     if note.startswith("first deploy of "):
                         console.info(note)
         raise typer.Exit(exc.exit_code) from None
+    from bay_cli import fleetsync
+
+    unpushed = (removed or result).get("reason") == fleetsync.REASON_RECEIPT_UNPUSHED
     if removed is not None:
         _report_remove(removed, as_json)
+        if unpushed:
+            raise typer.Exit(fleetsync.EXIT_RECEIPT_UNPUSHED)
         return
     if as_json:
         _echo_json(result)
+        if unpushed:
+            raise typer.Exit(fleetsync.EXIT_RECEIPT_UNPUSHED)
         return
     previous = result["previous_commit"]
     what = (
@@ -633,6 +692,22 @@ def _apply(
         console.warning(f"the fleet repo was not pushed: {result['push_error']}")
     if result.get("push_skipped"):
         console.warning(str(result["push_skipped"]))
+    if unpushed:
+        raise typer.Exit(fleetsync.EXIT_RECEIPT_UNPUSHED)
+
+
+def _refused_next(exc: Any) -> str | None:
+    """The next command after a refused ``bay up``, when there is one obvious one."""
+    from bay_cli import fleetsync
+
+    plan = exc.plan
+    if exc.reason == fleetsync.REASON_DIVERGED:
+        return "bay fleet push"
+    if exc.reason == "approve":
+        return f'bay approve {plan["plan_id"]} --reason "<why>"'
+    if exc.reason == "stale":
+        return "bay plan"
+    return None
 
 
 def _retry_deploy(result: dict[str, Any]) -> str | None:
@@ -679,12 +754,16 @@ def up(
     """Pin the project's commit in the fleet and deploy it.
 
     Plans first and refuses a blocked (exit 20) or stale (exit 30) plan, and
-    an approve plan (exit 10) without `bay approve`. Then writes the lock,
-    compiles, commits the fleet repo, deploys, records the receipt, prunes
-    old records from plans/ and pushes the fleet repo (not with --no-push; a
-    failed push is only a warning). A failed deploy exits 1, or 40 when the
-    only failure is a build container with no image yet (the first deploy of
-    a build app: push so the webhook builds it, then bay up again).
+    an approve plan (exit 10) without `bay approve`. Pulls the fleet first
+    when it is only behind its remote. Then writes the lock, compiles,
+    commits the fleet repo, pushes that commit (the claim; a refused push
+    stops before the box, exit 42), deploys, records the receipt, prunes old
+    records from plans/ and pushes the fleet repo again (exit 44 when that
+    fails). --no-push skips both pushes. A failed deploy exits 1, or 40 when
+    the only failure is a build container with no image yet (the first
+    deploy of a build app: push so the webhook builds it, then bay up again).
+    Exit 41: the fleet and its remote diverged, or the remote is down. Exit
+    43: another bay run holds this fleet checkout.
 
     In a fleet directory (or with --fleet and no bay.toml here), with no
     --project, it applies a whole-environment plan: every project of the

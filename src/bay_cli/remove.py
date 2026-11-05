@@ -32,13 +32,14 @@ another project needs, and a compile that would change anything else.
 from __future__ import annotations
 
 import copy
+import shlex
 import shutil
 from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
 from typing import Any
 
-from bay_cli import gitrepo, lockfile
+from bay_cli import fleetsync, gitrepo, lockfile
 from bay_cli import plan as planmod
 from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
@@ -678,12 +679,45 @@ def apply_remove(
     """``bay up --plan-id`` for a remove plan. Returns the result; ``result`` is ok or failed.
 
     Raises :class:`bay_cli.apply.Refused` for a blocked, stale or unapproved plan.
+    Holds the fleet's run lock, fast-forwards first and claims before the
+    deploy, as ``bay up`` does.
     """
-    from bay_cli import apply as applymod
 
     say = echo or (lambda _msg: None)
     if force and not (reason and reason.strip()):
         raise BayError("--force needs --reason", hint='Pass --reason "<why>".')
+    with fleetsync.write_run(cx.fleet_root, "up", env) as pulled:
+        return _apply_remove(
+            cx,
+            plan_id,
+            env=env,
+            force=force,
+            reason=reason,
+            cwd=cwd,
+            read_receipts=read_receipts,
+            deploy=deploy,
+            say=say,
+            push=push,
+            pulled=pulled.to_dict() if pulled else None,
+        )
+
+
+def _apply_remove(
+    cx: Context,
+    plan_id: str,
+    *,
+    env: str | None,
+    force: bool,
+    reason: str | None,
+    cwd: Path | None,
+    read_receipts: planmod.ReceiptReader | None,
+    deploy: Any,
+    say: Echo,
+    push: bool,
+    pulled: dict[str, Any] | None,
+) -> dict[str, Any]:
+    from bay_cli import apply as applymod
+
     moved = applymod._migrate_layout(cx, say)
     saved = planmod.load_saved(cx, plan_id)
     rm0 = saved.get("remove")
@@ -697,7 +731,8 @@ def apply_remove(
             hint=f"Run `bay up {saved.get('env')} --plan-id {plan_id}`.",
         )
     plan = recheck_remove(cx, saved, cwd=cwd, read_receipts=read_receipts)
-    planmod.save(cx, plan)
+    plan["fleet_sync"] = pulled
+    prior = applymod._save_plan(cx, plan)
     forced = applymod._gate(plan, force, reason, say)
     rm = plan["remove"]
     name = str(plan["project"])
@@ -707,6 +742,7 @@ def apply_remove(
     box_envs = sorted({str(r["box_env"]) for r in rows if r["box_env"]})
 
     # 2. the lock: every env it removes is pending.
+    head_before = gitrepo.head(cx.fleet_root)
     lock = copy.deepcopy(proj.lock)
     if lock_exists:
         if rm.get("commit"):
@@ -745,6 +781,21 @@ def apply_remove(
         except gitrepo.GitError as exc:
             raise BayError(f"cannot commit the fleet repo: {exc}") from None
         say(f"fleet commit {fleet_commit}")
+        applymod._claim(
+            cx,
+            push=push,
+            before=head_before,
+            commit=fleet_commit,
+            restore=[services] + ([proj.lock_file] if lock_exists else []),
+            unstage=[p for p in paths if p not in (services, proj.lock_file)],
+            prior_plan=prior,
+            plan=plan,
+            action="up",
+            say=say,
+            # The remove plan is stale once the fleet moved: plan it again.
+            again=f"bay --fleet {shlex.quote(str(cx.fleet_root))} remove {name}"
+            + ("" if whole else " " + " ".join(f"--env {r['env']}" for r in rows)),
+        )
         for target in box_envs:
             try:
                 (deploy or applymod.default_deploy)(
@@ -820,7 +871,9 @@ def apply_remove(
                 cx.fleet_root, [proj.lock_file], f"bay: {what} {name}{scope_text}"
             )
     except gitrepo.GitError as exc:
-        raise BayError(f"cannot commit the fleet repo: {exc}") from None
+        raise applymod._after_deploy(
+            BayError(f"cannot commit the fleet repo: {exc}")
+        ) from None
 
     # 7. plans/ prune, 8. push.
     pruned: list[str] = []
@@ -865,9 +918,15 @@ def apply_remove(
         "pushed": False,
         "push_error": None,
         "push_skipped": None,
+        "fleet_sync": plan.get("fleet_sync"),
     }
+    result.update(applymod.outcome(cx, reason=None, box_touched=bool(box_envs)))
     if push:
         applymod.push_fleet(cx, result, say)
+    if result["push_error"] and not result["pushed"]:
+        result["reason"] = fleetsync.REASON_RECEIPT_UNPUSHED
+        result["next"] = "bay fleet push"
+        fleetsync.notice("DEPLOYED, but the receipt is not on the remote. Run: bay fleet push")
     return applymod._with_layout_notes(moved, result)
 
 

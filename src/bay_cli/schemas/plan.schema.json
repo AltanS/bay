@@ -257,7 +257,22 @@
         }
       ]
     },
-    "stale": { "type": "array", "items": { "type": "string" } }
+    "stale": { "type": "array", "items": { "type": "string" } },
+    "fleet_sync": {
+      "description": "Since 2.12, not hashed: the fast-forward of the fleet before this plan, or null.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["pulled", "from", "to"],
+      "properties": {
+        "pulled": { "type": "integer", "minimum": 1 },
+        "from": { "type": "string" },
+        "to": { "type": "string" }
+      }
+    },
+    "reason": {
+      "description": "Since 2.12, not hashed: why the fleet blocks the plan (diverged, remote_unreachable, no_upstream), or null.",
+      "type": ["string", "null"]
+    }
   },
   "allOf": [
     {

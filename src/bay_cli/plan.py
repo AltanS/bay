@@ -2277,6 +2277,9 @@ _UNHASHED = (
     "approval",
     "stale",
     "notes",
+    # Since 2.12: what the run did to the fleet checkout, not a plan input.
+    "fleet_sync",
+    "reason",
 )
 
 
@@ -2297,23 +2300,45 @@ class _FleetState:
     dirty: bool | None
     behind: bool | None
     blockers: list[str]
+    #: Why the fleet blocks the plan (:mod:`bay_cli.fleetsync` reasons), or None.
+    reason: str | None = None
 
 
 def _fleet_state(cx: Context) -> _FleetState:
+    """The fleet against its remote. ``bay plan`` and ``bay up`` fast-forward first
+    (:func:`bay_cli.fleetsync.pull_if_behind`), so ``behind`` here means that pull
+    did not run: the run lock was busy, or the fleet is a folder of a bigger repo."""
+    from bay_cli import fleetsync
+
     is_git = gitrepo.is_repo(cx.fleet_root)
     head = gitrepo.head(cx.fleet_root) if is_git else None
     dirty = gitrepo.dirty(cx.fleet_root, exclude=(PLANS_DIR,)) if is_git else None
     behind: bool | None = None
     blockers: list[str] = []
+    reason: str | None = None
     if not is_git or head is None:
         blockers.append(f"the fleet {cx.fleet_root} is not a git repo with a commit")
+        return _FleetState(is_git, head, dirty, behind, blockers)
+    st = fleetsync.state(cx.fleet_root)
+    if st.no_remote:
+        behind = False
+    elif st.unreachable:
+        blockers.append(f"cannot fetch the fleet remote: {st.unreachable}")
+        reason = fleetsync.REASON_UNREACHABLE
+    elif st.upstream is None:
+        blockers.append(
+            "the fleet branch tracks no remote branch; set one with git branch -u"
+        )
+        reason = fleetsync.REASON_NO_UPSTREAM
+    elif st.diverged:
+        behind = True
+        blockers.append(fleetsync.diverged_message(st))
+        reason = fleetsync.REASON_DIVERGED
     else:
-        behind, problem = gitrepo.behind_remote(cx.fleet_root)
-        if problem:
-            blockers.append(problem)
-        elif behind:
+        behind = st.behind > 0
+        if behind:
             blockers.append("the fleet repo is behind its remote; pull it first")
-    return _FleetState(is_git, head, dirty, behind, blockers)
+    return _FleetState(is_git, head, dirty, behind, blockers, reason)
 
 
 def _env_names(proj: ProjectRef, docs: list[dict[str, Any] | None]) -> dict[str, dict[str, str]]:
@@ -2506,6 +2531,9 @@ def _finish(
             "the fleet repo has uncommitted changes and a step is destructive; "
             "commit or drop the changes first"
         )
+    # Unhashed: set by the caller that fast-forwarded the fleet first.
+    plan.setdefault("fleet_sync", None)
+    plan["reason"] = state.reason
     sha = body_sha256(plan)
     plan["plan_sha256"] = sha
     plan["plan_id"] = sha[:12]
