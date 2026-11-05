@@ -1979,3 +1979,31 @@ def test_the_env_busy_message_names_the_time_zone(
     message = next(b for b in plan["blockers"] if "is deploying" in b)
     assert re.search(r"since \d\d:\d\d EST[ .]", message), message
     assert re.search(r"expires at \d\d:\d\d EST,", message), message
+
+
+def test_the_env_busy_plan_id_is_the_claimers_plan(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    """item 8: the id in the text is holder.plan_id, the plan of the run that claimed."""
+    m = machines
+    seen: dict[str, Any] = {}
+    real = applymod.default_deploy
+
+    def a_deploy(cx: Context, box_env: str, **kw: Any) -> None:
+        with as_machine("machine-b"):
+            try:
+                up_at(m, "b", "status")
+            except applymod.Refused as exc:
+                seen["plan"] = exc.plan
+        seen["claimed"] = lock_at(m["a"], "webapp")["envs"]["production"]["plan_id"]
+        real(cx, box_env, **kw)
+
+    result = up_at(m, "a", "webapp", deploy=a_deploy)
+    holder = seen["plan"]["holder"]
+    assert holder["plan_id"] == seen["claimed"] == result["plan_id"]
+    message = next(b for b in seen["plan"]["blockers"] if "is deploying" in b)
+    assert f"(plan {result['plan_id']})" in message
+    assert git(m["a"], "cat-file", "-t", f"@{{u}}:plans/{result['plan_id']}.json") == "blob"
+    # A record with no plan id: the text leaves the id out.
+    no_id = planmod.env_busy_message({**holder, "plan_id": None})
+    assert "(plan" not in no_id and "None" not in no_id

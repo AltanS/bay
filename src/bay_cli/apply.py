@@ -526,7 +526,9 @@ def _skip_run_blockers(
             plan["took_over"] = holder
             fleetsync.notice(
                 f"TAKING OVER: {holder['claimed_by']} claimed {holder['box_env']} at "
-                f"{holder['claimed_at']} (plan {holder.get('plan_id')}) and has not reported. "
+                f"{holder['claimed_at']}"
+                + (f" (plan {holder['plan_id']})" if holder.get("plan_id") else "")
+                + " and has not reported. "
                 "This run deploys anyway (--take-over)."
             )
         else:

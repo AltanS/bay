@@ -2721,9 +2721,11 @@ def env_busy_message(holder: Mapping[str, Any]) -> str:
             return stamp
         return fleetsync.local_hhmm(when)
 
+    plan_id = holder.get("plan_id")
     text = (
         f"{holder['claimed_by']} is deploying {holder['box_env']} since "
-        f"{hhmm(str(holder['claimed_at']))} (plan {holder.get('plan_id')}). Wait for it. "
+        f"{hhmm(str(holder['claimed_at']))}{f' (plan {plan_id})' if plan_id else ''}. "
+        "Wait for it. "
         f"If that run is dead, the claim expires at {hhmm(str(holder['expires_at']))}, "
         "or pass --take-over."
     )
