@@ -8,15 +8,14 @@ fleet already. `set` built its own command and was not.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
+from helpers import typer_ctx
 
 from bay_cli import ansible, runner
 from bay_cli.commands import vault
 from bay_cli.context import Context
-from helpers import typer_ctx
 
 
 @pytest.fixture

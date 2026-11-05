@@ -43,6 +43,13 @@ SOURCE_ENV = "BAY_FLEET"
 SOURCE_BAY_TOML = "bay.toml"
 SOURCE_FLEETS_DIR = "~/.config/bay/fleets"
 SOURCE_CWD = "cwd"
+#: Step 5a: the working directory, or a parent, holds ``bay.fleet.toml``.
+SOURCE_FLEET_HERE = "the fleet folder you stand in"
+#: Step 5b: exactly one fleet lives in a folder above the working directory.
+SOURCE_FLEET_ABOVE = "the one fleet in a folder above you"
+
+#: The file that marks a directory as a fleet. The same name as ``bay_cli.fleet.FLEET_FILE``.
+_FLEET_MARKER = "bay.fleet.toml"
 
 
 #: Per-fleet cache directory, inside the fleet repo and git-ignored. It holds
@@ -147,10 +154,22 @@ class Context:
            parent) names with ``fleet = "<name>"``, found at
            ``~/.config/bay/fleets/<name>``.
         4. ``~/.config/bay/fleets/<name>``, when ``BAY_FLEET_NAME`` is set.
+        5. The fleet you stand in or live next to, in two parts:
+
+           a. The nearest directory at or above the working directory that
+              holds ``bay.fleet.toml``.
+           b. Only if 5a found nothing: walk the working directory and its
+              parents, nearest first. A directory whose direct children hold
+              exactly one fleet gives that fleet. More than one is an error.
+              The home directory, its parents, the filesystem root and
+              ``~/.config/bay/fleets`` are never searched.
+
+        A ``bay.toml`` that names a fleet which is not there stops at step 3
+        with "not found". It never falls through to step 5.
 
         With none of these, raise a :class:`BayError` that lists the ways to
         pick a fleet. There is no walking up to a framework clone and no
-        auto-pick of a lone fleet.
+        auto-pick of a lone fleet in ``~/.config/bay/fleets``.
 
         The framework root is always the repo this package runs from.
         """
@@ -169,7 +188,22 @@ class Context:
         if named is not None:
             return cls._from_fleet_path(named, SOURCE_FLEETS_DIR)
 
+        nearby = cls._from_nearby_folders()
+        if nearby is not None:
+            return nearby
+
         raise BayError(NO_FLEET_MESSAGE, hint=NO_FLEET_HINT)
+
+    @classmethod
+    def _from_nearby_folders(cls) -> Context | None:
+        """Discovery step 5: the fleet you stand in (5a), else the one next to a parent (5b)."""
+        here = fleet_dir_above(Path.cwd())
+        if here is not None:
+            return cls._from_fleet_path(here, SOURCE_FLEET_HERE)
+        above = fleet_in_folder_above(Path.cwd())
+        if above is not None:
+            return cls._from_fleet_path(above, SOURCE_FLEET_ABOVE)
+        return None
 
     @classmethod
     def for_fleet_name(cls, name: str) -> Context:
@@ -186,7 +220,9 @@ class Context:
         if not fleet_root.is_dir():
             raise BayError(
                 f"fleet directory not found: {fleet_root} (from {source})",
-                hint="Pass an existing directory to --fleet, or unset BAY_FLEET.",
+                hint=_NOT_FOUND_HINTS.get(
+                    source, "Pass an existing directory to --fleet, or unset BAY_FLEET."
+                ),
             )
         # Every Ansible command of this run now works on this fleet, whatever
         # the working directory is. See bay_cli/ansible.py.
@@ -198,12 +234,19 @@ class Context:
 
 NO_FLEET_MESSAGE = "no fleet selected"
 NO_FLEET_HINT = (
-    "Pick one of three ways: pass --fleet <path> before the command, "
+    "Pick one of these ways: pass --fleet <path> before the command, "
     f"set {FLEET_ENV}=<path>, or set {FLEET_NAME_ENV}=<name> "
     "(a fleet in ~/.config/bay/fleets; `bay fleet ls` lists them). "
     "Inside an app repo, the fleet named in bay.toml is used. "
+    "Inside a fleet folder, or in a folder with one fleet next to it, that fleet is used. "
+    "To register a checkout you have, run `bay fleet link <path>`. "
     "No fleet yet? Run `bay fleet init <name>`."
 )
+
+_NOT_FOUND_HINTS = {
+    SOURCE_FLEET_HERE: "The folder went away while Bay looked at it. Run the command again.",
+    SOURCE_FLEET_ABOVE: "The folder went away while Bay looked at it. Run the command again.",
+}
 
 
 def _fleet_named_by_bay_toml(start: Path) -> str | None:
@@ -224,6 +267,68 @@ def _fleet_named_by_bay_toml(start: Path) -> str | None:
             return None
         name = doc.get("fleet")
         return name if isinstance(name, str) and name else None
+    return None
+
+
+def fleet_dir_above(start: Path) -> Path | None:
+    """Step 5a: the nearest directory at or above ``start`` that holds ``bay.fleet.toml``."""
+    for directory in [start, *start.parents]:
+        if (directory / _FLEET_MARKER).is_file():
+            return directory
+    return None
+
+
+def _never_searched(start: Path) -> set[Path]:
+    """Directories step 5b never looks into: home, its parents, the root, the fleets folder."""
+    skip = {Path(start.anchor), fleets_root().resolve()}
+    try:
+        home = Path.home().resolve()
+    except (RuntimeError, OSError):
+        return skip
+    return skip | {home, *home.parents}
+
+
+def _fleets_inside(folder: Path) -> list[Path]:
+    """The direct children of ``folder`` that are fleets, once per real path, sorted by name.
+
+    A symlink to a fleet counts. A name that starts with ``.`` does not. A folder
+    that cannot be listed holds none.
+    """
+    try:
+        children = sorted(folder.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return []
+    found: dict[Path, Path] = {}
+    for child in children:
+        if child.name.startswith("."):
+            continue
+        try:
+            if child.is_dir() and (child / _FLEET_MARKER).is_file():
+                found.setdefault(child.resolve(), child)
+        except OSError:
+            continue
+    return list(found.values())
+
+
+def fleet_in_folder_above(start: Path) -> Path | None:
+    """Step 5b: the one fleet that lives in ``start`` or in a parent of it.
+
+    Nearest folder first. A folder with more than one fleet raises
+    :class:`BayError`: Bay does not guess.
+    """
+    skip = _never_searched(start)
+    for folder in [start, *start.parents]:
+        if folder.resolve() in skip:
+            continue
+        fleets = _fleets_inside(folder)
+        if len(fleets) == 1:
+            return fleets[0]
+        if len(fleets) > 1:
+            names = ", ".join(str(f) for f in fleets)
+            raise BayError(
+                f"more than one fleet lives in {folder}: {names}",
+                hint="Pass --fleet <path> before the command, or cd into one of them.",
+            )
     return None
 
 
@@ -286,6 +391,7 @@ def context_from(ctx: typer.Context | None) -> Context:
 def _fleet_is_explicit(ctx: typer.Context | None) -> bool:
     obj = ctx.find_root().obj if ctx is not None else None
     if isinstance(obj, Context):
+        # SOURCE_FLEET_HERE and SOURCE_FLEET_ABOVE are found, not named: not explicit.
         return obj.source in (SOURCE_FLAG, SOURCE_ENV, SOURCE_BAY_TOML, SOURCE_FLEETS_DIR)
     if isinstance(obj, GlobalOptions) and obj.fleet is not None:
         return True
@@ -303,11 +409,23 @@ def context_or_cwd(ctx: typer.Context | None) -> Context:
     fleet is set up (``bay server add`` in a fresh directory). A fleet the operator
     named on purpose (``--fleet``, ``BAY_FLEET``, ``BAY_FLEET_NAME``, or the
     ``fleet`` of a bay.toml) is never replaced by the working directory: that
-    error is raised.
+    error is raised. A fleet you stand in (step 5a) wins. A fleet that only lives
+    in a folder above you (step 5b) does not: a fresh folder next to a fleet is
+    where a new fleet starts, so the result stays the working directory.
     """
     try:
-        return context_from(ctx)
+        cx = context_from(ctx)
     except BayError:
         if _fleet_is_explicit(ctx):
             raise
         return Context.for_fleet_root(Path.cwd(), source=SOURCE_CWD)
+    if cx.source != SOURCE_FLEET_ABOVE:
+        return cx
+    from bay_cli import ansible
+
+    ansible.bind_fleet(None)
+    here = Context.for_fleet_root(Path.cwd(), source=SOURCE_CWD)
+    obj = ctx.find_root().obj if ctx is not None else None
+    if isinstance(obj, GlobalOptions):
+        obj._resolved = here
+    return here

@@ -10,7 +10,8 @@ Every command of the CLI is in exactly one of :data:`MUTATING_VERBS` and
 fails on a command in neither, so a new verb cannot skip the line by
 accident. :func:`install` wraps the callback of each mutating verb; the
 wrapper finds the fleet the same way the verb will (``--fleet``,
-``BAY_FLEET``, the ``fleet =`` line of the bay.toml here, ``BAY_FLEET_NAME``)
+``BAY_FLEET``, the ``fleet =`` line of the bay.toml here, ``BAY_FLEET_NAME``,
+the fleet folder you stand in, the one fleet in a folder above you)
 without side effects, prints the line, then runs the verb. When no fleet can
 be found, nothing is printed: the verb then stops with "no fleet selected".
 """
@@ -125,8 +126,10 @@ QUIET_VERBS: frozenset[str] = frozenset(
 _CWD_IS_FLEET = frozenset(
     {"service prune-webhooks", "server add", "server remove"}
 )
-#: Verbs that also find a fleet directory at or above the working directory.
-_FLEET_DIR_ABOVE = frozenset({"plan", "up", "approve", "remove"})
+
+#: Verbs that register an app repo: they need a fleet by name (``--fleet``, or the
+#: ``fleet =`` line of the bay.toml), never one found from the folder you stand in.
+_NAMED_FLEET_ONLY = frozenset({"init", "adopt"})
 
 #: Marks a wrapped callback, so a test can tell that :func:`install` covered it.
 MARK = "__bay_fleet_line__"
@@ -171,13 +174,6 @@ def _named(name: str | None) -> Path | None:
     return path if path.is_dir() else None
 
 
-def _fleet_dir_above(start: Path) -> Path | None:
-    for directory in [start, *start.parents]:
-        if (directory / "bay.fleet.toml").is_file():
-            return directory
-    return None
-
-
 #: The root object of the running command (``typer.Context.obj``), stored by
 #: the root callback (:func:`remember`). The wrapper reads it here, because a
 #: newer Typer ships Click inside itself and ``import click`` may fail.
@@ -203,7 +199,13 @@ def _global_fleet() -> Path | None:
 
 def resolve(path: str, kwargs: dict[str, Any]) -> tuple[Path, str | None] | None:
     """``(fleet root, name or None)`` the verb ``path`` will act on, or None. No side effects."""
-    from bay_cli.context import FLEET_NAME_ENV, fleets_root
+    from bay_cli.context import (
+        FLEET_NAME_ENV,
+        fleet_dir_above,
+        fleet_in_folder_above,
+        fleets_root,
+    )
+    from bay_cli.errors import BayError
 
     if path == "import":
         source, out = kwargs.get("fleet"), kwargs.get("out")
@@ -228,10 +230,18 @@ def resolve(path: str, kwargs: dict[str, Any]) -> tuple[Path, str | None] | None
             found = _named(name)
             if found is None:
                 return None
-    if found is None and path in _FLEET_DIR_ABOVE:
-        found = _fleet_dir_above(Path.cwd())
+    if found is None and path not in _NAMED_FLEET_ONLY:
+        # Step 5a: the fleet folder you stand in.
+        found = fleet_dir_above(Path.cwd())
     if found is None and path in _CWD_IS_FLEET:
         found = Path.cwd()
+    elif found is None and path not in _NAMED_FLEET_ONLY:
+        # Step 5b. A verb that works in a fresh folder (_CWD_IS_FLEET) ignores it,
+        # as context_or_cwd does. An ambiguous folder: the verb itself reports it.
+        try:
+            found = fleet_in_folder_above(Path.cwd())
+        except BayError:
+            return None
     if found is None:
         return None
     return found.expanduser().resolve(), None

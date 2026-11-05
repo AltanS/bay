@@ -35,10 +35,10 @@ from bay_cli import console
 from bay_cli.context import (
     FLEET_ENV,
     FLEET_NAME_ENV,
-    SOURCE_CWD,
     Context,
     GlobalOptions,
     context_from,
+    fleet_dir_above,
 )
 from bay_cli.errors import BayError
 
@@ -105,21 +105,12 @@ def _read_identity(path: Path) -> tuple[str | None, str | None]:
     return (name if isinstance(name, str) else None, fleet if isinstance(fleet, str) else None)
 
 
-def fleet_dir_above(start: Path) -> Path | None:
-    """The nearest directory at or above ``start`` that holds a ``bay.fleet.toml``."""
-    from bay_cli.fleet import FLEET_FILE
-
-    for directory in [start, *start.parents]:
-        if (directory / FLEET_FILE).is_file():
-            return directory
-    return None
-
-
 def fleet_context(
     ctx: typer.Context, fleet_name: str | None, *, allow_cwd: bool = False
 ) -> Context:
     """``--fleet <path>``, then ``BAY_FLEET``, then the fleet named in bay.toml, then
-    ``BAY_FLEET_NAME``, then (with ``allow_cwd``) the fleet directory you stand in."""
+    ``BAY_FLEET_NAME``, then (with ``allow_cwd``) the fleet you stand in or the one
+    fleet in a folder above you (discovery step 5)."""
     obj = ctx.find_root().obj
     if isinstance(obj, Context):
         return obj
@@ -130,9 +121,9 @@ def fleet_context(
     if os.environ.get(FLEET_NAME_ENV):
         return context_from(ctx)
     if allow_cwd:
-        found = fleet_dir_above(Path.cwd())
-        if found is not None:
-            return Context._from_fleet_path(found, SOURCE_CWD)
+        nearby = Context._from_nearby_folders()
+        if nearby is not None:
+            return nearby
     raise BayError(
         "no fleet found",
         hint="Run inside an app repo whose bay.toml names its fleet, pass --fleet <path> "

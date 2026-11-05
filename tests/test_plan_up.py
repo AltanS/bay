@@ -961,7 +961,7 @@ def test_up_with_a_box_checked_plan_id_is_not_stale(world: dict[str, Path], box:
 
 
 def test_project_flag_works_from_anywhere(
-    world: dict[str, Path], tmp_path: Path, box: FakeBox
+    world: dict[str, Path], tmp_path: Path, box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -969,7 +969,11 @@ def test_project_flag_works_from_anywhere(
     assert result.exit_code == 0, result.output
     # No bay.toml, no --project and no fleet: refused. (With a fleet, a
     # project-less plan covers the whole environment, see
-    # test_projectless_plan_covers_whole_env.)
+    # test_projectless_plan_covers_whole_env.) The fleet sits in tmp_path, next
+    # to "elsewhere": discovery step 5b would find it. A home directory inside
+    # tmp_path makes tmp_path a parent of home, which step 5b never searches.
+    (tmp_path / "home").mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     old = Path.cwd()
     os.chdir(elsewhere)
     try:

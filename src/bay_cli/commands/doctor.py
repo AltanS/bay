@@ -43,6 +43,8 @@ from bay_cli.context import (
     SOURCE_CWD,
     SOURCE_ENV,
     SOURCE_FLAG,
+    SOURCE_FLEET_ABOVE,
+    SOURCE_FLEET_HERE,
     SOURCE_FLEETS_DIR,
     Context,
     GlobalOptions,
@@ -188,7 +190,7 @@ def _run(ctx: typer.Context, env: str | None, *, no_remote: bool, as_json: bool)
 
 def _picked(ctx: typer.Context) -> tuple[Context | None, str | None, str, str]:
     """``(fleet, why, status, detail)``: the fleet the other verbs would use, and why."""
-    from bay_cli.commands.project_cmd import fleet_dir_above
+    from bay_cli.context import fleet_dir_above
 
     try:
         cx = context_from(ctx)
@@ -196,7 +198,7 @@ def _picked(ctx: typer.Context) -> tuple[Context | None, str | None, str, str]:
         found = fleet_dir_above(Path.cwd())
         if found is None:
             return None, None, "fail", f"{exc}" + (f"; {exc.hint}" if exc.hint else "")
-        cx = Context._from_fleet_path(found, SOURCE_CWD)
+        cx = Context._from_fleet_path(found, SOURCE_FLEET_HERE)
     why, given = _why(ctx, cx)
     from bay_cli.fleet_line import fleet_name
 
@@ -228,8 +230,10 @@ def _why(ctx: typer.Context, cx: Context) -> tuple[str, Path | None]:
     if cx.source == SOURCE_FLEETS_DIR:
         value = os.environ.get(FLEET_NAME_ENV, "")
         return f"{FLEET_NAME_ENV}={value}", fleets_root() / value
-    if cx.source == SOURCE_CWD:
+    if cx.source in (SOURCE_FLEET_HERE, SOURCE_CWD):
         return "the fleet directory you stand in", None
+    if cx.source == SOURCE_FLEET_ABOVE:
+        return "the one fleet in a folder above you", None
     return cx.source, None
 
 
