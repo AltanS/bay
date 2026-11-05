@@ -839,12 +839,18 @@ from one push.
 - **A forwarded push does not fan out again.** A request with
   `X-Bay-Webhook-Forwarded: 1` handles only the service in its URL. The
   receiver that forwarded it already handled the siblings.
-- **The alias retag does not apply.** The alias fan-out of `rebuild.sh`
-  (`bay_build_dedup_map`) re-tags services with the same build identity. A
-  service that shares the main build (`shared_from`, a service with neither
-  `image` nor `build`) still gets its image that way, or through the image
-  pull fan-out, and is never a sibling. Extra services with their own `build`
-  build one by one.
+- **Services that the alias fan-out reaches are not siblings.** A service
+  that shares the main build (`shared_from`, a service with neither `image`
+  nor `build`) gets its image from the alias fan-out of `rebuild.sh`, or from
+  the image pull fan-out. A local-strategy service with the same build
+  identity as another service of the project (same Dockerfile, context and
+  args) is an alias in `bay_build_dedup_map`. The primary's `rebuild.sh` run
+  triggers it after the build. Neither gets a direct trigger: `rebuild.sh`
+  recreates the container on each run, so a direct trigger restarts it twice
+  per push. The receiver leaves out such an alias only when its primary is
+  in the same project and has the same `regions`. A hook on the alias still
+  builds the alias itself, as before, and now also its primary. Remote
+  builds have no alias fan-out: each sibling builds on its own.
 - **The builds on one box run one at a time.** `rebuild.sh` holds a box-wide
   `flock` for each build. The systemd unit `bay-build@.service` stops a build
   after `git_deploy_build_timeout` seconds (default 1200), and that time
@@ -853,6 +859,13 @@ from one push.
   `git_deploy_build_timeout` to cover the builds of the whole group.
 - **`bay validate --check-webhook-health` checks the group.** A hook on any
   sibling is enough. With no hook, it reports one failure that names every
-  service of the group. With two or more hooks, it warns: each push then
-  builds every service of the group once per hook. Keep one hook and delete
-  the others.
+  service of the group. With two or more hooks, it warns. A second hook is
+  redundant: one hook builds the whole group.
+- **Keep one hook.** GitHub gives the deliveries of one push to the hooks of
+  a repo the same delivery id. The receiver remembers the delivery id per
+  service, also for each sibling it triggers, and drops a repeat. So a
+  second hook that reaches the same receiver builds nothing twice, in either
+  order. That record is in the memory of one receiver process only. A
+  restart loses it, receivers in two regions do not share it, and a caller
+  that sends no delivery id skips the check. In those cases a second hook
+  can still build the group twice.

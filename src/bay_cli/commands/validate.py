@@ -2624,8 +2624,9 @@ def _probe_webhook_health(
     - Checks the extra services of one bay.toml as one group
       (``push_sibling_groups``): the receiver builds every member from a push
       posted for any of them, so a hook on any member is enough. No hook
-      fails once for the group. Two or more hooks warn: each push then
-      builds the group once per hook.
+      fails once for the group. Two or more hooks warn: the second hook is
+      redundant, and the receiver's repeat check by delivery id does not
+      always catch it.
     """
     import requests
 
@@ -2798,8 +2799,11 @@ def _probe_sibling_group(
     result.warn(
         "Webhook health     "
         + ", ".join(f"'{n}'" for n in hooked)
-        + " of one bay.toml each have a hook: each push builds every service of "
-        f"the group ({names}) once per hook. Keep one hook and delete the others."
+        + f" of one bay.toml each have a hook. One hook builds the whole group "
+        f"({names}), so the others are redundant. The receiver drops a repeat by "
+        "its delivery id, but it keeps that record in memory per receiver: a "
+        "restart, another region or a missing delivery id can still build the "
+        "group twice. Keep one hook and delete the others."
     )
 
 

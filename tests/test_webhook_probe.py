@@ -406,7 +406,7 @@ def test_push_sibling_groups_match_the_receiver_filter():
 def test_group_with_one_hook_on_any_member_passes(tmp_path):
     result = _run_group_probe(tmp_path, [_hook("shop-app"), _hook("shop-admin")])
     assert not any("shop'" in f or "shop-ping" in f or "shop-app" in f for f in result.failed), result.failed
-    assert not any("once per hook" in w for w in result.warnings)
+    assert not any("redundant" in w for w in result.warnings)
     assert any("also builds 'shop', 'shop-ping'" in o for o in result.passed)
 
 
@@ -422,7 +422,7 @@ def test_group_with_no_hook_reports_once_naming_every_member(tmp_path):
 
 def test_group_with_two_hooks_warns_to_keep_one(tmp_path):
     result = _run_group_probe(tmp_path, [_hook("shop"), _hook("shop-ping"), _hook("shop-admin")])
-    warns = [w for w in result.warnings if "once per hook" in w]
+    warns = [w for w in result.warnings if "redundant" in w]
     assert len(warns) == 1
     assert "'shop', 'shop-ping'" in warns[0]
     assert "Keep one hook" in warns[0]
