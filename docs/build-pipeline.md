@@ -679,12 +679,15 @@ the receiver's in-memory `IMAGE_MAP` table on process start
   of build containers) changes, because the receiver reads it once at start
   too. The handler only restarts. A new receiver *image* is applied
   separately: `roles/git_deploy/tasks/render_webhook.yml` builds
-  `bay-webhook:latest` when the receiver files changed, the image is
-  missing, or the image's `com.bay.receiver-hash` label differs from the
+  `bay-webhook:latest` when the image is missing, or the image's
+  `com.bay.receiver-hash` label differs from the
   hash of the receiver files (`bay_tree_hash` in
   `filter_plugins/bay_filters.py`: sha256 over the file contents in sorted
   path order; `__pycache__`, bytecode, dotfiles other than `.dockerignore`, `*~` and `*.swp`
-  are left out, and a dangling symlink is an error). That file runs under `deploy_stack`
+  are left out, and a dangling symlink is an error). The deploy ships those
+  same files and no others (`bay_tree_files`, the list the hash is made from),
+  so local bytecode in the role folder never reaches the box or moves the
+  label. That file runs under `deploy_stack`
   too, so `bay up` builds it. The container spec carries the same label, so
   a receiver change changes the container's config hash: `bay plan --remote`
   predicts the recreate, although check mode builds nothing. Under `bay up`,

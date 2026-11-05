@@ -133,11 +133,34 @@
         mode: "0644"
       notify: Restart bay-webhook
 
+    # Ship the files that the receiver hash covers, and no others. The list
+    # comes from the same walk as the hash (filter_plugins bay_filters.py:
+    # bay_tree_files and bay_tree_hash), so bytecode, dotfiles and editor
+    # litter in the role folder on the control node never reach the box. A
+    # whole-directory copy shipped them, and their bytes differ per checkout
+    # and per machine: the copy reported a change and the receiver was rebuilt
+    # and recreated with the same hash. `bay_alert.py` is a symlink into
+    # alert_channel; `copy` ships the target's bytes. `.dockerignore` keeps
+    # litter that the box already holds out of the image.
+    - name: Create the webhook receiver build directories
+      ansible.builtin.file:
+        path: "{{ git_deploy_build_dir }}/webhook/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop: >-
+        {{ [''] + (('roles/git_deploy/files/webhook' | bay_tree_files)
+           | map('dirname') | reject('equalto', '') | unique | sort | list) }}
+      loop_control:
+        label: "{{ item or '.' }}"
+
     - name: Copy webhook receiver files
       ansible.builtin.copy:
-        src: webhook/
-        dest: "{{ git_deploy_build_dir }}/webhook/"
+        src: "webhook/{{ item }}"
+        dest: "{{ git_deploy_build_dir }}/webhook/{{ item }}"
         mode: "0644"
+      loop: "{{ 'roles/git_deploy/files/webhook' | bay_tree_files }}"
+      loop_control:
+        label: "{{ item }}"
       register: _webhook_files
 
     # The receiver's identity: a hash of its build context (the files the
@@ -150,13 +173,16 @@
       ansible.builtin.set_fact:
         _webhook_receiver_hash: "{{ 'roles/git_deploy/files/webhook' | bay_tree_hash }}"
 
-    # The image can be missing while the files are unchanged (pruned, or a
-    # host that has the files from an earlier deploy but never built). Build
-    # then too. A first build app on a box needs the image here, before the
-    # deploy_stack container pass creates `bay-webhook`. The inspect prints
-    # the image's receiver hash label, so an image that an earlier run left
-    # stale (files copied, build failed) is rebuilt as well. An image from
-    # before 2.4.0 has no label and is rebuilt once.
+    # The rule: the image is built when it is missing, or when its
+    # `com.bay.receiver-hash` label is not the hash of the receiver files.
+    # The label is the only record of what the image was built from. A changed
+    # file changes the hash. A copy that landed while its build failed leaves
+    # a stale label, so the next run builds. Whether the copy changed a file
+    # is not a trigger: it is the same fact as the hash, and it also fires
+    # for a file that only the box changed. The inspect prints the label. An
+    # image from before 2.4.0 has no label and is rebuilt once. A first build
+    # app on a box needs the image here, before the deploy_stack container
+    # pass creates `bay-webhook`.
     - name: Check whether the webhook receiver image exists
       ansible.builtin.command:
         argv:
@@ -180,7 +206,6 @@
           --label com.bay.receiver-hash={{ _webhook_receiver_hash }}
           {{ git_deploy_build_dir }}/webhook/
       when: >-
-        _webhook_files.changed
-        or (_webhook_image_inspect is not skipped and _webhook_image_inspect.rc != 0)
+        (_webhook_image_inspect is not skipped and _webhook_image_inspect.rc != 0)
         or (_webhook_image_inspect is not skipped
             and (_webhook_image_inspect.stdout | default('') | trim) != _webhook_receiver_hash)

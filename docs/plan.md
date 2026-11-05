@@ -693,9 +693,9 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
      receiver reads both only at start. Since 2.5.2 the container carries the
      label `com.bay.receiver-config-hash`, so a change is a `bay-webhook` recreate
      that the plan predicts and `applied` lists;
-   - the receiver image. Bay builds `bay-webhook:latest` when the receiver
-     files changed, the image is missing, or the image's `com.bay.receiver-hash`
-     label is not the hash of the receiver files. The container pass then
+   - the receiver image. Bay builds `bay-webhook:latest` when the
+     image is missing, or the image's `com.bay.receiver-hash` label is not the
+     hash of the receiver files. The container pass then
      creates or recreates `bay-webhook`. The container carries the same label,
      so the plan predicts that recreate (see the check mode list above);
    - the build trigger units. Bay enables `bay-build@<container>.path` for

@@ -75,7 +75,9 @@ def test_reconcile_runs_after_the_image_build_and_is_not_gated_on_changed_files(
 def test_missing_image_triggers_a_build_even_when_files_are_unchanged():
     tasks = _render_tasks()
     build = _by_name(tasks, "Build webhook receiver image")
-    assert "_webhook_files.changed" in build["when"]
+    # The label compare is the rule; whether the copy changed a file is not.
+    assert "_webhook_files" not in build["when"]
+    assert "!= _webhook_receiver_hash" in build["when"]
     assert "_webhook_image_inspect.rc != 0" in build["when"]
     inspect = _by_name(tasks, "Check whether the webhook receiver image exists")
     assert inspect["check_mode"] is False

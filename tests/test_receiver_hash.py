@@ -55,6 +55,7 @@ assert _spec is not None and _spec.loader is not None
 _filters = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_filters)
 bay_tree_hash = _filters.bay_tree_hash
+bay_tree_files = _filters.bay_tree_files
 
 
 def _receiver_copy(tmp_path: Path) -> Path:
@@ -136,6 +137,165 @@ def test_receiver_hash_label_relative_path_is_the_framework_checkout() -> None:
         bay_tree_hash("roles/git_deploy/files/no-such-dir")
 
 
+# ── The shipped files are the hashed files ──────────────────────────────
+
+_RENDER = ROOT / "roles" / "git_deploy" / "tasks" / "render_webhook.yml"
+_LISTING = "'roles/git_deploy/files/webhook' | bay_tree_files"
+
+
+def _litter(tree: Path) -> None:
+    """What a test run or an editor leaves in the role folder, git-ignored or not."""
+    (tree / "__pycache__").mkdir(exist_ok=True)
+    (tree / "__pycache__" / "x.pyc").write_bytes(b"\x00bytecode")
+    (tree / "stray.pyc").write_bytes(b"\x00")
+    (tree / ".app.py.swp").write_bytes(b"swap")
+    (tree / ".hidden").write_bytes(b"x")
+    (tree / "app.py~").write_bytes(b"backup")
+    (tree / "sub").mkdir(exist_ok=True)
+    (tree / "sub" / "keep.txt").write_bytes(b"input")
+    (tree / "sub" / "__pycache__").mkdir(exist_ok=True)
+    (tree / "sub" / "__pycache__" / "y.pyc").write_bytes(b"\x00")
+
+
+def test_receiver_files_listing_skips_litter(tmp_path: Path) -> None:
+    tree = _receiver_copy(tmp_path)
+    clean = bay_tree_files(tree)
+    _litter(tree)
+    listing = bay_tree_files(tree)
+    assert listing == sorted([*clean, "sub/keep.txt"])
+    assert not any("__pycache__" in f or f.endswith((".pyc", ".swp", "~")) for f in listing)
+    assert ".hidden" not in listing and ".app.py.swp" not in listing
+    assert ".dockerignore" in listing  # the one dotfile that is a build input
+
+
+def test_receiver_files_listing_is_what_the_hash_covers(tmp_path: Path) -> None:
+    """The hash is a function of the listing: each listed file counts, nothing else does."""
+    tree = _receiver_copy(tmp_path)
+    _litter(tree)
+    base = bay_tree_hash(tree)
+    for rel in bay_tree_files(tree):
+        target = (tree / rel).resolve()
+        original = target.read_bytes()
+        target.write_bytes(original + b"\n")
+        try:
+            assert bay_tree_hash(tree) != base, f"{rel} is listed but not hashed"
+        finally:
+            target.write_bytes(original)
+    # And no file outside the listing moves the hash.
+    listed = set(bay_tree_files(tree))
+    for path in tree.rglob("*"):
+        rel = path.relative_to(tree).as_posix()
+        if path.is_file() and rel not in listed:
+            original = path.read_bytes()
+            path.write_bytes(original + b"\n")
+            try:
+                assert bay_tree_hash(tree) == base, f"{rel} is hashed but not listed"
+            finally:
+                path.write_bytes(original)
+    # The real role folder: the listing is the Dockerfile's inputs plus .dockerignore.
+    assert bay_tree_files(RECEIVER) == [
+        ".dockerignore", "Dockerfile", "app.py", "bay_alert.py", "requirements.txt",
+    ]
+    # A symlink to a missing target is an error for the listing too.
+    (tree / "bay_alert.py").unlink()
+    (tree / "bay_alert.py").symlink_to("no-such-target.py")
+    with pytest.raises(ValueError, match="symlink to a missing target"):
+        bay_tree_files(tree)
+
+
+def test_receiver_dockerignore_keeps_bytecode_out_of_the_image() -> None:
+    lines = (RECEIVER / ".dockerignore").read_text().split()
+    assert "__pycache__/" in lines and "*.pyc" in lines
+
+
+def test_receiver_copy_ships_the_hashed_files_only() -> None:
+    copy = _named(_RENDER, "Copy webhook receiver files")
+    module = copy["ansible.builtin.copy"]
+    # Not the whole folder: the list the hash is made from.
+    assert module["src"] == "webhook/{{ item }}"
+    assert module["dest"].endswith("/webhook/{{ item }}")
+    assert copy["loop"] == "{{ " + _LISTING + " }}"
+    mkdir = _named(_RENDER, "Create the webhook receiver build directories")
+    assert _LISTING in mkdir["loop"]
+    names = [t.get("name") for t in _walk(yaml.safe_load(_RENDER.read_text()))]
+    assert names.index("Create the webhook receiver build directories") < names.index(
+        "Copy webhook receiver files"
+    )
+
+
+def test_receiver_copy_run_ignores_litter_and_is_idempotent(tmp_path: Path) -> None:
+    """Run the two tasks for real. Litter in the role folder never reaches the box.
+
+    Before the file list, `src: webhook/` copied the whole folder: the
+    `__pycache__` bytes differ per checkout, so a second checkout reported
+    `changed` and rebuilt the receiver with the same hash.
+    """
+    fw = tmp_path / "fw"
+    for role in ("git_deploy", "alert_channel"):
+        shutil.copytree(
+            ROOT / "roles" / role, fw / "roles" / role, symlinks=True,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+    shutil.copytree(
+        ROOT / "filter_plugins", fw / "filter_plugins",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    tree = fw / "roles" / "git_deploy" / "files" / "webhook"
+    _litter(tree)
+    wanted = bay_tree_files(tree)
+    dest = tmp_path / "builds"
+    tasks = [
+        _named(_RENDER, "Create the webhook receiver build directories"),
+        _named(_RENDER, "Copy webhook receiver files"),
+    ]
+    # Next to the role's files/, so that `copy` finds `webhook/...` as in the role.
+    play = fw / "roles" / "git_deploy" / "play-ship.yml"
+    play.write_text(yaml.safe_dump([{
+        "hosts": "localhost", "connection": "local", "gather_facts": False,
+        "vars": {"git_deploy_build_dir": str(dest)}, "tasks": tasks,
+    }]))
+    env = {
+        **os.environ,
+        "ANSIBLE_FILTER_PLUGINS": str(fw / "filter_plugins"),
+        "ANSIBLE_CONFIG": str(tmp_path / "ansible.cfg"),
+        "ANSIBLE_LOCAL_TEMP": str(tmp_path / "ansible-tmp"),
+        "ANSIBLE_REMOTE_TEMP": str(tmp_path / "ansible-tmp"),
+        "ANSIBLE_NOCOLOR": "1",
+        "ANSIBLE_LOCALHOST_WARNING": "0",
+        "ANSIBLE_INVENTORY_UNPARSED_WARNING": "0",
+        "ANSIBLE_RETRY_FILES_ENABLED": "0",
+    }
+    (tmp_path / "ansible.cfg").write_text("[defaults]\n")
+    env.pop("PYTHONPATH", None)
+
+    def run() -> int:
+        """Run the play. Returns the `changed` count of the recap."""
+        proc = subprocess.run(
+            [sys.executable, "-m", "ansible.cli.playbook", "-i", "localhost,", str(play)],
+            cwd=fw, env=env, capture_output=True, text=True, timeout=300,
+        )
+        assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-4000:]
+        recap = re.search(r"localhost\s*:.*?changed=(\d+)", proc.stdout)
+        assert recap, proc.stdout[-2000:]
+        return int(recap.group(1))
+
+    assert run() > 0
+    out = dest / "webhook"
+    shipped = sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file())
+    assert shipped == wanted
+    assert (dest / "webhook" / "sub").is_dir()
+    assert (dest / "webhook" / "bay_alert.py").read_bytes() == (
+        ROOT / "roles" / "alert_channel" / "files" / "bay_alert.py"
+    ).read_bytes()
+    assert not (dest / "webhook" / "bay_alert.py").is_symlink()
+    assert (dest / "webhook" / "app.py").stat().st_mode & 0o777 == 0o644
+
+    # Another checkout: other bytecode bytes, same sources. Nothing changes.
+    (tree / "__pycache__" / "x.pyc").write_bytes(b"\x00other machine")
+    (tree / "sub" / "__pycache__" / "y.pyc").write_bytes(b"\x00other machine")
+    assert run() == 0
+
+
 def _walk(tasks: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     for task in tasks or []:
         yield task
@@ -165,7 +325,8 @@ def test_receiver_hash_label_on_the_image_and_the_container() -> None:
     cmd = build["ansible.builtin.command"]["cmd"]
     assert f"--label {LABEL}={{{{ _webhook_receiver_hash }}}}" in cmd
     when = build["when"]
-    assert "_webhook_files.changed" in when
+    # The label is the whole rule: a copy that changed a file is not a trigger.
+    assert "_webhook_files" not in when
     assert "_webhook_image_inspect.rc != 0" in when
     assert "!= _webhook_receiver_hash" in when
     assert when.count("_webhook_image_inspect is not skipped") == 2, "check-mode guard"

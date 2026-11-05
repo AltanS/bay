@@ -219,6 +219,7 @@ class FilterModule:
             "bay_image_region_map": bay_image_region_map,
             "bay_spec_hash": bay_spec_hash,
             "bay_tree_hash": bay_tree_hash,
+            "bay_tree_files": bay_tree_files,
             "bay_framework_path": bay_framework_path,
             "bay_port_binding_tuple": bay_port_binding_tuple,
             "bay_port_spec_tuple": bay_port_spec_tuple,
@@ -1453,6 +1454,50 @@ _TREE_HASH_KEEP_DOTFILES = frozenset({".dockerignore"})
 _FRAMEWORK_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _tree_root(path):
+    """The directory ``path`` names, a relative one read from the framework checkout."""
+    root = Path(str(path))
+    if not root.is_absolute():
+        root = _FRAMEWORK_ROOT / root
+    if not root.is_dir():
+        raise ValueError(f"bay_tree_hash: {root} is not a directory")
+    return root
+
+
+def _tree_files(root):
+    """``(relative POSIX path, file)`` for every build input under ``root``, sorted.
+
+    The one walk behind ``bay_tree_hash`` (what is hashed) and
+    ``bay_tree_files`` (what a deploy ships), so the two cannot differ.
+    """
+    files = []
+    for item in root.rglob("*"):
+        rel = item.relative_to(root)
+        if _TREE_HASH_SKIP_DIRS & set(rel.parts) or item.name.endswith(_TREE_HASH_SKIP_SUFFIXES):
+            continue
+        if any(
+            part.startswith(".") and part not in _TREE_HASH_KEEP_DOTFILES for part in rel.parts
+        ):
+            continue
+        if item.is_symlink() and not item.exists():
+            raise ValueError(f"bay_tree_hash: {item} is a symlink to a missing target")
+        if item.is_file():
+            files.append((rel.as_posix(), item))
+    return sorted(files, key=lambda pair: pair[0])
+
+
+def bay_tree_files(path):
+    """Sorted relative POSIX paths of the files ``bay_tree_hash`` covers under ``path``.
+
+    A deploy ships exactly this list (git_deploy render_webhook.yml, `Copy
+    webhook receiver files`), so the files on the box are the files that the
+    receiver label hashes: bytecode or editor litter in the role folder on the
+    control node never reaches the box and never changes the copy. ``path`` is
+    resolved and checked as in ``bay_tree_hash``.
+    """
+    return [rel for rel, _ in _tree_files(_tree_root(path))]
+
+
 def bay_tree_hash(path):
     """``sha256:<hex>`` over the contents of every file under ``path``.
 
@@ -1469,7 +1514,7 @@ def bay_tree_hash(path):
     the build breaks. ``__pycache__``, ``*.pyc``, dotfiles (but not
     ``.dockerignore``), ``*~`` and ``*.swp`` are left out: editor and bytecode
     litter, never a build input. A missing directory is an error, never an
-    empty hash.
+    empty hash. The files are those of ``bay_tree_files``.
 
     A relative ``path`` is read from the framework checkout that holds this
     file (the directory above ``filter_plugins/``), so the same expression
@@ -1477,26 +1522,8 @@ def bay_tree_hash(path):
     --check`` and the tests run build_specs.yml that way, with no
     ``role_path``) and on any machine.
     """
-    root = Path(str(path))
-    if not root.is_absolute():
-        root = _FRAMEWORK_ROOT / root
-    if not root.is_dir():
-        raise ValueError(f"bay_tree_hash: {root} is not a directory")
-    files = []
-    for item in root.rglob("*"):
-        rel = item.relative_to(root)
-        if _TREE_HASH_SKIP_DIRS & set(rel.parts) or item.name.endswith(_TREE_HASH_SKIP_SUFFIXES):
-            continue
-        if any(
-            part.startswith(".") and part not in _TREE_HASH_KEEP_DOTFILES for part in rel.parts
-        ):
-            continue
-        if item.is_symlink() and not item.exists():
-            raise ValueError(f"bay_tree_hash: {item} is a symlink to a missing target")
-        if item.is_file():
-            files.append((rel.as_posix(), item))
     digest = hashlib.sha256()
-    for rel, item in sorted(files, key=lambda pair: pair[0]):
+    for rel, item in _tree_files(_tree_root(path)):
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
         digest.update(hashlib.sha256(item.read_bytes()).hexdigest().encode("ascii"))
