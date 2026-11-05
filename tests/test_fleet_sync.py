@@ -1194,6 +1194,7 @@ def test_a_validation_failure_in_the_deploy_step_is_not_a_stopped_claim(
     err = capsys.readouterr().err
     assert "STOPPED AFTER THE CLAIM" not in err
     assert "pending lock records" not in err
+    assert "putting the fleet back" not in err
     remote_lock = git(m["a"], "show", "@{u}:projects/webapp/bay.lock")
     assert '"result": "failed"' in remote_lock
 
@@ -1320,6 +1321,75 @@ def test_ctrl_c_before_the_claim_push_undoes_the_commit(
     assert snapshot(m["a"]) == before
     assert "STOPPED before the box was touched (interrupted)" in capsys.readouterr().err
     assert box.deploys == []
+
+
+def test_a_second_ctrl_c_cannot_cut_the_unwind_in_half(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """review 4, item 7: SIGINT is ignored while the unwind runs, then comes back."""
+    import signal
+
+    m = machines
+    before = snapshot(m["a"])
+    handler = signal.getsignal(signal.SIGINT)
+    seen: list[Any] = []
+    real_undo = fleetsync.undo
+
+    def interrupted(repo: Path) -> tuple[bool, str | None]:
+        raise KeyboardInterrupt
+
+    def undo(*a: Any, **k: Any) -> Any:
+        seen.append(signal.getsignal(signal.SIGINT))
+        os.kill(os.getpid(), signal.SIGINT)  # the second Ctrl-C, in the middle
+        return real_undo(*a, **k)
+
+    monkeypatch.setattr(fleetsync, "push_upstream", interrupted)
+    monkeypatch.setattr(fleetsync, "undo", undo)
+    with pytest.raises(KeyboardInterrupt):
+        up_at(m, "a", "webapp")
+    assert seen == [signal.SIG_IGN]
+    assert signal.getsignal(signal.SIGINT) is handler
+    assert snapshot(m["a"]) == before
+    err = capsys.readouterr().err
+    assert "Bay is putting the fleet back" in err
+    assert "STOPPED before the box was touched (interrupted)" in err
+
+
+def test_an_unwind_that_cannot_tell_if_the_claim_landed_undoes_nothing(
+    machines: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """review 4, item 7: the fetch in the unwind has 10 s; on a timeout, keep the commit."""
+    m = machines
+    real_push, real_fetch = fleetsync.push_upstream, fleetsync._fetch
+    limits: list[int] = []
+    pushed: list[bool] = []
+
+    def pushed_then_interrupted(repo: Path) -> Any:
+        real_push(repo)
+        pushed.append(True)
+        raise KeyboardInterrupt
+
+    def slow_fetch(repo: Path, *, timeout: int = 60) -> str | None:
+        if not pushed:  # the plan's own fetch
+            return real_fetch(repo, timeout=timeout)
+        limits.append(timeout)
+        return "git fetch timed out"
+
+    monkeypatch.setattr(fleetsync, "push_upstream", pushed_then_interrupted)
+    monkeypatch.setattr(fleetsync, "_fetch", slow_fetch)
+    with pytest.raises(KeyboardInterrupt):
+        up_at(m, "a", "webapp")
+    assert limits == [applymod.UNWIND_FETCH_SECONDS] == [10]
+    # The commit is on the remote, and the unwind did not undo it locally.
+    assert git(m["a"], "rev-parse", "HEAD") == git(m["remote"], "rev-parse", "main")
+    assert '"result": "pending"' in git(m["a"], "show", "HEAD:projects/webapp/bay.lock")
+    err = capsys.readouterr().err
+    assert "STOPPED DURING THE CLAIM (interrupted)" in err
+    assert "cannot tell" in err and "git fetch timed out" in err
+    assert "branch -r --contains" in err
+    assert "STOPPED before the box was touched" not in err
 
 
 def test_ctrl_c_after_the_claim_says_what_the_remote_holds(

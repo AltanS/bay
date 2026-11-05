@@ -304,6 +304,10 @@ def unwind_on_error(written: Written) -> Iterator[None]:
         raise
 
 
+#: The limit of the "did the claim land" fetch inside :func:`unwind`, in seconds.
+UNWIND_FETCH_SECONDS = 10
+
+
 def unwind(written: Written, exc: BaseException) -> None:
     """Undo what ``written`` lists, or say what is on the remote when the claim is.
 
@@ -315,12 +319,44 @@ def unwind(written: Written, exc: BaseException) -> None:
       refused claim: no other path changes.
     * The claim is on the remote: nothing is undone (another machine may have
       it already). One line says what the remote holds and what to run.
+    * Bay cannot tell (the fetch took longer than :data:`UNWIND_FETCH_SECONDS`
+      or failed): nothing is undone, since the commit may be on the remote.
+      One line says what to check.
+
+    A second Ctrl-C cannot cut it in half: SIGINT is ignored while it runs
+    (and by the git commands it starts), then the old handler comes back.
     """
+    import signal
+
+    try:
+        old = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except ValueError:  # not the main thread: no handler to swap
+        old = None
+    try:
+        fleetsync.notice("Bay is putting the fleet back. Ctrl-C waits until it is done.")
+        _unwind(written, exc)
+    finally:
+        if old is not None:
+            signal.signal(signal.SIGINT, old)
+
+
+def _unwind(written: Written, exc: BaseException) -> None:
     root = written.root
     assert root is not None
     what = "interrupted" if isinstance(exc, KeyboardInterrupt) else f"stopped: {exc}"
     if written.claim_started and not written.claimed and written.commit:
-        held, _ = fleetsync.landed(root, written.commit)
+        held, problem = fleetsync.landed(root, written.commit, timeout=UNWIND_FETCH_SECONDS)
+        if problem is not None:
+            commit = written.commit[:12]
+            fleetsync.notice(
+                f"STOPPED DURING THE CLAIM ({what}). Bay cannot tell if fleet commit {commit} "
+                f"reached the remote ({problem}), so it undid nothing. Nothing was deployed. "
+                f"Check with `git -C {root} fetch` and `git -C {root} branch -r --contains "
+                f"{commit}`. If the remote holds it, run `{written.again}` again on this "
+                "machine: it repairs this host's own stopped run. If not, "
+                f"`git -C {root} reset --keep {(written.before or '')[:12]}` puts the fleet back."
+            )
+            return
         written.claimed = held
     if written.claimed and written.commit:
         fleetsync.notice(

@@ -428,9 +428,13 @@ def push_upstream(repo: Path) -> tuple[bool, str | None]:
     return True, None
 
 
-def landed(repo: Path, commit: str) -> tuple[bool, str | None]:
-    """Fetch, then: does the tracked branch hold ``commit``? ``(held, fetch problem)``."""
-    problem = _fetch(repo)
+def landed(repo: Path, commit: str, *, timeout: int = 60) -> tuple[bool, str | None]:
+    """Fetch, then: does the tracked branch hold ``commit``? ``(held, fetch problem)``.
+
+    A fetch problem (it failed, or took longer than ``timeout`` seconds) means
+    Bay cannot tell; ``held`` is then False.
+    """
+    problem = _fetch(repo, timeout=timeout)
     if problem is not None:
         return False, problem
     return gitrepo.is_ancestor(repo, commit, "@{u}") is True, None
@@ -441,9 +445,9 @@ def _upstream_name(repo: Path) -> str:
     return f"{target[0]}/{target[1].removeprefix('refs/heads/')}" if target else "@{u}"
 
 
-def _fetch(repo: Path) -> str | None:
-    """``git fetch`` (no prompt, 60 s). A problem line, or None when it worked."""
-    proc = gitrepo._run(repo, "fetch", "--quiet", "--no-tags", timeout=60)
+def _fetch(repo: Path, *, timeout: int = 60) -> str | None:
+    """``git fetch`` (no prompt, ``timeout`` s). A problem line, or None when it worked."""
+    proc = gitrepo._run(repo, "fetch", "--quiet", "--no-tags", timeout=timeout)
     if proc is None:
         return "git fetch timed out"
     if proc.returncode != 0:
