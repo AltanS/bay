@@ -5,6 +5,7 @@ from pathlib import Path
 import typer
 
 from bay_cli import console, fleet_line
+from bay_cli.commands import fleet_sync_cmd
 from bay_cli.commands import compile_cmd, fleet_cmd, import_cmd, project_cmd, remove_cmd, route_cmd, self_cmd, skill_cmd, toml_cmd
 from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault
 from bay_cli.context import GlobalOptions, package_root
@@ -138,6 +139,7 @@ app.command(rich_help_panel="Framework")(framework.status)
 # Install and fleets on this machine
 app.add_typer(self_cmd.app, name="self", rich_help_panel="Framework")
 app.add_typer(fleet_cmd.app, name="fleet", rich_help_panel="Framework")
+fleet_sync_cmd.register(fleet_cmd.app)  # bay fleet status, pull, push
 app.add_typer(skill_cmd.app, name="skill", rich_help_panel="Framework")
 
 # Operational commands (top-level, allow extra args for ansible passthrough)
