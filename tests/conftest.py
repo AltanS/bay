@@ -54,6 +54,21 @@ def _reset_console_state():
 
 
 @pytest.fixture(autouse=True)
+def _forget_root_object():
+    """The fleet line remembers the root object of the last CLI run (fleet_line.remember).
+
+    A process runs one command, so that is right for the CLI. In a test process it
+    would carry the `--fleet` of an earlier test into the next one, so every test
+    starts and ends with nothing remembered.
+    """
+    from bay_cli import fleet_line
+
+    fleet_line.remember(None)
+    yield
+    fleet_line.remember(None)
+
+
+@pytest.fixture(autouse=True)
 def _unbind_fleet():
     """`Context.resolve` binds the fleet for Ansible commands (bay_cli/ansible.py).
 
