@@ -233,7 +233,8 @@ def push_sibling_groups(services: dict[str, Any]) -> list[list[str]]:
 
     Same rule as ``bay_push_siblings`` in filter_plugins/bay_filters.py, which
     writes ``siblings`` into the webhook receiver's config: a ``build`` with
-    the same repo, branch (default ``main``) and non-empty ``bay_toml_path``,
+    the same repo and branch (default ``main``), the same project (the same
+    non-empty ``bay_toml_path``, or else the same non-empty ``bay_project``),
     and no ``shared_from``. The receiver fans a push posted for any member out
     to the others, so the group needs one GitHub hook, on any member. A
     local alias (``bay_push_siblings`` leaves it out of the fan-out, as the
@@ -241,16 +242,18 @@ def push_sibling_groups(services: dict[str, Any]) -> list[list[str]]:
     builds its primary and the rest. Each group is sorted; the groups are
     sorted by their first name.
     """
-    groups: dict[tuple[str, str, str], list[str]] = {}
+    groups: dict[tuple[str, ...], list[str]] = {}
     for name, svc in (services or {}).items():
         build = svc.get("build") if isinstance(svc, dict) else None
         if not isinstance(build, dict) or build.get("shared_from"):
             continue
         repo = str(build.get("repo") or "")
         path = str(build.get("bay_toml_path") or "")
-        if not repo or not path:
+        project = str(build.get("bay_project") or "")
+        which = ("toml", path) if path else ("project", project) if project else None
+        if not repo or which is None:
             continue
-        key = (repo, str(build.get("branch", "main")), path)
+        key = (repo, str(build.get("branch", "main")), *which)
         groups.setdefault(key, []).append(str(name))
     return sorted(sorted(g) for g in groups.values() if len(g) > 1)
 

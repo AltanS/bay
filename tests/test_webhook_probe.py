@@ -394,12 +394,22 @@ def test_push_sibling_groups_match_the_receiver_filter():
     services["docs"] = {"build": {"repo": "git@github.com:Org/shop.git", "bay_toml_path": "docs/bay.toml"}}
     services["other"] = {"build": {"repo": "git@github.com:Org/shop.git", "branch": "dev",
                                    "bay_toml_path": "bay.toml"}}
+    # In-fleet projects (bay_project): two from the same repo and branch.
+    for name, project, dockerfile in (
+        ("tool", "tool", "Dockerfile"), ("tool-echo", "tool", "Dockerfile.echo"),
+        ("probe", "probe", "Dockerfile.probe"), ("probe-sink", "probe", "Dockerfile.sink"),
+    ):
+        services[name] = {"build": {"repo": "git@github.com:Org/tools.git", "bay_project": project,
+                                    "dockerfile": dockerfile, "strategy": "remote"}}
+    # Same name as a bay_toml_path value: never the same project.
+    services["odd"] = {"build": {"repo": "git@github.com:Org/shop.git", "bay_project": "bay.toml",
+                                 "strategy": "remote"}}
     groups = push_sibling_groups(services)
-    assert groups == [["shop", "shop-app", "shop-ping"]]
+    assert groups == [["probe", "probe-sink"], ["shop", "shop-app", "shop-ping"], ["tool", "tool-echo"]]
     for group in groups:
         for name in group:
             assert bay_push_siblings(services, name) == [n for n in group if n != name]
-    for name in ("shop-admin", "docs", "other"):
+    for name in ("shop-admin", "docs", "other", "odd"):
         assert not any(name in g for g in groups)
 
 

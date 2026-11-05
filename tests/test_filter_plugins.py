@@ -1005,3 +1005,31 @@ def test_push_siblings_keep_an_alias_whose_primary_is_another_project():
     services["shop-app"]["build"]["bay_toml_path"] = "other/bay.toml"
     assert bay_push_siblings(services, "shop") == ["shop-ping"]
 
+
+def _fleet_build(project, dockerfile="Dockerfile", repo="https://github.com/acme/tools.git"):
+    return {"build": {"repo": repo, "branch": "main", "bay_project": project,
+                      "dockerfile": dockerfile, "strategy": "remote"}}
+
+
+def test_push_siblings_in_fleet_project_by_bay_project():
+    services = {
+        "whoami": _fleet_build("whoami"),
+        "whoami-echo": _fleet_build("whoami", "Dockerfile.echo"),
+        # Another in-fleet project from the same repo and branch.
+        "probe": _fleet_build("probe", "Dockerfile.probe"),
+        "probe-sink": _fleet_build("probe", "Dockerfile.sink"),
+    }
+    assert bay_push_siblings(services, "whoami") == ["whoami-echo"]
+    assert bay_push_siblings(services, "whoami-echo") == ["whoami"]
+    assert bay_push_siblings(services, "probe") == ["probe-sink"]
+
+
+def test_push_siblings_bay_project_never_matches_a_bay_toml_path():
+    services = {
+        "a": _fleet_build("bay.toml"),
+        "b": {"build": {"repo": "https://github.com/acme/tools.git", "branch": "main",
+                        "bay_toml_path": "bay.toml", "strategy": "remote"}},
+    }
+    assert bay_push_siblings(services, "a") == []
+    assert bay_push_siblings(services, "b") == []
+

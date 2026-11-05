@@ -1188,10 +1188,12 @@ def bay_push_siblings(services, svc_name, default_strategy="local"):
     project builds from the push.
 
     A sibling has a ``build`` with the same repo and branch (default ``main``,
-    compared the way ``bay_shared_toml_paths`` compares them) and the same
-    non-empty ``bay_toml_path``. A service with no ``bay_toml_path`` has no
-    siblings. Another project in the same repo (another bay.toml) is not a
-    sibling. A service with ``shared_from`` is never one: it shares the main
+    compared the way ``bay_shared_toml_paths`` compares them) and is of the
+    same project: the same non-empty ``bay_toml_path`` (bay.toml in the app
+    repo), or the same non-empty ``bay_project`` (bay.toml in the fleet; the
+    compiler writes it only for a project with two or more own builds). A
+    service with neither key has no siblings. Another project in the same
+    repo is not a sibling. A service with ``shared_from`` is never one: it shares the main
     container's build, and rebuild.sh's alias fan-out (local) or the image
     pull fan-out (remote, registry) already reaches it. Only services with a
     ``build`` key count, the same selection as webhook-config.json.j2. Sorted.
@@ -1210,8 +1212,8 @@ def bay_push_siblings(services, svc_name, default_strategy="local"):
     own = (services.get(svc_name) or {}).get("build")
     if not isinstance(own, dict):
         return []
-    own_path = own.get("bay_toml_path") or ""
-    if not own_path or not own.get("repo"):
+    own_key = _push_project(own)
+    if own_key is None or not own.get("repo"):
         return []
     slug = _repo_slug(own["repo"], own.get("branch", "main"))
     names = []
@@ -1221,7 +1223,7 @@ def bay_push_siblings(services, svc_name, default_strategy="local"):
         build = svc.get("build")
         if not isinstance(build, dict) or build.get("shared_from"):
             continue
-        if (build.get("bay_toml_path") or "") != own_path or not build.get("repo"):
+        if _push_project(build) != own_key or not build.get("repo"):
             continue
         if _repo_slug(build["repo"], build.get("branch", "main")) == slug:
             names.append(name)
@@ -1236,6 +1238,22 @@ def bay_push_siblings(services, svc_name, default_strategy="local"):
             == (services[aliases[n]].get("regions") or [])
         )
     )
+
+
+def _push_project(build):
+    """What makes builds one project for a push, or None.
+
+    ``("toml", <bay_toml_path>)`` for a bay.toml in the app repo,
+    ``("project", <bay_project>)`` for one in the fleet. The two kinds never
+    match each other.
+    """
+    path = build.get("bay_toml_path") or ""
+    if path:
+        return ("toml", path)
+    project = build.get("bay_project") or ""
+    if project:
+        return ("project", project)
+    return None
 
 
 def _build_strategy(build, default_strategy="local"):
