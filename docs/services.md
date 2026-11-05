@@ -485,6 +485,13 @@ app repo. Never write them by hand (see [build-pipeline.md](build-pipeline.md),
 | `bay_build_hash` | Canonical hash of the `[build]` part of the pinned `bay.toml` (`python -m bay_reconcile.tomlhash --section build`). A push is config-only only when this matches. |
 | `bay_toml_files` | The files the mounts read, relative to the repo root. |
 
+For a project whose `bay.toml` lives in the fleet (`projects/<name>/bay.toml`), `bay compile`
+writes `bay_project: <name>` instead, and only when the project has two or more containers
+with their own `build` (not `shared_from`). The webhook receiver reads it to build every
+service of the project from one push (see [build-pipeline.md](build-pipeline.md), "Extra
+services of one repo"). A project with one build, and a project in its app repo, never get
+it. Never write it by hand.
+
 ### Build Strategy
 
 The `build.strategy` field controls where images are built. Set a server-level default in `group_vars`:

@@ -824,11 +824,18 @@ from one push.
   `shop-app` or `shop-worker`.
 - **The receiver fans the push out to the siblings.** The receiver config
   (`webhook-config.json.j2`) gives each service a `siblings` list: the other
-  services with the same repo, branch and `bay_toml_path`
+  services with the same repo and branch, of the same project
   (`bay_push_siblings` in `filter_plugins/bay_filters.py`). A service with no
   siblings has no `siblings` key, so its config is the same as before. After
   the signature check, the receiver runs the normal push handling for the
   hook's service and then for each sibling.
+- **How the receiver knows a project.** With the `bay.toml` in the app repo,
+  the builds of one project have the same `bay_toml_path`. With the
+  `bay.toml` in the fleet (`projects/<name>/bay.toml`), `bay compile` writes
+  `bay_project: <name>` on each build of a project that has two or more
+  services with their own build, and the builds of one project have the same
+  `bay_project`. Two projects in the fleet that build from the same repo and
+  branch are not siblings.
 - **Each sibling builds on its own.** It uses its own config entry: branch,
   `watch` and `ignore`, build context, regions and peers. It gets its own
   trigger file and its own correlation id. A sibling in another region is
