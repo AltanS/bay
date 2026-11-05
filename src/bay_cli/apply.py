@@ -935,18 +935,30 @@ def _apply_plan_steps(
     # did not fail and its own box wrote an ok receipt for this fleet commit.
     run_failed = failure is not None
     hosts, map_problem = box_names(cx, box_env)
-    results, unmapped = box_results(entries, fleet_commit, hosts)
     unread = unreadable_boxes(entries, hosts, cx, box_env)
-    box_notes = [f"{map_problem}; the receipt host names are taken as box names"] * bool(
-        map_problem
-    ) + [
-        f"host {host}: its receipt maps to no box of {box_env} in bay.fleet.toml, so no "
-        "lock record takes its result"
-        for host in unmapped
-    ]
+    per_box = hosts is not None
+    if hosts is not None:
+        results, unmapped = box_results(entries, fleet_commit, hosts)
+        box_notes = [
+            f"host {host}: its receipt maps to no box of {box_env} in bay.fleet.toml, so no "
+            "lock record takes its result"
+            for host in unmapped
+        ]
+    else:
+        # No map: never take host names for box names. The rule before 2.12.
+        results = env_wide_results(entries, fleet_commit, cx, box_env, unread)
+        box_notes = [
+            f"per-box results were not available ({map_problem}); every project of "
+            f"{box_env} gets the result of the whole deploy, as before 2.12: ok only when "
+            "every receipt from this deploy says ok"
+        ]
     if failure is None and "failed" in results.values():
         failed_boxes = sorted(b for b, r in results.items() if r == "failed")
-        failure = f"the box receipt says the deploy failed on {', '.join(failed_boxes)}"
+        failure = (
+            f"the box receipt says the deploy failed on {', '.join(failed_boxes)}"
+            if per_box
+            else "the box receipt says the deploy failed"
+        )
     deployed_at = planmod._now()
     pinned: list[dict[str, Any]] = []
     lock_files: list[Path] = []
@@ -1575,41 +1587,83 @@ def unreadable_boxes(
         if not error:
             continue
         host = entry.get("box")
-        if host is None:
+        if host is None or hosts is None:
+            # The whole read failed, or no map: Bay cannot tell the box, so every box.
             names = all_boxes
-        elif hosts is None:
-            names = [str(host)]
         else:
             names = list(hosts.get(str(host), []))
         out += [{"box": n, "host": host, "error": str(error)} for n in names]
     return out
 
 
+def _env_boxes(cx: Context, box_env: str) -> list[str]:
+    try:
+        boxes = planmod.load_fleet_doc(cx).get("boxes") or {}
+    except (BayError, OSError, ValueError):
+        return []
+    return sorted(n for n, b in boxes.items() if b.get("env") == box_env)
+
+
 def box_names(cx: Context, box_env: str) -> tuple[dict[str, list[str]] | None, str | None]:
     """``({inventory host: [fleet box]}, problem)`` for the receipts of ``box_env``.
 
-    :func:`bay_cli.receipts.host_boxes` over the fleet's ``[boxes]``. When the
-    inventory cannot be read, the map is None and ``problem`` says why.
+    :func:`bay_cli.receipts.host_boxes` over the fleet's ``[boxes]``, with the
+    inventory read once, as the deploy reads it. The map is None, and
+    ``problem`` says why, when the inventory cannot be read, when it has no
+    host in the box env, or when a box of the box env maps to no host. Bay
+    then cannot judge per box (:func:`env_wide_results`).
     """
     from bay_cli import receipts
 
     try:
         boxes = planmod.load_fleet_doc(cx).get("boxes") or {}
-        return receipts.host_boxes(cx.fleet_root, boxes, box_env), None
-    except Exception as exc:  # the inventory parser raises many types
+        names = receipts.inventory_names(cx.fleet_root, cx.framework_root)
+    except Exception as exc:  # the inventory reader raises many types
         return None, f"cannot read the inventory of {box_env}: {exc}"
+    if not names.get(box_env):
+        return None, f"the inventory has no host in {box_env}"
+    mapping = receipts.host_boxes(cx.fleet_root, boxes, box_env, names=names)
+    placed = {b for found in mapping.values() for b in found}
+    lost = [b for b in _env_boxes(cx, box_env) if b not in placed]
+    if lost:
+        return None, f"box {', '.join(lost)} of {box_env} maps to no inventory host"
+    return mapping, None
+
+
+def env_wide_results(
+    entries: list[dict[str, Any]],
+    fleet_commit: str,
+    cx: Context,
+    box_env: str,
+    unread: list[dict[str, Any]],
+) -> dict[str, str]:
+    """The result rule before 2.12, for every box of ``box_env`` (no host-to-box map).
+
+    ``ok`` when every receipt from this deploy says ``ok``, else ``failed``, for
+    every box of the box env. A receipt that cannot be read (``unread``) leaves
+    its boxes out (with no map: every box), so their projects are failed with
+    the "could not be read" error.
+    """
+    fresh = [
+        e["receipt"] for e in entries
+        if isinstance(e.get("receipt"), Mapping) and e["receipt"].get("fleet_commit") == fleet_commit
+    ]
+    word = "ok" if all(r.get("result") == "ok" for r in fresh) else "failed"
+    skip = {u["box"] for u in unread}
+    return {b: word for b in _env_boxes(cx, box_env) if b not in skip}
 
 
 def box_results(
     entries: list[dict[str, Any]],
     fleet_commit: str,
-    hosts: Mapping[str, list[str]] | None = None,
+    hosts: Mapping[str, list[str]],
 ) -> tuple[dict[str, str], list[str]]:
     """``({fleet box: "ok" | "failed"}, unmapped hosts)`` for this deploy.
 
     A receipt entry names its inventory host (``box``); ``hosts`` maps it to
-    the fleet boxes of ``bay.fleet.toml`` (:func:`box_names`). With no map, the
-    host name is taken as the box name.
+    the fleet boxes of ``bay.fleet.toml`` (:func:`box_names`). With no map the
+    caller uses :func:`env_wide_results` instead; a host name is never taken
+    for a box name.
 
     A receipt is from this deploy when its ``fleet_commit`` is this run's fleet
     commit (:func:`applied_from` uses the same test). Per box: ``failed`` when
@@ -1627,7 +1681,7 @@ def box_results(
         host = entry.get("box") or (receipt.get("box") if isinstance(receipt, Mapping) else None)
         if host is None:
             continue
-        names = [str(host)] if hosts is None else list(hosts.get(str(host), []))
+        names = list(hosts.get(str(host), []))
         if not names:
             unmapped.append(str(host))
             continue

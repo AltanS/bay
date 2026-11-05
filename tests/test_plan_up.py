@@ -5638,6 +5638,100 @@ def test_a_box_with_a_group_gets_only_that_groups_hosts(tmp_path: Path) -> None:
     }
 
 
+# ── review 4, item 2: no host-to-box map means the env-wide rule of 2.11 ────
+
+
+def _no_map(monkeypatch: pytest.MonkeyPatch, names: dict[str, list[str]] | None) -> None:
+    from bay_cli import receipts
+
+    def read(fleet_root: Path, framework_root: Path | None = None) -> dict[str, list[str]]:
+        if names is None:
+            raise RuntimeError("inventory parse error")
+        return names
+
+    monkeypatch.setattr(receipts, "inventory_names", read)
+
+
+@pytest.mark.parametrize(
+    ("names", "why"),
+    [
+        (None, "cannot read the inventory of production: inventory parse error"),
+        ({"production": []}, "the inventory has no host in production"),
+        ({"production": ["192.0.2.11"], "one": ["192.0.2.11"]},
+         "box box-2 of production maps to no inventory host"),
+    ],
+    ids=["unreadable", "no-host", "box-with-no-host"],
+)
+def test_no_host_map_keeps_a_good_deploy_ok(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch,
+    names: dict[str, list[str]] | None, why: str,
+) -> None:
+    _two_boxes_status_on_one(world, "box-2")
+    _no_map(monkeypatch, names)
+    result = do_up(world)
+    assert result["result"] == "ok", result
+    assert {r["project"]: r["result"] for r in result["pinned"]} == {"webapp": "ok", "status": "ok"}
+    assert lock_of(world)["envs"]["production"]["result"] == "ok"
+    notes = [n for n in result["notes"] if n.startswith("per-box results were not available")]
+    assert len(notes) == 1 and f"({why})" in notes[0], result["notes"]
+    # Host names are never taken for box names.
+    assert not any("maps to no box" in n for n in result["notes"])
+
+
+def test_no_host_map_and_a_failed_box_fails_the_whole_env(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _two_boxes_status_on_one(world, "box-2")
+    _no_map(monkeypatch, None)
+    box.fail_boxes = {"box-2"}
+    with pytest.raises(applymod.DeployFailed) as caught:
+        do_up(world)
+    rows = {r["project"]: r["result"] for r in caught.value.result["pinned"]}
+    assert rows == {"webapp": "failed", "status": "failed"}
+
+
+def test_the_inventory_is_read_once_with_the_deploy_environment(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess as sp
+
+    from bay_cli import receipts
+
+    calls: list[dict[str, Any]] = []
+    real = sp.run
+
+    def run(cmd: list[str], **kw: Any) -> Any:
+        if "ansible-inventory" in cmd:
+            calls.append({"cmd": cmd, **kw})
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(receipts.subprocess, "run", run)
+    cx = cx_of(world)
+    assert do_up(world)["result"] == "ok"
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["cwd"] == world["fleet"]
+    vendor = str(cx.framework_root / "vendor" / "collections")
+    assert call["env"]["ANSIBLE_COLLECTIONS_PATH"] == vendor
+    assert call["env"]["ANSIBLE_ROLES_PATH"].endswith(str(cx.framework_root / "roles"))
+    assert call["cmd"][-1] == "--graph"
+
+
+def test_the_inventory_read_needs_no_vault_password(tmp_path: Path) -> None:
+    """``--graph`` loads no variables, so a vaulted group_vars file does not stop it."""
+    from bay_cli import receipts
+
+    (tmp_path / "hosts").mkdir()
+    (tmp_path / "hosts" / "production").write_text(FAKE_INVENTORY)
+    (tmp_path / "group_vars" / "production").mkdir(parents=True)
+    (tmp_path / "group_vars" / "production" / "secrets.yml").write_text(
+        "$ANSIBLE_VAULT;1.1;AES256\n6162\n"
+    )
+    names = receipts.inventory_names(tmp_path)
+    assert names["production"] == ["192.0.2.11", "192.0.2.12"]
+    assert names["two"] == ["192.0.2.12"]
+
+
 def test_a_claim_on_the_old_box_env_of_a_move_blocks(
     world: dict[str, Path], box: FakeBox
 ) -> None:

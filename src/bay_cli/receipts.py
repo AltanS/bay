@@ -169,27 +169,70 @@ def _box_entry(env: str, box: str | None, result: Mapping[str, Any]) -> dict[str
 InventoryReader = Callable[[Path], dict[str, list[str]]]
 
 
-def inventory_names(fleet_root: Path) -> dict[str, list[str]]:
+def inventory_names(fleet_root: Path, framework_root: Path | None = None) -> dict[str, list[str]]:
     """``{name: hosts}`` for every group and every host of the fleet inventory.
 
-    A group gives its hosts (children included), a host gives itself. Ansible's
-    own inventory code reads the inventory the deploy gets
-    (:func:`bay_cli.ansible._fleet_inventory`), so a host is in a group here
-    exactly when the deploy's ``group_names`` has it. Raises when the
-    inventory cannot be read.
+    A group gives its hosts (children included), a host gives itself. The
+    inventory is read as the deploy reads it: ``ansible-inventory --graph``
+    runs in the framework's uv environment with the deploy's environment
+    (:func:`bay_cli.ansible.fleet_env`, the vendored collections) and the same
+    ``-i`` directory (:func:`bay_cli.ansible._fleet_inventory`). ``--graph``
+    loads no variables, so it needs no vault password. Raises
+    :class:`RuntimeError` when the inventory cannot be read.
     """
-    from ansible.inventory.manager import InventoryManager
-    from ansible.parsing.dataloader import DataLoader
+    import os
 
+    from bay_cli.context import package_root
+
+    bay_dir = framework_root or package_root()
     with ansible._fleet_inventory(fleet_root) as source:
         if source is None:
             return {}
-        manager = InventoryManager(loader=DataLoader(), sources=[str(source)])
-        out = {name: sorted(h.name for h in group.get_hosts())
-               for name, group in manager.groups.items()}
-        for host in manager.hosts:
-            out.setdefault(host, [host])
-        return out
+        env = {
+            **os.environ,
+            **ansible._collections_env(bay_dir),
+            **ansible.fleet_env(bay_dir, fleet_root),
+            "ANSIBLE_FORCE_COLOR": "False",
+            "ANSIBLE_NOCOLOR": "True",
+        }
+        cmd = [*ansible._uv_run_cmd(bay_dir), "ansible-inventory", "-i", str(source), "--graph"]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, cwd=fleet_root, env=env, timeout=60
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"ansible-inventory did not run: {exc}") from exc
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise RuntimeError(
+            f"ansible-inventory failed: {detail[-1] if detail else f'exit {proc.returncode}'}"
+        )
+    return parse_graph(proc.stdout)
+
+
+def parse_graph(text: str) -> dict[str, list[str]]:
+    """``{group or host: hosts}`` from ``ansible-inventory --graph`` output."""
+    import re
+
+    out: dict[str, set[str]] = {}
+    stack: list[str] = []
+    for raw in text.splitlines():
+        line = re.sub(r"\x1b\[[0-9;]*m", "", raw).rstrip()
+        if not line.strip():
+            continue
+        depth = line.count("|")
+        name = line.split("--", 1)[1] if "--" in line else line.strip()
+        if name.startswith("@"):
+            group = name[1:].rstrip(":")
+            del stack[depth:]
+            stack.append(group)
+            out.setdefault(group, set())
+            continue
+        del stack[depth:]
+        for group in stack:
+            out.setdefault(group, set()).add(name)
+        out.setdefault(name, set()).add(name)
+    return {k: sorted(v) for k, v in out.items()}
 
 
 def host_boxes(
@@ -198,25 +241,27 @@ def host_boxes(
     box_env: str,
     *,
     read_inventory: InventoryReader | None = None,
+    names: Mapping[str, list[str]] | None = None,
 ) -> dict[str, list[str]]:
     """``{inventory host: [fleet box names]}`` for the boxes of ``box_env``.
 
     A receipt's ``box`` is the ``inventory_hostname`` (often an address),
-    while the lock and the plan name a box of ``bay.fleet.toml``. The deploy
-    puts the containers of a box on the hosts of its ``group``
-    (``docs/layout-scenarios.md``, "Words"): so a host belongs to a box when
-    it is in the box's group, and only then: the box name places nothing. A
-    box with no group is alone in its box env and gets every host of the box
-    env. A host in the groups of two boxes runs both, so it maps to both.
-    Raises when the inventory cannot be read.
+    while the lock and the plan name a box of ``bay.fleet.toml``. The rule is
+    the deploy's own placement (``docs/layout-scenarios.md``, "Words"): the
+    compiler writes the box's ``group`` and the deploy puts its containers on
+    the hosts of that group. So a box with a ``group`` gets that group's hosts
+    and only those. A box with no group is alone in its box env and gets every
+    host of the box env. A host in the groups of two boxes runs both, so it
+    maps to both. The box name places nothing. Raises when the inventory
+    cannot be read.
     """
-    names = (read_inventory or inventory_names)(fleet_root)
+    found = names if names is not None else (read_inventory or inventory_names)(fleet_root)
     out: dict[str, list[str]] = {}
     for name, box in sorted(boxes.items()):
         if box.get("env") != box_env:
             continue
         group = box.get("group")
-        hosts = set(names.get(str(group) if group else box_env, []))
+        hosts = set(found.get(str(group) if group else box_env, []))
         for host in sorted(hosts):
             out.setdefault(host, []).append(name)
     return out
