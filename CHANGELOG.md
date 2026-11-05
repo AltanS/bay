@@ -8,6 +8,18 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.10.0] - 2026-11-05
+
+`bay provision` now locks the root password.
+
+### Added
+- `roles/users` locks the root password on every provision. Bay already refused root over SSH, but it never locked the password. Hetzner images ship with a locked root, so those boxes looked locked. A netcup image ships with a root password, and that password stayed valid at the provider console. New variable `users_lock_root_password`, default `true`.
+
+### Upgrade notes
+- Run `bay provision <group> --tags users` on each box to apply the lock. After that, root has no console login. Recovery without network is the provider's rescue system.
+- Set `users_lock_root_password: false` in the fleet group vars before the provision to keep a console root password.
+- A box whose root is already locked reports the task as unchanged.
+
 ## [2.9.2] - 2026-11-04
 
 The first `bay deploy --rig` on a fresh box no longer fails at the Traefik restart handler.

@@ -49,3 +49,10 @@
     name: "{{ app_user }}"
     password_lock: true
   become: true
+
+- name: Lock the root password (no console password login)
+  ansible.builtin.user:
+    name: root
+    password_lock: true
+  when: users_lock_root_password | bool
+  become: true

@@ -9,3 +9,8 @@ users_create_home: true
 # Sudoers config for admin user
 users_admin_sudoers: true
 users_admin_sudo_nopasswd: true
+
+# Lock the root password on provision. Root then has no password login at the
+# provider console; SSH for root is already refused. Recovery without network
+# is the provider's rescue system. Set false to keep a console root password.
+users_lock_root_password: true
