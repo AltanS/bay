@@ -2621,6 +2621,11 @@ def _probe_webhook_health(
     - Checks last_response.code (200 = ok, null = informational note, other = fail).
     - Flags orphan hooks that belong to this consumer's webhook_domain but have
       no matching service (safe to remove with ``bay service prune-webhooks``).
+    - Checks the extra services of one bay.toml as one group
+      (``push_sibling_groups``): the receiver builds every member from a push
+      posted for any of them, so a hook on any member is enough. No hook
+      fails once for the group. Two or more hooks warn: each push then
+      builds the group once per hook.
     """
     import requests
 
@@ -2629,6 +2634,7 @@ def _probe_webhook_health(
         list_repo_hooks,
         parse_repo_owner_name,
         probe_service_webhook,
+        push_sibling_groups,
         resolve_webhook_domain,
     )
 
@@ -2689,10 +2695,17 @@ def _probe_webhook_health(
     # 4. Probe each repo (cached per unique owner/repo)
     cache: dict[str, list[dict[str, Any]]] = {}
     orphan_reported: set[str] = set()
+    group_of = {
+        name: group for group in push_sibling_groups(services) for name in group
+    }
+    groups_done: set[str] = set()
 
     for svc_name, owner, repo_name in build_services:
         repo_key = f"{owner}/{repo_name}"
         hook_url_pattern = f"https://{webhook_domain}/webhook/{svc_name}"
+        group = group_of.get(svc_name)
+        if group is not None and group[0] in groups_done:
+            continue
 
         try:
             hooks = list_repo_hooks(owner, repo_name, github_token, _cache=cache)
@@ -2716,14 +2729,20 @@ def _probe_webhook_health(
             )
             continue
 
-        # Per-service hook probe
-        probe = probe_service_webhook(svc_name, hook_url_pattern, hooks)
-        if probe.status == "ok":
-            result.ok(f"Webhook health     {probe.message}")
-        elif probe.status == "note":
-            result.warn(f"Webhook health     note: {probe.message}")
-        elif probe.status == "fail":
-            result.fail(f"Webhook health     {probe.message}")
+        def _report(probe: Any) -> None:
+            if probe.status == "ok":
+                result.ok(f"Webhook health     {probe.message}")
+            elif probe.status == "note":
+                result.warn(f"Webhook health     note: {probe.message}")
+            elif probe.status == "fail":
+                result.fail(f"Webhook health     {probe.message}")
+
+        if group is None:
+            # Per-service hook probe
+            _report(probe_service_webhook(svc_name, hook_url_pattern, hooks))
+        else:
+            groups_done.add(group[0])
+            _probe_sibling_group(group, webhook_domain, hooks, result, _report)
 
         # Orphan scan — once per repo
         if repo_key not in orphan_reported:
@@ -2736,6 +2755,52 @@ def _probe_webhook_health(
                     f"Webhook health     orphan hook on {repo_key}: {orphan_url} "
                     f"— run 'bay service prune-webhooks {repo_key}' to remove"
                 )
+
+
+def _probe_sibling_group(
+    group: list[str],
+    webhook_domain: str,
+    hooks: list[dict[str, Any]],
+    result: ValidationResult,
+    report: Any,
+) -> None:
+    """Probe the hooks of one group of extra services of one bay.toml.
+
+    The webhook receiver builds every member from a push posted for any of
+    them (its ``siblings``), so one hook on any member covers the group.
+    """
+    from bay_cli.github_webhook import hooks_for_service, probe_service_webhook
+
+    names = ", ".join(f"'{n}'" for n in group)
+    hooked = []
+    for name in group:
+        url = f"https://{webhook_domain}/webhook/{name}"
+        own = hooks_for_service(url, hooks)
+        if own:
+            hooked.append(name)
+            report(probe_service_webhook(name, url, own))
+    if not hooked:
+        result.fail(
+            f"Webhook health     no webhook found for the services {names} of one "
+            f"bay.toml: add one hook, for any of them, matching "
+            f"https://{webhook_domain}/webhook/<service>"
+        )
+        return
+    others = [n for n in group if n not in hooked]
+    if len(hooked) == 1:
+        if others:
+            result.ok(
+                f"Webhook health     the hook for '{hooked[0]}' also builds "
+                + ", ".join(f"'{n}'" for n in others)
+                + " (same bay.toml)"
+            )
+        return
+    result.warn(
+        "Webhook health     "
+        + ", ".join(f"'{n}'" for n in hooked)
+        + " of one bay.toml each have a hook: each push builds every service of "
+        f"the group ({names}) once per hook. Keep one hook and delete the others."
+    )
 
 
 # ── Identifier safety ────────────────────────────────────────────────────

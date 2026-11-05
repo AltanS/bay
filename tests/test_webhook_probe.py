@@ -325,6 +325,118 @@ def test_probe_webhook_health_url_mismatch_fails(tmp_path):
         set_json_mode(False)
 
 
+# ── Extra services of one bay.toml: one hook per group ──────────────────
+
+
+def _group_services_data() -> dict:
+    def svc(dockerfile: str, **extra) -> dict:
+        build = {
+            "repo": "git@github.com:Org/shop.git",
+            "branch": "main",
+            "bay_toml_path": "bay.toml",
+            "dockerfile": dockerfile,
+            "strategy": "remote",
+        }
+        build.update(extra)
+        return {"build": build, "access": "public"}
+
+    return {
+        "services": {
+            "shop": svc("Dockerfile"),
+            "shop-app": svc("Dockerfile.app"),
+            "shop-ping": svc("Dockerfile.app"),
+            # Shares the main build: probed on its own, as before.
+            "shop-admin": svc("Dockerfile", shared_from="shop"),
+        },
+        "accessories": {},
+    }
+
+
+def _hook(name: str, code: int | None = 200) -> dict:
+    return {
+        "id": hash(name) & 0xFFFF,
+        "config": {"url": f"https://webhook.example.com/webhook/{name}"},
+        "last_response": {"code": code},
+    }
+
+
+def _run_group_probe(tmp_path: Path, hooks: list[dict]):
+    from bay_cli.commands.validate import ValidationResult, _probe_webhook_health
+    from bay_cli.console.output import set_json_mode
+
+    set_json_mode(True)
+    try:
+        root = _make_consumer_root(tmp_path, webhook_domain="webhook.example.com", github_token="tok")
+        parsed = {"group_vars/all/secrets.yml": {"github_admin_token": "tok"}}
+        with patch("bay_cli.github_webhook.requests") as mock_req:
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.json.return_value = hooks
+            mock_resp.raise_for_status = MagicMock()
+            mock_req.get.return_value = mock_resp
+            result = ValidationResult()
+            _probe_webhook_health(root, "production", _group_services_data(), parsed, result)
+        return result
+    finally:
+        set_json_mode(False)
+
+
+def test_push_sibling_groups_match_the_receiver_filter():
+    """Same groups as filter_plugins `bay_push_siblings`, which the receiver uses."""
+    import sys
+
+    from bay_cli.github_webhook import push_sibling_groups
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "filter_plugins"))
+    from bay_filters import bay_push_siblings
+
+    services = _group_services_data()["services"]
+    services["docs"] = {"build": {"repo": "git@github.com:Org/shop.git", "bay_toml_path": "docs/bay.toml"}}
+    services["other"] = {"build": {"repo": "git@github.com:Org/shop.git", "branch": "dev",
+                                   "bay_toml_path": "bay.toml"}}
+    groups = push_sibling_groups(services)
+    assert groups == [["shop", "shop-app", "shop-ping"]]
+    for group in groups:
+        for name in group:
+            assert bay_push_siblings(services, name) == [n for n in group if n != name]
+    for name in ("shop-admin", "docs", "other"):
+        assert not any(name in g for g in groups)
+
+
+def test_group_with_one_hook_on_any_member_passes(tmp_path):
+    result = _run_group_probe(tmp_path, [_hook("shop-app"), _hook("shop-admin")])
+    assert not any("shop'" in f or "shop-ping" in f or "shop-app" in f for f in result.failed), result.failed
+    assert not any("once per hook" in w for w in result.warnings)
+    assert any("also builds 'shop', 'shop-ping'" in o for o in result.passed)
+
+
+def test_group_with_no_hook_reports_once_naming_every_member(tmp_path):
+    # A hook for the shared service only: its URL starts with `.../webhook/shop`
+    # but it is not a hook of `shop`.
+    result = _run_group_probe(tmp_path, [_hook("shop-admin")])
+    group_fails = [f for f in result.failed if "of one bay.toml" in f]
+    assert len(group_fails) == 1
+    assert "'shop', 'shop-app', 'shop-ping'" in group_fails[0]
+    assert not any("no webhook found for 'shop" in f for f in result.failed)
+
+
+def test_group_with_two_hooks_warns_to_keep_one(tmp_path):
+    result = _run_group_probe(tmp_path, [_hook("shop"), _hook("shop-ping"), _hook("shop-admin")])
+    warns = [w for w in result.warnings if "once per hook" in w]
+    assert len(warns) == 1
+    assert "'shop', 'shop-ping'" in warns[0]
+    assert "Keep one hook" in warns[0]
+    assert not result.failed
+
+
+def test_shared_service_keeps_the_single_service_probe(tmp_path):
+    # Not a group member: probed on its own, with the old prefix match.
+    result = _run_group_probe(tmp_path, [_hook("shop")])
+    assert any("no webhook found for 'shop-admin'" in f for f in result.failed)
+    result = _run_group_probe(tmp_path / "x", [_hook("shop"), _hook("shop-admin")])
+    assert any("webhook for 'shop-admin' is healthy" in o for o in result.passed)
+
+
 def test_probe_webhook_health_404_last_response_fails(tmp_path):
     """last_response.code = 404 → probe fails."""
     from bay_cli.commands.validate import ValidationResult, _probe_webhook_health

@@ -225,6 +225,49 @@ def probe_service_webhook(
     )
 
 
+# ── Extra services of one bay.toml ────────────────────────────────────────
+
+
+def push_sibling_groups(services: dict[str, Any]) -> list[list[str]]:
+    """The groups of services that one push builds together, two or more each.
+
+    Same rule as ``bay_push_siblings`` in filter_plugins/bay_filters.py, which
+    writes ``siblings`` into the webhook receiver's config: a ``build`` with
+    the same repo, branch (default ``main``) and non-empty ``bay_toml_path``,
+    and no ``shared_from``. The receiver fans a push posted for any member out
+    to the others, so the group needs one GitHub hook, on any member. Each
+    group is sorted; the groups are sorted by their first name.
+    """
+    groups: dict[tuple[str, str, str], list[str]] = {}
+    for name, svc in (services or {}).items():
+        build = svc.get("build") if isinstance(svc, dict) else None
+        if not isinstance(build, dict) or build.get("shared_from"):
+            continue
+        repo = str(build.get("repo") or "")
+        path = str(build.get("bay_toml_path") or "")
+        if not repo or not path:
+            continue
+        key = (repo, str(build.get("branch", "main")), path)
+        groups.setdefault(key, []).append(str(name))
+    return sorted(sorted(g) for g in groups.values() if len(g) > 1)
+
+
+def hooks_for_service(hook_url: str, hooks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The hooks whose URL is ``hook_url`` exactly, or that URL plus a path or query.
+
+    Stricter than the prefix match of ``probe_service_webhook``: the hook of
+    ``shop-app`` is not a hook of ``shop`` here. The group check needs to
+    know which member a hook belongs to.
+    """
+    want = _normalise_url(hook_url)
+    out = []
+    for hook in hooks:
+        url = _normalise_url(str(hook.get("config", {}).get("url", "")))
+        if url == want or url.startswith(want + "/") or url.startswith(want + "?"):
+            out.append(hook)
+    return out
+
+
 # ── Orphan detection ──────────────────────────────────────────────────────
 
 
