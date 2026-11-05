@@ -8,6 +8,7 @@ See the v0.76.0 trim_blocks regression for a concrete example.
 
 import json
 import shlex
+import shutil
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
@@ -94,3 +95,18 @@ def patch_fleet(root: Path, framework: Path | None = None):
 
     cx = Context.for_fleet_root(root, framework if framework is not None else root / ".bay")
     return patch.object(Context, "resolve", classmethod(lambda cls, fleet=None: cx))
+
+
+def host_tools(directory: Path, *names: str) -> Path:
+    """Make `directory` hold a symlink to this host's copy of each tool.
+
+    A rendered box script names Debian paths (`/usr/bin/cat`) and a test may
+    pin PATH to `/usr/bin:/bin`. NixOS has neither, so a test points the
+    script or PATH at this folder instead. A missing tool fails the test.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        found = shutil.which(name)
+        assert found, f"{name} is not on this host's PATH"
+        (directory / name).symlink_to(found)
+    return directory

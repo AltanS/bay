@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from helpers import make_ansible_env
+from helpers import host_tools, make_ansible_env
 
 ROOT = Path(__file__).resolve().parent.parent
 ROLE = ROOT / "roles" / "debug_agent"
@@ -114,6 +114,16 @@ def readlog(tmp_path):
     secret = tmp_path / "secret.txt"
     secret.write_text("topsecret\n")
     script = _script(tmp_path, "bay-readlog", debug_agent_readable_paths=[str(logs)])
+    # The box script runs Debian paths; point them at this host's tools so the
+    # test also runs on NixOS. Assert first, so a template change cannot make
+    # the swap a silent no-op.
+    tools = host_tools(tmp_path / "tools", "cat", "tail", "head", "grep", "ls")
+    body = script.read_text()
+    for debian, here in (('exec "/usr/bin/$op"', f'exec "{tools}/$op"'),
+                         ("exec /bin/ls ", f"exec {tools}/ls ")):
+        assert debian in body, debian
+        body = body.replace(debian, here)
+    script.write_text(body)
     return script, logs, secret
 
 

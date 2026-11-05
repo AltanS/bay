@@ -28,7 +28,7 @@ from pathlib import Path
 import jinja2
 import pytest
 import yaml
-from helpers import make_ansible_env
+from helpers import host_tools, make_ansible_env
 from test_observability_contract import _ansible_env, _minimal_render_context
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -262,7 +262,9 @@ def _run_helper(tmp_path: Path, *, endpoint: str, docker_body: str | None, timeo
     result = subprocess.run(
         ["bash", str(script)],
         capture_output=True, text=True,
-        env={"PATH": f"{bindir}:/usr/bin:/bin"},
+        # Only the tools the helper and the fake docker need, never the host's
+        # real docker. Symlinks, not /usr/bin:/bin, which NixOS does not fill.
+        env={"PATH": f"{bindir}:{host_tools(tmp_path / 'tools', 'bash', 'timeout', 'awk', 'sleep')}"},
     )
     elapsed = time.monotonic() - start
     return result, (calls.read_text() if calls.exists() else ""), elapsed

@@ -8,6 +8,13 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.10.1] - 2026-11-05
+
+The test suite now passes on NixOS. No change on a box.
+
+### Fixed
+- 5 tests failed on NixOS, because NixOS has no `/usr/bin/cat` and no tools in `/usr/bin:/bin`. The `bay-readlog` tests ran the box script with its Debian paths, and the `select-builder.sh` tests set `PATH` to `/usr/bin:/bin`. Each test now uses a folder of symlinks to this host's own tools. The box scripts keep their fixed paths. A release from a NixOS machine no longer needs `BAY_RELEASE_SKIP_CHECKS=1`.
+
 ## [2.10.0] - 2026-11-05
 
 `bay provision` now locks the root password.
