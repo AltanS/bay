@@ -1552,7 +1552,12 @@ machine's pin. Bay closes that gap in three ways:
 
 - **Bay pulls for you.** `bay plan`, `bay up`, `bay rollback`, `bay deploy` and
   `bay provision` fetch, and fast-forward a fleet that is only behind. They
-  never merge or rebase. `bay show` does not pull.
+  never merge or rebase. `bay show` does not pull. Plan ids are content
+  hashes, so two machines that plan the same thing write the same
+  `plans/<id>.json`. Before the fast-forward, Bay removes a local untracked
+  file under `plans/` that the remote now holds, and prints
+  `fleet: removed <n> local plan record(s) that the remote now holds`. It
+  deletes nothing else: any other untracked file in the way still refuses.
 - **Bay claims before it deploys.** `bay up` pushes its fleet commit before
   the deploy. When the remote moved in the meantime, the push is refused,
   Bay undoes its commit and stops before the box (exit 42). Run `bay up`

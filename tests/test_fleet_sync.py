@@ -911,3 +911,69 @@ def test_a_full_undo_says_so_and_lists_nothing(
     assert result.exit_code == 42, result.output
     doc = json.loads(result.stdout)
     assert doc["undo_failed"] == [] and "The fleet commit of this run is undone." in doc["error"]
+
+
+# ── the plan record collision ───────────────────────────────────────────────
+
+
+def test_same_plan_on_two_machines_no_longer_blocks_the_pull(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    m = machines
+    # B plans the same thing A then applies: the same content-hashed plan id.
+    b_plan = cli({"fleet": m["b"], "app": m["app"]}, "plan", "--json")
+    plan_id = json.loads(b_plan.stdout)["plan_id"]
+    a_up = up_at(m, "a", "webapp")
+    assert a_up["plan_id"] == plan_id
+    record = Path("plans") / f"{plan_id}.json"
+    assert (m["b"] / record).is_file()
+    assert git(m["b"], "ls-files", "--", str(record)) == ""  # untracked in B
+    pulled = cli({"fleet": m["b"], "app": m["app"]}, "fleet", "pull")
+    assert pulled.exit_code == 0, pulled.output
+    assert "fleet: removed 1 local plan record(s) that the remote now holds" in pulled.stderr
+    assert git(m["b"], "rev-parse", "HEAD") == git(m["remote"], "rev-parse", "main")
+    assert git(m["b"], "ls-files", "--", str(record)) == str(record)  # now the remote's copy
+
+
+def test_only_colliding_untracked_plan_records_are_removed(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    m = machines
+    (m["a"] / "plans").mkdir(exist_ok=True)
+    (m["a"] / "plans" / "aaaaaaaaaaaa.json").write_text('{"from": "a"}\n')
+    commit_all(m["a"], "a plan record")
+    git(m["a"], "push", "-q")
+    (m["b"] / "plans").mkdir(exist_ok=True)
+    (m["b"] / "plans" / "aaaaaaaaaaaa.json").write_text('{"from": "b"}\n')
+    (m["b"] / "plans" / "bbbbbbbbbbbb.json").write_text('{"only": "b"}\n')
+    (m["b"] / "plans" / "bbbbbbbbbbbb.approved").write_text("approved\n")
+    git(m["b"], "fetch", "-q")
+    pulled = fleetsync.fast_forward(m["b"])
+    assert pulled.count == 1
+    assert (m["b"] / "plans" / "aaaaaaaaaaaa.json").read_text() == '{"from": "a"}\n'
+    assert (m["b"] / "plans" / "bbbbbbbbbbbb.json").read_text() == '{"only": "b"}\n'
+    assert (m["b"] / "plans" / "bbbbbbbbbbbb.approved").is_file()
+
+
+def test_a_colliding_non_plan_file_still_refuses(
+    machines: dict[str, Path], box: FakeBox
+) -> None:
+    m = machines
+    (m["a"] / "plans").mkdir(exist_ok=True)
+    (m["a"] / "plans" / "aaaaaaaaaaaa.json").write_text('{"from": "a"}\n')
+    (m["a"] / "notes.md").write_text("from a\n")
+    commit_all(m["a"], "a plan record and a note")
+    git(m["a"], "push", "-q")
+    (m["b"] / "plans").mkdir(exist_ok=True)
+    (m["b"] / "plans" / "aaaaaaaaaaaa.json").write_text('{"from": "b"}\n')
+    (m["b"] / "notes.md").write_text("from b, untracked\n")
+    head = git(m["b"], "rev-parse", "HEAD")
+    result = cli({"fleet": m["b"], "app": m["app"]}, "fleet", "pull")
+    exc = result.exception
+    assert getattr(exc, "reason", None) == "dirty", result.output
+    assert "notes.md" in str(exc)
+    assert git(m["b"], "rev-parse", "HEAD") == head
+    assert (m["b"] / "notes.md").read_text() == "from b, untracked\n"
+    # The merge did not run, so the plan record B removed for it is back.
+    assert (m["b"] / "plans" / "aaaaaaaaaaaa.json").read_text() == '{"from": "b"}\n'
+    assert "removed" not in result.stderr

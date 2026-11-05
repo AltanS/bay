@@ -265,12 +265,55 @@ def _git_refusal(stderr: str) -> str:
     return "; ".join(keep[:12]) or (lines[-1] if lines else "git refused")
 
 
+#: The folder of plan records: the only place a fast-forward ever deletes a file.
+PLANS = "plans"
+
+
+def _plan_collisions(repo: Path) -> list[str]:
+    """Untracked files under ``plans/`` that the upstream commit tracks.
+
+    Plan ids are content hashes, so two machines that plan the same thing
+    write the same ``plans/<id>.json``. The merge would refuse to overwrite
+    the local untracked copy; the remote one records the same plan.
+    """
+    untracked = _out(repo, "ls-files", "--others", "--", f"{PLANS}/")
+    upstream = _out(repo, "ls-tree", "-r", "--name-only", "@{u}", "--", f"{PLANS}/")
+    if not untracked or not upstream:
+        return []
+    held = set(upstream.splitlines())
+    return sorted(
+        rel
+        for rel in untracked.splitlines()
+        if rel in held and rel.startswith(f"{PLANS}/") and ".." not in Path(rel).parts
+    )
+
+
 def fast_forward(repo: Path) -> Pulled:
-    """``git merge --ff-only @{u}``. Raises :class:`SyncError` when git refuses."""
+    """``git merge --ff-only @{u}``. Raises :class:`SyncError` when git refuses.
+
+    First it removes the local untracked plan records that the upstream
+    commit holds (:func:`_plan_collisions`), and prints how many. Nothing
+    else is ever deleted. When the merge then fails, they are put back.
+    """
     old = gitrepo.head(repo) or ""
     upstream = _out(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}") or "@{u}"
     count = int(_out(repo, "rev-list", "--count", "HEAD..@{u}") or 0)
+    removed: dict[str, bytes] = {}
+    for rel in _plan_collisions(repo):
+        path = repo / rel
+        try:
+            removed[rel] = path.read_bytes()
+            path.unlink()
+        except OSError:
+            removed.pop(rel, None)
     proc = gitrepo._run(repo, "merge", "--ff-only", "--quiet", "--no-stat", "@{u}", timeout=120)
+    if (proc is None or proc.returncode != 0) and removed:
+        for rel, data in removed.items():
+            with contextlib.suppress(OSError):
+                if not (repo / rel).exists():
+                    (repo / rel).write_bytes(data)
+    elif removed:
+        notice(f"fleet: removed {len(removed)} local plan record(s) that the remote now holds")
     if proc is None or proc.returncode != 0:
         detail = _git_refusal(str(proc.stderr) if proc is not None else "git merge timed out")
         raise SyncError(
