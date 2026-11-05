@@ -98,7 +98,7 @@ def _render_compose_zot(**overrides) -> str:
     )()
     base = {
         "zot_enabled": True,
-        "zot_image": "ghcr.io/project-zot/zot:v2.1.15",
+        "zot_image": "ghcr.io/project-zot/zot:v2.1.22",
         "zot_config_dir": "/opt/zot/config",
         "zot_data_dir": "/opt/zot/data",
         "zot_domain": "registry.example.com",

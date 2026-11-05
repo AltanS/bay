@@ -31,12 +31,15 @@ One fleet can now serve several machines. Bay pulls the fleet for you, claims th
 - `previous` in a lock now names the last pin whose deploy was confirmed. Before, a `bay up` that replaced a failed or pending pin made that pin `previous`, so `bay rollback` went back to a commit that never ran. A rollback from a failed pin also put the failed pin back as `previous`. Now an up over a failed or pending pin keeps the `previous` the record has, and drops it when it names the new pin. A record with no `result` (an older lock, `bay adopt`) counts as confirmed. The other projects that a `bay up` pins follow the same rule.
 - The undo of a refused claim checks every git call. When a path cannot be put back, the message says the undo was partial and names the paths, and the JSON error has `undo_failed`.
 - A plain `bay deploy` (with or without `--rig`) now ships the config files of a project. Before, it failed at `deploy_stack : Deploy config files` on a box with a project whose config file sits beside its `bay.toml` (for example `projects/gatus/config.yaml`). Only `bay up` and `bay plan --remote` told the role where those files are. Now `bay deploy` compiles the fleet into a scratch folder, as `bay up` does, and the role copies from there. The compile writes nothing into the fleet. When it fails, the deploy stops before the playbook. A run whose tags skip `deploy_stack` (for example `--tags headscale`) does not compile. With `--allow-dirty`, the config files still come from the committed fleet and the pinned project commits.
+- The default Zot image is now `ghcr.io/project-zot/zot:v2.1.22` (was v2.1.15). v2.1.15 has a dedupe cache bug: with the S3 driver and dedupe on, a layer can serve 0 bytes after a cleanup run. The fix came upstream in PR #4201 (first in v2.1.19) and PR #4465 (first in v2.1.22). The CA bundle mount stays: v2.1.22 is built with Go 1.27.1.
 
 ### Upgrade notes
+- A registry with the S3 driver and dedupe on moves to Zot v2.1.22 on the next rig deploy. v2.1.22 repairs the dedupe cache at each start. This walk takes a few minutes. During the walk, a broken layer returns 404.
+- A registry that already serves 0-byte layers: set `zot_gc_enabled: false` for the first start of v2.1.22. Check that the layers pull, then remove the setting and deploy again.
+- A fleet that sets `zot_image` itself does not change. Set it to v2.1.22 by hand.
 - Update every machine that runs `bay up` on a fleet (`bay self update`). An older CLI cannot write a lock that holds `claimed_by` and `claimed_at`: its schema refuses the two keys. It meets them while a 2.12 machine deploys, and after a 2.12 `bay up` that died before its receipt. Its `bay up` then stops with a lock schema error, possibly after its deploy ran.
 - `bay deploy` and `bay provision` now refuse a fleet with uncommitted files, a diverged fleet and an unreachable remote. Commit and push first, or pass `--allow-dirty` or `--offline`. Run `bay fleet push` after an `--offline` run.
 - New exit codes: 41 (the fleet is not in step with its remote, or dirty for the playbook verbs), 42 (claim refused), 43 (fleet busy), 44 (deployed, but the receipt is not on the remote). 40 stays the first image of `bay up`. Scripts that read the exit code of `bay up`, `bay deploy` or `bay provision` must know them.
-- No action on a box.
 
 ## [2.11.0] - 2026-11-05
 

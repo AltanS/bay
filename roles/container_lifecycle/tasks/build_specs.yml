@@ -458,14 +458,14 @@
     _zot_spec:
       name: zot
       type: infra
-      image: "{{ zot_image | default('ghcr.io/project-zot/zot:v2.1.15') }}"
+      image: "{{ zot_image | default('ghcr.io/project-zot/zot:v2.1.22') }}"
       restart_policy: unless-stopped
       networks:
         - "{{ traefik_docker_network | default('services') }}"
       volumes:
         - "{{ zot_config_dir | default('/opt/zot/config') }}:/etc/zot:ro"
         - "{{ zot_data_dir | default('/opt/zot/data') }}:/var/lib/registry"
-        # eMudhra CA incident (Oct 2026): zot v2.1.15 is built with Go 1.25.8
+        # eMudhra CA incident (Oct 2026): zot v2.1.22 is built with Go 1.27.1
         # and its distroless image ships a CA bundle that still trusts
         # "emSign ECC Root CA - G3", so a MITM on the S3 storage driver could
         # swap blobs and tags. The host's bundle (Ubuntu ca-certificates)

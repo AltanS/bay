@@ -30,7 +30,7 @@
 # out on the hairpin. Deployment nodes use public DNS and are unaffected.
 
 zot_enabled: false
-zot_image: "ghcr.io/project-zot/zot:v2.1.15"
+zot_image: "ghcr.io/project-zot/zot:v2.1.22"
 zot_domain: ""
 zot_port: 5000
 

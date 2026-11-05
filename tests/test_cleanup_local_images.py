@@ -130,7 +130,7 @@ def test_ignores_running_containers_from_other_repos() -> None:
     repo = "registry.example.com/demo/svc"
     removed = _select(
         _TAGS_MIXED,
-        running=["traefik:v3.6", "ghcr.io/project-zot/zot:v2.1.15"],
+        running=["traefik:v3.6", "ghcr.io/project-zot/zot:v2.1.22"],
         keep=3,
         repo=repo,
     )
