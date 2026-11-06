@@ -8,6 +8,14 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.12.2] - 2026-11-06
+
+`bay fleet ls` no longer breaks a path across lines, and CI is green again.
+
+### Fixed
+- `bay fleet ls` word-wrapped long paths with real newlines at the console width. The fleet name could land on its own line, and a link path could be split from its `-> <target>` part. That breaks copy-paste and scripts. Each fleet now prints on one logical line, and the terminal does the display wrapping. The text of each line is the same as before. A fleet path with square brackets is also printed as is now, and is no longer read as Rich markup.
+- CI had been red since 2.11.0 on one test, `tests/test_fleet_link.py::test_ls_shows_the_real_path_of_a_link`. The test sets `COLUMNS=500` for the one command, but Rich reads `COLUMNS` once, when the console is created at import time. A narrower width at import time (a CI runner, a long `/tmp/pytest-of-runner/...` path) won over the test, and the line wrapped. The output fix above makes the test pass at any width.
+
 ## [2.12.1] - 2026-11-06
 
 A push now builds every service of a `bay.toml`, and a remote build that `bay up` adds can clone its repo.
