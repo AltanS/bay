@@ -218,6 +218,37 @@
       }
     },
     "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+    "scope": {
+      "description": "Since 2.13: the boxes a one-project bay up deploys (docs/plan.md, \"Which boxes a run touches\"). Part of the plan id. all_boxes true: no -l, every host of the box env (one box, --all-boxes, no host map, a tailnet allowlist step, a step Bay cannot place). Otherwise limits names the inventory hosts per box env, hosts is their union and skipped_boxes are the boxes the run does not touch. why says why a scope has all_boxes. Absent on a whole-environment plan, which deploys every box.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["all_boxes", "boxes", "hosts", "skipped_boxes", "reasons", "limits", "why"],
+      "properties": {
+        "all_boxes": { "type": "boolean" },
+        "boxes": { "type": "array", "items": { "type": "string" } },
+        "hosts": { "type": "array", "items": { "type": "string" } },
+        "skipped_boxes": { "type": "array", "items": { "type": "string" } },
+        "reasons": {
+          "type": "object",
+          "additionalProperties": {
+            "enum": [
+              "project box",
+              "old box of the move",
+              "ingress box",
+              "build server",
+              "webhook box",
+              "planned step",
+              "shares a host"
+            ]
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": { "type": "array", "items": { "type": "string" } }
+        },
+        "why": { "type": ["string", "null"] }
+      }
+    },
     "code": {
       "description": "Branch mode only, and only when bay up keeps code: the build containers whose running commit is newer than the pin. bay up applies the config and leaves their :latest where it is. Absent otherwise.",
       "type": "object",

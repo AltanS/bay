@@ -65,6 +65,7 @@ from pathlib import Path
 from typing import Any
 
 from bay_cli import gitrepo, layout, lockfile, reposource
+from bay_cli import scope as scopemod
 from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
 from bay_cli.fleet import (
@@ -1910,14 +1911,21 @@ def _running_names(slice_: Mapping[str, Any]) -> set[str] | None:
     return {c["name"] for b in slice_["boxes"] for c in b["containers"]}
 
 
-def default_receipt_reader(cx: Context, box_env: str) -> list[dict[str, Any]]:
+def default_receipt_reader(
+    cx: Context, box_env: str, *, hosts: Sequence[str] | None = None
+) -> list[dict[str, Any]]:
     from bay_cli.receipts import fetch_receipts
 
-    return fetch_receipts(cx, box_env)
+    return fetch_receipts(cx, box_env, hosts=hosts)
 
 
 def default_box_check(
-    cx: Context, box_env: str, services_file: Path, *, config_files_root: Path | None = None
+    cx: Context,
+    box_env: str,
+    services_file: Path,
+    *,
+    config_files_root: Path | None = None,
+    hosts: Sequence[str] | None = None,
 ) -> list[dict[str, Any]] | None:
     """Today's deploy, in check mode, with the plan-only switch, against the compiled file.
 
@@ -1939,6 +1947,9 @@ def default_box_check(
 
     ``config_files_root`` is the ``files/`` of the plan's scratch fleet; the
     check mode run copies config files from there, as ``bay up`` will.
+
+    ``hosts`` limits the check to the hosts of the plan's scope
+    (:func:`bay_cli.scope.limit_args`), as ``bay up`` will limit the deploy.
     """
     from bay_cli.commands.ops import _run_playbook
     from bay_cli.healthcheck import new_report_dir, report_dir_vars
@@ -1964,6 +1975,7 @@ def default_box_check(
                 "_rig_write=false",
                 *report_dir_vars(real_reports),
                 *config_files_vars(config_files_root),
+                *(scopemod.limit_args(hosts) if hosts else []),
                 "--check",
             ],
         )
@@ -2269,6 +2281,9 @@ class PlanOptions:
     #: Branch mode: order running code against the pin. ``bay rollback`` turns
     #: it off: it moves code backwards on purpose.
     code_order: bool = True
+    #: ``--all-boxes``: a one-project run deploys every box of the box env, as
+    #: before 2.13 (no scope, :mod:`bay_cli.scope`).
+    all_boxes: bool = False
 
 
 # ``notes`` is text for the reader (a missing --remote hint, the directory the
@@ -2425,6 +2440,12 @@ class _Diff:
         default_factory=lambda: {"checked": False, "containers": [], "errors": []}
     )
     wanted_data: dict[str, Any] = field(default_factory=dict)
+    #: The scope of a one-project plan (:mod:`bay_cli.scope`), set before the box check.
+    scope: scopemod.Result | None = None
+
+
+#: ``(compiled wanted data or None, steps) -> scope``: the plan's scope, from the compile.
+ScopeOf = Callable[[Mapping[str, Any] | None, list[dict[str, Any]]], scopemod.Result]
 
 
 def _compile_and_diff(
@@ -2445,10 +2466,13 @@ def _compile_and_diff(
     notes: list[str],
     check_box: BoxCheck | None,
     fleet_doc: Mapping[str, Any],
+    scope_of: ScopeOf | None = None,
 ) -> _Diff:
     """Compile the fleet copy, diff it against PINNED, check secrets and (``--remote``) the box.
 
     ``names`` are the containers of the planned project(s) in the env.
+    ``scope_of`` (a one-project plan) computes the scope from the compile
+    before the box check, so the check runs on the hosts ``bay up`` deploys.
     """
     from bay_cli import secrets_check
 
@@ -2495,12 +2519,19 @@ def _compile_and_diff(
                     f"secret {m['name']} is missing in the fleet for "
                     f"{box_env} (used by {', '.join(m['used_by'])})"
                 )
+        if scope_of is not None:
+            out.scope = scope_of(out.wanted_data, out.steps)
         if opts.box_check and box_env is not None and not blockers:
             services_file = comp.services_file()
             assert services_file is not None
             checker = check_box or partial(default_box_check, config_files_root=comp.files_root)
+            limit = scopemod.limit_for(out.scope.scope if out.scope else None, box_env)
             try:
-                entries = checker(cx, box_env, services_file)
+                entries = (
+                    checker(cx, box_env, services_file, hosts=limit)
+                    if limit
+                    else checker(cx, box_env, services_file)
+                )
                 out.box_checked = True
             except (BayError, OSError, SystemExit) as exc:
                 blockers.append(f"the check on the box failed: {exc}")
@@ -2541,7 +2572,10 @@ def _finish(
         notes.append(
             "the steps come from the compiled files alone; pass --remote to check them on the box"
         )
-    if box_env is not None:
+    scoped = scopemod.scope_note(plan.get("scope") or {}, str(plan.get("env")))
+    if scoped is not None:
+        notes.append(scoped)
+    elif box_env is not None:
         notes.append(UNPLANNED_NOTE.format(box_env=box_env))
     backup_note = backup_disabled_note(cx, box_env, steps)
     if backup_note is not None:
@@ -2825,6 +2859,25 @@ def make_plan(
         cx, opts, place.box_env, env_names, notes, read_receipts
     )
 
+    # The scope (spec 2026-11-06): the boxes this run needs, from the compile.
+    t_step = tailnet_step(cx, proj.fleet) if state.is_git else None
+    old_moves = [(place.move[0], box_and_env(proj.fleet, place.move[0])[1])] if place.move else []
+
+    def scope_of(data: Mapping[str, Any] | None, found: list[dict[str, Any]]) -> scopemod.Result:
+        return scopemod.compute(
+            cx,
+            proj.fleet,
+            project=proj.name,
+            box=place.box,
+            box_env=place.box_env,
+            moves=old_moves,
+            steps=[*found, *([t_step] if t_step else [])],
+            current=current,
+            wanted=data,
+            all_boxes=opts.all_boxes,
+            group_var=lambda e, k: _group_var(cx, e, k),
+        )
+
     # Compile WANTED and diff
     diff = _Diff()
     if wanted.doc is not None and not wanted.problems:
@@ -2845,6 +2898,15 @@ def make_plan(
             notes=notes,
             check_box=check_box,
             fleet_doc=proj.fleet,
+            scope_of=scope_of,
+        )
+    scoped = diff.scope or scope_of(None, diff.steps)
+    notes.extend(scoped.notes)
+    if place.box_env is not None:
+        notes.extend(
+            scopemod.drift_notes(
+                cx.fleet_root, scoped.scope, scoped.maps, receipt_entries, place.box_env, env
+            )
         )
     keep: list[str] = []
     code = project_code(proj, wanted, env, env_names, diff, receipt_entries, opts)
@@ -2902,6 +2964,8 @@ def make_plan(
         "exit_code": 0,
         "approval": None,
         "stale": [],
+        # Hashed: the boxes bay up deploys (spec 2026-11-06, 2.13.0).
+        "scope": scoped.scope,
     }
     # Only a plan with a box move carries ``moves``: an older plan without the
     # key keeps its id.
@@ -3423,6 +3487,14 @@ def stale_reasons(saved: Mapping[str, Any], fresh: Mapping[str, Any]) -> list[st
             reasons.append(
                 f"the pin moved: {PROJECTS_DIR}/{name}/{LOCK_FILE} changed since the plan"
             )
+    s_scope, f_scope = saved.get("scope"), fresh.get("scope")
+    if s_scope != f_scope and (s_scope is not None or fresh.get("project") is not None):
+        reasons.append(
+            "the scope changed: the plan runs on "
+            + _scope_words(s_scope)
+            + ", a new plan runs on "
+            + _scope_words(f_scope)
+        )
     s_run, f_run = saved["running"], fresh["running"]
     if (
         s_run.get("checked")
@@ -3438,6 +3510,33 @@ def stale_reasons(saved: Mapping[str, Any], fresh: Mapping[str, Any]) -> list[st
         else:
             reasons.append("plan id differs but no input changed")
     return reasons
+
+
+def _scope_words(scope: Mapping[str, Any] | None) -> str:
+    if not scope:
+        return "every box (a plan made before 2.13)"
+    if scope.get("all_boxes"):
+        return "every box"
+    return "box " + ", ".join(scope.get("boxes") or [])
+
+
+def refuse_all_boxes(saved: Mapping[str, Any], all_boxes: bool) -> None:
+    """``--all-boxes`` with a saved plan whose scope is not every box: refuse."""
+    scope = saved.get("scope")
+    if not all_boxes or not scopemod.is_limited(scope):
+        return
+    assert scope is not None
+    env, project = saved.get("env"), saved.get("project")
+    raise BayError(
+        f"plan {saved.get('plan_id')} runs on box {', '.join(scope['boxes'])} only, "
+        "and --all-boxes asks for every box",
+        hint=f"Plan again with --all-boxes: bay plan {env} --project {project} --all-boxes",
+    )
+
+
+def saved_all_boxes(saved: Mapping[str, Any]) -> bool:
+    """True when the saved plan was made with ``--all-boxes``."""
+    return (saved.get("scope") or {}).get("why") == scopemod.WHY_FLAG
 
 
 def saved_data_mode(saved: Mapping[str, Any]) -> str | None:
@@ -3502,6 +3601,7 @@ def recheck(
         raise BayError(
             f"plan {saved.get('plan_id')} is for project {saved.get('project')}, not {proj.name}"
         )
+    refuse_all_boxes(saved, opts.all_boxes)
     again = PlanOptions(
         env=str(saved["env"]),
         at=saved["wanted"]["commit"],
@@ -3518,6 +3618,8 @@ def recheck(
             for s in saved.get("steps") or []
         ),
         code_order=opts.code_order,
+        # The saved plan's scope: a plan made with --all-boxes is checked with it.
+        all_boxes=opts.all_boxes or saved_all_boxes(saved),
     )
     fresh = make_plan(proj, again, read_receipts=read_receipts, check_box=check_box)
     _absorb_migration(proj.cx, saved, fresh)
