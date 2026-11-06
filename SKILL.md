@@ -125,7 +125,9 @@ bay status --json --env <env>                         # read the receipt right a
 - **Framework changes are invisible to users until tagged.** Commit in
   `bay/`, add a `CHANGELOG.md` entry, then `make release VERSION=X.Y.Z` (never
   `git tag`/`git push` by hand — `version.yml` would drift from the tags). Then
-  `bay self update` on each machine.
+  `bay self update` on each machine, and one `bay up <env>` (no `--project`)
+  per box environment, so that every box gets the new framework. A one-project
+  `bay up` renders it only on the boxes it needs.
 - **For local iteration use `bay --fleet <path>`** to try a framework or fleet
   change without a release, and `bay self update --to <tag>` to move the
   installed copy to a given tag.

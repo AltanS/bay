@@ -595,14 +595,58 @@ the boxes it skips, and `bay up` prints the same line. After a change of fleet
 files (`bay.fleet.toml`, `group_vars/`, `files/`), run `bay up <env>` in the
 fleet, or pass `--all-boxes`.
 
-**Fleet drift.** A skipped box keeps its receipt, with the `fleet_commit` it
-was deployed from. A scoped `bay plan` adds one note per skipped box whose
-fleet files changed since then: the box, the count and up to three paths. The
-lock files, `plans/` and `group_vars/all/services.yml` do not count.
-`bay show <project>` prints one more line under the env row when the box of
-the project has such drift (`fleet_drift` in `--json`). The status word does
-not change. A `fleet_commit` that the local repo does not know gives
-"unknown fleet commit", never an error.
+**Drift.** A skipped box keeps its receipt. The receipt names the
+`fleet_commit` and the framework (`framework_version`, `framework_commit`)
+that the box was deployed from. A box has drift when fleet files changed
+since that fleet commit, or when its framework is not the one this machine
+deploys now. The lock files, `plans/` and `group_vars/all/services.yml` do
+not count as fleet files.
+
+Bay compares the framework commits when the receipt and this machine both
+have one. Else it compares the versions (`bay_version` of `version.yml`).
+This machine deploys the HEAD of its framework checkout. A dev checkout a few
+commits past a tag (`v2.12.2-6-g1a2b3c4`) so differs from a box deployed from
+the tag, and the note says `Bay v2.12.2 at <commit12> (this machine:
+v2.12.2-6-g1a2b3c4)`. A box deployed from the same checkout has no drift. A
+receipt with no framework fields gives "an unknown framework", never an
+error. A `fleet_commit` that the local repo does not know gives "an unknown
+fleet commit", never an error.
+
+A scoped `bay plan` adds one note per skipped box with drift. One box gets
+one line, for both kinds:
+
+```
+box box-2 runs Bay v2.12.2 (this machine: v2.13.0) and fleet commit abc123def456; 2 fleet file(s) changed since then (bay.fleet.toml, files/x.conf); it is skipped, run `bay up production` to bring it up to date
+```
+
+The line shows up to three paths. `bay show <project>` prints the same line,
+ending in `; run bay up <env>`, under the env row when the box of the project
+has drift. The status word does not change. `bay show --json` has it in
+`envs[].fleet_drift`, null when there is no drift:
+
+```json
+{
+  "box": "box-2",
+  "fleet_commit": "<sha>",
+  "known": true,
+  "paths": ["bay.fleet.toml", "files/x.conf"],
+  "count": 2,
+  "framework": {
+    "box": {"version": "2.12.2", "commit": "<sha>"},
+    "here": {"version": "2.13.0", "commit": "<sha>", "label": "v2.13.0"},
+    "differs": true
+  }
+}
+```
+
+`known` is false for an unknown fleet commit, and null when the receipt names
+no fleet commit. `differs` is null when there is nothing to compare.
+
+**After a Bay upgrade.** A scoped run renders the new framework only on the
+boxes it deploys. So after `bay self update`, run one `bay up <env>` (no
+`--project`) per box environment, so that every box gets the new framework.
+When a changelog line says "the next `bay up` does X on every box", it now
+means that whole-environment run.
 
 **Results.** A project on a skipped box keeps its lock record. It is not
 pinned, not marked failed and not counted in the receipt commit. A skipped box
@@ -1537,6 +1581,9 @@ box receipt), and one status word per environment:
 
 Bay checks the words in this order: `deploying`, `HALF`, `unknown`, `drift`, `ahead`, `behind`, `ok`.
 `bay show` never pulls the fleet. It reads the lock as it is in this checkout.
+When the box of the project runs an older fleet or another framework, one more
+line under the env row says so (see "Drift" in
+[Which boxes a run touches](#which-boxes-a-run-touches)).
 
 RUNNING also names the code: `<container> code <commit12>` for each build container of the
 project in the receipt, and `code ?` when the receipt names no commit for it (see

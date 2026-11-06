@@ -68,6 +68,11 @@ and the new version. With no `--to` it takes the newest tag by version. It stops
 the checkout has uncommitted changes. It works on the checkout that the running `bay`
 came from, wherever that is.
 
+After `bay self update`, run one `bay up <env>` (no `--project`) per box environment, so
+that every box gets the new framework. A `bay up` for one project runs only on the boxes
+it needs (see [plan.md](plan.md#which-boxes-a-run-touches)). When a changelog line says
+"the next `bay up` does X on every box", it means that whole-environment run.
+
 ## Teach your coding agents: bay skill
 
 `SKILL.md` at the root of the checkout tells a coding agent how to use Bay: the three

@@ -24,12 +24,13 @@ needing manual action is called out under **Upgrade notes**. Entries for
 ### Added
 - `--all-boxes` on `bay plan`, `bay up` and `bay rollback`: the run deploys every box of the box env, as before 2.13.
 - `scope` in the plan JSON and in the `bay up --json` result: `all_boxes`, `boxes`, `hosts`, `skipped_boxes`, `reasons`, `limits` and `why`. It is part of the plan id. `bay up --plan-id` deploys the scope of the saved plan, and the plan is stale when a new plan has another scope. `--all-boxes` with a scoped plan id is refused.
-- Fleet drift. A scoped `bay plan` adds one note per skipped box whose fleet files changed since its last deploy: the box, the count and up to three paths. `bay show <project>` prints one more line under the env row when the box of the project has drift (`fleet_drift` in `--json`). The status word does not change.
+- Drift. A scoped `bay plan` adds one note per skipped box with drift: its fleet files changed since its last deploy (the count and up to three paths), or it runs another framework than this machine deploys (`Bay v2.12.2 (this machine: v2.13.0)`). One box gets one line for both. Bay compares the framework commits when both sides have one, else the versions. A receipt with no framework fields shows "an unknown framework". `bay show <project>` prints the same line under the env row when the box of the project has drift (`fleet_drift` in `--json`, with `framework: {box, here, differs}`). The status word does not change.
 - `docs/plan.md` has a section "Which boxes a run touches".
 
 ### Upgrade notes
 - A run for one project no longer refreshes the shared proxy, the gateway and the update watcher on the other boxes. After a change of fleet files (`bay.fleet.toml`, `group_vars/`, `files/`), run `bay up <env>` in the fleet, or pass `--all-boxes`.
 - The plan JSON and the `bay up` result have `scope`. A one-project plan saved by 2.12 is stale under 2.13: plan again.
+- After a Bay upgrade (`bay self update`), run one `bay up <env>` (no `--project`) per box environment, so that every box gets the new framework. A scoped run renders it only on the boxes it deploys. From 2.13 on, a changelog line that says "the next `bay up` does X on every box" means that whole-environment run.
 - Every machine that deploys a fleet moves to 2.13.0 together. `env_busy` is still per box env, so two scoped runs on different boxes of one box env still block each other.
 
 ## [2.12.2] - 2026-11-06
