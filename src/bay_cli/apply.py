@@ -2509,6 +2509,7 @@ def show(
     envs = sorted(set(lock.get("envs") or {}) | {e for d in docs for e in (d.get("deploy") or {})})
     reader = read_receipts or planmod.default_receipt_reader
     cache: dict[str, list[dict[str, Any]]] = {}
+    maps: dict[str, dict[str, list[str]] | None] = {}
     rows: list[dict[str, Any]] = []
     # The pinned services file names the build containers (they carry code).
     compiled, _ = planmod.current_services(cx)
@@ -2560,6 +2561,11 @@ def show(
         status, why = env_status(
             record, lock_commit, wanted.commit, running, code, in_fleet=proj.in_fleet
         )
+        drift = (
+            _box_drift(cx, box, box_env, cache[box_env], maps)
+            if remote and box_env is not None and box
+            else None
+        )
         rows.append(
             {
                 "env": env,
@@ -2586,6 +2592,9 @@ def show(
                     "code_source": dict(sorted(code_source.items())),
                     "boxes": detail,
                 },
+                # The fleet files that changed since the box's last deploy
+                # (a project run skips the other boxes, spec 2026-11-06).
+                "fleet_drift": drift,
             }
         )
     return {
@@ -2610,6 +2619,32 @@ def show(
         },
         "envs": rows,
     }
+
+
+def _box_drift(
+    cx: Context,
+    box: str,
+    box_env: str,
+    entries: list[dict[str, Any]],
+    maps: dict[str, dict[str, list[str]] | None],
+) -> dict[str, Any] | None:
+    """``{box, fleet_commit, known, count, paths}`` when the box runs an older fleet.
+
+    The box's receipt names the fleet commit it was deployed from. None when
+    there is no drift, no receipt, or Bay cannot tell the box's hosts.
+    """
+    hosts: list[str] | None = None
+    if len(_env_boxes(cx, box_env)) > 1:
+        if box_env not in maps:
+            maps[box_env] = box_names(cx, box_env)[0]
+        mapping = maps[box_env]
+        if mapping is None:
+            return None
+        hosts = [h for h, found in mapping.items() if box in found]
+    drift = scopemod.fleet_drift(cx.fleet_root, scopemod.box_commit(entries, hosts))
+    if drift is None or (drift["known"] and not drift["paths"]):
+        return None
+    return {"box": box, **drift, "count": len(drift["paths"])}
 
 
 def render_show(doc: Mapping[str, Any]) -> str:
@@ -2644,4 +2679,8 @@ def render_show(doc: Mapping[str, Any]) -> str:
             f"{short(row['pinned']['commit'])}  RUNNING {running}"
         )
         lines.append(f"  {'':<12} {row['reason']}")
+        drift = row.get("fleet_drift")
+        line = scopemod.drift_line(str(drift["box"]), drift) if drift else None
+        if line:
+            lines.append(f"  {'':<12} {line}; run bay up {row['env']}")
     return "\n".join(lines)
