@@ -63,6 +63,13 @@
 # itself). This play runs as root, delegates to the build_server, and is a
 # no-op when build_server is undefined or equals the target host (the main
 # bootstrap play already covers that case).
+#
+# A limited `bay up` (one project, 2.13.0) sets bay_scope_limited and runs
+# with `-l <the hosts of its boxes>`. That run must not touch a build server
+# that is not one of its play hosts: a box outside the limit may be down, and
+# the run must not fail because of it. ansible_play_hosts_all is the play's
+# host list after the limit. `bay deploy --region` does not set the var, so it
+# keeps the old behaviour (tests/test_scope_ansible.py runs both).
 - name: Bootstrap stack directory on build server
   hosts: "{{ target_host }}"
   become: true
@@ -81,7 +88,9 @@
         owner: "{{ app_user }}"
         group: docker
       delegate_to: "{{ build_server | default(inventory_hostname) }}"
-      when: build_server is defined
+      when:
+        - build_server is defined
+        - not (bay_scope_limited | default(false) | bool) or build_server in ansible_play_hosts_all
 
 - name: Deploy services
   hosts: "{{ target_host }}"
