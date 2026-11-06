@@ -2905,7 +2905,13 @@ def make_plan(
     if place.box_env is not None:
         notes.extend(
             scopemod.drift_notes(
-                cx.fleet_root, scoped.scope, scoped.maps, receipt_entries, place.box_env, env
+                cx.fleet_root,
+                scoped.scope,
+                scoped.maps,
+                receipt_entries,
+                place.box_env,
+                env,
+                cx.framework_root,
             )
         )
     keep: list[str] = []

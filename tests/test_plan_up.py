@@ -27,7 +27,8 @@ import yaml
 from typer.testing import CliRunner
 
 from bay_cli import apply as applymod
-from bay_cli import lockfile
+from bay_cli import git as git_mod
+from bay_cli import lockfile, paths
 from bay_cli import plan as planmod
 from bay_cli.cli import app
 from bay_cli.context import Context
@@ -224,6 +225,9 @@ class FakeBox:
             "env": box_env,
             "box": fake_host("box-1"),
             "deployed_at": "2026-10-06T12:00:00Z",
+            # What the real deploy records: version.yml and the framework HEAD.
+            "framework_version": paths.read_installed_version(cx.framework_root),
+            "framework_commit": git_mod.head_commit(cx.framework_root),
             "fleet_commit": gitrepo.head(cx.fleet_root),
             "result": "failed" if self.fail else "ok",
             "containers": [row(name, entry) for name, entry in sorted(entries.items())],

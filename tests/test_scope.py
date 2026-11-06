@@ -185,8 +185,10 @@ def test_a_changed_build_takes_every_receiver_box_and_the_build_server() -> None
 
 
 def test_a_changed_local_build_takes_the_receiver_boxes_only() -> None:
-    res = _compute(wanted=_changed("app-eu2", paths={"include": ["src/"]}),
-                   group_vars={"build_server": HOST["infra"]})
+    res = _compute(
+        wanted=_changed("app-eu2", paths={"include": ["src/"]}),
+        group_vars={"build_server": HOST["infra"]},
+    )
     assert res.scope["boxes"] == ["eu", "eu2", "na"]
     assert res.scope["skipped_boxes"] == ["infra"]
 
@@ -288,7 +290,10 @@ def test_a_box_on_a_shared_host_joins_the_scope() -> None:
 
 def test_limit_args() -> None:
     assert scopemod.limit_args(["192.0.2.1", "192.0.2.2"]) == [
-        "-l", "192.0.2.1,192.0.2.2", "-e", "bay_scope_limited=true",
+        "-l",
+        "192.0.2.1,192.0.2.2",
+        "-e",
+        "bay_scope_limited=true",
     ]
 
 
@@ -310,9 +315,7 @@ def _capture_deploy(
         ops, "_run_playbook", lambda cx, pb, env, tags, extra: seen.update(argv=list(extra))
     )
     monkeypatch.setattr(ops, "_invalidate_rig_cache", lambda *a: None)
-    monkeypatch.setattr(
-        ops, "_run_post_deploy_healthcheck", lambda *a, **k: seen.update(health=k)
-    )
+    monkeypatch.setattr(ops, "_run_post_deploy_healthcheck", lambda *a, **k: seen.update(health=k))
     kw = {"limit": limit} if limit is not None else {}
     applymod._REAL_DEFAULT_DEPLOY(cx_of(world), "production", **kw)
     return seen["argv"], seen["health"]
@@ -463,7 +466,8 @@ def test_a_skipped_box_that_is_down_does_not_fail_the_run(
         if hosts is None:  # only a read of every host meets box-2, which is down
             out = [
                 {**e, "receipt": None, "error": "unreachable"}
-                if e["box"] == FAKE_HOSTS["box-2"] else e
+                if e["box"] == FAKE_HOSTS["box-2"]
+                else e
                 for e in out
             ]
         return out
@@ -617,3 +621,164 @@ def test_show_prints_the_drift_of_the_project_box(world: dict[str, Path], box: F
     # The box of a project that the run deployed has no drift line.
     status = applymod.show(planmod.load_project(cx_of(world), "status", cwd=world["fleet"]))
     assert status["envs"][0]["fleet_drift"] is None
+
+
+# ── framework drift ─────────────────────────────────────────────────────────
+
+HERE = {"version": "2.13.0", "commit": "c" * 40, "label": "v2.13.0"}
+
+
+def _receipt(**kw: Any) -> dict[str, Any]:
+    return {"framework_version": "2.12.2", "framework_commit": "b" * 40, **kw}
+
+
+def test_framework_drift_differing_version() -> None:
+    fw = scopemod.framework_drift(_receipt(), HERE)
+    assert fw["differs"] is True
+    assert fw["box"] == {"version": "2.12.2", "commit": "b" * 40}
+    assert fw["here"] == HERE
+    line = scopemod.drift_line(
+        "box-2", {"fleet_commit": None, "known": None, "paths": [], "framework": fw}
+    )
+    assert line == "box box-2 runs Bay v2.12.2 (this machine: v2.13.0)"
+
+
+def test_framework_drift_same_commit_is_no_drift() -> None:
+    fw = scopemod.framework_drift(_receipt(framework_commit="c" * 40), HERE)
+    assert fw["differs"] is False
+    assert (
+        scopemod.box_drift(Path("/nonexistent"), _receipt(framework_commit="c" * 40), HERE) is None
+    )
+
+
+def test_framework_drift_compares_versions_without_commits() -> None:
+    # One side has no commit (a framework outside git): compare versions.
+    same = scopemod.framework_drift(
+        _receipt(framework_commit=None, framework_version="2.13.0"), HERE
+    )
+    assert same["differs"] is False
+    here = {**HERE, "commit": None}
+    older = scopemod.framework_drift(_receipt(framework_version="v2.12.2"), here)
+    assert older["differs"] is True
+
+
+def test_framework_drift_missing_fields_is_unknown_never_an_error() -> None:
+    fw = scopemod.framework_drift({"fleet_commit": None}, HERE)
+    assert fw["differs"] is None and fw["box"] == {"version": None, "commit": None}
+    drift = scopemod.box_drift(Path("/nonexistent"), {}, HERE)
+    assert drift is not None
+    assert scopemod.drift_line("box-2", drift) == "box box-2 runs an unknown framework"
+
+
+def test_framework_drift_of_a_dev_checkout(tmp_path: Path) -> None:
+    """A checkout 1 commit past its tag differs from a box deployed from the tag."""
+    repo = tmp_path / "bay"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    (repo / "version.yml").write_text('---\nbay_version: "2.12.2"\n')
+    commit_all(repo, "release")
+    git(repo, "tag", "v2.12.2")
+    tagged = git(repo, "rev-parse", "HEAD")
+    (repo / "x").write_text("dev\n")
+    commit_all(repo, "dev")
+    here = scopemod.framework_here(repo)
+    assert here["version"] == "2.12.2"
+    assert here["commit"] == git(repo, "rev-parse", "HEAD")
+    assert here["label"].startswith("v2.12.2-1-g")
+    from_tag = _receipt(framework_commit=tagged)
+    drift = scopemod.box_drift(tmp_path, from_tag, here)
+    assert drift is not None and drift["framework"]["differs"] is True
+    assert scopemod.drift_line("box-2", drift) == (
+        f"box box-2 runs Bay v2.12.2 at {tagged[:12]} (this machine: {here['label']})"
+    )
+    # A box deployed from this same dev checkout has no drift.
+    same = _receipt(framework_commit=here["commit"])
+    assert scopemod.box_drift(tmp_path, same, here) is None
+
+
+def test_framework_and_fleet_drift_share_one_line() -> None:
+    drift = {
+        "fleet_commit": "a" * 40,
+        "known": True,
+        "paths": ["group_vars/all/main.yml", "files/x.conf"],
+        "framework": scopemod.framework_drift(_receipt(), HERE),
+    }
+    assert scopemod.drift_line("box-2", drift) == (
+        f"box box-2 runs Bay v2.12.2 (this machine: v2.13.0) and fleet commit {'a' * 12}; "
+        "2 fleet file(s) changed since then (group_vars/all/main.yml, files/x.conf)"
+    )
+    unknown = {**drift, "known": False, "paths": []}
+    assert scopemod.drift_line("box-2", unknown) == (
+        "box box-2 runs Bay v2.12.2 (this machine: v2.13.0) and an unknown fleet commit "
+        f"{'a' * 12} (not in the local fleet repo)"
+    )
+
+
+def _old_framework_on_box_2(box: FakeBox) -> None:
+    old = box.per_box[("production", "box-2")]
+    assert old is not None
+    old["framework_version"] = "2.11.0"
+    old["framework_commit"] = "f" * 40
+
+
+def test_plan_notes_framework_and_fleet_drift_of_a_skipped_box(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    _two_boxes_status_on_one(world, "box-2")
+    do_up(world, all_boxes=True)
+    (world["fleet"] / "files").mkdir(exist_ok=True)
+    (world["fleet"] / "files" / "a.conf").write_text("a\n")
+    commit_all(world["fleet"], "a fleet file")
+    _up_status(world)  # box-1 moves on, box-2 is skipped
+    _old_framework_on_box_2(box)
+    here = scopemod.framework_here(cx_of(world).framework_root)
+    plan = _status_plan(world)
+    notes = [n for n in plan["notes"] if n.startswith("box box-2 runs")]
+    assert len(notes) == 1  # one line per box, not one per kind of drift
+    assert notes[0].startswith(
+        f"box box-2 runs Bay v2.11.0 (this machine: {here['label']}) and fleet commit "
+    )
+    assert "1 fleet file(s) changed since then (files/a.conf)" in notes[0]
+    assert notes[0].endswith("; it is skipped, run `bay up production` to bring it up to date")
+
+
+def test_plan_notes_framework_drift_alone(world: dict[str, Path], box: FakeBox) -> None:
+    _two_boxes_status_on_one(world, "box-2")
+    do_up(world, all_boxes=True)  # both boxes run this fleet commit
+    box.per_box[("production", "box-2")] = {
+        **box.receipts["production"],
+        "box": FAKE_HOSTS["box-2"],
+    }
+    _old_framework_on_box_2(box)
+    plan = _status_plan(world)
+    notes = [n for n in plan["notes"] if n.startswith("box box-2 runs")]
+    assert len(notes) == 1 and notes[0].startswith("box box-2 runs Bay v2.11.0 (this machine: ")
+    assert "fleet commit" not in notes[0]
+
+
+def test_show_prints_framework_drift_with_the_fleet_drift(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    _two_boxes_status_on_one(world, "box-2")
+    do_up(world, all_boxes=True)
+    (world["fleet"] / "group_vars" / "all" / "main.yml").write_text(
+        "---\nstack_name: testfleet\nx: 1\n"
+    )
+    commit_all(world["fleet"], "fleet edit")
+    _up_status(world)
+    _old_framework_on_box_2(box)
+    here = scopemod.framework_here(cx_of(world).framework_root)
+    doc = applymod.show(project(world))
+    drift = doc["envs"][0]["fleet_drift"]
+    assert drift["box"] == "box-2" and drift["count"] == 1  # the old fields stay
+    assert drift["framework"] == {
+        "box": {"version": "2.11.0", "commit": "f" * 40},
+        "here": here,
+        "differs": True,
+    }
+    lines = [ln.strip() for ln in applymod.render_show(doc).splitlines() if "box box-2 runs" in ln]
+    assert lines == [
+        f"box box-2 runs Bay v2.11.0 (this machine: {here['label']}) and fleet commit "
+        f"{drift['fleet_commit'][:12]}; 1 fleet file(s) changed since then "
+        "(group_vars/all/main.yml); run bay up production"
+    ]

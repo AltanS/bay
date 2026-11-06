@@ -128,9 +128,7 @@ def host_map(cx: Context, box_env: str) -> tuple[dict[str, list[str]] | None, st
 
 
 def env_boxes(boxes: Mapping[str, Any], box_env: str) -> list[str]:
-    return sorted(
-        n for n, b in boxes.items() if isinstance(b, Mapping) and b.get("env") == box_env
-    )
+    return sorted(n for n, b in boxes.items() if isinstance(b, Mapping) and b.get("env") == box_env)
 
 
 # ── rule 4: the build surface ───────────────────────────────────────────────
@@ -441,7 +439,12 @@ def fleet_drift(fleet_root: Path, fleet_commit: str | None) -> dict[str, Any] | 
     if gitrepo.resolve_commit(fleet_root, f"{fleet_commit}^{{commit}}") is None:
         return {"fleet_commit": fleet_commit, "known": False, "paths": []}
     out = gitrepo._out(
-        fleet_root, "-c", "core.quotepath=off", "diff", "--name-only", "--relative",
+        fleet_root,
+        "-c",
+        "core.quotepath=off",
+        "diff",
+        "--name-only",
+        "--relative",
         f"{fleet_commit}..HEAD",
     )
     if out is None:
@@ -450,33 +453,129 @@ def fleet_drift(fleet_root: Path, fleet_commit: str | None) -> dict[str, Any] | 
     return {"fleet_commit": fleet_commit, "known": True, "paths": paths}
 
 
-def box_commit(
+def box_receipt(
     entries: Sequence[Mapping[str, Any]], hosts: Iterable[str] | None
-) -> str | None:
-    """The ``fleet_commit`` of the first receipt of ``hosts`` (None: every entry)."""
+) -> Mapping[str, Any] | None:
+    """The first receipt of ``hosts`` (None: of every entry), sorted by host."""
     wanted = None if hosts is None else set(hosts)
     for entry in sorted(entries, key=lambda e: str(e.get("box"))):
         if wanted is not None and str(entry.get("box")) not in wanted:
             continue
         receipt = entry.get("receipt")
-        if isinstance(receipt, Mapping) and receipt.get("fleet_commit"):
-            return str(receipt["fleet_commit"])
+        if isinstance(receipt, Mapping):
+            return receipt
     return None
 
 
-def drift_line(name: str, drift: Mapping[str, Any]) -> str | None:
-    """One line about a box's fleet drift, or None when there is none."""
-    commit = str(drift["fleet_commit"])[:12]
-    if not drift["known"]:
-        return f"box {name}: unknown fleet commit {commit} (not in the local fleet repo)"
-    paths = list(drift["paths"])
-    if not paths:
-        return None
-    shown = ", ".join(paths[:3]) + (", ..." if len(paths) > 3 else "")
-    return (
-        f"box {name} runs fleet commit {commit}; {len(paths)} fleet file(s) changed "
-        f"since then ({shown})"
+# ── framework drift ─────────────────────────────────────────────────────────
+
+
+def framework_here(framework_root: Path) -> dict[str, Any]:
+    """What this machine's deploy would record in a receipt, and a label for people.
+
+    ``version`` is ``bay_version`` of ``version.yml`` (the play's ``vars_files``,
+    the receipt's ``framework_version``). ``commit`` is the framework HEAD
+    (:func:`bay_cli.receipts.deploy_extra_vars`, the receipt's
+    ``framework_commit``). ``label`` is ``git describe --tags``
+    (``v2.13.0``, or ``v2.12.2-6-g1a2b3c4`` for a dev checkout).
+    """
+    from bay_cli import git, paths
+
+    try:
+        version = paths.read_installed_version(framework_root)
+    except Exception:  # a broken version.yml: compare by commit only
+        version = None
+    commit = git.head_commit(framework_root)
+    label = git._quiet(framework_root, "describe", "--tags") or (
+        f"v{version}" if version else (commit or "unknown")[:12]
     )
+    return {"version": version, "commit": commit, "label": label}
+
+
+def framework_drift(receipt: Mapping[str, Any], here: Mapping[str, Any]) -> dict[str, Any]:
+    """``{"box", "here", "differs"}``: the framework a box runs against this machine's.
+
+    Commits are compared when both sides have one, else versions. ``differs``
+    is None when there is nothing to compare (a receipt from before the
+    framework fields: "unknown framework").
+    """
+    box = {
+        "version": receipt.get("framework_version") or None,
+        "commit": receipt.get("framework_commit") or None,
+    }
+    if box["commit"] and here.get("commit"):
+        differs: bool | None = str(box["commit"]) != str(here["commit"])
+    elif box["version"] and here.get("version"):
+        differs = _bare(box["version"]) != _bare(here["version"])
+    else:
+        differs = None
+    return {"box": box, "here": dict(here), "differs": differs}
+
+
+def box_drift(
+    fleet_root: Path, receipt: Mapping[str, Any] | None, here: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Fleet-file and framework drift of one box, from its receipt; None: no drift.
+
+    ``{"fleet_commit", "known", "paths", "framework"}``. ``known`` is None when
+    the receipt names no fleet commit.
+    """
+    if receipt is None:
+        return None
+    commit = receipt.get("fleet_commit") or None
+    fleet = fleet_drift(fleet_root, str(commit) if commit else None)
+    framework = framework_drift(receipt, here)
+    out = {
+        "fleet_commit": fleet["fleet_commit"] if fleet else None,
+        "known": fleet["known"] if fleet else None,
+        "paths": list(fleet["paths"]) if fleet else [],
+        "framework": framework,
+    }
+    fleet_moved = bool(out["paths"]) or out["known"] is False
+    if not fleet_moved and framework["differs"] is False:
+        return None
+    return out
+
+
+def _bare(version: Any) -> str:
+    return str(version).lstrip("v")
+
+
+def _framework_words(framework: Mapping[str, Any]) -> str | None:
+    """``Bay v2.12.2 (this machine: v2.13.0)``; None when the frameworks match."""
+    if framework["differs"] is False:
+        return None
+    if framework["differs"] is None:
+        return "an unknown framework"
+    box, here = framework["box"], framework["here"]
+    if not box["version"]:
+        name = f"commit {str(box['commit'])[:12]}"
+    elif box["commit"] and _bare(box["version"]) == _bare(here.get("version")):
+        # Same version, another commit: a dev checkout on one side.
+        name = f"v{_bare(box['version'])} at {str(box['commit'])[:12]}"
+    else:
+        name = f"v{_bare(box['version'])}"
+    return f"Bay {name} (this machine: {here.get('label')})"
+
+
+def drift_line(name: str, drift: Mapping[str, Any]) -> str | None:
+    """One line about a box's framework and fleet drift, or None when there is none."""
+    framework = drift.get("framework")
+    fw = _framework_words(framework) if framework else None
+    commit = str(drift.get("fleet_commit") or "")[:12]
+    paths = list(drift.get("paths") or [])
+    if drift.get("known") is False:
+        fleet = f"an unknown fleet commit {commit} (not in the local fleet repo)"
+    elif paths:
+        shown = ", ".join(paths[:3]) + (", ..." if len(paths) > 3 else "")
+        fleet = f"fleet commit {commit}; {len(paths)} fleet file(s) changed since then ({shown})"
+    else:
+        fleet = None
+    if fw and fleet:
+        return f"box {name} runs {fw} and {fleet}"
+    if fw or fleet:
+        return f"box {name} runs {fw or fleet}"
+    return None
 
 
 def drift_notes(
@@ -486,17 +585,19 @@ def drift_notes(
     entries: Sequence[Mapping[str, Any]],
     box_env: str,
     env: str,
+    framework_root: Path,
 ) -> list[str]:
-    """One note per skipped box of ``box_env`` whose receipt runs an older fleet."""
+    """One note per skipped box of ``box_env`` that runs an older fleet or framework."""
     mapping = maps.get(box_env)
     if not is_limited(scope) or mapping is None:
         return []
+    here = framework_here(framework_root)
     notes = []
     for name in scope.get("skipped_boxes") or []:
         hosts = [h for h, found in mapping.items() if name in found]
         if not hosts:
             continue
-        drift = fleet_drift(fleet_root, box_commit(entries, hosts))
+        drift = box_drift(fleet_root, box_receipt(entries, hosts), here)
         line = drift_line(name, drift) if drift else None
         if line:
             notes.append(f"{line}; it is skipped, run `bay up {env}` to bring it up to date")

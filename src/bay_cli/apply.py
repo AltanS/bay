@@ -2510,6 +2510,7 @@ def show(
     reader = read_receipts or planmod.default_receipt_reader
     cache: dict[str, list[dict[str, Any]]] = {}
     maps: dict[str, dict[str, list[str]] | None] = {}
+    here = scopemod.framework_here(cx.framework_root) if remote else {}
     rows: list[dict[str, Any]] = []
     # The pinned services file names the build containers (they carry code).
     compiled, _ = planmod.current_services(cx)
@@ -2562,7 +2563,7 @@ def show(
             record, lock_commit, wanted.commit, running, code, in_fleet=proj.in_fleet
         )
         drift = (
-            _box_drift(cx, box, box_env, cache[box_env], maps)
+            _box_drift(cx, box, box_env, cache[box_env], maps, here)
             if remote and box_env is not None and box
             else None
         )
@@ -2627,11 +2628,14 @@ def _box_drift(
     box_env: str,
     entries: list[dict[str, Any]],
     maps: dict[str, dict[str, list[str]] | None],
+    here: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    """``{box, fleet_commit, known, count, paths}`` when the box runs an older fleet.
+    """``{box, fleet_commit, known, count, paths, framework}`` when the box runs an
+    older fleet or another framework (:func:`bay_cli.scope.box_drift`).
 
-    The box's receipt names the fleet commit it was deployed from. None when
-    there is no drift, no receipt, or Bay cannot tell the box's hosts.
+    The box's receipt names the fleet commit and the framework it was deployed
+    from. None when there is no drift, no receipt, or Bay cannot tell the box's
+    hosts.
     """
     hosts: list[str] | None = None
     if len(_env_boxes(cx, box_env)) > 1:
@@ -2641,8 +2645,8 @@ def _box_drift(
         if mapping is None:
             return None
         hosts = [h for h, found in mapping.items() if box in found]
-    drift = scopemod.fleet_drift(cx.fleet_root, scopemod.box_commit(entries, hosts))
-    if drift is None or (drift["known"] and not drift["paths"]):
+    drift = scopemod.box_drift(cx.fleet_root, scopemod.box_receipt(entries, hosts), here)
+    if drift is None:
         return None
     return {"box": box, **drift, "count": len(drift["paths"])}
 
