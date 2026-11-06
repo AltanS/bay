@@ -78,13 +78,14 @@ def test_contributing_still_documents_the_release_command() -> None:
     assert "CHANGELOG.md" in text
 
 
-def test_every_doc_that_names_bay_up_says_it_deploys_the_whole_box_environment() -> None:
-    """`bay up` is not a one-project deploy. A doc that names it must say so.
+def test_every_doc_that_names_bay_up_says_which_boxes_it_deploys() -> None:
+    """A one-project `bay up` deploys only the boxes it needs (2.13). A doc that names it must say so.
 
-    A doc whose first lines carry `Status: historical` describes an old design
-    and is exempt. The shell form of the rule:
+    Before 2.13 every `bay up` deployed the whole box environment, and the rule
+    was that phrase. A doc whose first lines carry `Status: historical`
+    describes an old design and is exempt. The shell form of the rule:
     for f in $(grep -l "bay up" docs/*.md); do grep -qi "status: historical" $f ||
-    grep -q "deploys the whole box environment" $f || echo $f; done
+    grep -q "only the boxes it needs" $f || echo $f; done
     """
     missing = []
     for doc in sorted((_REPO_ROOT / "docs").glob("*.md")):
@@ -94,6 +95,6 @@ def test_every_doc_that_names_bay_up_says_it_deploys_the_whole_box_environment()
         head = "\n".join(text.splitlines()[:10]).lower()
         if "status: historical" in head:
             continue
-        if "deploys the whole box environment" not in text:
+        if "only the boxes it needs" not in text:
             missing.append(doc.name)
-    assert not missing, f"these docs name `bay up` without saying it deploys the whole box environment: {missing}"
+    assert not missing, f"these docs name `bay up` without saying which boxes it deploys: {missing}"

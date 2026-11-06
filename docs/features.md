@@ -86,6 +86,7 @@ Deploy the same stack to multiple regional servers from a single fleet:
 - Cross-region service connectivity via the tailnet (Headscale coordinates all regions)
 - Per-region domain configuration (e.g., `eu.example.com`, `na.example.com`)
 - Shared Headscale coordination server on the control region
+- A one-project `bay up` runs only on the boxes it needs (see [plan.md](plan.md#which-boxes-a-run-touches)); `bay up <env>` in the fleet runs on all of them
 - Target one region or all of them: `bay deploy production -- --limit eu`, `bay deploy production`. Keep the box env (`production`) and add `--limit`. A deploy with the group name as the env (`bay deploy eu`) writes the receipt as `eu.json`, which `bay status` and `bay plan` do not read
 
 See [multi-region.md](multi-region.md) for the full setup guide.
@@ -109,7 +110,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 ## Developer Experience
 
 - **`bay` CLI** -- single entry point wrapping plan, up, deploy, provision, validate, gateway, vault, backup, test, and framework management
-- **`bay plan` / `bay approve` / `bay up`** -- the daily flow: `bay plan` compares WANTED with PINNED (and with RUNNING on the box, with `--remote`) and gives a verdict, and `bay up` pins, compiles, commits and deploys the whole box environment (see [plan.md](plan.md))
+- **`bay plan` / `bay approve` / `bay up`** -- the daily flow: `bay plan` compares WANTED with PINNED (and with RUNNING on the box, with `--remote`) and gives a verdict, and `bay up` pins, compiles, commits and deploys: only the boxes it needs for one project, the whole box environment for `bay up <env>` in the fleet (see [plan.md](plan.md))
 - **`bay status --json`** -- the deploy receipt of every box (see [deploy-receipt.md](deploy-receipt.md)); plain `bay status` shows the version, the fleet and the feature flags
 - **`bay validate`** -- pre-deploy config checks: YAML syntax, `services.yml` schema, inventory, vault keys (also runs automatically before every deploy)
 - **`bay doctor`** -- environment probes: the fleet it picked, the installed CLI, SSH reachability, vault password, DNS resolution, box receipts, app repos

@@ -56,9 +56,14 @@ bay status --json --env <env>                         # read the receipt right a
 ```
 
 - Plan exit codes: 0 auto, 10 approve, 20 blocked, 30 stale (plan again).
-- `bay up` deploys the **whole box environment**, not one project. It pins
-  every project it covered, commits the plan record under `plans/` and the
-  receipt, and pushes the fleet. Never delete `plans/`.
+- `bay up` for one project deploys **only the boxes it needs** (its box, the
+  old box of a move, the ingress box for a route change, every webhook box and
+  the build server when a build entry changes). `bay up <env>` in the fleet,
+  or `--all-boxes`, deploys the whole box environment. The plan and the
+  `bay up --json` result say which in `scope`. Fleet-level changes reach the
+  skipped boxes only with `bay up <env>`. It pins every project on the boxes
+  it deployed, commits the plan record under `plans/` and the receipt, and
+  pushes the fleet. Never delete `plans/`.
 - `bay up --json` lists what the deploy did in `applied`. Its `steps` field
   is the plan, not the result.
 - `bay rollback <env> --project <p>` returns to the previous pin and freezes it.

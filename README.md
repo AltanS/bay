@@ -124,7 +124,7 @@ Here `--fleet prod` after `init` is the fleet name: the directory `~/.config/bay
 
 Read **[docs/install.md](docs/install.md)** for installation steps, updates, and fleet selection. Read **[docs/onboarding.md](docs/onboarding.md)** for a step-by-step guide to your first project.
 
-`bay init` writes `bay.toml` in your app repo. Next, `bay plan` shows pending changes. Then `bay up` pins the commit and deploys the whole box environment.
+`bay init` writes `bay.toml` in your app repo. Next, `bay plan` shows pending changes. Then `bay up` pins the commit and deploys the boxes the project needs.
 
 #### Pre-flight check, provision and rig deploy
 

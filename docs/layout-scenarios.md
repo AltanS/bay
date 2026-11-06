@@ -55,7 +55,9 @@ boxes. `shop` and `blog` are apps.
 
 ## What `bay up` does
 
-`bay up <env>` deploys the whole box environment, not one project. It runs from an app
+`bay up <env>` in the fleet deploys the whole box environment. A run for one project (in an
+app repo, or with `--project`) deploys only the boxes it needs (plan.md,
+[Which boxes a run touches](plan.md#which-boxes-a-run-touches)). It runs from an app
 repo or from the fleet. It commits the plan record under `plans/` and the receipt, and it
 pushes the fleet. A project is covered when it has a `[deploy.<e>]` table (any name `<e>`)
 on the same box environment as the plan. What gets pinned depends on where you run it:
@@ -131,7 +133,7 @@ The one-line list is near the top of this page. This is the full table. Four wor
 | Word | Where it is set | What it is |
 |---|---|---|
 | Box | `[boxes.<name>]` in `bay.fleet.toml` | One server. The name (`eu-1`) is a label: `box = "eu-1"` in a deploy table, the lock, `default_box`, a resource's `box` list and `ingress_box` use it. Bay never reads `hosts/` to find a box. The compiler writes only the `group` of the box, and the deploy puts a container on the inventory hosts that are in that group. The `box` field of a receipt, and the `box` that a plan prints for a box prediction, is the `inventory_hostname`: the name at the start of the line in `hosts/<env>` (`eu-1 ansible_host=...`). Give the box the name of its inventory group or of its host line, so that one name shows everywhere. `bay validate` checks the names. The `group` of a box must be a group in `hosts/<box env>` (an error). A box name that is neither a host nor a group there gets a warning. |
-| Box env | `env` of the box | The box environment. It names the inventory file `hosts/<env>`, the folder `group_vars/<env>/` (the secrets), and the receipt `/var/lib/bay/receipts/<env>.json`. Every command passes it to Ansible as a host pattern, so a group (or host) with this name must exist in the inventory. A hosts file with only `[eu]` and `[eu2]` headings has no such group: add `[<box env>:children]` and list the groups under it (scenario 11). `bay validate` fails when the group is missing. `bay provision <box env>` and the deploy of `bay up` run on every host of that group. |
+| Box env | `env` of the box | The box environment. It names the inventory file `hosts/<env>`, the folder `group_vars/<env>/` (the secrets), and the receipt `/var/lib/bay/receipts/<env>.json`. Every command passes it to Ansible as a host pattern, so a group (or host) with this name must exist in the inventory. A hosts file with only `[eu]` and `[eu2]` headings has no such group: add `[<box env>:children]` and list the groups under it (scenario 11). `bay validate` fails when the group is missing. `bay provision <box env>` and the deploy of `bay up <env>` in the fleet run on every host of that group. A one-project `bay up` runs only on the hosts of the boxes it needs ([plan.md](plan.md#which-boxes-a-run-touches)). |
 | Group | `group` of the box | The inventory group: the `[eu]` heading inside the hosts file. It limits a container to the boxes of that group. |
 | Deploy env | `[deploy.<env>]` in a `bay.toml` | An environment of one app: own box, data and container suffix, and its own record in the lock. `bay plan <env>` and `bay up <env>` take this name. Its secret values come from the box env of its box (below). |
 
@@ -377,7 +379,7 @@ bay init --fleet acme                     # once: drafts bay.toml, writes projec
 git add bay.toml && git commit -m "chore: add bay.toml"
 git push                                  # 1. push first: bay up refuses a commit the remote lacks
 bay plan production                       # WANTED (this commit) vs PINNED vs RUNNING
-bay up production                         # 2. pins this commit, deploys the whole env, registers shop with the webhook
+bay up production                         # 2. pins this commit, deploys the boxes it needs, registers shop with the webhook
 git commit -am "feat: first build"        # 3. a push that changes code, made AFTER bay up
 git push                                  #    the webhook builds the first image
 bay plan production                       # 4. then see plan.md "The first image" for the last steps
@@ -733,7 +735,8 @@ Two things to check before the push, when the project has more than one deploy e
 
 - **One `bay up` per box env.** The adopt writes the adopt commit into the record of every deploy env, but
   `bay up <env>` deploys only the box env of that deploy env, and only that box env gets the new
-  `rebuild.sh`. A box that did not get it still treats the push as code, builds and recreates. Run
+  `rebuild.sh`. Inside that box env the adopt changes the compiled build entries, so the run takes
+  every box with a webhook receiver and the build server ([plan.md](plan.md#which-boxes-a-run-touches)). A box that did not get it still treats the push as code, builds and recreates. Run
   `bay up <env>` for each deploy env that sits on another box env (two deploy envs on one box env need
   one `bay up`), and only then push.
 - **Adopt from the deploy branch.** The adopt commit lands on the branch you have checked out, and
@@ -1065,8 +1068,8 @@ form, as above: a deploy aimed at the group `eu2` writes its receipt as `eu2.jso
 
 SSH access to the box, and its tailnet enrolment, come from you, out of band. An empty box
 runs nothing until an app names it: `box = "eu-2"` in a `[deploy.<env>]` table, or
-`default_box` in `bay.fleet.toml`. `bay up production` then deploys the whole env,
-including the new box. An app on the new box that has `needs = ["postgres"]` also needs a postgres
+`default_box` in `bay.fleet.toml`. `bay up production` in the fleet then deploys the whole env,
+including the new box. A one-project run deploys only the boxes it needs. An app on the new box that has `needs = ["postgres"]` also needs a postgres
 resource that lists `eu-2` (scenario 5, "How a resource maps to boxes"), or its plan blocks.
 
 ## 12. Box move with data
@@ -1164,7 +1167,8 @@ Why not one project with three envs (`[deploy.acme]`, `[deploy.globex]` ...)?
   covered project, see [What `bay up` does](#what-bay-up-does).)
 - A deploy env has its own suffix on the container name (`shop-globex`) but not its own box
   env: its box env is the one of its box (see [Words](#words-deploy-env-box-env-and-group)).
-  `bay up globex` deploys the whole box environment, not one tenant.
+  `bay up globex` in the fleet deploys the whole box environment, not one tenant. A run for one
+  tenant project deploys only the boxes it needs ([plan.md](plan.md#which-boxes-a-run-touches)).
 
 A new tenant is a new project: `bay init`, add its secrets, `bay up`.
 

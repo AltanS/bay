@@ -187,7 +187,7 @@ and `bay status --json` stays `status_version` 2. A reader of an older receipt
 must treat a missing `commit` or `image_ref` as null, a missing `commit_source` as `label` when `commit` is set, a missing `commit_tags` as null, a missing `failed` as unknown,
 and a missing `routes` as "this receipt does not say".
 
-`bay up` deploys the whole box environment, so the receipt covers every project on it. It reads `action` back: every container that is not `noop` goes into
+`bay up` reads the receipts of the boxes it deployed: the whole box environment for `bay up <env>`, for one project only the boxes it needs (a skipped box keeps its old receipt). A receipt covers every project on its box. It reads `action` back: every container that is not `noop` goes into
 the `applied` list of its JSON result, when the receipt's `fleet_commit` is
 the commit of that `bay up` (see [plan.md](plan.md)). It reads `code_moves`
 the same way: every `skipped` or `missing` move goes into `code_kept` and

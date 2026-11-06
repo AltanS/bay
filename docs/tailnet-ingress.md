@@ -330,7 +330,7 @@ One list. Do every step in this order. Run the `bay` commands with `--fleet <pat
    `deploy_stack,headscale,traefik` on every host of the ingress box's box env, and this deploys the
    prerequisites of step 2: `deploy_stack` covers the Traefik role (the DNS-01 resolver, the token
    file, the route file) and the `tailnet_identity` sidecar role, and `headscale` covers the
-   split-DNS records and the ACL render. Like every `bay up`, it deploys the whole box environment.
+   split-DNS records and the ACL render. A one-project `bay up` deploys only the boxes it needs, and with a route step the ingress box is one of them.
    Step 5 stays: it checks the ACL before the route moves.
 9. **Probe from a peer**, not from the ingress host (see
    [Diagnosing a broken route](#diagnosing-a-broken-route)).

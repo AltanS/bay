@@ -197,8 +197,9 @@ volume whose container runs on the host:
 - Nothing runs while `backup_enabled` is false. The plan says so: `volume backups are
   compiled, but backup_enabled is false: no backup runs`.
 - A new or changed volume backup is a plan step of kind `backup`.
-  `bay up` deploys the whole box environment, and with such a step it also runs the `backup`
-  tag, so the script and the timer are installed in the same deploy.
+  `bay up` deploys the box of that volume (a one-project run deploys only the boxes it needs),
+  and with such a step it also runs the `backup` tag, so the script and the timer are installed
+  in the same deploy.
 - Like an accessory, a volume that is gone keeps its timer and its repo. Remove them by hand.
 - `backup = false` on the mount leaves the volume out. A volume from `bay import` carries it,
   because the old YAML fleet backed up no volume. Drop it to start the backups.

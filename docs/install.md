@@ -282,7 +282,8 @@ neither place is an error that names the project.
 
 **Push first.** `bay up` refuses a commit that is on no branch of the remote. The box
 builds from the remote, so it cannot run a commit that only your machine has. `bay plan`
-says so in a note. `bay up` deploys the whole box environment, not one project. Which pins it
+says so in a note. A one-project `bay up` deploys only the boxes it needs; `bay up <env>` in the
+fleet deploys the whole box environment. Which pins it
 moves depends on where you run it (see [plan.md](plan.md#every-deployed-project-is-pinned)).
 
 ## Caches

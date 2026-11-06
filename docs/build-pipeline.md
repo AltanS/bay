@@ -98,7 +98,7 @@ the push may deploy. The rules for each webhook build:
    skipped and the registry moves `:latest` with
    `docker buildx imagetools create --prefer-index=false` (a failure is
    `build.failed`, "Registry retag").
-2. **Hold guard.** `_hold_reason` decides. (A held push waits for `bay up`. `bay up` deploys the whole box environment, not one project.) The push is held when:
+2. **Hold guard.** `_hold_reason` decides. (A held push waits for `bay up`. A one-project `bay up` deploys only the boxes it needs, with every webhook box and the build server when a build entry changes.) The push is held when:
    - the compiled `build.track` is `pin` (`[deploy.<env>] track = "pin"`).
      This holds every push, so `build.held` (warn) fires on every push of a
      `pin` project, by design: each one waits for `bay up`. Mute it per

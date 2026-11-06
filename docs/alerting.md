@@ -380,7 +380,7 @@ would orphan every existing snapshot.
 
 Generated from `alerts/registry.yml` — do not hand-edit. Run `make docs-alerts`.
 
-A held build (`build.held`) waits for `bay up`, which deploys the whole box environment, not one project.
+A held build (`build.held`) waits for `bay up`. A one-project `bay up` deploys only the boxes it needs; `bay up <env>` in the fleet deploys the whole box environment.
 
 <!-- BEGIN GENERATED ALERT TABLE -->
 

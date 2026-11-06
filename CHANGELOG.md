@@ -8,6 +8,30 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.13.0] - 2026-11-06
+
+`bay up` for one project runs only on the boxes it needs.
+
+### Changed
+- A run for one project (`bay up`, `bay plan` and `bay rollback`, in an app repo or with `--project`) now has a scope: the fleet boxes it needs. The playbook, the box check of `bay plan --remote`, the receipt read after the deploy and the health check run only on the inventory hosts of those boxes (`ansible-playbook -l <hosts>`). Before, every run deployed every host of the box env, so a deploy for one app took the time of all boxes and could fail because of another box.
+- A box is in the scope when it is the box of the project, the old box of a move, the ingress box of a plan with a route step, or a box with a planned step of another project. When the compiled entry of a container with a `build` changes, the scope also takes every box with a webhook receiver and the build server: each receiver renders the config of every build of the fleet. A pin move with no `bay.toml` change adds no box. A box that shares an inventory host with a box of the scope runs too.
+- There is no limit for `bay up <env>` in the fleet, a route-only plan, a box env with one box, a scope that holds every host, a fleet with no host map, a plan with a `tailnet` step, a step that Bay cannot place on one box, and a Jinja `build_server` when the build surface changed. The notes say why.
+- A scoped plan replaces the note about the shared proxy, the gateway and the update watcher. The new note names the boxes the run deploys and the boxes it skips. `bay up` prints the same line.
+- A project on a skipped box keeps its lock record: not pinned, not marked failed, not counted in the receipt commit. A skipped box that is down does not fail or warn the run.
+- The build server bootstrap play in `deploy.yml` (`run_once` with `delegate_to: build_server`) no longer touches a build server outside the hosts of a limited `bay up`. `bay deploy --region` keeps the old behaviour.
+- A move to a box in another box env deploys the old box env on the old box only.
+
+### Added
+- `--all-boxes` on `bay plan`, `bay up` and `bay rollback`: the run deploys every box of the box env, as before 2.13.
+- `scope` in the plan JSON and in the `bay up --json` result: `all_boxes`, `boxes`, `hosts`, `skipped_boxes`, `reasons`, `limits` and `why`. It is part of the plan id. `bay up --plan-id` deploys the scope of the saved plan, and the plan is stale when a new plan has another scope. `--all-boxes` with a scoped plan id is refused.
+- Fleet drift. A scoped `bay plan` adds one note per skipped box whose fleet files changed since its last deploy: the box, the count and up to three paths. `bay show <project>` prints one more line under the env row when the box of the project has drift (`fleet_drift` in `--json`). The status word does not change.
+- `docs/plan.md` has a section "Which boxes a run touches".
+
+### Upgrade notes
+- A run for one project no longer refreshes the shared proxy, the gateway and the update watcher on the other boxes. After a change of fleet files (`bay.fleet.toml`, `group_vars/`, `files/`), run `bay up <env>` in the fleet, or pass `--all-boxes`.
+- The plan JSON and the `bay up` result have `scope`. A one-project plan saved by 2.12 is stale under 2.13: plan again.
+- Every machine that deploys a fleet moves to 2.13.0 together. `env_busy` is still per box env, so two scoped runs on different boxes of one box env still block each other.
+
 ## [2.12.2] - 2026-11-06
 
 `bay fleet ls` no longer breaks a path across lines, and CI is green again.

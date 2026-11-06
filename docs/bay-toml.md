@@ -31,7 +31,8 @@ resources and the per-project lockfile. Only the `bay` CLI writes the lockfile.
 
 Status: the schema and the validator ship today, and so do the commands that act on the
 file (`bay init`, `bay plan`, `bay up`, `bay show`, `bay rollback`, see [plan.md](plan.md)).
-This page is the contract they follow. `bay up` deploys the whole box environment, not one project.
+This page is the contract they follow. A one-project `bay up` deploys only the boxes it needs;
+`bay up <env>` in the fleet deploys the whole box environment.
 The other docs call this file at the project's current commit **WANTED** (what you ask for),
 the commit in the fleet lockfile **PINNED**, and what the box reports **RUNNING**. The three
 are defined in [plan.md](plan.md).

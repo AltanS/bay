@@ -15,6 +15,7 @@ These are the daily verbs of Bay v2. They work on one project of one fleet.
   - [Features Bay cannot deploy yet](#features-bay-cannot-deploy-yet)
   - [Risk](#risk)
   - [Box move](#box-move)
+  - [Which boxes a run touches](#which-boxes-a-run-touches)
   - [The whole environment](#the-whole-environment)
   - [bay approve](#bay-approve)
   - [bay up](#bay-up)
@@ -454,7 +455,9 @@ Risk is set by the data that a step touches.
 | Box predicts a remove (`source: box`) | destructive |
 
 `bay up` writes the whole compiled file, so a change to another project's
-container is part of this plan too. Such a step carries that project in
+container is part of this plan too. A one-project run then deploys that
+container's box too (see [Which boxes a run touches](#which-boxes-a-run-touches)).
+Such a step carries that project in
 `project` and keeps the risk it has in its own plan: a safe change of project
 B is safe in a plan for project A, and two safe changes give `auto`.
 
@@ -482,8 +485,10 @@ verdict `auto` and asks for no approval. The `reason` of the step names what the
 read it before you run `bay up` (use `bay plan --remote` to see these steps at all).
 
 `bay up` also refreshes the shared proxy, the gateway and the update watcher
-on the boxes. That work comes from the fleet, not from `bay.toml`. The plan
-says so once, in `notes`. It is not a step.
+on the boxes it deploys. That work comes from the fleet, not from `bay.toml`.
+The plan says so once, in `notes`. It is not a step. A one-project run skips
+the boxes it does not need, and its note names them (see
+[Which boxes a run touches](#which-boxes-a-run-touches)).
 
 ### Box move
 
@@ -533,9 +538,96 @@ environment, `bay up` deploys that one too.
 
 A rollback across a move is a move back: it needs `--data keep` again.
 
+### Which boxes a run touches
+
+Since 2.13, a run for one project (in an app repo, or with `--project`)
+deploys only the boxes it needs. This set of boxes is the **scope**.
+`bay up <env>` in the fleet, with no project, still deploys the whole box
+environment.
+
+A box is in the scope when one of these holds:
+
+1. It is the box of the project.
+2. It is the old box of a [box move](#box-move). When the old box is in
+   another box environment, the second deploy runs on the old box only.
+3. The plan has a `route` step, and the box is `[tailnet] ingress_box`.
+4. The build surface changed. The compiled entry of a container with a
+   `build` differs between the services file before the run and the one the
+   run writes: added, removed, or any key changed. Then the scope also takes
+   every box with a webhook receiver (a box where a build runs) and the build
+   server. Each receiver renders the config of every build of the fleet, so a
+   hook could reach any of them. A pin move with no `bay.toml` change compiles
+   the same entries, so it adds no box.
+5. The plan has a compile step for a container of another project, or of no
+   project, on that box (see [Risk](#risk)). A planned step runs where it is
+   planned.
+
+Ansible limits hosts, not boxes. So a box that shares an inventory host with a
+box of the scope is in the scope too (reason `shares a host`).
+
+The playbook, the box check of `bay plan --remote`, the receipt read after
+the deploy and the health check run only on the inventory hosts of the scope
+(`ansible-playbook -l <hosts>`). The run also sets `bay_scope_limited`, so the
+build server bootstrap play in `deploy.yml` leaves a build server outside the
+limit alone. The plan itself still reads the receipt of every host: for
+RUNNING, and for the drift notes below.
+
+There is no scope, and so no `-l`, in these cases:
+
+- `bay up <env>` and `bay plan <env>` with no project, and a route-only plan.
+- `--all-boxes` on `bay plan`, `bay up` or `bay rollback`.
+- The scope holds every host of the box environment. A box environment with
+  one box is always this case.
+- Bay cannot read the host map: the inventory fails, or a box maps to no
+  host. A note says so.
+- The plan has a `tailnet` step: the allowlist of every box changes.
+- Bay cannot place a planned step on one box. A note names the step.
+- The build surface changed, and `build_server` or
+  `git_deploy_build_strategy` is a Jinja value in `group_vars`. A note says so.
+
+`bay rollback` uses the same rule.
+
+**What a scoped run skips.** Each deploy also refreshes the shared proxy, the
+gateway and the update watcher on the boxes it runs on. Those changes come
+from the fleet, not from `bay.toml`. A scoped run does not refresh them on the
+skipped boxes. The plan says so in a note that names the boxes it runs on and
+the boxes it skips, and `bay up` prints the same line. After a change of fleet
+files (`bay.fleet.toml`, `group_vars/`, `files/`), run `bay up <env>` in the
+fleet, or pass `--all-boxes`.
+
+**Fleet drift.** A skipped box keeps its receipt, with the `fleet_commit` it
+was deployed from. A scoped `bay plan` adds one note per skipped box whose
+fleet files changed since then: the box, the count and up to three paths. The
+lock files, `plans/` and `group_vars/all/services.yml` do not count.
+`bay show <project>` prints one more line under the env row when the box of
+the project has such drift (`fleet_drift` in `--json`). The status word does
+not change. A `fleet_commit` that the local repo does not know gives
+"unknown fleet commit", never an error.
+
+**Results.** A project on a skipped box keeps its lock record. It is not
+pinned, not marked failed and not counted in the receipt commit. A skipped box
+that is down does not fail or warn the run.
+
+**The plan id.** The plan JSON has `scope` (see [The plan JSON](#the-plan-json)),
+and it is part of the plan id. `bay up --plan-id` deploys the scope of the
+saved plan. The check before the deploy plans again and must find the same
+scope, else the plan is `stale` ("the scope changed"). A plan made with
+`--all-boxes` is checked with it. `bay up --all-boxes --plan-id <id>` with a
+scoped plan is refused: plan again with `--all-boxes`. The result of
+`bay up --json` has the same `scope`.
+
+**Links between boxes.** `bay.toml` has no key for `links:`, and the compiler
+never writes `links`. So a link from an app on one box to a container on
+another box needs no rule here.
+
+**Not yet per box.** `env_busy` is still per box environment: two scoped runs
+on different boxes of one box environment still block each other.
+
 ### The whole environment
 
-`bay up` always deploys a whole box environment. `bay plan <env>` can show
+`bay up <env>` with no project deploys the whole box environment. A run for
+one project deploys only the boxes it needs (see
+[Which boxes a run touches](#which-boxes-a-run-touches)). `bay plan <env>` can show
 all of it. Run it with no `--project` and no `bay.toml` here or above, in the
 fleet directory or with `--fleet`, `BAY_FLEET` or `BAY_FLEET_NAME`:
 
@@ -692,7 +784,9 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
      `next` (the same command). The exit code is 130.
 6. Bay runs today's deploy for the box's environment, limited to
    `--tags deploy_stack` (the same work as `bay deploy <env> --tags deploy_stack`,
-   and the same tag the box check of `bay plan` runs). The `git_deploy` role
+   and the same tag the box check of `bay plan` runs). A run for one project
+   adds `-l <hosts>`: only the hosts of the plan's scope (see
+   [Which boxes a run touches](#which-boxes-a-run-touches)). The `git_deploy` role
    runs before the containers, and under that tag it renders the webhook side
    of every build container on the box:
    - the rebuild script, so a later webhook build uses the deployed config, not
@@ -838,10 +932,13 @@ failed `bay up` lists them as `deploy_tags`. When the deploy used only
 
 #### Every deployed project is pinned
 
-`bay up` deploys the whole box environment, not only one project. So after
+`bay up` deploys every project on the boxes it runs on: the whole box
+environment for `bay up <env>` in the fleet, only the boxes it needs for one
+project (see [Which boxes a run touches](#which-boxes-a-run-touches)). So after
 the deploy, OK or failed, Bay updates the lock of every project that has a
-`[deploy.<e>]` (any `<e>`) on the same box environment as the plan. This is what
-"covered" means in the docs. What moves depends on how you call it:
+`[deploy.<e>]` (any `<e>`) on a box the run deployed. This is what "covered"
+means in the docs. A project on a skipped box keeps its record. What moves
+depends on how you call it:
 
 - **In an app repo, or with `--project <name>`: one project.** That project is pinned
   to the planned commit (the table below). Every other project keeps its pin.
@@ -1621,6 +1718,15 @@ know.
 - `source` is `compile` for a step from the compiled diff, `box` for a step
   from the box prediction.
 - `box_prediction` is empty without `--remote`.
+- `scope` (since 2.13, one-project plans only) is the set of boxes `bay up`
+  deploys: `{"all_boxes", "boxes", "hosts", "skipped_boxes", "reasons",
+  "limits", "why"}`. `reasons` gives one reason per box: `project box`,
+  `old box of the move`, `ingress box`, `build server`, `webhook box`,
+  `planned step` or `shares a host`. `limits` holds the `-l` hosts per box
+  environment, and `hosts` is their union. With `all_boxes` true there is no
+  `-l`, and `why` says why. It is part of the plan id (see
+  [Which boxes a run touches](#which-boxes-a-run-touches)). The `bay up --json`
+  result has the same field.
 - `fleet_sync` (since 2.12) is `{"pulled", "from", "to"}` when `bay plan`
   fast-forwarded the fleet first, else null. `reason` is `diverged`,
   `remote_unreachable` or `no_upstream` when the fleet blocks the plan, else
@@ -1651,7 +1757,7 @@ receipt says what runs.
 |---|---|---|
 | `git push` to the app repo | No | The webhook builds and deploys the new code. `bay show` then says `behind`. |
 | `git push` that changes `bay.toml` | No | The build is held (`build.held` alert). Nothing deploys until `bay up`. |
-| `bay up` | Yes: the pin moves to the new commit, the old pin goes to `previous` | Bay deploys the whole box environment from the pinned commits. |
+| `bay up` | Yes: the pin moves to the new commit, the old pin goes to `previous` | Bay deploys the pinned commits: the whole box environment for `bay up <env>`, only the boxes it needs for one project. |
 | `bay rollback` | Yes: the pin moves back to `previous`, and `frozen` is set | The previous code and config. Pushes build but do not deploy. |
 
 The lock syncs through git. `bay up` commits it and pushes the fleet repo

@@ -89,7 +89,7 @@ The CLI argument is just an Ansible host pattern passed as `target_host`:
 
 This works because the framework playbooks use `hosts: "{{ target_host }}"` -- whatever you pass as the environment argument becomes the Ansible host pattern. There is nothing region-specific in the framework.
 
-The same name also names the deploy receipt: the box writes `/var/lib/bay/receipts/<name>.json`. So `bay deploy eu` writes `eu.json`, which `bay status --env production`, `bay plan` and `bay rollback` do not read, and it leaves `production.json` as it was. To deploy one region, keep the box env and limit the hosts: `bay deploy production -- --limit eu`. That writes `production.json` on the EU box only.
+The same name also names the deploy receipt: the box writes `/var/lib/bay/receipts/<name>.json`. So `bay deploy eu` writes `eu.json`, which `bay status --env production`, `bay plan` and `bay rollback` do not read, and it leaves `production.json` as it was. To deploy one region, keep the box env and limit the hosts: `bay deploy production -- --limit eu`. That writes `production.json` on the EU box only. A one-project `bay up` does this by itself: it deploys only the boxes it needs (see [plan.md](plan.md#which-boxes-a-run-touches)).
 
 ## group_vars Layering
 
