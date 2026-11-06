@@ -725,14 +725,23 @@ def deploy(
 
 
 def _run_post_deploy_healthcheck(
-    env: str, root: Path, bay_dir: Path, *, report_dir: Path | None = None
+    env: str,
+    root: Path,
+    bay_dir: Path,
+    *,
+    report_dir: Path | None = None,
+    groups: set[str] | None = None,
 ) -> None:
     """Post-deploy reachability audit. Probes every public service's
     `domains:` with HTTPS GET in parallel and reports status. Does not
     exit the deploy non-zero — the deploy itself already succeeded, and
     we don't want a transient 502 on an unrelated service to fail-out
     an otherwise-good rollout. Failures are reported loudly with a
-    `docker logs` hint so the operator sees them."""
+    `docker logs` hint so the operator sees them.
+
+    ``groups`` (a limited ``bay up``) keeps only the services placed on
+    those groups (``regions``); a service with no ``regions`` runs on every
+    box, so it stays."""
     from bay_cli.config import StackConfig
     from bay_cli.healthcheck import (
         read_touched_services,
@@ -742,6 +751,12 @@ def _run_post_deploy_healthcheck(
 
     cfg = StackConfig(root)
     services = cfg.get_services()
+    if groups is not None:
+        services = {
+            name: svc
+            for name, svc in services.items()
+            if not (svc or {}).get("regions") or set((svc or {}).get("regions") or []) & groups
+        }
     if not services:
         return
 

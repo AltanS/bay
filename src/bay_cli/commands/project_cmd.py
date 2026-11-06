@@ -98,6 +98,15 @@ _AllowUnsupportedOpt = Annotated[
         help="Plan and apply even when bay.toml uses a feature Bay cannot deploy yet.",
     ),
 ]
+_AllBoxesOpt = Annotated[
+    bool,
+    typer.Option(
+        "--all-boxes",
+        help="With --project: run on every box of the box environment, as before 2.13. "
+        "Without it, a project run deploys only the boxes it needs (docs/plan.md, "
+        '"Which boxes a run touches").',
+    ),
+]
 _ForceCodeOpt = Annotated[
     bool,
     typer.Option(
@@ -497,6 +506,7 @@ def plan(
     force_code: _ForceCodeOpt = False,
     data: _DataOpt = None,
     log: _LogOpt = None,
+    all_boxes: _AllBoxesOpt = False,
 ) -> None:
     """Compare WANTED (bay.toml at HEAD), PINNED (the lock) and RUNNING (the box).
 
@@ -557,6 +567,7 @@ def plan(
                     cwd_repo=cwd_repo,
                     data=data,
                     force_code=force_code,
+                    all_boxes=all_boxes,
                 )
                 if plan_id:
                     result = planmod.recheck(proj, planmod.load_saved(proj.cx, plan_id), opts)
@@ -617,6 +628,7 @@ def _apply(
     force_code: bool = False,
     take_over: bool = False,
     allow_dirty: bool = False,
+    all_boxes: bool = False,
 ) -> None:
     from bay_cli import apply as applymod
     from bay_cli import plan as planmod
@@ -662,6 +674,7 @@ def _apply(
                     cwd_repo=cwd_repo,
                     data=data,
                     force_code=force_code,
+                    all_boxes=all_boxes,
                 )
                 if which == "rollback":
                     # For a rollback, `at` is --to: the code commit to roll back to.
@@ -834,6 +847,7 @@ def up(
     log: _LogOpt = None,
     take_over: _TakeOverOpt = False,
     allow_dirty: _AllowDirtyOpt = False,
+    all_boxes: _AllBoxesOpt = False,
 ) -> None:
     """Pin the project's commit in the fleet and deploy it.
 
@@ -853,7 +867,12 @@ def up(
 
     In a fleet directory (or with --fleet and no bay.toml here), with no
     --project, it applies a whole-environment plan: every project of the
-    environment at its WANTED commit.
+    environment at its WANTED commit, on every box of the box environment.
+
+    With a project, it deploys only the boxes the plan needs (the scope:
+    the project's box, the old box of a move, the ingress box for a route
+    change, the build server and webhook boxes when a build changes).
+    --all-boxes deploys every box of the box environment.
 
     Examples:
 
@@ -879,6 +898,7 @@ def up(
         force_code=force_code,
         take_over=take_over,
         allow_dirty=allow_dirty,
+        all_boxes=all_boxes,
     )
 
 
@@ -905,6 +925,7 @@ def rollback(
     log: _LogOpt = None,
     take_over: _TakeOverOpt = False,
     allow_dirty: _AllowDirtyOpt = False,
+    all_boxes: _AllBoxesOpt = False,
 ) -> None:
     """Return an environment to its previous pin and its previous code, and freeze it.
 
@@ -939,6 +960,7 @@ def rollback(
         data,
         take_over=take_over,
         allow_dirty=allow_dirty,
+        all_boxes=all_boxes,
     )
 
 

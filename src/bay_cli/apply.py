@@ -61,7 +61,7 @@ import contextlib
 import copy
 import json
 import shutil
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -69,6 +69,7 @@ from typing import Any
 
 from bay_cli import fleetsync, gitrepo, layout, lockfile
 from bay_cli import plan as planmod
+from bay_cli import scope as scopemod
 from bay_cli.context import Context
 from bay_cli.errors import BayError, ErrorCode
 from bay_cli.fleet import GENERATED_SERVICES
@@ -139,8 +140,14 @@ def default_deploy(
     config_files_root: Path | None = None,
     code_targets: Mapping[str, Any] | None = None,
     tags: str = UP_DEPLOY_TAGS,
+    limit: Mapping[str, Any] | None = None,
 ) -> None:
     """Today's ``bay deploy <env> --tags deploy_stack``, without the prompts and the banner.
+
+    ``limit`` (``{"hosts": [...], "boxes": [...]}``) is the plan's scope in
+    this box env (:func:`bay_cli.scope.limit_for`): the playbook runs with
+    ``-l <hosts>`` and the health check probes only the services of those
+    boxes. None: the whole box env, as before 2.13.
 
     ``tags`` adds ``headscale,traefik`` when the plan has a route step
     (:func:`bay_cli.routes.deploy_tags`).
@@ -182,12 +189,18 @@ def default_deploy(
         ]
         if code_targets:
             extra += ["-e", json.dumps({"bay_code_targets": dict(code_targets)})]
+        health: dict[str, Any] = {}
+        if limit:
+            extra += scopemod.limit_args(list(limit["hosts"]))
+            health["groups"] = scopemod.groups_of(
+                planmod.load_fleet_doc(cx), limit.get("boxes") or []
+            )
         # From here on Ansible runs against the box: box_touched is true.
         _PLAYBOOK["started"] = True
         ops._run_playbook(cx, "deploy", box_env, tags, extra)
         ops._invalidate_rig_cache(cx.cache_dir)
         ops._run_post_deploy_healthcheck(
-            box_env, cx.fleet_root, cx.framework_root, report_dir=report_dir
+            box_env, cx.fleet_root, cx.framework_root, report_dir=report_dir, **health
         )
     finally:
         shutil.rmtree(report_dir, ignore_errors=True)
@@ -495,9 +508,9 @@ class _SeenReceipts:
         self._reader = reader
         self._seen: dict[str, list[dict[str, Any]]] = {}
 
-    def __call__(self, cx: Context, box_env: str) -> list[dict[str, Any]]:
+    def __call__(self, cx: Context, box_env: str, **kw: Any) -> list[dict[str, Any]]:
         # Resolved per call: tests swap planmod.default_receipt_reader.
-        entries = (self._reader or planmod.default_receipt_reader)(cx, box_env)
+        entries = (self._reader or planmod.default_receipt_reader)(cx, box_env, **kw)
         self._seen[box_env] = entries
         return entries
 
@@ -812,6 +825,11 @@ def _apply_plan_steps(
     """
     env = str(plan["env"])
     box_env = str(plan["box_env"])
+    # The boxes this run deploys (:mod:`bay_cli.scope`). A plan with no scope
+    # (a whole-environment plan) deploys every box, as before 2.13.
+    scope: dict[str, Any] = plan.get("scope") or scopemod.whole(
+        scopemod.WHY_NO_PROJECT, _env_boxes(cx, box_env)
+    )
     adopt_notes: list[str] = []
     for proj, commit in members:
         on_remote = planmod.commit_on_remote(proj, commit)
@@ -975,6 +993,13 @@ def _apply_plan_steps(
             )
             if target == box_env and tags != UP_DEPLOY_TAGS:
                 extra["tags"] = tags
+            # The plan's scope (spec 2026-11-06): only the hosts of its boxes.
+            limited = scopemod.limit_for(scope, target)
+            if limited:
+                extra["limit"] = {
+                    "hosts": limited,
+                    "boxes": [b for b in scope["boxes"] if b in _env_boxes(cx, target)],
+                }
             try:
                 run_deployer(
                     deploy or default_deploy, cx, target, config_files_root=comp.files_root, **extra
@@ -995,12 +1020,19 @@ def _apply_plan_steps(
     # 6. receipt. After a deploy that exited 0, a receipt read that errors is tried
     # again (read_receipts_after): "cannot read" is not "no receipt from this deploy".
     reader = read_receipts or planmod.default_receipt_reader
-    entries = read_receipts_after(reader, cx, box_env, retry=failure is None, say=say)
+    # A limited run asks only the hosts it deployed: a skipped box that is down
+    # neither fails nor warns the run.
+    read_hosts = scopemod.limit_for(scope, box_env)
+    entries = read_receipts_after(
+        reader, cx, box_env, retry=failure is None, say=say, hosts=read_hosts
+    )
     # Results are per box (:func:`box_results`): a member is ok only when the run
     # did not fail and its own box wrote an ok receipt for this fleet commit.
     run_failed = failure is not None
     hosts, map_problem = box_names(cx, box_env)
-    unread = unreadable_boxes(entries, hosts, cx, box_env)
+    unread = unreadable_boxes(
+        entries, hosts, cx, box_env, only=set(scope["boxes"]) if read_hosts else None
+    )
     per_box = hosts is not None
     if hosts is not None:
         results, unmapped = box_results(entries, fleet_commit, hosts)
@@ -1088,6 +1120,9 @@ def _apply_plan_steps(
     lock_files += more_files
     pinned += more_rows
     notes = planmod.repair_notes(plan) + list(adopt_notes) + box_notes
+    scoped = scopemod.scope_note(scope, env)
+    if scoped is not None:
+        notes.insert(0, scoped)
     notes += [
         f"{name} has no pinned commit, so this deploy left it out and its lock is unchanged"
         for name in left_out
@@ -1182,6 +1217,8 @@ def _apply_plan_steps(
         "allowed_dirty": plan.get("allowed_dirty"),
         # The deploy ran, but these boxes' receipts could not be read (not "no receipt").
         "receipt_unread": unread,
+        # The boxes this run deployed (the plan's scope).
+        "scope": scope,
     }
     if unread and failure and failure.startswith("the deploy ran, but the receipt"):
         result["next"] = again_command(cx, action, env, plan.get("project"))
@@ -1462,6 +1499,7 @@ def _apply_route_steps(
         "deploy_tags": tags,
         "frozen": False,
         "route_only": True,
+        "scope": scopemod.whole(scopemod.WHY_NO_PROJECT, _env_boxes(cx, box_env)),
         "fleet_sync": plan.get("fleet_sync"),
         "took_over": plan.get("took_over"),
         "allowed_dirty": plan.get("allowed_dirty"),
@@ -1603,7 +1641,13 @@ RECEIPT_READ_PAUSE = 2.0
 
 
 def read_receipts_after(
-    reader: planmod.ReceiptReader, cx: Context, box_env: str, *, retry: bool, say: Echo
+    reader: planmod.ReceiptReader,
+    cx: Context,
+    box_env: str,
+    *,
+    retry: bool,
+    say: Echo,
+    hosts: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """The receipts after the deploy. With ``retry``, a read that errors is tried again.
 
@@ -1611,6 +1655,7 @@ def read_receipts_after(
     that raises means the receipt could not be read, which says nothing about
     the deploy. After a deploy that exited 0 that read is tried up to
     :data:`RECEIPT_READ_TRIES` times, :data:`RECEIPT_READ_PAUSE` seconds apart.
+    ``hosts`` (a limited run) asks only those inventory hosts.
     """
     import time
 
@@ -1618,7 +1663,7 @@ def read_receipts_after(
     entries: list[dict[str, Any]] = []
     for attempt in range(1, tries + 1):
         try:
-            entries = reader(cx, box_env)
+            entries = reader(cx, box_env, hosts=list(hosts)) if hosts else reader(cx, box_env)
             problem = next((str(e["error"]) for e in entries if e.get("error")), None)
         except (BayError, OSError) as exc:
             entries, problem = [{"env": box_env, "box": None, "receipt": None,
@@ -1637,10 +1682,13 @@ def unreadable_boxes(
     hosts: Mapping[str, list[str]] | None,
     cx: Context,
     box_env: str,
+    *,
+    only: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """``[{"box", "host", "error"}]`` for each fleet box whose receipt could not be read.
 
-    An entry with no host (the whole read failed) counts for every box of the box env.
+    An entry with no host (the whole read failed) counts for every box of the
+    box env, or for every box of ``only`` (the scope of a limited run).
     """
     out: list[dict[str, Any]] = []
     try:
@@ -1660,6 +1708,8 @@ def unreadable_boxes(
             names = all_boxes
         else:
             names = list(hosts.get(str(host), []))
+        if only is not None:
+            names = [n for n in names if n in only]
         out += [{"box": n, "host": host, "error": str(error)} for n in names]
     return out
 
@@ -1681,21 +1731,7 @@ def box_names(cx: Context, box_env: str) -> tuple[dict[str, list[str]] | None, s
     host in the box env, or when a box of the box env maps to no host. Bay
     then cannot judge per box (:func:`env_wide_results`).
     """
-    from bay_cli import receipts
-
-    try:
-        boxes = planmod.load_fleet_doc(cx).get("boxes") or {}
-        names = receipts.inventory_names(cx.fleet_root, cx.framework_root)
-    except Exception as exc:  # the inventory reader raises many types
-        return None, f"cannot read the inventory of {box_env}: {exc}"
-    if not names.get(box_env):
-        return None, f"the inventory has no host in {box_env}"
-    mapping = receipts.host_boxes(cx.fleet_root, boxes, box_env, names=names)
-    placed = {b for found in mapping.values() for b in found}
-    lost = [b for b in _env_boxes(cx, box_env) if b not in placed]
-    if lost:
-        return None, f"box {', '.join(lost)} of {box_env} maps to no inventory host"
-    return mapping, None
+    return scopemod.host_map(cx, box_env)
 
 
 def env_wide_results(
@@ -2256,6 +2292,7 @@ def _rollback(
         cwd_repo=opts.cwd_repo,
         # A rollback moves code backwards on purpose: no forward-only check.
         code_order=False,
+        all_boxes=opts.all_boxes,
     )
     return up(proj, restored, action="rollback", code=code, **kwargs)
 

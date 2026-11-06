@@ -152,11 +152,30 @@ class FakeBox:
         self.per_box: dict[tuple[str, str], dict[str, Any] | None] = {}
         #: Per deploy: the config files the deploy would copy, relative path -> bytes.
         self.config_files: list[dict[str, bytes] | None] = []
+        #: Per deploy: the ``limit`` it got (None: the whole box env).
+        self.limits: list[dict[str, Any] | None] = []
+        #: Per receipt read: the ``hosts`` it asked (None: every host).
+        self.reads: list[list[str] | None] = []
 
-    def deploy(self, cx: Context, box_env: str, *, config_files_root: Path | None = None) -> None:
+    def deploy(
+        self,
+        cx: Context,
+        box_env: str,
+        *,
+        config_files_root: Path | None = None,
+        limit: dict[str, Any] | None = None,
+    ) -> None:
+        """``limit`` (a scoped bay up): only the boxes on those hosts get a new receipt."""
         from bay_cli import gitrepo
 
         self.deploys.append(box_env)
+        self.limits.append(None if limit is None else dict(limit))
+        skipped = (
+            set()
+            if limit is None
+            else {b for b in self._boxes(cx, box_env) if fake_host(b) not in limit["hosts"]}
+        )
+        unreached = self.unreached | skipped
         self.config_files.append(
             None
             if config_files_root is None
@@ -170,13 +189,13 @@ class FakeBox:
         entries = {**(data.get("accessories") or {}), **(data.get("services") or {})}
         previous = self.receipts.get(box_env)
         for b in self._boxes(cx, box_env):
-            if b in self.unreached and (box_env, b) not in self.per_box:
+            if b in unreached and (box_env, b) not in self.per_box:
                 self.per_box[(box_env, b)] = (
                     None
                     if previous is None
                     else {**copy.deepcopy(previous), "box": fake_host(b)}
                 )
-            elif b not in self.unreached:
+            elif b not in unreached:
                 self.per_box.pop((box_env, b), None)
         before = {
             c["name"]: c for c in (self.receipts.get(box_env) or {}).get("containers", [])
@@ -235,9 +254,14 @@ class FakeBox:
         )
         return found or ["box-1"]
 
-    def read(self, cx: Context, box_env: str) -> list[dict[str, Any]]:
+    def read(
+        self, cx: Context, box_env: str, *, hosts: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        self.reads.append(None if hosts is None else list(hosts))
         out = []
         for b in self._boxes(cx, box_env):
+            if hosts is not None and fake_host(b) not in hosts:
+                continue
             if (box_env, b) in self.per_box:
                 receipt = self.per_box[(box_env, b)]
             else:
@@ -5429,9 +5453,9 @@ def _two_boxes_status_on_one(world: dict[str, Path], webapp_box: str) -> Path:
     return status
 
 
-def _up_status(world: dict[str, Path]) -> dict[str, Any]:
+def _up_status(world: dict[str, Path], **kw: Any) -> dict[str, Any]:
     proj = planmod.load_project(cx_of(world), "status", cwd=world["fleet"])
-    return applymod.up(proj, planmod.PlanOptions())
+    return applymod.up(proj, planmod.PlanOptions(**kw))
 
 
 def test_unrelated_failure_on_another_box_keeps_a_confirmed_pin(
@@ -5449,7 +5473,8 @@ def test_unrelated_failure_on_another_box_keeps_a_confirmed_pin(
     _edit_in_fleet(status, world, 'MODE = "one"', 'MODE = "two"')
     box.fail_boxes = {"box-1"}
     with pytest.raises(applymod.DeployFailed) as err:
-        _up_status(world)
+        # --all-boxes: the run deploys box-2 too, as every run did before 2.13.
+        _up_status(world, all_boxes=True)
     box.fail_boxes = set()
     assert err.value.exit_code == 1 and err.value.result["result"] == "failed"
     rows = {r["project"]: r["result"] for r in err.value.result["pinned"]}

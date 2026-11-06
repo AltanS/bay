@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -267,9 +267,21 @@ def host_boxes(
     return out
 
 
-def fetch_receipts(cx: Context, env: str, *, run: Runner | None = None) -> list[dict[str, Any]]:
-    """One ``cat`` per box in inventory group ``env``. Never raises for a box."""
+def fetch_receipts(
+    cx: Context,
+    env: str,
+    *,
+    run: Runner | None = None,
+    hosts: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """One ``cat`` per box in inventory group ``env``. Never raises for a box.
+
+    ``hosts`` (the scope of a limited ``bay up``) adds ``-l <hosts>``: only
+    those hosts are asked.
+    """
     argv, extra_env = _adhoc_cat(cx, env)
+    if hosts:
+        argv += ["-l", ",".join(hosts)]
     runner = run or _default_runner
     try:
         proc = runner(argv, extra_env, cx.fleet_root)
