@@ -265,5 +265,7 @@ def ls() -> None:
     for row in rows:
         mark = "" if row["has_fleet_file"] else f"  (no {FLEET_FILE})"
         where = f"{row['path']} -> {row['real_path']}" if row["real_path"] else row["path"]
-        console.console.print(f"  {row['name']}  {where}{mark}")
+        # soft_wrap: Rich would word-wrap a long path with real newlines, which breaks
+        # copy-paste and scripts. One logical line leaves the display to the terminal.
+        console.console.print(f"  {row['name']}  {where}{mark}", soft_wrap=True, markup=False)
 
