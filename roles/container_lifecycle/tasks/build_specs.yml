@@ -66,6 +66,10 @@
     # nothing is read here. Second line of defence: deploy_stack/tasks/validate.yml.
     _svc_port_rendered: >-
       {%- if _svc_expose == 'loopback' -%}127.0.0.1:{{ _svc_internal }}:{{ _svc_internal }}{%- elif _svc_expose in ['gateway', 'tailnet'] -%}{{ gateway_bind_ip }}:{{ _svc_internal }}:{{ _svc_internal }}{%- elif _svc_expose == 'host' -%}0.0.0.0:{{ _svc_internal }}:{{ _svc_internal }}{%- endif -%}
+    # The egress networks this container joins as a client (bay.toml
+    # `egress`, tasks/egress.yml). [] for every other container, which then
+    # keeps its one network and its config hash.
+    _egress_client_nets: "{{ _name | bay_egress_client_networks(active_accessories | default({})) }}"
     _base:
       name: "{{ _name }}"
       type: service
@@ -113,6 +117,9 @@
          | combine({'ports': [_svc_port_rendered]}
                    if (_svc_expose != '')
                    else {})
+         | combine({'networks': [traefik_docker_network | default('services')] + _egress_client_nets}
+                   if _egress_client_nets | length > 0
+                   else {})
          | combine(_log_rotation)
       }}
 
@@ -141,6 +148,15 @@
     # enforced by `bay validate`, not by this render.
     _acc_port_rendered: >-
       {%- if _acc_expose == 'loopback' -%}127.0.0.1:{{ _acc_port_pair }}{%- elif _acc_expose in ['gateway', 'tailnet'] -%}{{ gateway_bind_ip }}:{{ _acc_port_pair }}{%- elif _acc_expose == 'host' -%}0.0.0.0:{{ _acc_port_pair }}{%- endif -%}
+    # An internal container can be an egress client too (see the services above).
+    _egress_client_nets: "{{ _name | bay_egress_client_networks(active_accessories | default({})) }}"
+    # An egress container (bay.toml `egress`): alone on its own network, at
+    # the .2 that tasks/egress.yml read back from Docker, with NET_RAW dropped
+    # and no-new-privileges. Only then are these keys in the spec, so no other
+    # container's config hash changes. A partial pass (no egress.yml run) has
+    # no address; it never reconciles an egress container.
+    _egress_net: "{{ _name | bay_egress_network }}"
+    _egress_addr: "{{ ((_egress_nets | default({})).get(_name) or {}).get('address', '') }}"
     _base:
       name: "{{ _name }}"
       type: accessory
@@ -186,6 +202,18 @@
                    else {})
          | combine({'release': _acc.release}
                    if _acc.release is defined
+                   else {})
+         | combine({'networks': [traefik_docker_network | default('services')] + _egress_client_nets}
+                   if (_egress_client_nets | length > 0 and _acc.network_mode is not defined
+                       and _acc.egress is not defined)
+                   else {})
+         | combine({'networks': [_egress_net],
+                    'cap_drop': ['NET_RAW'],
+                    'security_opt': ['no-new-privileges:true']}
+                   if _acc.egress is defined
+                   else {})
+         | combine({'network_ips': {_egress_net: _egress_addr}}
+                   if (_acc.egress is defined and _egress_addr != '')
                    else {})
          | combine(_log_rotation)
       }}

@@ -8,6 +8,24 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.15.0] - 2026-11-09
+
+A service can reach the public internet and nothing else.
+
+### Added
+- `egress = "public"` on a `[services.<name>]` table in `bay.toml`. That container can reach the public internet only: no tailnet address (including MagicDNS), no private or reserved range, no other container, not the box, not the public address of any box in the inventory, and no IPv6. Use it for a container that runs untrusted content, such as a headless browser.
+- The project's main container (and its canary) can still call it at `http://<container>:<port>`. `egress_clients = ["<service>"]` lets sibling services call it too. The egress container cannot open a connection to its clients.
+- The validator requires `port`, `inherit = false` and `dns` with public IPv4 resolvers, and refuses a route, an `expose` other than `loopback`, any `needs` and `update = "auto"` (also when inherited).
+- On every `bay up` the box creates the Docker network `services-egress-<container>` (IPv4 /28 from the new `bay_egress_subnet_pool`, default `172.31.240.0/20`, bridge `bayeg<8 hex>`), pins the container at `.2` with `NET_RAW` dropped and `no-new-privileges`, and loads `/etc/nftables.d/bay-egress.conf` (tables `inet bay_egress` and `bridge bay_egress`, which match only the `bayeg*` bridges). The rules are checked with `nft -c`, loaded with `nft -f` without a Docker restart, and checked live before the reconciler runs. A failure stops the deploy before the container starts. Unused egress networks are removed after the reconciler; the tables and the file go when no container uses egress any more.
+- The reconciler creates a container with more than one network, or a fixed address, by create, connect, start. Before, every network after the first was dropped without a word. Such a container is recreated when it is not attached as its spec says (new reason code `networks`).
+- A push build (`rebuild.sh`) attaches the egress network to a client before it starts the new container.
+
+### Upgrade notes
+- No action needed. A container without `egress` gets the same spec, the same config hash and the same SDK call as in 2.14.0, so this release recreates nothing by itself. `bay compile --check` reports all three fleets up to date. A box with no egress container pays one `stat` per deploy.
+- A box that runs an egress container needs the nftables boot config from `bay deploy <env> --rig` (`include "/etc/nftables.d/*.conf"` and the `nftables` service enabled); the deploy stops and says so otherwise.
+- Adding `egress` recreates the service and its clients once. Emergency rollback: `nft delete table inet bay_egress` and `nft delete table bridge bay_egress`. Normal rollback: remove the key and run `bay up`.
+- Every machine that runs `bay up` for a project with `egress` needs 2.15.0. An older CLI refuses the key as unknown.
+
 ## [2.14.0] - 2026-11-09
 
 A container can have its own DNS resolvers.

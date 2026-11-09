@@ -29,6 +29,7 @@ if _filter_dir not in sys.path:
 
 from bay_filters import (
     bay_build_dedup_map,
+    bay_egress_client_networks,
     bay_image_consumers,
     bay_image_region_map,
     bay_prefix_volumes,
@@ -88,6 +89,7 @@ def _render_rebuild_sh(
     peer_urls: dict | None = None,
     secrets: dict | None = None,
     gateway_bind_ip: str = "100.64.0.1",
+    accessories: dict | None = None,
 ) -> str:
     """Render rebuild.sh.j2 with the given services config.
 
@@ -103,6 +105,7 @@ def _render_rebuild_sh(
     env.filters["bay_prefix_volumes"] = bay_prefix_volumes
     env.filters["bay_traefik_labels"] = bay_traefik_labels
     env.filters["bay_watchtower_labels"] = bay_watchtower_labels
+    env.filters["bay_egress_client_networks"] = bay_egress_client_networks
 
     tmpl = env.get_template("rebuild.sh.j2")
     rendered = tmpl.render(
@@ -131,6 +134,7 @@ def _render_rebuild_sh(
         webhook={"secret": webhook_secret},
         secrets=secrets or {},
         gateway_bind_ip=gateway_bind_ip,
+        accessories=accessories or {},
     )
     return rendered
 

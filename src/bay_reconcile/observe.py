@@ -164,7 +164,25 @@ def parse_state(
         memory=_int_or_none(host_config.get("Memory")),
         memory_swap=_int_or_none(host_config.get("MemorySwap")),
         dns=_dns_tuple(host_config),
+        networks=_networks(attrs.get("NetworkSettings")),
     )
+
+
+def _networks(settings: object) -> dict[str, str] | None:
+    """NetworkSettings.Networks as ``{name: fixed IPv4 address or ""}``; None if not reported."""
+    if not isinstance(settings, Mapping):
+        return None
+    raw = settings.get("Networks")
+    if raw is None:
+        return None if "Networks" not in settings else {}
+    if not isinstance(raw, Mapping):
+        return None
+    out: dict[str, str] = {}
+    for name, endpoint in raw.items():
+        ipam = (endpoint or {}).get("IPAMConfig") if isinstance(endpoint, Mapping) else None
+        address = (ipam or {}).get("IPv4Address") if isinstance(ipam, Mapping) else None
+        out[str(name)] = str(address or "")
+    return out
 
 
 def _dns_tuple(host_config: Mapping[str, Any]) -> tuple[str, ...] | None:

@@ -46,3 +46,17 @@ container_lifecycle_stack_label: "bay.stack"
 
 # Remove containers not in current specs after deploy
 container_lifecycle_cleanup: true
+
+# ── Egress containers (bay.toml `[services.<name>] egress = "public"`) ──────
+# Each egress container gets its own Docker network, services-egress-<name>,
+# with one IPv4 /28 from this pool (the first free one, picked by a hash of the
+# name and read back from Docker once the network exists, never moved). The
+# container sits at .2, its clients get .8 to .14. The pool must not overlap a
+# network the box routes to; a /28 that a Docker network or a host route
+# already covers is skipped. 4096 addresses = 256 egress containers per box.
+bay_egress_subnet_pool: 172.31.240.0/20
+
+# Extra IPv4 addresses or networks an egress container may never reach, on
+# top of the private, tailnet, loopback, link-local and multicast ranges and
+# the public address of every box in the inventory (tasks/egress.yml).
+bay_egress_blocked_extra: []

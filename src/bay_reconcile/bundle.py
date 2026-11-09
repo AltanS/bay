@@ -64,6 +64,9 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         mem_limit=d.get("mem_limit"),
         memswap_limit=d.get("memswap_limit"),
         dns=_dns(d),
+        network_ips=_network_ips(d),
+        cap_drop=_str_tuple(d, "cap_drop"),
+        security_opt=_str_tuple(d, "security_opt"),
         labels=dict(d.get("labels") or {}),
         healthcheck=_healthcheck(d),
         log_driver=d.get("log_driver"),
@@ -83,6 +86,35 @@ def _dns(d: Mapping[str, Any]) -> tuple[str, ...]:
     if isinstance(raw, list | tuple) and all(isinstance(a, str) and a for a in raw):
         return tuple(raw)
     raise ValueError(f"{d.get('name')!r}: dns must be a list of address strings")
+
+
+def _str_tuple(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    """A list of non-empty strings under ``key``, or ``()``. A bad shape fails at load time."""
+    raw = d.get(key)
+    if raw is None:
+        return ()
+    if isinstance(raw, list | tuple) and all(isinstance(a, str) and a for a in raw):
+        return tuple(raw)
+    raise ValueError(f"{d.get('name')!r}: {key} must be a list of strings")
+
+
+def _network_ips(d: Mapping[str, Any]) -> dict[str, str]:
+    """``{network: IPv4 address}`` for fixed addresses, or ``{}``.
+
+    Every key must be one of the entry's ``networks``: an address for a network
+    the container never joins would be silently ignored by the create.
+    """
+    raw = d.get("network_ips")
+    if not raw:
+        return {}
+    networks = set(d.get("networks") or ())
+    if not isinstance(raw, Mapping) or not all(
+        isinstance(k, str) and isinstance(v, str) and v and k in networks for k, v in raw.items()
+    ):
+        raise ValueError(
+            f"{d.get('name')!r}: network_ips must map networks of the entry to addresses"
+        )
+    return dict(raw)
 
 
 def _release(d: Mapping[str, Any]) -> str | tuple[str, ...] | None:

@@ -496,6 +496,7 @@ class TestCbMaxFailuresDefault:
         from test_rebuild_config import _regex_replace, _to_json
         from bay_filters import (  # type: ignore[import-not-found]
             bay_build_dedup_map,
+            bay_egress_client_networks,
             bay_image_consumers,
             bay_image_region_map,
             bay_prefix_volumes,
@@ -513,6 +514,7 @@ class TestCbMaxFailuresDefault:
         env.filters["bay_prefix_volumes"] = bay_prefix_volumes
         env.filters["bay_traefik_labels"] = bay_traefik_labels
         env.filters["bay_watchtower_labels"] = bay_watchtower_labels
+        env.filters["bay_egress_client_networks"] = bay_egress_client_networks
 
         tmpl = env.get_template("rebuild.sh.j2")
         rendered = tmpl.render(

@@ -1407,8 +1407,9 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
   'stack_name': stack_name | default('bay'),
 } %}
 {% if not _pull_ns.first %}el{% endif %}if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
+{% set _egress_nets = svc_name | bay_egress_client_networks(accessories | default({})) %}
   _run_container() {
-    docker run -d \
+    docker {{ 'create' if _egress_nets else 'run -d' }} \
       --name "{{ svc_name }}" \
       --hostname "{{ svc_name }}" \
       --restart unless-stopped \
@@ -1443,7 +1444,15 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
       -l '{{ k }}={{ v }}' \
 {% endfor %}
       "${EXTRA_LABELS[@]}" \
-      "${IMAGE_REF}"{{ ' ' ~ svc.command if svc.command is defined else '' }}
+      "${IMAGE_REF}"{{ ' ' ~ svc.command if svc.command is defined else '' }}{{ ' || return 1' if _egress_nets else '' }}
+{% for _net in _egress_nets %}
+    # An egress client (bay.toml egress): attach the egress network before the
+    # start, so a push never drops it. Not started yet, so a failure removes it.
+    docker network connect "{{ _net }}" "{{ svc_name }}" >/dev/null || { docker rm -f "{{ svc_name }}" >/dev/null 2>&1; return 1; }
+{% endfor %}
+{% if _egress_nets %}
+    docker start "{{ svc_name }}" >/dev/null
+{% endif %}
   }
 {% set _pull_ns.first = false %}
 {% endif %}
@@ -1994,8 +2003,9 @@ docker rm "${SERVICE}"   2>/dev/null || true
   'stack_name': stack_name | default('bay'),
 } %}
 {% if not loop.first %}el{% endif %}if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
+{% set _egress_nets = svc_name | bay_egress_client_networks(accessories | default({})) %}
   _run_container() {
-    docker run -d \
+    docker {{ 'create' if _egress_nets else 'run -d' }} \
       --name "{{ svc_name }}" \
       --hostname "{{ svc_name }}" \
       --restart unless-stopped \
@@ -2030,7 +2040,15 @@ docker rm "${SERVICE}"   2>/dev/null || true
       -l '{{ k }}={{ v }}' \
 {% endfor %}
       "${EXTRA_LABELS[@]}" \
-      "${IMAGE_NAME}:latest"{{ ' ' ~ svc.command if svc.command is defined else '' }}
+      "${IMAGE_NAME}:latest"{{ ' ' ~ svc.command if svc.command is defined else '' }}{{ ' || return 1' if _egress_nets else '' }}
+{% for _net in _egress_nets %}
+    # An egress client (bay.toml egress): attach the egress network before the
+    # start, so a push never drops it. Not started yet, so a failure removes it.
+    docker network connect "{{ _net }}" "{{ svc_name }}" >/dev/null || { docker rm -f "{{ svc_name }}" >/dev/null 2>&1; return 1; }
+{% endfor %}
+{% if _egress_nets %}
+    docker start "{{ svc_name }}" >/dev/null
+{% endif %}
   }
 {% endfor %}
 {% if git_deploy_services | length > 0 %}

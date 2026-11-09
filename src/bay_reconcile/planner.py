@@ -39,6 +39,11 @@ def plan(
     - config_hash differs/absent    -> CanarySwap (zero-downtime service) else Recreate
     - image id differs from the local one -> same change path as a config change
     - managed container not desired -> Remove (orphan cleanup)
+    - hash and image match, but a spec that wires networks (a second network
+      or a fixed address, ``ContainerSpec.wires_networks``) is not attached
+      as it says -> same change path. A push build or a hand ``docker network
+      disconnect`` can drop the egress network without touching the hash
+      label. Every other spec ignores its networks here, as before.
 
     The image check is what the config hash alone cannot see. The hash covers
     the config TEXT, so a rebuilt image under an unchanged reference (the
@@ -56,6 +61,7 @@ def plan(
             state.config_hash
             and state.config_hash == spec.config_hash
             and not state.image_drifted
+            and not (spec.wires_networks and _networks_reason(spec, state))
         ):
             actions.append(NoOp(spec.name))
         else:
@@ -96,6 +102,7 @@ REASON_CODES = (
     "volumes",
     "memory",
     "dns",
+    "networks",
     "stopped",
 )
 
@@ -195,6 +202,9 @@ def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
     dns = _dns_reason(spec, state)
     if dns:
         detail.append(dns)
+    networks = _networks_reason(spec, state)
+    if networks:
+        detail.append(networks)
     env_file = env_file_reason(spec.env_file_change)
     if env_file:
         detail.append(env_file)
@@ -310,10 +320,37 @@ def _dns_reason(spec: ContainerSpec, state: ContainerState) -> str | None:
     return f"dns: {now} -> {then}"
 
 
+def _networks_reason(spec: ContainerSpec, state: ContainerState) -> str | None:
+    """Name a difference in the networks the container is attached to.
+
+    Only for a container on user networks (not ``network_mode``), and only
+    when docker reported its networks. A fixed address (``network_ips``) must
+    match too; a network without one may have any address.
+    """
+    if spec.network_mode or not spec.networks or state.networks is None:
+        return None
+    want, have = set(spec.networks), set(state.networks)
+    parts: list[str] = []
+    if want - have:
+        parts.append("not attached to " + ", ".join(sorted(want - have)))
+    if have - want:
+        parts.append("also attached to " + ", ".join(sorted(have - want)))
+    for net, address in sorted(spec.network_ips.items()):
+        now = state.networks.get(net)
+        if now is not None and now != address:
+            parts.append(f"address on {net} {now or 'picked by docker'} -> {address}")
+    if not parts:
+        return None
+    return "networks: " + "; ".join(parts)
+
+
 def _change_reason(spec: ContainerSpec, state: ContainerState) -> str:
     if not state.config_hash:
         return "no config-hash label (pre-reconciler container)"
     if state.config_hash == spec.config_hash:
+        if not state.image_drifted:
+            # The only other way past the NoOp gate: a wired spec's networks.
+            return _networks_reason(spec, state) or "networks: drift"
         return _image_reason(state)
     reason = f"config-hash changed ({state.config_hash[:12]} -> {spec.config_hash[:12]})"
     if state.image_drifted:

@@ -168,6 +168,12 @@ fi
 # resolvers, obvious placeholders, and the Hetzner provider defaults that the
 # netplan role ships (documented as overridable).
 #
+# Also allowlisted: IANA special-purpose ranges (RFC 6890): link-local
+# 169.254/16 (cloud metadata), 192.0.0/24, benchmarking 198.18/15, and
+# multicast plus reserved 224/3. They are not routable to a real host. The
+# egress firewall block list (src/bay_reconcile/egressnet.py BLOCKED_V4)
+# names them.
+#
 # CGNAT/Tailscale (100.64.0.0/10) is allowlisted wholesale, deliberately. The
 # docs legitimately teach the CIDR and individual node addresses, so policing
 # this range by VALUE is futile — the real leak that got through review was a
@@ -179,6 +185,7 @@ ALLOW+='|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.'
 ALLOW+='|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|100\.100\.100\.100'
 ALLOW+='|1\.1\.1\.1|8\.8\.8\.8|8\.8\.4\.4|9\.9\.9\.9'
 ALLOW+='|1\.2\.3\.4|5\.6\.7\.8|9\.8\.7\.6|2\.2\.2\.2|3\.3\.3\.3|999\.'
+ALLOW+='|169\.254\.|192\.0\.0\.|198\.1[89]\.|22[4-9]\.|2[34][0-9]\.|25[0-4]\.'
 ALLOW+='|185\.12\.64\.[12])'
 
 bad_ips=$(ggrep -IhoE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' -- "${EXCLUDES[@]}" 2>/dev/null \
@@ -498,6 +505,16 @@ bad_junk=$(gls | grep -E "$JUNK_RE" || true)
 if [ -n "$bad_junk" ]; then
     fail "Tracked dev-artifact file found — should not be committed:"
     echo "$bad_junk" >&2
+fi
+
+# A scan of the working tree reads tracked files only. A new untracked file
+# once made a pre-commit scan report "clean", and the release then failed.
+# Say so, but keep the status.
+if [ -z "$REF" ]; then
+    untracked=$(git ls-files --others --exclude-standard | wc -l | tr -d ' ')
+    if [ "$untracked" -gt 0 ]; then
+        echo "leak-scan: note: ${untracked} untracked file(s) were not scanned (the scan reads tracked files only); git add them and run again" >&2
+    fi
 fi
 
 if [ "$status" -eq 0 ]; then

@@ -66,10 +66,12 @@ nftables_drop_ipv4_options: true
 nftables_prerouting_rules: []
 
 # ── Ownership of /etc/nftables.d/ ───────────────────────────────────────────
-# nftables.conf ends with `include "/etc/nftables.d/*.conf"`. Bay writes two
+# nftables.conf ends with `include "/etc/nftables.d/*.conf"`. Bay writes three
 # files there:
 #
 #   bay-prerouting.conf    this role (the rules above)
+#   bay-egress.conf        container_lifecycle role, on every bay up, only on a
+#                          box with an egress container (bay.toml `egress`)
 #   trellis-blocklist.conf crowdsec role (ip_blocklist CIDR set)
 #
 # Any other *.conf there is unsupported. Bay does not remove it, but each run

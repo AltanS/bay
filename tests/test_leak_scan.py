@@ -182,6 +182,54 @@ def test_documentation_ip_stays_green(scratch):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# IANA special-purpose addresses (RFC 6890). None can name a real host, and
+# the egress block list names them. Assembled from fragments, like the rest.
+SPECIAL_PURPOSE_IPS = [
+    "169.254." + "169.254",
+    "192.0." + "0.0",
+    "198.18." + "0.0",
+    "198.19." + "255.1",
+    "224.0." + "0.0",
+    "240.0." + "0.1",
+    "254.1." + "1.1",
+]
+# Real-looking public addresses one step outside those ranges.
+NEIGHBOUR_IPS = [
+    "198.20." + "0.1",
+    "169.253." + "1.1",
+    "192.0." + "1.1",
+    "223.255." + "255.1",
+]
+
+
+@pytest.mark.parametrize("ip", SPECIAL_PURPOSE_IPS)
+def test_special_purpose_ip_stays_green(scratch, ip):
+    _plant(scratch, "planted.yml", f"blocked: {ip}\n")
+    result = _scan(scratch)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("ip", NEIGHBOUR_IPS)
+def test_public_ip_next_to_a_special_purpose_range_is_red(scratch, ip):
+    _plant(scratch, "planted.yml", f"ansible_host: {ip}\n")
+    result = _scan(scratch)
+    assert result.returncode != 0
+    assert ip in result.stdout + result.stderr
+
+
+def test_untracked_file_is_noted_but_does_not_change_the_status(scratch):
+    (scratch / "new.txt").write_text("not added yet\n")
+    result = _scan(scratch)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "1 untracked file(s) were not scanned" in result.stderr
+    assert "leak-scan: clean" in result.stdout
+
+
+def test_no_untracked_note_when_everything_is_tracked(scratch):
+    result = _scan(scratch)
+    assert "untracked" not in result.stdout + result.stderr
+
+
 def test_scan_of_a_past_ref_sees_a_leak_the_worktree_no_longer_has(scratch):
     """The pre-push hook depends on this: history, not worktree."""
     _plant(scratch, "planted.py", f'API_KEY = "{LOWER_KEY}"\n')

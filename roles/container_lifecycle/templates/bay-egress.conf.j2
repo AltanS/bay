@@ -1,0 +1,110 @@
+#!/usr/sbin/nft -f
+# {{ ansible_managed }}
+# Bay egress firewall (container_lifecycle role, tasks/egress.yml). Do not
+# edit by hand: it is rendered from the bay.toml `egress` key on every
+# `bay up`, and removed when no container uses egress any more.
+#
+# An egress container sits alone on its own Docker network, whose Linux
+# bridge is named bayeg<8 hex>. Every rule here matches those bridges and
+# nothing else, so no other traffic on the box changes.
+#
+# Why these drops win: nftables runs every base chain on a hook in priority
+# order. An `accept` ends only the chain it is in; the packet then meets the
+# next base chain (CrowdSec at -10 runs before this table, Docker's iptables-nft
+# chains, Tailscale's and Bay's `inet filter` at 0 after it). A `drop` in ANY
+# base chain is final. So a drop here cannot be undone by Docker's or
+# Tailscale's accepts, and an accept here (established traffic, the one
+# allowed client connection) changes nothing for the chains after it.
+#
+# Published ports are DNATed in prerouting, before forward, so a connection
+# from an egress container to a box address and a published port arrives here
+# as a container address (172.16/12) and meets the blocked set.
+#
+# Emergency rollback: `nft delete table inet bay_egress` and
+# `nft delete table bridge bay_egress` reopen everything at once. The next
+# `bay up` loads this file again. To remove the feature, delete the `egress`
+# key from bay.toml and run `bay up`.
+#
+# This file loads on its own with `nft -f`. The create-then-delete idiom
+# replaces only these two tables, so no Docker restart is needed.
+# nftables.conf also includes it at boot and on every nftables reload.
+
+table inet bay_egress {}
+delete table inet bay_egress
+table bridge bay_egress {}
+delete table bridge bay_egress
+
+table inet bay_egress {
+    # IPv4 ranges an egress container may never reach: private, tailnet and
+    # MagicDNS (100.64/10), loopback, link-local, multicast and reserved, and
+    # the public address of every box in the inventory.
+    set blocked_v4 {
+        type ipv4_addr
+        flags interval
+        elements = { {{ _egress_blocked | join(', ') }} }
+    }
+
+    # Routed traffic. A regular chain is entered only from an egress bridge,
+    # so every other packet leaves this base chain on its accept policy and
+    # meets the later chains exactly as before.
+    chain forward {
+        type filter hook forward priority -5; policy accept;
+        iifname "bayeg*" jump from_egress
+        oifname "bayeg*" jump to_egress
+    }
+
+    chain from_egress {
+        ct state established,related accept
+        meta nfproto ipv6 counter drop
+{% for _e in _egress_rules %}
+        # {{ _e.container }}: a client on its network may open {{ _e.address }}:{{ _e.port }}.
+        iifname "{{ _e.bridge }}" oifname "{{ _e.bridge }}" ip daddr {{ _e.address }} tcp dport {{ _e.port }} ct state new accept
+{% endfor %}
+        # Any other new connection inside one egress network, or between two
+        # (the egress container to its clients, too), is dropped.
+        oifname "bayeg*" counter drop
+        ip daddr @blocked_v4 limit rate 10/minute burst 20 packets log prefix "bay-egress-drop: " level info
+        ip daddr @blocked_v4 counter drop
+    }
+
+    # Nothing outside may open a connection into an egress network.
+    chain to_egress {
+        meta nfproto ipv6 counter drop
+        ct state new counter drop
+    }
+
+    # Traffic to the box itself: the gateway, host-network Traefik, host
+    # ports, box addresses. Only replies to the box's own connections pass.
+    chain input {
+        type filter hook input priority -5; policy accept;
+        iifname "bayeg*" jump egress_to_host
+    }
+
+    chain egress_to_host {
+        ct state established,related accept
+        limit rate 10/minute burst 20 packets log prefix "bay-egress-host: " level info
+        counter drop
+    }
+}
+
+# Frames bridged between two containers of one egress network never reach the
+# IP hooks above unless br_netfilter is on. This table filters them on the
+# bridge itself, so the egress container cannot open a connection to its
+# clients whether br_netfilter is loaded or not. It keeps no connection state,
+# so the egress container may only answer from its port (no bare SYN). ARP and
+# everything that is not IP passes.
+table bridge bay_egress {
+    chain forward {
+        type filter hook forward priority -200; policy accept;
+        meta ibrname "bayeg*" jump intra
+    }
+
+    chain intra {
+        ether type ip6 counter drop
+{% for _e in _egress_rules %}
+        meta ibrname "{{ _e.bridge }}" ip daddr {{ _e.address }} tcp dport {{ _e.port }} accept
+        meta ibrname "{{ _e.bridge }}" ip saddr {{ _e.address }} tcp sport {{ _e.port }} tcp flags & (syn | ack) != syn accept
+{% endfor %}
+        ether type ip counter drop
+    }
+}

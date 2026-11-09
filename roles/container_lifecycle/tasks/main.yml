@@ -22,6 +22,16 @@
 #        not list every managed container. git_deploy uses this to bring the
 #        webhook receiver onto its current image.
 
+#        Egress containers (bay.toml `egress`): a full pass creates their
+#        networks and loads their firewall BEFORE the specs are built (the
+#        specs pin the address the network got) and before the reconciler,
+#        then removes what no container needs AFTER it. A partial pass never
+#        touches either. See tasks/egress.yml.
+
+- name: Prepare the egress networks and firewall
+  ansible.builtin.include_tasks: egress.yml
+  when: container_lifecycle_only | default([]) | length == 0
+
 - name: Build container specs from services.yml
   ansible.builtin.include_tasks: build_specs.yml
   when: container_specs is not defined or (container_lifecycle_only | default([]) | length > 0)
@@ -33,3 +43,10 @@
       {{ _container_lifecycle_partial_specs | default([])
          if (container_lifecycle_only | default([]) | length > 0)
          else container_specs }}
+
+- name: Remove the egress networks and firewall nothing uses
+  ansible.builtin.include_tasks: egress_prune.yml
+  when:
+    - container_lifecycle_only | default([]) | length == 0
+    - not ansible_check_mode
+    - not (bay_reconciler_plan_only | default(false) | bool)

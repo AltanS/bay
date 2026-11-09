@@ -9,6 +9,7 @@
   - [Database binding: `database:` vs manual `DATABASE_URL`](#database-binding-database-vs-manual-database_url)
 - [Accessory Schema](#accessory-schema)
   - [`release`](#release)
+  - [`egress`](#egress)
   - [`path`](#path)
   - [`build.shared_from`](#buildshared_from)
 - [Top-level keys besides services](#top-level-keys-besides-services)
@@ -336,6 +337,11 @@ accessories:
     dns:                             # Resolvers for this one container (docker --dns). 1 to 3 IPs, order kept
       - 1.1.1.1                      #   Absent = the box resolver. Never a host name
 
+    egress:                          # bay.toml egress = "public": public internet only (see bay-toml.md)
+      mode: public                   #   Runs alone on services-egress-<name>, at .2, behind
+      port: 3000                     #   /etc/nftables.d/bay-egress.conf. The clients join that
+      clients: [myapp]               #   network and may open <name>:<port>. Needs dns, no network_mode
+
     log_rotation:                    # Per-accessory docker log retention (same shape as services)
       driver: json-file              #   json-file | local | none
       max_size: 10m                  #   accessories often want smaller caps
@@ -368,6 +374,23 @@ container, before it creates or recreates the container. A non-zero exit or a ti
 container keeps running and the receipt says `failed`. A push build (`rebuild.sh`) runs it
 before it swaps the container, and on a failure leaves `:latest` where it was and raises
 `build.failed`. A change of `release` alone recreates nothing.
+
+The release container joins only the container's first network (`services`), never an
+egress network (see `egress` below): a migration has no reason to call the egress
+container.
+
+### `egress`
+
+The compiled form of `bay.toml` `egress = "public"` (see
+[bay-toml.md](bay-toml.md#egress-a-service-that-reaches-the-public-internet-only)). It is
+only on an accessory, because an egress service has no route. `port` is the container
+port its clients may open, and `clients` lists the containers that join its network: the
+main container of the project environment first, then the `egress_clients` services. The
+deploy (`roles/container_lifecycle/tasks/egress.yml`) gives the accessory its own
+network `services-egress-<name>` at `.2`, drops `NET_RAW`, sets `no-new-privileges`, and
+loads the firewall before the reconciler runs. Each client gets that network as a
+second network, after `services`, also on a webhook push. A hand entry may use it too; it
+must not set `network_mode`, and each client must run on the same box.
 
 ### `path`
 

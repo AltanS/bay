@@ -79,6 +79,7 @@ _POST_RENAME_SCRIPTS = {
     "bay-docker-ro",
     "bay-job.sh",  # 2.3.0 [[jobs]]
     "bay-prerouting.conf",  # 2.7.0 nftables pre-routing table (GH#4)
+    "bay-egress.conf",  # egress containers (bay.toml egress)
 }
 
 

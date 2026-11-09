@@ -276,6 +276,7 @@ def _file_rules(doc: dict[str, Any]) -> Iterator[Violation]:
     yield from _deploy_rules(doc, envs, services)
     yield from _release_update_rules(doc, envs)
     yield from _dns_rules(doc, envs, services)
+    yield from _egress_rules(doc, envs, services)
     yield from _path_rules(services)
     yield from _domain_rules(doc, envs, services)
 
@@ -675,6 +676,130 @@ def _dns_rules(
                     f"{_join(base, 'dns')}[{i}]",
                     f"\"{entry}\" is not an IP address; write an IPv4 or IPv6 address "
                     "such as 1.1.1.1, not a domain name",
+                )
+
+
+#: Sent with every refusal of a missing or unusable resolver on an egress service.
+_EGRESS_DNS_HINT = (
+    'set public resolvers, for example dns = ["1.1.1.1", "9.9.9.9"]. Docker sends '
+    "the container's lookups from inside it, so without dns they go to the box "
+    "resolver, often the tailnet's 100.100.100.100, which egress blocks"
+)
+
+
+def _egress_rules(
+    doc: dict[str, Any], envs: dict[str, dict[str, Any]], services: dict[str, Any]
+) -> Iterator[Violation]:
+    """``egress = "public"``: a service that may reach the public internet only.
+
+    Bay puts it alone on its own Docker network behind a box firewall, so
+    everything that needs the shared ``services`` network or a private address
+    is refused here, where the reason can still be read: a route (Traefik
+    reaches containers over ``services``), a publish beyond loopback, a need (it
+    resolves to a container or a tailnet address), the project's env and
+    sibling URLs (``inherit = false`` is required), and ``update = "auto"``
+    (Watchtower would recreate it outside Bay). ``dns`` is required and every
+    resolver must be a public IPv4 address. ``egress_clients`` names the
+    sibling services that may call it; the main container always may.
+    """
+    from bay_reconcile.egressnet import is_blocked_v4
+
+    egress = {n for n, s in services.items() if isinstance(s, dict) and "egress" in s}
+    top_update = doc.get("update")
+    env_updates = {e: d.get("update") for e, d in envs.items()}
+    for name, svc in services.items():
+        if not isinstance(svc, dict):
+            continue
+        base = f"services.{name}"
+        clients = svc.get("egress_clients")
+        if name not in egress:
+            if clients is not None:
+                yield Violation(
+                    _join(base, "egress_clients"),
+                    'only a service with egress = "public" has clients; remove the key',
+                )
+            continue
+        if "port" not in svc:
+            yield Violation(
+                _join(base, "port"),
+                "is required for an egress service: its clients reach it at "
+                "http://<container>:<port>",
+            )
+        for key in ("domain", "path"):
+            if key in svc:
+                yield Violation(
+                    _join(base, key),
+                    "an egress service has no route: Traefik reaches containers over "
+                    "the services network, and an egress container is not on it",
+                )
+        if svc.get("expose") not in (None, "loopback"):
+            yield Violation(
+                _join(base, "expose"),
+                'an egress service may only expose "loopback", or nothing',
+            )
+        if "needs" in svc:
+            yield Violation(
+                _join(base, "needs"),
+                "an egress service cannot reach a database, a cache or another "
+                "project: each resolves to a private address, which egress blocks",
+            )
+        if svc.get("inherit") is not False:
+            yield Violation(
+                _join(base, "inherit"),
+                "must be false for an egress service, so it gets none of the "
+                "project's env, secrets or sibling URLs",
+            )
+        own_update = svc.get("update")
+        inherited = [("the top level", top_update)] + [
+            (f"deploy.{e}", u) for e, u in env_updates.items()
+        ]
+        if own_update == "auto" or (
+            own_update is None and any(u == "auto" for _, u in inherited)
+        ):
+            where = "" if own_update == "auto" else (
+                " (inherited from "
+                + ", ".join(w for w, u in inherited if u == "auto")
+                + ")"
+            )
+            yield Violation(
+                _join(base, "update"),
+                f'"auto" is refused for an egress service{where}: Watchtower would '
+                'recreate it outside Bay; set update = "notify" or "off" on the service',
+            )
+        dns = svc.get("dns")
+        if dns is None:
+            yield Violation(
+                _join(base, "dns"), f"is required for an egress service; {_EGRESS_DNS_HINT}"
+            )
+        for i, entry in enumerate(dns if isinstance(dns, list) else []):
+            if not isinstance(entry, str):
+                continue
+            try:
+                ip = ipaddress.ip_address(entry)
+            except ValueError:
+                continue  # _dns_rules names it
+            if ip.version == 6:
+                yield Violation(
+                    f"{_join(base, 'dns')}[{i}]",
+                    "an egress container has no IPv6; use a public IPv4 resolver",
+                )
+            elif is_blocked_v4(entry):
+                yield Violation(
+                    f"{_join(base, 'dns')}[{i}]",
+                    f"{entry} is in a private, tailnet or reserved range, which egress "
+                    f"blocks; {_EGRESS_DNS_HINT}",
+                )
+        for i, client in enumerate(clients if isinstance(clients, list) else []):
+            if not isinstance(client, str):
+                continue
+            where = f"{_join(base, 'egress_clients')}[{i}]"
+            if client == name:
+                yield Violation(where, "an egress service is not its own client")
+            elif client not in services:
+                yield Violation(where, f"no service named {client} in this file")
+            elif client in egress:
+                yield Violation(
+                    where, f"{client} is an egress service itself and cannot be a client"
                 )
 
 

@@ -1,0 +1,73 @@
+---
+# Egress containers, part 2: after the reconciler (see tasks/egress.yml).
+#
+# 1. Remove the egress networks this stack created that no wanted egress
+#    container needs and that no container is attached to. A network still in
+#    use is kept and named.
+# 2. When no container on this host uses egress any more, remove the
+#    firewall, but only when Bay installed it (the file exists) and only when
+#    step 1 kept no network. Removing the `egress` key and running `bay up` is
+#    the normal rollback.
+#
+# Runs after the reconciler, never before it: the old egress container must be
+# gone before its firewall is. Skipped in check mode (main.yml). A host that
+# never used egress pays one `stat`: the file exists from the first egress
+# deploy until this cleanup has removed everything.
+
+- name: Look for the egress firewall file
+  ansible.builtin.stat:
+    path: /etc/nftables.d/bay-egress.conf
+  register: _egress_fw_stat
+  become: true
+  become_user: root
+
+- name: Clean up the egress networks and firewall
+  when: (_egress_sidecars | default([]) | length > 0) or _egress_fw_stat.stat.exists
+  block:
+    - name: Remove the egress networks nothing uses
+      ansible.builtin.script:
+        # One line on purpose: see "Ensure the egress networks" in egress.yml.
+        cmd: "{{ playbook_dir }}/src/bay_reconcile/egressnet.py prune --spec {{ _egress_prune_spec | to_json | quote }}"
+        executable: python3
+      vars:
+        _egress_prune_spec:
+          containers: "{{ _egress_sidecars | default([]) }}"
+          stack: "{{ stack_name | default('bay') }}"
+      register: _egress_prune
+      changed_when: >-
+        _egress_prune.rc == 0 and
+        ((_egress_prune.stdout | from_json).removed | length > 0)
+
+    - name: Name the egress networks that are still in use
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: Bay kept the egress network(s)
+          {{ (_egress_prune.stdout | from_json).kept | join(', ') }}: a container
+          is still attached. Remove that container, then run bay up again.
+      when: (_egress_prune.stdout | from_json).kept | length > 0
+
+    # Create-then-delete in one transaction: it works whether the tables are
+    # live or not, and touches nothing else.
+    - name: Remove the egress tables when no container uses egress
+      ansible.builtin.command:
+        argv: [nft, -f, "-"]
+        stdin: |
+          table inet bay_egress {}
+          delete table inet bay_egress
+          table bridge bay_egress {}
+          delete table bridge bay_egress
+      changed_when: true
+      become: true
+      become_user: root
+      when: &egress_fw_gone
+        - _egress_sidecars | default([]) | length == 0
+        - _egress_fw_stat.stat.exists
+        - (_egress_prune.stdout | from_json).kept | length == 0
+
+    - name: Remove the egress firewall file
+      ansible.builtin.file:
+        path: /etc/nftables.d/bay-egress.conf
+        state: absent
+      become: true
+      become_user: root
+      when: *egress_fw_gone

@@ -157,13 +157,54 @@ class SdkDockerClient:
             kwargs["memswap_limit"] = spec.memswap_limit
         if spec.dns:
             kwargs["dns"] = list(spec.dns)
+        if spec.cap_drop:
+            kwargs["cap_drop"] = list(spec.cap_drop)
+        if spec.security_opt:
+            kwargs["security_opt"] = list(spec.security_opt)
         if spec.ports:
             kwargs["ports"] = _ports_to_sdk(spec.ports)
         if spec.healthcheck:
             kwargs["healthcheck"] = healthcheck_to_sdk(spec.healthcheck)
         if spec.log_driver:
             kwargs["log_config"] = {"type": spec.log_driver, "config": dict(spec.log_options or {})}
+        if spec.wires_networks:
+            self._create_wired(spec, kwargs)
+            return
         self._c.containers.run(**kwargs)
+
+    def _create_wired(self, spec: ContainerSpec, kwargs: dict[str, Any]) -> None:
+        """Create, attach every network (fixed addresses where pinned), then start.
+
+        ``containers.run`` takes one network and no address, so a second network
+        used to be dropped without a word. The container is created on the
+        first network, which is detached and attached again when it has a fixed
+        address (the SDK's create cannot set one on every version), every other
+        network is attached, and only then does the container start: it never
+        runs without its networks. A failure removes the half-made container, so
+        the next run sees it missing and creates it again instead of leaving a
+        stopped container that the planner would leave alone.
+        """
+        kwargs = {k: v for k, v in kwargs.items() if k != "detach"}
+        ctr = self._c.containers.create(**kwargs)
+        try:
+            first, *rest = spec.networks
+            pinned = dict(spec.network_ips)
+            if first in pinned:
+                net = self._c.networks.get(first)
+                net.disconnect(ctr)
+                net.connect(ctr, ipv4_address=pinned[first])
+            for name in rest:
+                if name in pinned:
+                    self._c.networks.get(name).connect(ctr, ipv4_address=pinned[name])
+                else:
+                    self._c.networks.get(name).connect(ctr)
+            ctr.start()
+        except Exception:
+            try:
+                ctr.remove(force=True)
+            except docker.errors.APIError:
+                pass
+            raise
 
     def run_release(self, spec: ContainerSpec, *, timeout: float) -> tuple[int | None, str]:
         name = f"{spec.name}{RELEASE_SUFFIX}"

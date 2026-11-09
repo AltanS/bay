@@ -25,6 +25,7 @@ _ROLE = _ROOT / "roles" / "nftables"
 _TASKS = _ROLE / "tasks" / "main.yml"
 _DEFAULTS = _ROLE / "defaults" / "main.yml"
 _CROWDSEC_TASKS = _ROOT / "roles" / "crowdsec" / "tasks" / "main.yml"
+_EGRESS_TASKS = _ROOT / "roles" / "container_lifecycle" / "tasks" / "egress.yml"
 
 _DEST = "/etc/nftables.d/bay-prerouting.conf"
 _DEPLOY = "Deploy nftables pre-routing rules"
@@ -182,6 +183,11 @@ def test_unmanaged_file_scan_excludes_exactly_the_bay_owned_files() -> None:
     owned = {Path(_DEST).name}
     for task in yaml.safe_load(_CROWDSEC_TASKS.read_text()):
         dest = (task.get("ansible.builtin.template") or {}).get("dest", "")
+        if dest.startswith("/etc/nftables.d/"):
+            owned.add(Path(dest).name)
+    # The egress firewall (container_lifecycle) names its file in a block var.
+    for task in yaml.safe_load(_EGRESS_TASKS.read_text()):
+        dest = (task.get("vars") or {}).get("_egress_conf", "")
         if dest.startswith("/etc/nftables.d/"):
             owned.add(Path(dest).name)
     assert set(find["excludes"]) == owned, (

@@ -112,6 +112,7 @@
     patterns: "*.conf"
     excludes:
       - bay-prerouting.conf
+      - bay-egress.conf
       - trellis-blocklist.conf
   register: _nftables_d_unmanaged
   become: true

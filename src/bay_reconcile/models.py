@@ -144,6 +144,15 @@ class ContainerSpec:
     #: it because ``bay_spec_hash`` reads the raw spec, where the key exists
     #: only when ``dns`` is set.
     dns: Sequence[str] = ()
+    #: Fixed IPv4 addresses per network (``{network: address}``), only for an
+    #: egress container (bay.toml ``egress``), which sits at ``.2`` of its own
+    #: network so the firewall can name it. Empty means docker picks.
+    network_ips: Mapping[str, str] = field(default_factory=dict)
+    #: Linux capabilities to drop (docker ``--cap-drop``) and security options
+    #: (docker ``--security-opt``). Bay sets them only on an egress container:
+    #: ``NET_RAW`` and ``no-new-privileges:true``. Empty means docker's default.
+    cap_drop: Sequence[str] = ()
+    security_opt: Sequence[str] = ()
     labels: Mapping[str, str] = field(default_factory=dict)
     healthcheck: Mapping[str, object] | None = None
     log_driver: str | None = None
@@ -165,6 +174,18 @@ class ContainerSpec:
     #: config hash already folds in the env file bytes. The planner turns it
     #: into the ``env_file`` reason.
     env_file_change: Mapping[str, object] | None = None
+
+    @property
+    def wires_networks(self) -> bool:
+        """True when the container needs more than docker's one-network create.
+
+        That is a second network or a fixed address: today only an egress
+        container (one network, a fixed ``.2``) and its clients (``services``
+        plus the egress network). Only these specs take the create, connect,
+        start path, and only these recreate when their network attachments
+        drift. Every other spec is created and planned exactly as before.
+        """
+        return not self.network_mode and (len(self.networks) > 1 or bool(self.network_ips))
 
 
 @dataclass(frozen=True)
@@ -205,6 +226,11 @@ class ContainerState:
     # ``HostConfig.Dns``, in order. () is "none set". None means docker did not
     # report the field.
     dns: tuple[str, ...] | None = field(default=None, compare=False, hash=False)
+    # The networks the container is attached to, from docker's
+    # ``NetworkSettings.Networks``: name -> the fixed IPv4 address it was given
+    # (``IPAMConfig.IPv4Address``), "" when docker picked the address. None
+    # means docker did not report the field.
+    networks: Mapping[str, str] | None = field(default=None, compare=False, hash=False)
 
     @property
     def running(self) -> bool:

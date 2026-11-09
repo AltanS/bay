@@ -24,6 +24,26 @@ _alert_spec = importlib.util.spec_from_file_location(
 _bay_alert = importlib.util.module_from_spec(_alert_spec)
 _alert_spec.loader.exec_module(_bay_alert)
 
+# The egress network names, bridge names and blocked ranges come from the one
+# module that also runs on the box (src/bay_reconcile/egressnet.py), so the
+# firewall, the spec builder and rebuild.sh can never disagree with the network
+# the box created. Loaded on first use: a copy of filter_plugins/ without the
+# framework's src/ beside it must still load every other filter.
+_EGRESS_MODULE_PATH = (
+    Path(__file__).resolve().parent.parent / "src" / "bay_reconcile" / "egressnet.py"
+)
+_egressnet_module = None
+
+
+def _egressnet():
+    global _egressnet_module
+    if _egressnet_module is None:
+        spec = importlib.util.spec_from_file_location("bay_egressnet", _EGRESS_MODULE_PATH)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _egressnet_module = module
+    return _egressnet_module
+
 bay_alert_body = _bay_alert.bay_alert_body
 bay_alert_content_type = _bay_alert.bay_alert_content_type
 bay_desugar_legacy = _bay_alert.bay_desugar_legacy
@@ -241,7 +261,52 @@ class FilterModule:
             "bay_scram_verifier": bay_scram_verifier,
             "bay_md5_verifier": bay_md5_verifier,
             "bay_db_password_verifier": bay_db_password_verifier,
+            "bay_egress_network": bay_egress_network,
+            "bay_egress_bridge": bay_egress_bridge,
+            "bay_egress_sidecars": bay_egress_sidecars,
+            "bay_egress_client_networks": bay_egress_client_networks,
+            "bay_egress_blocked_v4": bay_egress_blocked_v4,
         }
+
+
+# ── Egress containers (bay.toml `egress`) ─────────────────────────────
+
+
+def bay_egress_network(container):
+    """``services-egress-<container>``: the Docker network of one egress container."""
+    return _egressnet().network_name(str(container))
+
+
+def bay_egress_bridge(container):
+    """``bayeg<8 hex>``: the Linux bridge of that network, which the nftables rules match."""
+    return _egressnet().bridge_name(str(container))
+
+
+def bay_egress_sidecars(accessories):
+    """Sorted names of the accessories with ``egress`` (the compiled form of bay.toml egress)."""
+    return sorted(
+        name for name, cfg in (accessories or {}).items()
+        if isinstance(cfg, dict) and cfg.get("egress")
+    )
+
+
+def bay_egress_client_networks(name, accessories):
+    """The egress networks container ``name`` joins as a client, in sidecar-name order.
+
+    ``[]`` for every container that is no client, so a spec without egress
+    keeps its one network and its config hash.
+    """
+    out = []
+    for sidecar in bay_egress_sidecars(accessories):
+        clients = (accessories[sidecar].get("egress") or {}).get("clients") or []
+        if name in clients:
+            out.append(bay_egress_network(sidecar))
+    return out
+
+
+def bay_egress_blocked_v4(extra=None):
+    """The IPv4 ranges egress containers may not reach, plus ``extra``, merged, as CIDR strings."""
+    return _egressnet().blocked_v4(extra or [])
 
 
 def bay_config_dirs(paths):
@@ -1485,7 +1550,8 @@ def bay_spec_hash(spec, env_digest=None):
 
     Covers the fields that docker_container acts on: image, volumes, env,
     labels (excluding the config-hash label itself), networks, network_mode,
-    ports, command, restart_policy, mem_limit, memswap_limit, dns (only when set).  Fields that change between
+    ports, command, restart_policy, mem_limit, memswap_limit, dns, network_ips,
+    cap_drop, security_opt (each only when set).  Fields that change between
     deploys but are not part of the running container config are excluded
     (e.g. ``build``, ``type``).
 

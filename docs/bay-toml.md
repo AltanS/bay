@@ -635,9 +635,9 @@ service may use that name. Container names are in rule 8.
   the same image. An internal service that does this is (validated, not deployed yet).
 - The service inherits `update` and `logs` from the project. `replicas` defaults to `1`
   and `zero_downtime` to `false`.
-- The service may set its own: `command`, `port`, `health`, `memory`, `dns`, `replicas`,
-  `zero_downtime`, `update`, `logs`, `log_rotation`, `access`, `mounts`, `env`,
-  `secrets`, `fleet_secrets`, `needs`, `image` or `build`.
+- The service may set its own: `command`, `port`, `health`, `memory`, `dns`, `egress`,
+  `egress_clients`, `replicas`, `zero_downtime`, `update`, `logs`, `log_rotation`,
+  `access`, `mounts`, `env`, `secrets`, `fleet_secrets`, `needs`, `image` or `build`.
 - Routing: `path = "/api"` routes a prefix of the main domain, on a segment boundary
   (`/api` and `/api/x`, not `/apiary`). The prefix is not stripped: the app sees the full
   path. The router of the service outranks the main container's router. A trailing slash
@@ -670,6 +670,107 @@ service may use that name. Container names are in rule 8.
   port = 3000
   dns = ["1.1.1.1", "8.8.8.8"]
   ```
+
+  To also keep it off the tailnet, the private ranges and the other containers, add
+  `egress = "public"` (next section).
+
+#### `egress`: a service that reaches the public internet only
+
+`egress = "public"` is for a container that runs untrusted content, such as a headless
+browser that renders third-party pages. That container can reach the public internet
+and nothing else:
+
+- no tailnet address (`100.64.0.0/10`, which also holds MagicDNS `100.100.100.100`);
+- no private or reserved range (`10/8`, `172.16/12`, `192.168/16`, `127/8`,
+  `169.254/16`, `0/8`, `192.0.0/24`, `198.18/15`, `224/3`), so no other container;
+- not the box itself (its gateway, Traefik on the box network, published box ports);
+- not the public address of any box of the fleet;
+- no IPv6 at all.
+
+The project's main container can still call it at `http://<container>:<port>`, for
+example `http://anchorgenius-steel:3000`. `egress_clients` names sibling services that
+may call it too. Nothing else can reach it. The service itself cannot open a connection
+to its clients.
+
+```toml
+[services.steel]
+inherit = false
+image = "ghcr.io/steel-dev/steel-browser:latest"
+port = 3000
+dns = ["1.1.1.1", "9.9.9.9"]
+egress = "public"
+update = "notify"             # only needed when the project sets update = "auto"
+# egress_clients = ["worker"] # optional: sibling services that may call it
+```
+
+The rules, checked by `bay toml validate` and `bay plan`:
+
+| Rule | Why |
+|------|-----|
+| Only on `[services.<name>]`. | The main container keeps its normal networking. |
+| `port` is required. | Clients reach it on that port, and the firewall opens only that port. |
+| No `domain` and no `path`. | Traefik reaches containers over the `services` network, which the service is not on. |
+| `expose` is absent or `"loopback"`. | A publish on the tailnet address would open it to the tailnet. |
+| No `needs`. | A database, a cache or another project resolves to a private address, which egress blocks. |
+| `inherit = false` is required. | It gets none of the project's env, secrets or sibling URLs. |
+| `dns` is required, and every resolver is a public IPv4 address. | Docker sends the container's lookups from inside the container. Without `dns` they go to the box resolver, often the tailnet's `100.100.100.100`, which egress blocks. An IPv6 resolver is unreachable too. |
+| `update = "auto"` is refused, also when inherited from the top level or a `[deploy.<env>]`. | Watchtower would recreate the container outside Bay. Set `update = "notify"` or `"off"` on the service. |
+| Each `egress_clients` entry is another service of the file, not an egress service. | A client joins the service's network. |
+
+What Bay does on the box, on every `bay up`
+(`roles/container_lifecycle/tasks/egress.yml`):
+
+1. It creates the Docker network `services-egress-<container>` (IPv4 only, one /28 from
+   `bay_egress_subnet_pool`, default `172.31.240.0/20`, Linux bridge
+   `bayeg<8 hex>`). The first /28 is chosen by a hash of the name, past every subnet a
+   Docker network or a box route already uses. Once the network exists, Bay reads its
+   subnet back from Docker and never moves it.
+2. The service runs on that network alone, at address `.2`, with `NET_RAW` dropped and
+   `no-new-privileges`. The main container (and its canary) and each `egress_clients`
+   service join the network as a second network, after `services`. A webhook push
+   (`rebuild.sh`) attaches the network before it starts the new container.
+3. It writes `/etc/nftables.d/bay-egress.conf`: the tables `inet bay_egress` and
+   `bridge bay_egress`. They match only the `bayeg*` bridges, so no other traffic on the
+   box changes. Bay checks the file with `nft -c`, loads it with `nft -f` (no Docker
+   restart), and checks that the tables are live. nftables loads the file again at boot
+   and on every nftables reload.
+4. Only then does Bay create or recreate the containers. If any step fails,
+   the deploy stops before the service starts.
+5. After that, Bay removes the egress networks that nothing uses. When no
+   container on the box uses egress any more, it removes the tables and the file.
+
+A box needs the nftables boot config that `bay deploy --rig` writes
+(`include "/etc/nftables.d/*.conf"` in `/etc/nftables.conf`, and the `nftables` service
+enabled). Without it the deploy stops, because the rules would vanish at the next
+reboot. `br_netfilter` is not needed: the `bridge` table filters the traffic inside an
+egress network on its own.
+
+The one-shot `release` container and the `[[jobs]]` containers of the main container run
+on `services` only, so they cannot call the egress service.
+
+Adding `egress` recreates the service and its clients once (their networks change).
+Every container without `egress` keeps its spec and its config hash.
+
+**Verify** on the box, after `bay up`:
+
+```bash
+sudo nft list table inet bay_egress      # the rules and their counters
+sudo nft list table bridge bay_egress
+docker inspect -f '{{json .NetworkSettings.Networks}}' <container>   # only services-egress-<container>, at .2
+docker inspect -f '{{json .NetworkSettings.Networks}}' <main>        # services and services-egress-<container>
+docker exec <main> sh -c 'ip route'                                   # default route on the services network
+```
+
+From inside the egress network (for example `docker run --rm -it --network
+services-egress-<container> --dns 1.1.1.1 nicolaka/netshoot`): a public HTTPS site
+answers; a tailnet address, a private address, the gateway (`.1`) and a box address
+time out; `curl -6` fails; the counters in `nft list table inet bay_egress` rise.
+
+**Emergency rollback**: `sudo nft delete table inet bay_egress && sudo nft delete table
+bridge bay_egress` reopens everything at once. The next `bay up` loads the rules again.
+The normal rollback is to remove `egress` (and `egress_clients`) from `bay.toml` and run
+`bay up`: the containers are recreated without the network, then Bay removes the network,
+the tables and the file.
 
 ### `[deploy.<env>]`
 

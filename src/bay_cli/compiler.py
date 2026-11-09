@@ -656,7 +656,20 @@ class _Compiler:
                 entry["port"] = f"{port}:{port}"
                 if expose != "loopback":
                     entry["expose"] = expose
+            if "egress" in level:
+                # Its own network and firewall (container_lifecycle egress.yml).
+                # The main container of this env always joins it; egress_clients
+                # adds siblings. Only here, so no other entry changes.
+                clients = [unit.containers["web"]] + [
+                    unit.containers[c] for c in level.get("egress_clients", [])
+                    if c in unit.containers
+                ]
+                entry["egress"] = {"mode": level["egress"], "port": port, "clients": clients}
             self.accessories[name] = entry
+            return
+
+        if "egress" in level:
+            self._err(f"{unit.label}: {_p(base, 'egress')}: an egress service cannot have a route")
             return
 
         assert port is not None  # the validator requires a port for routed containers

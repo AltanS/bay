@@ -1,0 +1,242 @@
+---
+# Egress containers (bay.toml `[services.<name>] egress = "public"`), part 1.
+#
+# Runs on every full container_lifecycle pass (`bay up`, `bay deploy`), BEFORE
+# build_specs and the reconciler. The containers are still the old ones here,
+# so the firewall must be live before any egress container starts:
+#
+#   1. create the per-container Docker networks (src/bay_reconcile/egressnet.py)
+#      and read their subnets back, so build_specs can pin the container at .2
+#   2. render /etc/nftables.d/bay-egress.conf, check it with `nft -c`
+#   3. load it with `nft -f` (only the bay_egress tables; no Docker restart)
+#   4. check that the tables are live
+#
+# A failure in any step stops the deploy before the reconciler runs: the
+# egress container is never started without its firewall (fail closed).
+# tasks/egress_prune.yml runs after the reconciler: it removes the networks
+# nothing uses and, when no container uses egress any more, the firewall.
+#
+# Root tasks carry `become_user: root` explicitly. deploy.yml runs this play
+# as app_user, and a task-level `become: true` alone keeps that user. The
+# network step runs as app_user, a member of the docker group.
+#
+# Check mode (`bay plan --remote`): the network step runs with --dry-run, so
+# build_specs plans the address a real deploy would pin; the template shows
+# its diff; nothing is created or loaded. A plan-only run without check mode
+# (`-e bay_reconciler_plan_only=true`) creates no network and skips the
+# firewall.
+
+- name: Find the egress containers of this host
+  ansible.builtin.set_fact:
+    _egress_sidecars: "{{ active_accessories | default({}) | bay_egress_sidecars }}"
+    _egress_nets: {}
+
+- name: Check the egress containers
+  ansible.builtin.assert:
+    that:
+      - _egress_cfg.network_mode is not defined
+      - (_egress_cfg.egress.port | default(0) | int) > 0
+      - _egress_cfg.egress.clients | default([]) | length > 0
+      - _egress_missing_clients | length == 0
+      # Docker picks a container's default route by network name when the
+      # priorities are equal. The client must keep its route on the main
+      # network, so that name must sort first.
+      - (traefik_docker_network | default('services')) < (_egress_name | bay_egress_network)
+    fail_msg: >-
+      egress container {{ _egress_name }}: it needs a port and at least one
+      client, no network_mode, every client on this host
+      (missing: {{ _egress_missing_clients | join(', ') or 'none' }}), and a
+      main network ({{ traefik_docker_network | default('services') }}) whose
+      name sorts before {{ _egress_name | bay_egress_network }}.
+    quiet: true
+  loop: "{{ _egress_sidecars }}"
+  loop_control:
+    loop_var: _egress_name
+  vars:
+    _egress_cfg: "{{ active_accessories[_egress_name] }}"
+    _egress_missing_clients: >-
+      {{ _egress_cfg.egress.clients | default([])
+         | difference((active_services | default({}) | list)
+                      + (active_accessories | default({}) | list)) }}
+
+# ── 1. Networks ───────────────────────────────────────────────────────────
+# `script` copies the one file to the box and runs it with the box's python3
+# and docker SDK, the same pair the reconciler uses. check_mode: false because
+# the dry run is read-only and build_specs needs its answer.
+- name: Ensure the egress networks
+  ansible.builtin.script:
+    # One line on purpose. In a folded scalar (>-) a line after a
+    # more-indented line keeps a real newline, so the shell ran the flag as a
+    # second command and the "dry run" created networks (seen on a live test box, 2.15.0).
+    cmd: "{{ playbook_dir }}/src/bay_reconcile/egressnet.py ensure {{ _egress_dry_flag }} --spec {{ _egress_ensure_spec | to_json | quote }}"
+    executable: python3
+  vars:
+    _egress_dry_flag: "{{ '--dry-run' if (ansible_check_mode or (bay_reconciler_plan_only | default(false) | bool)) else '' }}"
+    _egress_ensure_spec:
+      containers: "{{ _egress_sidecars }}"
+      pool: "{{ bay_egress_subnet_pool }}"
+      stack: "{{ stack_name | default('bay') }}"
+  register: _egress_ensure
+  check_mode: false
+  # `rc == 0 and` first: Jinja short-circuits, so a failed run reports its own
+  # error instead of dying on from_json of an error document.
+  changed_when: >-
+    _egress_ensure.rc == 0 and
+    ((_egress_ensure.stdout | from_json).networks | dict2items
+     | selectattr('value.created', 'equalto', true) | list | length > 0)
+  when: _egress_sidecars | length > 0
+
+- name: Record the egress networks
+  ansible.builtin.set_fact:
+    _egress_nets: "{{ (_egress_ensure.stdout | from_json).networks }}"
+  when: _egress_sidecars | length > 0
+
+# ── 2-4. Firewall ─────────────────────────────────────────────────────────
+- name: Install the egress firewall
+  when:
+    - _egress_sidecars | length > 0
+    - not (bay_reconciler_plan_only | default(false) | bool) or ansible_check_mode
+  become: true
+  become_user: root
+  vars:
+    _egress_conf: /etc/nftables.d/bay-egress.conf
+    _egress_rules: >-
+      {%- set out = [] -%}
+      {%- for s in _egress_sidecars -%}
+        {%- set _ = out.append({'container': s,
+                                'bridge': _egress_nets[s].bridge,
+                                'address': _egress_nets[s].address,
+                                'port': active_accessories[s].egress.port | int}) -%}
+      {%- endfor -%}
+      {{ out }}
+    # The public address of every box (ansible_host, or the inventory name
+    # when it is an address, and netplan_address), the same sources as the
+    # CrowdSec inventory allowlist. Names and IPv6 are skipped by the filter.
+    # bay_egress_blocked_extra is added; the filter merges it all with the
+    # fixed private, tailnet and reserved ranges.
+    _egress_blocked: >-
+      {%- set out = [] -%}
+      {%- for h in groups['all'] | default([]) -%}
+        {%- set hv = hostvars[h] -%}
+        {%- for cand in [hv.ansible_host | default(h), hv.netplan_address | default('')] -%}
+          {%- if cand -%}{%- set _ = out.append(cand | string) -%}{%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {%- for extra in bay_egress_blocked_extra | default([]) -%}
+        {%- set _ = out.append(extra | string) -%}
+      {%- endfor -%}
+      {{ out | bay_egress_blocked_v4 }}
+  block:
+    - name: Check that nft is installed
+      ansible.builtin.command:
+        argv: [nft, --version]
+      changed_when: false
+      check_mode: false
+
+    # Without the include the rules vanish at the next reboot, and the egress
+    # container would come back with no firewall. The nftables role writes it.
+    - name: Read the nftables boot config
+      ansible.builtin.command:
+        argv: [cat, "{{ nftables_config_path | default('/etc/nftables.conf') }}"]
+      register: _egress_nft_conf
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Read whether the nftables service starts at boot
+      ansible.builtin.command:
+        argv: [systemctl, is-enabled, nftables]
+      register: _egress_nft_enabled
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Check that the egress rules survive a reboot
+      ansible.builtin.assert:
+        that:
+          - "'include \"/etc/nftables.d/*.conf\"' in _egress_nft_conf.stdout | default('')"
+          - (_egress_nft_enabled.stdout | default('') | trim) == 'enabled'
+        fail_msg: >-
+          The egress firewall needs nftables at boot: {{ nftables_config_path |
+          default('/etc/nftables.conf') }} must include /etc/nftables.d/*.conf
+          and the nftables service must be enabled. Run
+          `bay deploy <env> --tags nftables` first.
+        quiet: true
+
+    - name: Ensure /etc/nftables.d exists
+      ansible.builtin.file:
+        path: /etc/nftables.d
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Render the egress firewall
+      ansible.builtin.template:
+        src: bay-egress.conf.j2
+        dest: "{{ _egress_conf }}"
+        owner: root
+        group: root
+        mode: "0644"
+        validate: nft -c -f %s
+      register: _egress_fw_file
+
+    - name: Read the live egress tables
+      ansible.builtin.shell:
+        cmd: nft list table inet bay_egress && nft list table bridge bay_egress
+        executable: /bin/bash
+      register: _egress_fw_live
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # Replaces only the two bay_egress tables. Docker's chains are untouched,
+    # so no Docker restart. A command task is skipped in check mode.
+    - name: Load the egress firewall
+      ansible.builtin.command:
+        argv: [nft, -f, "{{ _egress_conf }}"]
+      changed_when: true
+      when: _egress_fw_file is changed or _egress_fw_live.rc != 0
+
+    - name: Read the egress tables again
+      ansible.builtin.shell:
+        cmd: nft list table inet bay_egress && nft list table bridge bay_egress
+        executable: /bin/bash
+      register: _egress_fw_check
+      changed_when: false
+      failed_when: false
+      when: not ansible_check_mode
+
+    - name: Check that the egress firewall is live for every egress container
+      ansible.builtin.assert:
+        that:
+          - _egress_fw_check.rc == 0
+          - _egress_fw_check.stdout.count(_egress_rule.bridge) >= 4
+        fail_msg: >-
+          The egress firewall for {{ _egress_rule.container }} (bridge
+          {{ _egress_rule.bridge }}) is not live after `nft -f {{ _egress_conf }}`.
+          The deploy stops before the container starts.
+        quiet: true
+      loop: "{{ _egress_rules }}"
+      loop_control:
+        loop_var: _egress_rule
+        label: "{{ _egress_rule.container }}"
+      when: not ansible_check_mode
+
+    # The bridge table above filters traffic inside an egress network on its
+    # own, so br_netfilter is not required. Reported so a reader of the deploy
+    # knows whether the inet rules see bridged frames too.
+    - name: Read whether br_netfilter passes bridged frames to the IP hooks
+      ansible.builtin.command:
+        argv: [cat, /proc/sys/net/bridge/bridge-nf-call-iptables]
+      register: _egress_brnf
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Note the br_netfilter state
+      ansible.builtin.debug:
+        msg: >-
+          br_netfilter is {{ 'on' if (_egress_brnf.stdout | default('') | trim) == '1' else 'off' }}.
+          The bridge table bay_egress filters traffic inside each egress
+          network either way.

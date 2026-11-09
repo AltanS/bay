@@ -318,6 +318,7 @@ Each reason is `<code>: <detail>`:
 | `labels`, `ports`, `volumes` | That part of the settings differs. |
 | `memory` | `mem_limit` or `memswap_limit` differs. Bay sets both to the `memory` value, so swap is never allowed. |
 | `dns` | The resolver list (`dns` in `bay.toml`) differs from the one the container was created with. Order counts. The detail reads `dns: <now> -> <wanted>`. |
+| `networks` | The container is not attached to the networks its spec names, or a fixed address differs. The detail names the network: `networks: not attached to services-egress-<x>`, `also attached to ...`, or `address on <net> <now> -> <wanted>`. It is a reason to recreate even when the config hash matches, but only for an egress container and its clients (`egress` in `bay.toml`), for example after a hand `docker network disconnect`. For every other container it is only named, when the hash changed anyway. |
 | `stopped` | The container does not run. The deploy leaves it as it is. |
 | `zero_downtime` | The new container takes over before the old one stops. |
 

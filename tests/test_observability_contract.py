@@ -141,6 +141,7 @@ def test_contract_doc_exists():
 def _ansible_env():
     from bay_filters import (
         bay_build_dedup_map,
+        bay_egress_client_networks,
         bay_image_consumers,
         bay_image_region_map,
         bay_prefix_volumes,
@@ -160,6 +161,7 @@ def _ansible_env():
     env.filters["bay_repo_slug"] = bay_repo_slug
     env.filters["bay_traefik_labels"] = bay_traefik_labels
     env.filters["bay_watchtower_labels"] = bay_watchtower_labels
+    env.filters["bay_egress_client_networks"] = bay_egress_client_networks
     return env
 
 
