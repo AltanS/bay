@@ -70,10 +70,12 @@ def status(ctx: typer.Context, as_json: _JsonOpt = False) -> None:
     """Show the fleet checkout against its remote. Exit 0 when in sync and clean, else 41.
 
     Fleet name and path, branch, upstream, ahead, behind, uncommitted paths,
-    untracked plan records, the run that holds the fleet (if one does), and
-    every lock record that is pending or failed. One fetch, no box access.
+    untracked plan records, the run that holds the fleet (if one does),
+    every lock record that is pending or failed, and the Bay version that
+    last deployed from the fleet (bay.compat.json). One fetch, no box access.
     """
     from bay_cli import apply as applymod
+    from bay_cli import compat
 
     cx = _context(ctx)
     _need_git(cx)
@@ -84,6 +86,7 @@ def status(ctx: typer.Context, as_json: _JsonOpt = False) -> None:
         "untracked_plans": _untracked_plans(cx),
         "lock_holder": fleetsync.lock_holder(cx.fleet_root),
         "open_records": _open_records(cx),
+        "bay_compat": compat.for_cx(cx).to_dict(),
     }
     # ``clean`` means no uncommitted file. Behind or ahead is ``in_sync``, not ``clean``.
     clean = not st.dirty_paths
@@ -129,6 +132,14 @@ def _render_status(doc: dict[str, Any], st: fleetsync.State, ok: bool) -> str:
             else ""
         )
         lines.append(f"  {row['project']} {row['env']}: {row['result']}{who}")
+    floor = doc["bay_compat"]
+    if floor["deployed_with"]:
+        lines.append(
+            f"  last deployed with Bay v{floor['deployed_with']} "
+            f"(this machine: v{floor['installed'] or 'unknown'})"
+        )
+    elif floor["state"] in ("invalid", "newer_format"):
+        lines.append(f"  {floor['message']}")
     if st.diverged:
         lines.append(f"  {fleetsync.diverged_message(st)}")
     lines.append("  in sync and clean" if ok else "  not in sync or not clean")

@@ -95,7 +95,9 @@ bay status --json --env <env>                         # read the receipt right a
   commit before the deploy; exit 42 (`claim_refused`) means the remote moved
   and nothing was deployed, so run it again. Exit 41 is a diverged fleet or
   an unreachable remote, exit 43 another run on this checkout, exit 44 a
-  receipt that is not on the remote (`bay fleet push`). Never merge
+  receipt that is not on the remote (`bay fleet push`), exit 45 a fleet last
+  deployed with a newer Bay (`bay_older`: run `bay self update --to <version>`;
+  `--allow-older-bay` only for a deliberate downgrade). Never merge
   `services.yml`, a `bay.lock` or a vault file by hand. `bay fleet status`
   shows the clone against its remote.
 - **A deploy ships app code, not just config.** `git_deploy` pulls each

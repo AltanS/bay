@@ -155,6 +155,29 @@ def upgrade_lock(raw: Any) -> Any:
     return raw
 
 
+def newer_lock_version(raw: Any) -> int | None:
+    """The ``lock_version`` of a raw lock when it is higher than :data:`LOCK_VERSION`."""
+    found = raw.get("lock_version") if isinstance(raw, dict) else None
+    if isinstance(found, int) and not isinstance(found, bool) and found > LOCK_VERSION:
+        return found
+    return None
+
+
+def lock_version_message(rel: str, found: int) -> str:
+    return (
+        f"{rel}: lock_version: is {found}, but this Bay knows up to {LOCK_VERSION}; "
+        "run `bay self update`"
+    )
+
+
+class LockTooNew(ValueError):
+    """A lock with a ``lock_version`` this Bay does not know: a newer Bay wrote it."""
+
+    def __init__(self, path: Path | str, found: int) -> None:
+        super().__init__(lock_version_message(str(path), found))
+        self.found = found
+
+
 def load_lock(path: Path, fleet_root: Path) -> Lock:
     """Read and check one ``projects/<name>/bay.lock``. Raise FleetError on any problem."""
     rel = _rel(path, fleet_root)
@@ -164,6 +187,9 @@ def load_lock(path: Path, fleet_root: Path) -> Lock:
         raise FleetError([f"{rel}: cannot read the file ({exc.strerror})"]) from exc
     except json.JSONDecodeError as exc:
         raise FleetError([f"{rel}: not valid JSON: {exc}"]) from exc
+    found = newer_lock_version(raw)
+    if found is not None:
+        raise FleetError([lock_version_message(rel, found)])
     schema = json.loads(LOCK_SCHEMA_PATH.read_text())
     problems = sorted(set(bay_toml.schema_violations(raw, schema)))
     if problems:

@@ -359,6 +359,7 @@ The verb exits with the verdict's code:
 | claim refused | 42 | Not a verdict. The push before the deploy was refused, or it did not reach the tracked branch. Nothing was deployed. `next` says what to run: `bay up` again (it pulls first), or `bay fleet push` first when the fleet also had local commits. |
 | fleet busy, env busy | 43 | Not a verdict. Another `bay` run on this machine holds the fleet checkout (`fleet_busy`), or another run claimed the box env less than 30 minutes ago and has not reported (`env_busy`). The message names the holder. `bay plan` exits 20 for an `env_busy` plan. |
 | receipt unpushed | 44 | Not a verdict. The deploy worked, but the push of the receipt failed twice, also after `git pull --rebase`. Run `bay fleet push`. A failed deploy keeps its own exit code (1 or 40). |
+| older Bay | 45 | Not a verdict. The fleet was last deployed with a newer Bay than this machine runs (`bay_older`), or Bay cannot read `bay.compat.json` (`compat_invalid`, `compat_newer`). Nothing was written and no box was touched. `bay up`, `bay rollback`, a remove, `bay deploy` and `bay provision` use it. `bay plan` exits 20 for the same plan. See [An older Bay does not deploy](#an-older-bay-does-not-deploy). |
 
 `blocked` wins over `stale`, and `stale` wins over `approve`.
 
@@ -1894,6 +1895,47 @@ machine's pin. Bay closes that gap in three ways:
   only for its pull: when the fleet is busy, it skips the pull. To name the
   holder, Bay only probes the lock with a shared lock that it drops at once.
 
+#### An older Bay does not deploy
+
+A machine with an older Bay compiles `services.yml` the old way. Its deploy
+can undo what a newer Bay wrote. So the fleet root holds `bay.compat.json`
+(schema `src/bay_cli/schemas/bay_compat.schema.json`). Only the CLI writes it:
+
+```json
+{"compat_version": 1, "deployed_with": "2.16.0"}
+```
+
+`deployed_with` is the Bay version (`bay_version` in `version.yml`) of the
+last run that claimed a deploy from this fleet. `bay up`, `bay rollback` and
+a remove write it in their claim commit when it names another version, so
+the claim pushes it before the box is touched. When it already names this
+version, the run does not write it, and a steady fleet gets no diff. A run
+that stops before the deploy puts it back, or removes it when the run created
+it. A fleet inside a bigger repo gets it committed the same way.
+
+`bay up`, `bay rollback`, a remove, `bay deploy` and `bay provision` check it
+after the fetch and before they write anything:
+
+| `bay.compat.json` | What Bay does |
+|---|---|
+| No file, or the same or an older version than this machine runs | Goes on. |
+| A newer version than this machine runs (any part: also a patch) | Refuses (`bay_older`, exit 45). `next` is `bay self update --to v<version>`. |
+| Not valid JSON, not readable, or `deployed_with` is not `N.N.N` | Refuses (`compat_invalid`, exit 45). Restore the file from git. |
+| `compat_version` higher than this Bay knows | Refuses (`compat_newer`, exit 45). Run `bay self update`. |
+| This machine cannot read its own version | Goes on with one warning line, and writes nothing. |
+
+`--allow-older-bay` on `bay up`, `bay rollback`, `bay deploy` and
+`bay provision` skips only `bay_older`. It is for a deliberate downgrade, for
+example after a bad release. Bay prints one `WARNING: --allow-older-bay: ...`
+line. `bay up` and `bay rollback` record `allowed_older_bay` in the result and
+write the older version, so the floor moves down. `bay deploy` and
+`bay provision` never write the file. `bay plan` shows `bay_older` as a
+blocker (exit 20) and the check as `bay_compat` in the plan JSON. Neither is
+in the plan hash. `bay fleet status` prints
+`last deployed with Bay v2.16.0 (this machine: v2.15.0)`.
+
+A Bay older than 2.16.0 ignores the file. Update every machine that deploys.
+
 A diverged fleet (both sides have commits) blocks with `reason: diverged`.
 Run `bay fleet push`: it runs `git pull --rebase` once and pushes. When the
 rebase conflicts, Bay aborts it and lists the files. Never merge
@@ -1908,7 +1950,7 @@ for a plan with a destructive step stays. The files that the run writes
 itself (the lock, `services.yml`, the plan record) do not count.
 
 `--allow-dirty` never covers a hand edit in a file that only Bay writes: any
-uncommitted `projects/<name>/bay.lock`, and a `group_vars/all/services.yml`
+uncommitted `projects/<name>/bay.lock` or `bay.compat.json`, and a `group_vars/all/services.yml`
 whose hash header does not match its body (a hand edit, no header, or a
 deleted file). Such a file refuses `bay up`, `bay rollback`, a remove,
 `bay deploy` and `bay provision` with `reason: dirty`, also with
@@ -1936,6 +1978,7 @@ they check the fleet first:
 | Diverged | Refuses (`diverged`, exit 41). |
 | Uncommitted files (tracked or untracked, `plans/` left out) | Refuses (`dirty`, exit 41) and lists up to 20 paths, unless `--allow-dirty`. An edit in a lock or in `services.yml` refuses also with `--allow-dirty`. The files would deploy, and no other machine can see them. Config files are the exception: `bay deploy` copies them from the committed fleet and the pinned project commits, also with `--allow-dirty`. |
 | Ahead | Pushes first (the claim). A refused push stops the run before the box (exit 42). |
+| Last deployed with a newer Bay | Refuses (`bay_older`, exit 45), unless `--allow-older-bay`. Writes nothing. See [An older Bay does not deploy](#an-older-bay-does-not-deploy). |
 | `--offline` | No fetch and no push. Bay prints a warning: the result is not on the remote, so run `bay fleet push` after it. A `bay deploy` still compiles the fleet for its config files, and stops when a pinned app commit is not in the local repo cache. |
 
 A fleet with no remote, or inside a bigger repo, gets the dirty check only.
@@ -1992,6 +2035,9 @@ and the next write stores version 2.
   `claimed_by` is for people; Bay judges a claim only by `claimed_run`. Bay
   removes all three when it writes `ok` or `failed`. A CLI older than 2.12 cannot write a lock that holds them, so
   update every machine.
+- A lock with a `lock_version` higher than this Bay knows stops the command.
+  A newer Bay wrote it. The message names the lock and says to run
+  `bay self update`.
 - `previous` is one level of history: enough for `bay rollback`. It names
   the last pin whose deploy was confirmed. A `bay up` that replaces a pin
   whose `result` is `failed` or `pending` keeps the `previous` the record

@@ -80,6 +80,14 @@ _AllowDirtyOpt = Annotated[
         "other machine can see them.",
     ),
 ]
+_AllowOlderBayOpt = Annotated[
+    bool,
+    typer.Option(
+        "--allow-older-bay",
+        help="Deploy although the fleet was last deployed with a newer Bay (bay_older). "
+        "A deliberate downgrade: bay.compat.json then records this older version.",
+    ),
+]
 _NoPushOpt = Annotated[
     bool, typer.Option("--no-push", help="Do not push the fleet repo after the last commit.")
 ]
@@ -629,6 +637,7 @@ def _apply(
     take_over: bool = False,
     allow_dirty: bool = False,
     all_boxes: bool = False,
+    allow_older_bay: bool = False,
 ) -> None:
     from bay_cli import apply as applymod
     from bay_cli import plan as planmod
@@ -644,6 +653,7 @@ def _apply(
                 "push": push,
                 "take_over": take_over,
                 "allow_dirty": allow_dirty,
+                "allow_older_bay": allow_older_bay,
             }
             removal = _saved_remove(ctx, plan_id) if which == "up" and plan_id else None
             if removal is not None:
@@ -798,6 +808,10 @@ def _refused_next(exc: Any) -> str | None:
         return "bay fleet status"
     if exc.reason == fleetsync.REASON_ENV_BUSY:
         return "bay show"
+    if exc.reason == fleetsync.REASON_BAY_OLDER:
+        return f"bay self update --to v{(plan.get('bay_compat') or {}).get('deployed_with')}"
+    if exc.reason == fleetsync.REASON_COMPAT_NEWER:
+        return "bay self update"
     if exc.reason == "approve":
         return f'bay approve {plan["plan_id"]} --reason "<why>"'
     if exc.reason == "stale":
@@ -848,6 +862,7 @@ def up(
     take_over: _TakeOverOpt = False,
     allow_dirty: _AllowDirtyOpt = False,
     all_boxes: _AllBoxesOpt = False,
+    allow_older_bay: _AllowOlderBayOpt = False,
 ) -> None:
     """Pin the project's commit in the fleet and deploy it.
 
@@ -864,6 +879,9 @@ def up(
     fleet has uncommitted files (--allow-dirty deploys them). Exit 43:
     another bay run holds this fleet checkout, or another machine claimed this
     box env less than 30 minutes ago (env_busy; --take-over deploys anyway).
+    Exit 45: the fleet was last deployed with a newer Bay (bay_older; run
+    `bay self update`, or --allow-older-bay for a deliberate downgrade), or
+    its bay.compat.json cannot be read (compat_invalid, compat_newer).
 
     In a fleet directory (or with --fleet and no bay.toml here), with no
     --project, it applies a whole-environment plan: every project of the
@@ -899,6 +917,7 @@ def up(
         take_over=take_over,
         allow_dirty=allow_dirty,
         all_boxes=all_boxes,
+        allow_older_bay=allow_older_bay,
     )
 
 
@@ -926,6 +945,7 @@ def rollback(
     take_over: _TakeOverOpt = False,
     allow_dirty: _AllowDirtyOpt = False,
     all_boxes: _AllBoxesOpt = False,
+    allow_older_bay: _AllowOlderBayOpt = False,
 ) -> None:
     """Return an environment to its previous pin and its previous code, and freeze it.
 
@@ -961,6 +981,7 @@ def rollback(
         take_over=take_over,
         allow_dirty=allow_dirty,
         all_boxes=all_boxes,
+        allow_older_bay=allow_older_bay,
     )
 
 

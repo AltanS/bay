@@ -8,6 +8,28 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.16.0] - 2026-11-09
+
+A machine with an older Bay no longer deploys from a fleet that a newer Bay deployed last.
+
+### Added
+- `bay.compat.json` in the fleet root: `{"compat_version": 1, "deployed_with": "2.16.0"}`. Only the CLI writes it. `deployed_with` is the Bay version of the last run that claimed a deploy from this fleet. Schema: `src/bay_cli/schemas/bay_compat.schema.json`.
+- `bay up`, `bay rollback`, a remove, `bay deploy` and `bay provision` check it after the fleet fetch and before they write anything or touch a box. When this machine runs an older Bay (any part of the version, also a patch), they stop with `reason: bay_older` and the new exit code 45. The message names both versions and `bay self update --to v<version>`; `next` holds that command, and `box_touched` is false.
+- `--allow-older-bay` on `bay up`, `bay rollback`, `bay deploy` and `bay provision`: a deliberate downgrade, for example after a bad release. The run goes on with one `WARNING: --allow-older-bay: ...` line. `bay up` and `bay rollback` record `allowed_older_bay` in the result and write the older version, so the floor moves down.
+- A `bay.compat.json` that Bay cannot read stops the same verbs with `compat_invalid` (exit 45; restore the file from git), and one with a higher `compat_version` with `compat_newer` (exit 45; run `bay self update`). No flag skips these.
+- `bay plan` shows `bay_older` as a blocker (exit 20), like `env_busy`, and the check as `bay_compat` in the plan JSON. Neither is in the plan hash. `bay fleet status` prints `last deployed with Bay vX (this machine: vY)` and `bay_compat` in its JSON.
+
+### Changed
+- `bay up`, `bay rollback` and a remove write `bay.compat.json` in their claim commit when it names another version than this machine runs, or is missing. A steady fleet gets no diff. A run that stops before the deploy puts the file back, or removes it when the run created it. A fleet inside a bigger repo gets it committed the same way.
+- `--allow-dirty` never covers an uncommitted `bay.compat.json`, as for a `bay.lock`.
+- A lock whose `lock_version` is higher than this Bay knows now stops with a clear line, not a schema error: the line names the lock and its `lock_version`, says this Bay knows up to 2, and says to run `bay self update`.
+- A machine that cannot read its own version (`version.yml`) prints one warning line, does not check the file and does not write it.
+
+### Upgrade notes
+- The first `bay up` from a 2.16.0 machine adds `bay.compat.json` to the fleet in its claim commit.
+- Machines still on 2.15.0 or older ignore the file and are NOT stopped by it. Update every machine that deploys (`bay self update`).
+- No box change and no container restart.
+
 ## [2.15.0] - 2026-11-09
 
 A service can reach the public internet and nothing else.

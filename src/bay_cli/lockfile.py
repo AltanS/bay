@@ -34,7 +34,13 @@ from pathlib import Path
 from typing import Any
 
 from bay_cli import bay_toml
-from bay_cli.fleet import LOCK_SCHEMA_PATH, LOCK_VERSION, upgrade_lock
+from bay_cli.fleet import (
+    LOCK_SCHEMA_PATH,
+    LOCK_VERSION,
+    LockTooNew,
+    newer_lock_version,
+    upgrade_lock,
+)
 from bay_cli.fleet import lock_file as _lock_file
 
 
@@ -48,12 +54,19 @@ def lock_path(fleet_root: Path, name: str) -> Path:
 
 
 def read(path: Path) -> dict[str, Any] | None:
-    """The parsed lock as version 2, or None when there is no file."""
+    """The parsed lock as version 2, or None when there is no file.
+
+    Raises :class:`bay_cli.fleet.LockTooNew` (a ValueError) for a lock that a
+    newer Bay wrote: its ``lock_version`` is higher than this Bay knows.
+    """
     if not path.is_file():
         return None
     data = upgrade_lock(json.loads(path.read_text()))
     if not isinstance(data, dict):
         raise ValueError(f"{path}: not a JSON object")
+    found = newer_lock_version(data)
+    if found is not None:
+        raise LockTooNew(path, found)
     return data
 
 

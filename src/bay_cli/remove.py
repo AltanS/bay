@@ -678,6 +678,7 @@ def apply_remove(
     push: bool = True,
     take_over: bool = False,
     allow_dirty: bool = False,
+    allow_older_bay: bool = False,
 ) -> dict[str, Any]:
     """``bay up --plan-id`` for a remove plan. Returns the result; ``result`` is ok or failed.
 
@@ -711,6 +712,7 @@ def apply_remove(
             pulled=fleetsync.sync_record(cx.fleet_root, pulled),
             take_over=take_over,
             allow_dirty=allow_dirty,
+            allow_older_bay=allow_older_bay,
             written=written,
         )
 
@@ -730,6 +732,7 @@ def _apply_remove(
     pulled: dict[str, Any] | None,
     take_over: bool = False,
     allow_dirty: bool = False,
+    allow_older_bay: bool = False,
     written: Any = None,
 ) -> dict[str, Any]:
     from bay_cli import apply as applymod
@@ -751,7 +754,14 @@ def _apply_remove(
     plan["fleet_sync"] = pulled
     prior = applymod._save_plan(cx, plan)
     forced = applymod._gate(
-        plan, force, reason, say, cx=cx, take_over=take_over, allow_dirty=allow_dirty
+        plan,
+        force,
+        reason,
+        say,
+        cx=cx,
+        take_over=take_over,
+        allow_dirty=allow_dirty,
+        allow_older_bay=allow_older_bay,
     )
     rm = plan["remove"]
     name = str(plan["project"])
@@ -806,12 +816,16 @@ def _apply_remove(
                 "compile failed after the lock was written:\n  " + "\n  ".join(comp.errors)
             )
         services = applymod._write_services(cx, comp.result.text())
-        paths = [services, planmod.plan_file(cx, plan["plan_id"])]
-        if lock_exists:
-            paths.append(proj.lock_file)
+        restore = (
+            [services]
+            + ([proj.lock_file] if lock_exists else [])
+            + applymod._stage_compat(cx, written, say)
+        )
+        records = [planmod.plan_file(cx, plan["plan_id"])]
         approval = planmod.approval_file(cx, plan["plan_id"])
         if approval.is_file():
-            paths.append(approval)
+            records.append(approval)
+        paths = restore + records
         try:
             fleet_commit = gitrepo.commit_paths(
                 cx.fleet_root, paths, f"bay: remove {name}{scope_text} (plan {plan['plan_id']})"
@@ -825,8 +839,8 @@ def _apply_remove(
             push=push,
             before=head_before,
             commit=fleet_commit,
-            restore=[services] + ([proj.lock_file] if lock_exists else []),
-            unstage=[p for p in paths if p not in (services, proj.lock_file)],
+            restore=restore,
+            unstage=records,
             prior_plan=prior,
             plan=plan,
             action="up",
@@ -965,6 +979,7 @@ def _apply_remove(
         "fleet_sync": plan.get("fleet_sync"),
         "took_over": plan.get("took_over"),
         "allowed_dirty": plan.get("allowed_dirty"),
+        "allowed_older_bay": plan.get("allowed_older_bay"),
     }
     # The same step 8 as bay up: a remove that is not confirmed is deploy_failed.
     applymod.settle(cx, result, push=push, failed=bool(unconfirmed), say=say)

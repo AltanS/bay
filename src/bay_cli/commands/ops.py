@@ -161,6 +161,12 @@ _OfflineOpt = typer.Option(
     "run `bay fleet push` after it. A deploy still compiles the fleet, and stops when "
     "a pinned app commit is not in the local repo cache.",
 )
+_AllowOlderBayOpt = typer.Option(
+    False,
+    "--allow-older-bay",
+    help="Run although the fleet was last deployed with a newer Bay (bay_older). For a "
+    "deliberate downgrade. This command writes nothing; bay up records the version.",
+)
 _AllowDirtyOpt = typer.Option(
     False,
     "--allow-dirty",
@@ -236,26 +242,39 @@ def _config_files_root(cx: Context, reach: bool) -> Iterator[Path | None]:
 
 
 def _fleet_gate(
-    ctx: typer.Context, cx: Context, verb: str, env: str, *, offline: bool, allow_dirty: bool
+    ctx: typer.Context,
+    cx: Context,
+    verb: str,
+    env: str,
+    *,
+    offline: bool,
+    allow_dirty: bool,
+    allow_older_bay: bool = False,
 ) -> None:
     """Hold the run lock for the command and check the fleet against its remote.
 
     Here, not in :func:`_run_playbook`: ``bay up`` runs that too, and has its
     own claim. The lock is released when the command's context closes.
-    """
-    from bay_cli import fleetsync
 
-    for flag in ("--offline", "--allow-dirty"):
+    After the fetch, the fleet's Bay version floor (:func:`bay_cli.compat.require`):
+    an older Bay stops (exit 45) unless ``allow_older_bay``. Nothing is written.
+    """
+    from bay_cli import compat, fleetsync
+
+    for flag in ("--offline", "--allow-dirty", "--allow-older-bay"):
         if flag in (ctx.args or []):
             ctx.args = [a for a in ctx.args if a != flag]
             if flag == "--offline":
                 offline = True
-            else:
+            elif flag == "--allow-dirty":
                 allow_dirty = True
+            else:
+                allow_older_bay = True
     ctx.with_resource(fleetsync.run_lock(cx.fleet_root, verb, env))
     fleetsync.prepare_playbook(
         cx.fleet_root, verb=verb, offline=offline, allow_dirty=allow_dirty
     )
+    compat.require(cx, allow_older=allow_older_bay)
 
 
 def _show_headscale_onboarding(cx: Context) -> None:
@@ -549,6 +568,7 @@ def deploy(
     ),
     offline: bool = _OfflineOpt,
     allow_dirty: bool = _AllowDirtyOpt,
+    allow_older_bay: bool = _AllowOlderBayOpt,
 ) -> None:
     """Deploy services to the target environment.
 
@@ -560,7 +580,8 @@ def deploy(
     The fleet first: a fleet that is only behind its remote is pulled, one
     that is ahead is pushed first, and a diverged fleet, an unreachable
     remote or uncommitted files refuse (--offline, --allow-dirty). A dry run
-    follows the same rules.
+    follows the same rules. A fleet last deployed with a newer Bay refuses
+    with exit 45 (bay_older; --allow-older-bay runs anyway).
 
     Config files come from a scratch compile, as in `bay up`: the committed
     fleet and the pinned project commits, also with --allow-dirty. A file
@@ -606,7 +627,15 @@ def deploy(
         check_token_scope = True
     if "--profile" in (ctx.args or []):
         profile = True
-    _fleet_gate(ctx, cx, "deploy", env, offline=offline, allow_dirty=allow_dirty)
+    _fleet_gate(
+        ctx,
+        cx,
+        "deploy",
+        env,
+        offline=offline,
+        allow_dirty=allow_dirty,
+        allow_older_bay=allow_older_bay,
+    )
 
     _validate_env(env, root)
 
@@ -810,6 +839,7 @@ def provision(
     ),
     offline: bool = _OfflineOpt,
     allow_dirty: bool = _AllowDirtyOpt,
+    allow_older_bay: bool = _AllowOlderBayOpt,
 ) -> None:
     """Provision and harden a server (base OS, users, firewall, Docker).
 
@@ -820,7 +850,8 @@ def provision(
     Note: the netplan tag intentionally fails when connecting over the
     tailnet \u2014 a safety assertion rejects netplan_address != ansible_host.
 
-    The fleet is checked first, as for bay deploy (--offline, --allow-dirty).
+    The fleet is checked first, as for bay deploy (--offline, --allow-dirty,
+    --allow-older-bay).
 
     Examples:
 
@@ -835,7 +866,15 @@ def provision(
     # strip it either way so it is never forwarded to ansible-playbook.
     if "--profile" in (ctx.args or []):
         profile = True
-    _fleet_gate(ctx, cx, "provision", env, offline=offline, allow_dirty=allow_dirty)
+    _fleet_gate(
+        ctx,
+        cx,
+        "provision",
+        env,
+        offline=offline,
+        allow_dirty=allow_dirty,
+        allow_older_bay=allow_older_bay,
+    )
     passthrough = [a for a in (ctx.args or []) if a != "--profile"]
     extra_args = _region_extra_args(cx, region, env, passthrough)
     _run_playbook(cx, "provision", env, tags, extra_args, profile=profile)

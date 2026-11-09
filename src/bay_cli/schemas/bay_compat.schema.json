@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AltanS/bay/schemas/bay_compat.schema.json",
+  "title": "bay.compat.json",
+  "description": "The Bay version floor of a fleet. The CLI owns it: bay up writes it in its claim commit. deployed_with is the Bay version of the last run that claimed a deploy from this fleet. An older Bay refuses to deploy (bay_older, exit 45) unless --allow-older-bay.",
+  "type": "object",
+  "required": ["compat_version", "deployed_with"],
+  "properties": {
+    "compat_version": { "type": "integer", "minimum": 1 },
+    "deployed_with": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "x-messages": { "pattern": "must be a version like 2.16.0" }
+    }
+  }
+}

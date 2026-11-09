@@ -76,6 +76,8 @@ from bay_cli.fleet import (
     LOCK_FILE,
     LOCK_SUFFIX,
     PROJECTS_DIR,
+    LockTooNew,
+    lock_version_message,
 )
 
 PLAN_VERSION = 1
@@ -198,6 +200,8 @@ def load_project(
         lock_file, lock_rel = flat, f"{PROJECTS_DIR}/{flat.name}"
     try:
         raw = lockfile.read(lock_file)
+    except LockTooNew as exc:
+        raise BayError(lock_version_message(lock_rel, exc.found)) from None
     except ValueError as exc:
         raise BayError(f"{lock_rel} is not valid JSON: {exc}") from None
     in_dir = cx.fleet_root / PROJECTS_DIR / name / "bay.toml"
@@ -2306,6 +2310,9 @@ _UNHASHED = (
     "took_over",
     "allowed_dirty",
     "dirty_owned",
+    # Since 2.16: the fleet's Bay version floor (bay.compat.json) against this machine.
+    "bay_compat",
+    "allowed_older_bay",
 )
 
 
@@ -2316,6 +2323,8 @@ def body_sha256(plan: Mapping[str, Any]) -> str:
     run_messages = {str(b.get("message")) for b in plan.get("run_blockers") or []}
     if isinstance(plan.get("dirty_owned"), Mapping):
         run_messages.add(str(plan["dirty_owned"].get("message")))
+    if isinstance(plan.get("bay_compat"), Mapping) and plan["bay_compat"].get("message"):
+        run_messages.add(str(plan["bay_compat"]["message"]))
     if run_messages and isinstance(body.get("blockers"), list):
         body["blockers"] = [b for b in body["blockers"] if b not in run_messages]
     canon = json.dumps(body, sort_keys=True, separators=(",", ":"))
@@ -2611,8 +2620,13 @@ def add_run_blockers(
     *,
     now: datetime | None = None,
 ) -> None:
-    """The two blockers that ``bay up --allow-dirty`` and ``--take-over`` may skip.
+    """The blockers that ``bay up --allow-older-bay``, ``--allow-dirty`` and ``--take-over`` skip.
 
+    * ``bay_older``: the fleet's ``bay.compat.json`` names a newer Bay than this
+      machine runs (:mod:`bay_cli.compat`). A file Bay cannot read
+      (``compat_invalid``) or a ``compat_version`` it does not know
+      (``compat_newer``) blocks too, and no flag skips those. ``bay_compat``
+      holds the check (:meth:`bay_cli.compat.Check.to_dict`).
     * ``dirty``: the fleet has uncommitted paths (:func:`bay_cli.fleetsync.dirty_paths`:
       ``plans/`` and the first-deploy marker left out). Ansible reads the work tree,
       so they would deploy, and no other machine can see them.
@@ -2626,9 +2640,26 @@ def add_run_blockers(
     is hashed (:func:`body_sha256`), so the plan id stays the same. Call it after
     the plan id is set.
     """
-    from bay_cli import fleetsync
+    from bay_cli import compat, fleetsync
 
     gates: list[dict[str, Any]] = []
+    floor = compat.for_cx(cx)
+    plan["bay_compat"] = floor.to_dict()
+    if floor.state == compat.OLDER:
+        gates.append(
+            {
+                "reason": fleetsync.REASON_BAY_OLDER,
+                "message": str(floor.message),
+                "deployed_with": floor.deployed_with,
+                "installed": floor.installed,
+            }
+        )
+    elif floor.blocks:
+        # Never skipped: Bay cannot tell which Bay may deploy this fleet.
+        plan["blockers"].append(str(floor.message))
+        plan["reason"] = plan.get("reason") or floor.reason
+    elif floor.state == compat.UNKNOWN:
+        plan.setdefault("notes", []).append(str(floor.message))
     owned = [p for p in state.dirty_paths if fleetsync.hand_edited(cx.fleet_root, p)]
     if owned:
         # Never skipped: the undo of a run puts these files back, so a hand edit

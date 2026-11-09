@@ -305,20 +305,22 @@
       }
     },
     "reason": {
-      "description": "Since 2.12, not hashed: why the fleet or the box env blocks the plan (diverged, remote_unreachable, no_upstream, git_failed, dirty, env_busy), or null.",
+      "description": "Since 2.12, not hashed: why the fleet or the box env blocks the plan (diverged, remote_unreachable, no_upstream, git_failed, dirty, env_busy; since 2.16 bay_older, compat_invalid, compat_newer), or null.",
       "type": ["string", "null"]
     },
     "run_blockers": {
-      "description": "Since 2.12, not hashed: the blockers that bay up --allow-dirty (dirty) and --take-over (env_busy) may skip. Their text is in blockers too.",
+      "description": "Since 2.12, not hashed: the blockers that bay up --allow-dirty (dirty), --take-over (env_busy) and, since 2.16, --allow-older-bay (bay_older) may skip. Their text is in blockers too.",
       "type": "array",
       "items": {
         "type": "object",
         "required": ["reason", "message"],
         "properties": {
-          "reason": { "enum": ["dirty", "env_busy"] },
+          "reason": { "enum": ["dirty", "env_busy", "bay_older"] },
           "message": { "type": "string" },
           "paths": { "type": "array", "items": { "type": "string" } },
-          "holder": { "$ref": "#/$defs/claim" }
+          "holder": { "$ref": "#/$defs/claim" },
+          "deployed_with": { "type": "string", "description": "bay_older: the Bay version in bay.compat.json." },
+          "installed": { "type": "string", "description": "bay_older: the Bay version this machine runs." }
         }
       }
     },
@@ -334,6 +336,31 @@
       "description": "Since 2.12, not hashed: the uncommitted fleet paths that bay up --allow-dirty deployed, or null.",
       "type": ["array", "null"],
       "items": { "type": "string" }
+    },
+    "bay_compat": {
+      "description": "Since 2.16, not hashed: the fleet's bay.compat.json against the Bay this machine runs. state: missing, same, newer, older (blocks: bay_older), invalid (blocks: compat_invalid), newer_format (blocks: compat_newer) or unknown (this Bay does not know its version; a note, no check).",
+      "type": "object",
+      "required": ["state", "deployed_with", "installed", "message"],
+      "properties": {
+        "state": { "enum": ["missing", "same", "newer", "older", "invalid", "newer_format", "unknown"] },
+        "deployed_with": { "type": ["string", "null"] },
+        "installed": { "type": ["string", "null"] },
+        "message": { "type": ["string", "null"] }
+      }
+    },
+    "allowed_older_bay": {
+      "description": "Since 2.16, not hashed: the bay_older blocker that bay up --allow-older-bay skipped, or null.",
+      "anyOf": [
+        {
+          "type": "object",
+          "required": ["deployed_with", "installed"],
+          "properties": {
+            "deployed_with": { "type": "string" },
+            "installed": { "type": "string" }
+          }
+        },
+        { "type": "null" }
+      ]
     }
   },
   "allOf": [

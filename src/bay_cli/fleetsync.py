@@ -39,6 +39,8 @@ EXIT_NOT_IN_SYNC = 41
 EXIT_CLAIM_REFUSED = 42
 EXIT_BUSY = 43
 EXIT_RECEIPT_UNPUSHED = 44
+#: The fleet's bay.compat.json stops this Bay (:mod:`bay_cli.compat`).
+EXIT_BAY_OLDER = 45
 
 REASON_DIVERGED = "diverged"
 REASON_UNREACHABLE = "remote_unreachable"
@@ -64,6 +66,11 @@ CLAIM_FRESH_SECONDS = 30 * 60
 
 #: Plan and up reasons for the two run blockers (:func:`bay_cli.plan.add_run_blockers`).
 REASON_ENV_BUSY = "env_busy"
+#: The Bay version floor (:mod:`bay_cli.compat`), all exit 45. Only ``bay_older``
+#: may be skipped (``--allow-older-bay``).
+REASON_BAY_OLDER = "bay_older"
+REASON_COMPAT_INVALID = "compat_invalid"
+REASON_COMPAT_NEWER = "compat_newer"
 
 
 def claim_time(record: Any) -> datetime | None:
@@ -1247,14 +1254,17 @@ def _path_list(paths: Sequence[str]) -> str:
     return shown + (f" and {more} more" if more > 0 else "")
 
 
-#: Files only Bay writes: the generated services file and every project lock.
+#: Files only Bay writes: the generated services file, every project lock and
+#: the Bay version floor.
 OWNED_SERVICES = "group_vars/all/services.yml"
+OWNED_COMPAT = "bay.compat.json"
 
 
 def bay_owned(rel: str) -> bool:
-    """True for a fleet path that only Bay writes: ``services.yml`` or a ``bay.lock``."""
+    """True for a fleet path that only Bay writes: ``services.yml``, a ``bay.lock``
+    or ``bay.compat.json``."""
     parts = Path(rel).parts
-    return rel == OWNED_SERVICES or (
+    return rel in (OWNED_SERVICES, OWNED_COMPAT) or (
         len(parts) == 3 and parts[0] == "projects" and parts[2] == "bay.lock"
     )
 
@@ -1262,9 +1272,9 @@ def bay_owned(rel: str) -> bool:
 def hand_edited(repo: Path, rel: str) -> bool:
     """True for an uncommitted path that ``--allow-dirty`` never covers.
 
-    Every ``bay.lock``. A ``services.yml`` only when its hash header does not
-    match its body (a hand edit, no header, or a deleted file): one that
-    ``bay compile --working-tree`` wrote is an ordinary dirty file.
+    Every ``bay.lock`` and ``bay.compat.json``. A ``services.yml`` only when its
+    hash header does not match its body (a hand edit, no header, or a deleted
+    file): one that ``bay compile --working-tree`` wrote is an ordinary dirty file.
     """
     if not bay_owned(rel):
         return False
@@ -1287,6 +1297,7 @@ def owned_dirty_message(paths: Sequence[str]) -> str:
         f"`git checkout HEAD -- <path>` in the fleet (git checkout HEAD -- "
         f"{' '.join(paths[:3])}), then run the command again. Change bay.toml or "
         "bay.fleet.toml instead"
+        + ("; bay up writes bay.compat.json itself" if OWNED_COMPAT in paths else "")
     )
 
 

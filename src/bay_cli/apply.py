@@ -91,6 +91,9 @@ _SYNC_REASONS = {
     fleetsync.REASON_DIRTY: fleetsync.EXIT_NOT_IN_SYNC,
     fleetsync.REASON_GIT_FAILED: fleetsync.EXIT_NOT_IN_SYNC,
     fleetsync.REASON_ENV_BUSY: fleetsync.EXIT_BUSY,
+    fleetsync.REASON_BAY_OLDER: fleetsync.EXIT_BAY_OLDER,
+    fleetsync.REASON_COMPAT_INVALID: fleetsync.EXIT_BAY_OLDER,
+    fleetsync.REASON_COMPAT_NEWER: fleetsync.EXIT_BAY_OLDER,
 }
 
 #: The refusal of a commit that is on no branch of its repo.
@@ -101,9 +104,11 @@ class Refused(Exception):
     """``bay up`` will not apply the plan. ``exit_code`` is the verdict's code.
 
     A plan blocked by the fleet sync state (diverged, unreachable, dirty) exits
-    41, one blocked by another run's fresh claim (``env_busy``) exits 43, and
-    each carries that ``reason``. A refusal with its own ``reason`` (an app
-    commit that is not pushed) exits 1. Otherwise ``reason`` is the verdict.
+    41, one blocked by another run's fresh claim (``env_busy``) exits 43, one
+    blocked by the Bay version floor (``bay_older``, ``compat_invalid``,
+    ``compat_newer``) exits 45, and each carries that ``reason``. A refusal
+    with its own ``reason`` (an app commit that is not pushed) exits 1.
+    Otherwise ``reason`` is the verdict.
     """
 
     def __init__(
@@ -409,6 +414,31 @@ def _unwind(written: Written, exc: BaseException) -> None:
     )
 
 
+def _stage_compat(cx: Context, written: Written, say: Echo) -> list[Path]:
+    """Write ``bay.compat.json`` for the claim commit when it changes (:mod:`bay_cli.compat`).
+
+    Returns ``[path]`` to commit, or ``[]`` when the file already names this
+    machine's version, or the version is unknown (one warning line). The path
+    goes into ``written.restore`` first, so the unwind of a run that stops
+    before the deploy puts it back from the commit before the run, or removes
+    it when that commit had none.
+    """
+    from bay_cli import compat
+
+    floor = compat.for_cx(cx)
+    if floor.state == compat.UNKNOWN:
+        fleetsync.notice(str(floor.message))
+        return []
+    if not compat.needs_write(floor):
+        return []
+    path = cx.fleet_root / compat.COMPAT_FILE
+    written.restore.append(path)
+    compat.write(cx.fleet_root, str(floor.installed))
+    was = f"v{floor.deployed_with}" if floor.deployed_with else "no file"
+    say(f"fleet: {compat.COMPAT_FILE} records Bay v{floor.installed} (was {was})")
+    return [path]
+
+
 def _write_services(cx: Context, text: str) -> Path:
     target = cx.fleet_root / GENERATED_SERVICES
     _, state = planmod.current_services(cx)
@@ -519,13 +549,19 @@ class _SeenReceipts:
 
 
 def _skip_run_blockers(
-    cx: Context | None, plan: dict[str, Any], *, take_over: bool, allow_dirty: bool
+    cx: Context | None,
+    plan: dict[str, Any],
+    *,
+    take_over: bool,
+    allow_dirty: bool,
+    allow_older_bay: bool = False,
 ) -> None:
-    """Drop the run blockers the operator skipped: ``--take-over`` and ``--allow-dirty``.
+    """Drop the run blockers the operator skipped: ``--take-over``, ``--allow-dirty``
+    and ``--allow-older-bay``.
 
     Each skip prints one loud line and is recorded in the plan (``took_over``,
-    ``allowed_dirty``), and from there in the result. The verdict is decided
-    again, and the plan record is saved again so it shows what ran.
+    ``allowed_dirty``, ``allowed_older_bay``), and from there in the result. The
+    verdict is decided again, and the plan record is saved again so it shows what ran.
     """
     gates = list(plan.get("run_blockers") or [])
     skipped = [
@@ -533,6 +569,7 @@ def _skip_run_blockers(
         for g in gates
         if (take_over and g["reason"] == fleetsync.REASON_ENV_BUSY)
         or (allow_dirty and g["reason"] == fleetsync.REASON_DIRTY)
+        or (allow_older_bay and g["reason"] == fleetsync.REASON_BAY_OLDER)
     ]
     if not skipped:
         return
@@ -540,7 +577,20 @@ def _skip_run_blockers(
     plan["blockers"] = [b for b in plan["blockers"] if b not in messages]
     plan["run_blockers"] = [g for g in gates if g not in skipped]
     for gate in skipped:
-        if gate["reason"] == fleetsync.REASON_ENV_BUSY:
+        if gate["reason"] == fleetsync.REASON_BAY_OLDER:
+            from bay_cli import compat
+
+            plan["allowed_older_bay"] = {
+                "deployed_with": gate["deployed_with"],
+                "installed": gate["installed"],
+            }
+            fleetsync.notice(
+                compat.allowed_line(
+                    compat.Check(compat.OLDER, gate["installed"], gate["deployed_with"])
+                )
+                + f" It records v{gate['installed']} in {compat.COMPAT_FILE}."
+            )
+        elif gate["reason"] == fleetsync.REASON_ENV_BUSY:
             holder = dict(gate["holder"])
             plan["took_over"] = holder
             fleetsync.notice(
@@ -575,13 +625,16 @@ def _gate(
     cx: Context | None = None,
     take_over: bool = False,
     allow_dirty: bool = False,
+    allow_older_bay: bool = False,
 ) -> bool:
     """Refuse blocked, stale and unapproved plans. True when ``--force`` overrode approve.
 
-    ``take_over`` and ``allow_dirty`` first drop those run blockers
-    (:func:`_skip_run_blockers`); nothing else skips a blocker.
+    ``take_over``, ``allow_dirty`` and ``allow_older_bay`` first drop those run
+    blockers (:func:`_skip_run_blockers`); nothing else skips a blocker.
     """
-    _skip_run_blockers(cx, plan, take_over=take_over, allow_dirty=allow_dirty)
+    _skip_run_blockers(
+        cx, plan, take_over=take_over, allow_dirty=allow_dirty, allow_older_bay=allow_older_bay
+    )
     verdict = plan["verdict"]
     if verdict == "blocked":
         raise Refused(plan, "the plan is blocked: " + "; ".join(plan["blockers"]))
@@ -617,11 +670,14 @@ def up(
     code: Mapping[str, Any] | None = None,
     take_over: bool = False,
     allow_dirty: bool = False,
+    allow_older_bay: bool = False,
 ) -> dict[str, Any]:
     """Apply a plan. Returns a result document; raises :class:`Refused` or BayError.
 
     ``take_over`` skips the ``env_busy`` blocker (another run's fresh claim on
-    the box env), ``allow_dirty`` the ``dirty`` one (uncommitted fleet paths).
+    the box env), ``allow_dirty`` the ``dirty`` one (uncommitted fleet paths),
+    ``allow_older_bay`` the ``bay_older`` one (the fleet's ``bay.compat.json``
+    names a newer Bay; this run records the older version).
 
     With ``push`` (the default) the fleet repo is pushed after the last lock
     commit when it has a remote. A failed push is a warning, never a failed
@@ -656,7 +712,14 @@ def up(
         plan["fleet_sync"] = fleetsync.sync_record(cx.fleet_root, pulled)
         prior = _save_plan(cx, plan)
         forced = _gate(
-            plan, force, reason, say, cx=cx, take_over=take_over, allow_dirty=allow_dirty
+            plan,
+            force,
+            reason,
+            say,
+            cx=cx,
+            take_over=take_over,
+            allow_dirty=allow_dirty,
+            allow_older_bay=allow_older_bay,
         )
         commit = str(plan["wanted"]["commit"])
         return _with_layout_notes(moved, _apply_plan(
@@ -726,6 +789,7 @@ def up_env(
     push: bool = True,
     take_over: bool = False,
     allow_dirty: bool = False,
+    allow_older_bay: bool = False,
 ) -> dict[str, Any]:
     """Apply a whole-environment plan (``bay up <env>`` in a fleet, no ``--project``).
 
@@ -755,7 +819,14 @@ def up_env(
                 code=ErrorCode.NOT_FOUND,
             )
         forced = _gate(
-            plan, force, reason, say, cx=cx, take_over=take_over, allow_dirty=allow_dirty
+            plan,
+            force,
+            reason,
+            say,
+            cx=cx,
+            take_over=take_over,
+            allow_dirty=allow_dirty,
+            allow_older_bay=allow_older_bay,
         )
         if not plan["projects"]:
             return _with_layout_notes(moved, _apply_route_plan(
@@ -944,12 +1015,14 @@ def _apply_plan_steps(
             code_targets.update(_code_targets(proj, env, commit, built, code, keep=keep))
         compiled = comp.result.data()
 
-        # 4. commit
-        paths = [p.lock_file for p, _ in members]
-        paths += [services, planmod.plan_file(cx, plan["plan_id"])]
+        # 4. commit, with the Bay version floor when it changes
+        compat_paths = _stage_compat(cx, written, say)
+        records = [planmod.plan_file(cx, plan["plan_id"])]
         approval = planmod.approval_file(cx, plan["plan_id"])
         if approval.is_file():
-            paths.append(approval)
+            records.append(approval)
+        restore = [p.lock_file for p, _ in members] + [services] + compat_paths
+        paths = restore + records
         try:
             fleet_commit = gitrepo.commit_paths(cx.fleet_root, paths, message)
         except gitrepo.GitError as exc:
@@ -961,8 +1034,8 @@ def _apply_plan_steps(
             push=push,
             before=head_before,
             commit=fleet_commit,
-            restore=[p.lock_file for p, _ in members] + [services],
-            unstage=paths[len(members) + 1 :],
+            restore=restore,
+            unstage=records,
             prior_plan=prior_plan,
             plan=plan,
             action=action,
@@ -1215,6 +1288,7 @@ def _apply_plan_steps(
         "fleet_sync": plan.get("fleet_sync"),
         "took_over": plan.get("took_over"),
         "allowed_dirty": plan.get("allowed_dirty"),
+        "allowed_older_bay": plan.get("allowed_older_bay"),
         # The deploy ran, but these boxes' receipts could not be read (not "no receipt").
         "receipt_unread": unread,
         # The boxes this run deployed (the plan's scope).
@@ -1404,10 +1478,12 @@ def _apply_route_steps(
         if comp.result is None:
             raise BayError("compile failed:\n  " + "\n  ".join(comp.errors))
         services = _write_services(cx, comp.result.text())
-        paths = [services, planmod.plan_file(cx, plan["plan_id"])]
+        restore = [services] + _stage_compat(cx, written, say)
+        records = [planmod.plan_file(cx, plan["plan_id"])]
         approval = planmod.approval_file(cx, plan["plan_id"])
         if approval.is_file():
-            paths.append(approval)
+            records.append(approval)
+        paths = restore + records
         try:
             fleet_commit = gitrepo.commit_paths(cx.fleet_root, paths, f"bay: up {env} (routes)")
         except gitrepo.GitError as exc:
@@ -1419,8 +1495,8 @@ def _apply_route_steps(
             push=push,
             before=head_before,
             commit=fleet_commit,
-            restore=[services],
-            unstage=paths[1:],
+            restore=restore,
+            unstage=records,
             prior_plan=prior_plan,
             plan=plan,
             action="up",
@@ -1503,6 +1579,7 @@ def _apply_route_steps(
         "fleet_sync": plan.get("fleet_sync"),
         "took_over": plan.get("took_over"),
         "allowed_dirty": plan.get("allowed_dirty"),
+        "allowed_older_bay": plan.get("allowed_older_bay"),
     }
     return _finish_up(cx, result, push=push, failure=failure, first_exit=False, say=say)
 

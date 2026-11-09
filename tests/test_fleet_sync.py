@@ -1673,7 +1673,9 @@ def test_a_machine_with_no_machine_id_writes_an_empty_run_and_never_judges(
 # ── review 3, I: --allow-dirty never covers the files only Bay writes ───────
 
 
-@pytest.mark.parametrize("path", ["group_vars/all/services.yml", "projects/webapp/bay.lock"])
+@pytest.mark.parametrize(
+    "path", ["group_vars/all/services.yml", "projects/webapp/bay.lock", "bay.compat.json"]
+)
 def test_a_hand_edit_in_a_bay_file_refuses_even_with_allow_dirty(
     machines: dict[str, Path], box: FakeBox, playbooks: list[tuple[str, str]], path: str
 ) -> None:

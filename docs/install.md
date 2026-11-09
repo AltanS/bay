@@ -208,6 +208,11 @@ The working rule:
   (exit 42). Run it again: it pulls first. While one machine deploys a box
   env, a plan for that box env on any machine is blocked (`env_busy`, exit 43
   for `bay up`). Wait for it, or pass `--take-over` when that run is dead.
+- Every machine that deploys runs the same Bay release. Bay enforces it: the
+  fleet's `bay.compat.json` names the Bay version of the last `bay up`. A
+  machine with an older Bay stops before it writes anything (`bay_older`,
+  exit 45). Run `bay self update --to <that version>`. For a deliberate
+  downgrade, pass `--allow-older-bay`. Bay older than 2.16.0 ignores the file.
 - Never merge generated files by hand: not `services.yml`, not a `bay.lock`,
   not a vault file. When `bay fleet push` reports a conflict, it has undone
   the rebase. Re-run the Bay command that wrote the file.
