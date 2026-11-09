@@ -92,6 +92,9 @@
          | combine({'memswap_limit': _svc.memswap_limit}
                    if _svc.memswap_limit is defined
                    else {})
+         | combine({'dns': _svc.dns}
+                   if _svc.dns is defined
+                   else {})
          | combine({'command': _svc.command}
                    if _svc.command is defined
                    else {})
@@ -171,6 +174,9 @@
                    else {})
          | combine({'memswap_limit': _acc.memswap_limit}
                    if _acc.memswap_limit is defined
+                   else {})
+         | combine({'dns': _acc.dns}
+                   if _acc.dns is defined
                    else {})
          | combine({'command': _acc.command}
                    if _acc.command is defined

@@ -163,7 +163,20 @@ def parse_state(
         ),
         memory=_int_or_none(host_config.get("Memory")),
         memory_swap=_int_or_none(host_config.get("MemorySwap")),
+        dns=_dns_tuple(host_config),
     )
+
+
+def _dns_tuple(host_config: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """HostConfig.Dns as a tuple. Docker reports null or [] for none; None if the key is absent."""
+    if "Dns" not in host_config:
+        return None
+    raw = host_config["Dns"]
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        return None
+    return tuple(str(a) for a in raw)
 
 
 def _int_or_none(value: object) -> int | None:

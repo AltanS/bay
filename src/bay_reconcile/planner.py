@@ -95,6 +95,7 @@ REASON_CODES = (
     "ports",
     "volumes",
     "memory",
+    "dns",
     "stopped",
 )
 
@@ -191,6 +192,9 @@ def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
     memory = _memory_reason(spec, state)
     if memory:
         detail.append(memory)
+    dns = _dns_reason(spec, state)
+    if dns:
+        detail.append(dns)
     env_file = env_file_reason(spec.env_file_change)
     if env_file:
         detail.append(env_file)
@@ -292,6 +296,18 @@ def _memory_reason(spec: ContainerSpec, state: ContainerState) -> str | None:
     if not parts:
         return None
     return "memory: " + ", ".join(parts)
+
+
+def _dns_reason(spec: ContainerSpec, state: ContainerState) -> str | None:
+    """Name a difference in the container's resolver list (order counts)."""
+    if state.dns is None:
+        return None
+    want = tuple(spec.dns)
+    if state.dns == want:
+        return None
+    now = ", ".join(state.dns) or "docker's default"
+    then = ", ".join(want) or "docker's default"
+    return f"dns: {now} -> {then}"
 
 
 def _change_reason(spec: ContainerSpec, state: ContainerState) -> str:

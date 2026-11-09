@@ -423,6 +423,7 @@ These keys sit at the top level. Every key in this table may also be set in a
 | `health` | string | `"/"` when there is a port, else `"none"` | Health check path, or `"none"`. Bay probes it on the container, not through the route. A failed check removes the new container and starts the previous one again. A path other than `/` on an internal container (no `domain`, no `path`) is (validated, not deployed yet). |
 | `replicas` | integer >= 1 | `1` | Number of containers. More than 1 on an internal container is (validated, not deployed yet). |
 | `memory` | size | none | Memory limit. Bay sets `mem_limit` and `memswap_limit` to this one value, so the container gets no swap (a `docker run --memory-swap` equal to `--memory`). A container that ran with `mem_limit` alone is recreated once by the first deploy of the compiled file, and the box prediction names it as `memory: memswap_limit <now> -> <memory>` (see [plan.md](plan.md#the-box-prediction---remote)). |
+| `dns` | list of 1 to 3 IP addresses | none | Resolvers for this one container (Docker `--dns`). Each entry is an IPv4 or IPv6 address, never a domain name, and no entry repeats. The order is kept. The limit is 3 because Docker and glibc use at most 3 nameservers. Use it for a container that must not see the box's tailnet split DNS. Without `dns` the container gets the box resolver as before. Adding, changing or removing `dns` recreates that container once, and the box prediction names it as `dns: <now> -> <wanted>`. |
 | `update` | `notify`, `auto`, `off` | `notify` | What happens when a newer image appears. |
 | `zero_downtime` | bool | `false` | `true`: the previous container keeps running until the new one is healthy. `false`: there is a gap. `true` on an internal container is (validated, not deployed yet). |
 | `logs` | `"off"` or duration | fleet setting | How long the log archive on the box keeps logs. Rotation is always on. |
@@ -634,7 +635,7 @@ service may use that name. Container names are in rule 8.
   the same image. An internal service that does this is (validated, not deployed yet).
 - The service inherits `update` and `logs` from the project. `replicas` defaults to `1`
   and `zero_downtime` to `false`.
-- The service may set its own: `command`, `port`, `health`, `memory`, `replicas`,
+- The service may set its own: `command`, `port`, `health`, `memory`, `dns`, `replicas`,
   `zero_downtime`, `update`, `logs`, `log_rotation`, `access`, `mounts`, `env`,
   `secrets`, `fleet_secrets`, `needs`, `image` or `build`.
 - Routing: `path = "/api"` routes a prefix of the main domain, on a segment boundary
@@ -659,6 +660,16 @@ service may use that name. Container names are in rule 8.
 - Siblings reach each other at `http://<service>:<port>`. Every service with a `port`
   gets `<SERVICE>_URL` in every other service of the same environment, and the main
   container is `WEB_URL`. A service with `inherit = false` receives none.
+- `dns` is never inherited. It sets the resolvers of that one container and no other.
+  A scraper browser that must not use the box's tailnet split DNS looks like this:
+
+  ```toml
+  [services.steel]
+  inherit = false
+  image = "ghcr.io/steel-dev/steel-browser:latest"
+  port = 3000
+  dns = ["1.1.1.1", "8.8.8.8"]
+  ```
 
 ### `[deploy.<env>]`
 
@@ -712,7 +723,7 @@ to its app repo never changes its config.
 Overrides. A `[deploy.<env>]` table may also set:
 
 - any image and runtime key: `image`, `port`, `command`, `release`, `health`,
-  `replicas`, `memory`, `update`, `zero_downtime`, `logs`, `secrets`;
+  `replicas`, `memory`, `dns`, `update`, `zero_downtime`, `logs`, `secrets`;
 - any `access` key, for example `access.mode = "tailnet"`;
 - `build.args`, and nothing else under `build`;
 - `env`, for example `[deploy.staging.env]`;

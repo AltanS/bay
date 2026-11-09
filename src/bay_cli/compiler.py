@@ -55,7 +55,7 @@ HEADER_RE = re.compile(
 #: Keys a [deploy.<env>] table may override with a plain replace.
 _RUNTIME_KEYS = (
     "image", "port", "command", "release", "health", "replicas", "memory", "update",
-    "zero_downtime", "logs", "secrets", "log_rotation",
+    "zero_downtime", "logs", "secrets", "log_rotation", "dns",
 )
 #: bay.toml update -> services.yml update. None means: leave the key out (monitor).
 _UPDATE = {"notify": None, "auto": "auto", "off": False}
@@ -608,6 +608,9 @@ class _Compiler:
             # so its first deploy from a compiled file recreates it once.
             entry["mem_limit"] = level["memory"]
             entry["memswap_limit"] = level["memory"]
+        if "dns" in level:
+            # Resolvers for this one container (docker --dns). Order is kept.
+            entry["dns"] = list(level["dns"])
         rotation = level.get("log_rotation")
         if rotation:
             entry["log_rotation"] = dict(rotation)

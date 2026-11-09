@@ -8,6 +8,20 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.14.0] - 2026-11-09
+
+A container can have its own DNS resolvers.
+
+### Added
+- `dns` in `bay.toml`: a list of 1 to 3 IP addresses. Bay passes them to that one container as Docker `--dns`. It works at the top level (the main container), in `[services.<name>]` and in `[deploy.<env>]`. It is never inherited by a sibling service. Each entry must be an IPv4 or IPv6 address, not a domain name, and no entry may repeat. The order is kept. The limit is 3 because Docker and glibc use at most 3 nameservers.
+- Use it for a container that must not see the box's tailnet split DNS, for example a scraper browser. Without `dns`, a container uses the box resolver as before.
+- The reconciler puts `dns` in the container spec and the config hash, and reads `HostConfig.Dns` back. Adding, changing or removing `dns` recreates that container once. The box prediction names it as `dns: <now> -> <wanted>` (new reason code `dns`).
+- A push build (`rebuild.sh`) passes the same `--dns` flags, so a main container keeps its resolvers on every push.
+
+### Upgrade notes
+- No action needed. A container without `dns` gets the same spec and the same config hash as in 2.13.0, so this release recreates nothing by itself. `bay compile --check` reports all three fleets up to date.
+- Every machine that runs `bay up` for a project with `dns` needs 2.14.0. An older CLI refuses the key as unknown.
+
 ## [2.13.0] - 2026-11-06
 
 `bay up` for one project runs only on the boxes it needs.

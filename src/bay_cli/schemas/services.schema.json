@@ -278,6 +278,14 @@
           "type": "string",
           "description": "Container memory plus swap limit (e.g., '512m'). Set it equal to mem_limit to give the container no swap, so its pages never reach disk. Requires mem_limit and must not be smaller than it. '-1' means unlimited swap."
         },
+        "dns": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "type": "string" },
+          "description": "Resolver IP addresses for this one container (docker --dns), in order. At most 3, because docker and glibc use at most 3 nameservers. Absent means the box resolver."
+        },
         "log_rotation": {
           "$ref": "#/$defs/log_rotation"
         },
@@ -404,6 +412,14 @@
         "memswap_limit": {
           "type": "string",
           "description": "Container memory plus swap limit (e.g., '512m'). Set it equal to mem_limit to give the container no swap, so its pages never reach disk. Requires mem_limit and must not be smaller than it. '-1' means unlimited swap."
+        },
+        "dns": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "type": "string" },
+          "description": "Resolver IP addresses for this one container (docker --dns), in order. At most 3, because docker and glibc use at most 3 nameservers. Absent means the box resolver."
         },
         "log_rotation": {
           "$ref": "#/$defs/log_rotation"

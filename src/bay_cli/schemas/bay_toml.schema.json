@@ -17,6 +17,7 @@
     "health": { "$ref": "#/$defs/health" },
     "replicas": { "$ref": "#/$defs/replicas" },
     "memory": { "$ref": "#/$defs/size" },
+    "dns": { "$ref": "#/$defs/dns" },
     "update": { "$ref": "#/$defs/update" },
     "zero_downtime": { "type": "boolean" },
     "logs": { "$ref": "#/$defs/logs" },
@@ -141,6 +142,18 @@
     "replicas": {
       "type": "integer",
       "minimum": 1
+    },
+    "dns": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "type": "string" },
+      "x-messages": {
+        "minItems": "must list at least one resolver address; remove the key to use the box resolver",
+        "maxItems": "lists more than 3 resolvers; docker and glibc use at most 3 nameservers, so the rest would be ignored",
+        "uniqueItems": "lists the same resolver twice"
+      }
     },
     "size": {
       "type": "string",
@@ -439,6 +452,7 @@
         "port": { "$ref": "#/$defs/port" },
         "health": { "$ref": "#/$defs/health" },
         "memory": { "$ref": "#/$defs/size" },
+        "dns": { "$ref": "#/$defs/dns" },
         "replicas": { "$ref": "#/$defs/replicas" },
         "zero_downtime": { "type": "boolean" },
         "update": { "$ref": "#/$defs/update" },
@@ -505,6 +519,7 @@
         "health": { "$ref": "#/$defs/health" },
         "replicas": { "$ref": "#/$defs/replicas" },
         "memory": { "$ref": "#/$defs/size" },
+        "dns": { "$ref": "#/$defs/dns" },
         "update": { "$ref": "#/$defs/update" },
         "zero_downtime": { "type": "boolean" },
         "logs": { "$ref": "#/$defs/logs" },

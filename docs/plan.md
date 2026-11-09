@@ -317,6 +317,7 @@ Each reason is `<code>: <detail>`:
 | `env_file` | The env file that the deploy would write differs from the one on the box. The detail names added, removed and changed keys, never a value. When only the line order moved, the detail is "same variables, different order". |
 | `labels`, `ports`, `volumes` | That part of the settings differs. |
 | `memory` | `mem_limit` or `memswap_limit` differs. Bay sets both to the `memory` value, so swap is never allowed. |
+| `dns` | The resolver list (`dns` in `bay.toml`) differs from the one the container was created with. Order counts. The detail reads `dns: <now> -> <wanted>`. |
 | `stopped` | The container does not run. The deploy leaves it as it is. |
 | `zero_downtime` | The new container takes over before the old one stops. |
 

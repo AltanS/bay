@@ -145,6 +145,8 @@ services:
 
     mem_limit: 512m                  # Docker memory limit (e.g., 256m, 1g)
     memswap_limit: 512m              # Memory plus swap. Equal to mem_limit = no swap. Needs mem_limit, never smaller
+    dns:                             # Resolvers for this one container (docker --dns). 1 to 3 IPs, order kept
+      - 1.1.1.1                      #   Absent = the box resolver. Never a host name
 
     log_rotation:                    # Per-service docker log retention (overrides log_rotation_defaults)
       driver: json-file              #   json-file | local | none
@@ -331,6 +333,8 @@ accessories:
 
     mem_limit: 512m                  # Docker memory limit (e.g., 256m, 1g)
     memswap_limit: 512m              # Memory plus swap. Equal to mem_limit = no swap. Needs mem_limit, never smaller
+    dns:                             # Resolvers for this one container (docker --dns). 1 to 3 IPs, order kept
+      - 1.1.1.1                      #   Absent = the box resolver. Never a host name
 
     log_rotation:                    # Per-accessory docker log retention (same shape as services)
       driver: json-file              #   json-file | local | none

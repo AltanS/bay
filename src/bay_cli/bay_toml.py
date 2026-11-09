@@ -18,6 +18,7 @@ editing the file.
 from __future__ import annotations
 
 import difflib
+import ipaddress
 import json
 import re
 import tomllib
@@ -32,7 +33,7 @@ SCHEMA_PATH = Path(__file__).parent / "schemas" / "bay_toml.schema.json"
 #: as unknown inside a table is almost always the scalar-after-table trap.
 TOP_LEVEL_KEYS = (
     "name", "fleet", "publish", "image", "port", "command", "release", "health",
-    "replicas", "memory", "update", "zero_downtime", "logs", "secrets",
+    "replicas", "memory", "dns", "update", "zero_downtime", "logs", "secrets",
 )
 
 #: Matches the start of a template expression in any string value.
@@ -274,6 +275,7 @@ def _file_rules(doc: dict[str, Any]) -> Iterator[Violation]:
     yield from _access_rules(doc, services)
     yield from _deploy_rules(doc, envs, services)
     yield from _release_update_rules(doc, envs)
+    yield from _dns_rules(doc, envs, services)
     yield from _path_rules(services)
     yield from _domain_rules(doc, envs, services)
 
@@ -644,6 +646,36 @@ def _release_update_rules(
             "recreates the container without running the release. Use \"notify\" or "
             "\"off\", or remove release",
         )
+
+
+def _dns_rules(
+    doc: dict[str, Any], envs: dict[str, dict[str, Any]], services: dict[str, Any]
+) -> Iterator[Violation]:
+    """Every ``dns`` entry must be an IPv4 or IPv6 address, not a domain name.
+
+    The list shape (1 to 3 unique strings) is the schema's job. Docker hands
+    the addresses to resolv.conf as they are, and a domain name there would need
+    a resolver to look it up.
+    """
+    tables = [("", doc)]
+    tables += [(f"deploy.{env}", d) for env, d in envs.items()]
+    tables += [(f"services.{name}", s) for name, s in services.items() if isinstance(s, dict)]
+    for base, table in tables:
+        dns = table.get("dns")
+        for i, entry in enumerate(dns if isinstance(dns, list) else []):
+            if not isinstance(entry, str):
+                continue
+            try:
+                # A zone id (fe80::1%eth0) parses, but docker cannot use it.
+                if "%" in entry:
+                    raise ValueError(entry)
+                ipaddress.ip_address(entry)
+            except ValueError:
+                yield Violation(
+                    f"{_join(base, 'dns')}[{i}]",
+                    f"\"{entry}\" is not an IP address; write an IPv4 or IPv6 address "
+                    "such as 1.1.1.1, not a domain name",
+                )
 
 
 def _deploy_rules(

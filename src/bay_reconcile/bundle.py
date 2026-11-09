@@ -63,6 +63,7 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         restart_policy=d.get("restart_policy") or "unless-stopped",
         mem_limit=d.get("mem_limit"),
         memswap_limit=d.get("memswap_limit"),
+        dns=_dns(d),
         labels=dict(d.get("labels") or {}),
         healthcheck=_healthcheck(d),
         log_driver=d.get("log_driver"),
@@ -72,6 +73,16 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         release=_release(d),
         env_file_change=_env_file_change(d),
     )
+
+
+def _dns(d: Mapping[str, Any]) -> tuple[str, ...]:
+    """The spec's ``dns`` resolver list, or ``()``. A bad shape fails at load time."""
+    raw = d.get("dns")
+    if raw is None:
+        return ()
+    if isinstance(raw, list | tuple) and all(isinstance(a, str) and a for a in raw):
+        return tuple(raw)
+    raise ValueError(f"{d.get('name')!r}: dns must be a list of address strings")
 
 
 def _release(d: Mapping[str, Any]) -> str | tuple[str, ...] | None:

@@ -139,6 +139,11 @@ class ContainerSpec:
     restart_policy: str = "unless-stopped"
     mem_limit: str | None = None
     memswap_limit: str | None = None
+    #: Resolver addresses for this container only (docker ``--dns``,
+    #: HostConfig.Dns), in order. Empty means docker's default. The hash covers
+    #: it because ``bay_spec_hash`` reads the raw spec, where the key exists
+    #: only when ``dns`` is set.
+    dns: Sequence[str] = ()
     labels: Mapping[str, str] = field(default_factory=dict)
     healthcheck: Mapping[str, object] | None = None
     log_driver: str | None = None
@@ -196,6 +201,10 @@ class ContainerState:
     # on swap is "unlimited swap". None means docker did not report the field.
     memory: int | None = field(default=None, compare=False, hash=False)
     memory_swap: int | None = field(default=None, compare=False, hash=False)
+    # The resolvers the running container was created with, from docker's
+    # ``HostConfig.Dns``, in order. () is "none set". None means docker did not
+    # report the field.
+    dns: tuple[str, ...] | None = field(default=None, compare=False, hash=False)
 
     @property
     def running(self) -> bool:
