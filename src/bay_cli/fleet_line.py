@@ -38,6 +38,7 @@ MUTATING_VERBS: frozenset[str] = frozenset(
         "up",
         "rollback",
         "adopt",
+        "toml move",
         "remove",
         "route add",
         "route rm",
@@ -133,6 +134,7 @@ _CWD_IS_FLEET = frozenset(
 
 #: Verbs that register an app repo: they need a fleet by name (``--fleet``, or the
 #: ``fleet =`` line of the bay.toml), never one found from the folder you stand in.
+#: ``toml move --to repo`` is one too (:func:`resolve`).
 _NAMED_FLEET_ONLY = frozenset({"init", "adopt"})
 
 #: Marks a wrapped callback, so a test can tell that :func:`install` covered it.
@@ -234,12 +236,15 @@ def resolve(path: str, kwargs: dict[str, Any]) -> tuple[Path, str | None] | None
             found = _named(name)
             if found is None:
                 return None
-    if found is None and path not in _NAMED_FLEET_ONLY:
+    named_only = path in _NAMED_FLEET_ONLY or (
+        path == "toml move" and str(getattr(kwargs.get("to"), "value", kwargs.get("to"))) == "repo"
+    )
+    if found is None and not named_only:
         # Step 5a: the fleet folder you stand in.
         found = fleet_dir_above(Path.cwd())
     if found is None and path in _CWD_IS_FLEET:
         found = Path.cwd()
-    elif found is None and path not in _NAMED_FLEET_ONLY:
+    elif found is None and not named_only:
         # Step 5b. A verb that works in a fresh folder (_CWD_IS_FLEET) ignores it,
         # as context_or_cwd does. An ambiguous folder: the verb itself reports it.
         try:

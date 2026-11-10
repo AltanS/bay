@@ -102,6 +102,11 @@
               "type": "string",
               "pattern": "^[0-9a-f]{7,64}$"
             },
+            "from_app_commit": {
+              "description": "Set by bay toml move --to fleet: the app repo commit this environment ran before the bay.toml moved into the fleet. bay rollback refuses while no fleet pin is in previous.",
+              "type": "string",
+              "pattern": "^[0-9a-f]{7,64}$"
+            },
             "database": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$" },
             "role": { "type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$" },
             "volumes": {

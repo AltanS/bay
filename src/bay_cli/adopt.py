@@ -490,6 +490,8 @@ def _new_lock(
         record = dict(records.get(env) or {})
         record.pop("previous", None)
         adopted = dict(record.get("adopted") or {})
+        # The mark of an earlier `bay toml move --to fleet` means nothing now.
+        adopted.pop("from_app_commit", None)
         adopted["from_fleet_commit"] = fleet_head
         record["adopted"] = adopted
         records[env] = record

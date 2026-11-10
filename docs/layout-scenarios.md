@@ -724,8 +724,8 @@ Steps. The order matters: adopt, `bay up`, then `git push`.
 
 ```
 cd ~/code/shop
-bay --fleet ~/.config/bay/fleets/acme adopt shop --check    # prints the files and the lock diff, changes nothing
-bay --fleet ~/.config/bay/fleets/acme adopt shop
+bay --fleet ~/.config/bay/fleets/acme toml move shop --to repo --check   # prints the files and the lock diff, changes nothing
+bay --fleet ~/.config/bay/fleets/acme toml move shop --to repo
 bay plan production                       # must say: 0 container steps, verdict auto
 bay up production                         # in the app checkout: takes the unpushed adopt commit, moves no code
 git push                                  # last: the push is config only, it builds and recreates nothing
@@ -744,7 +744,8 @@ Two things to check before the push, when the project has more than one deploy e
   commit that is on another branch triggers nothing there. A deploy env that follows another branch gets
   the commit only when you merge it into that branch.
 
-`bay adopt` copies `projects/shop/bay.toml` and its files into the app repo, at
+`bay toml move shop --to repo` (until 2.17.0 `bay adopt shop`, which still works) copies
+`projects/shop/bay.toml` and its files into the app repo, at
 `--toml-path` (default `bay.toml`). It rewrites the lock to repo form. It deletes
 everything in the fleet folder except the lock. It commits both repos. The app repo commit
 stays local: you push it, after `bay up`. The `bay.toml` is not in the repo yet, so name
@@ -774,6 +775,21 @@ pin and the code (scenario 10).
 
 `bay plan` on the adopt commit prints no "bay up will refuse it" note. It says the commit is the adopt
 commit and is not pushed yet, and that `bay up` takes it. Once you push, the note is gone.
+
+**The way back.** An app whose repo goes public moves its `bay.toml` back into the fleet, so the
+domains, the secret names and the fleet name leave the public repo:
+
+```
+bay --fleet ~/.config/bay/fleets/acme toml move shop --to fleet --check
+bay --fleet ~/.config/bay/fleets/acme toml move shop --to fleet
+bay --fleet ~/.config/bay/fleets/acme plan production --project shop   # must say 0 steps
+bay --fleet ~/.config/bay/fleets/acme up production --project shop     # moves no code
+cd ~/code/shop && git rm -r bay.toml site.conf && git commit -m "chore: bay.toml lives in the fleet" && git push
+```
+
+The move copies the `bay.toml` as pinned, so it refuses while the app repo holds an undeployed
+config change. Delete the files in the app repo only after the `bay up`: then the delete push is a
+normal code push. See [plan.md, bay toml move](plan.md#bay-toml-move).
 
 ## 8. App needs app
 

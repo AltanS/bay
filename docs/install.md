@@ -251,7 +251,8 @@ A command that works on a fleet finds it in this order. The first rule that appl
      use `BAY_FLEET_NAME`.
 
    Rule 5 applies to every verb that finds the fleet in the usual way. Three verbs skip it:
-   `init`, `adopt` and `show --routes` need rule 1, 2, 3 or 4. A few older verbs work in a fresh
+   `init`, `adopt` (and `toml move --to repo`) and `show --routes` need rule 1, 2, 3 or 4.
+   `toml move --to fleet` uses every rule. A few older verbs work in a fresh
    folder, before any fleet exists: `service prune-webhooks` (it deletes GitHub hooks), and
    `server add|remove` (they write the hosts files and `group_vars/`). They use 5a. If 5a
    finds nothing, they take the working directory as the fleet. They ignore 5b, so a fresh
@@ -265,9 +266,9 @@ command prints that error as one JSON document on stdout: `error`, `hint`, `code
 (`no_fleet`, or `fleet_ambiguous` when a folder holds more than one fleet) and `candidates`
 (the fleets it found, empty for none).
 
-`bay init` and `bay adopt` run in an app repo that has no `bay.toml` yet, so rule 3 has nothing
-to read. They use rules 1, 2 and 4. `bay init` also takes its own `--fleet <name>` (a folder name, not
-a path, and not the global option), which stands in the place of rule 3. `bay adopt` has no such option:
+`bay init` and `bay toml move --to repo` (the old `bay adopt`) run in an app repo that has no
+`bay.toml` yet, so rule 3 has nothing to read. They use rules 1, 2 and 4. `bay init` also takes its own `--fleet <name>` (a folder name, not
+a path, and not the global option), which stands in the place of rule 3. `bay toml move` has no such option:
 use the global `--fleet <path>`, `BAY_FLEET` or `BAY_FLEET_NAME`.
 
 `--fleet <path>` is also how you try a fleet that is not under `~/.config/bay/fleets`.

@@ -270,12 +270,13 @@ to reproduce it. The flags that change what a command *means*:
 - `bay secret missing <env>` — List secret NAMES the services need that the env's vault lacks.
 - `bay test` — Run the consumer's infrastructure tests (tests/test_infra.sh).
 - `bay toml` — Work with bay.toml files.
+- `bay toml move <name>` — Move a project's bay.toml and the files its mounts read between the fleet and its app repo.
 - `bay toml validate [path]` — Check a bay.toml file against schema v3; print one line per violation.
 - `bay validate` — Validate configuration files before deploying.
 
 ### Daily
 
-- `bay adopt <name>` — Move a project's bay.toml and its files from the fleet into this app repo.
+- `bay adopt <name>` — Deprecated: use `bay toml move <name> --to repo`. It works the same.
 - `bay approve <plan_id>` — Approve a saved plan with destructive or shared steps.
 - `bay init` — Draft a bay.toml in this app repo and register the app in the fleet.
 - `bay plan [env]` — Compare WANTED (bay.toml at HEAD), PINNED (the lock) and RUNNING (the box).

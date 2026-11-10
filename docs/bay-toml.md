@@ -470,7 +470,7 @@ lockfile (see Behavior).
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `repo` | string | none | The git URL that the box clones to build. Only for an app in the fleet (`projects/<name>/bay.toml`); an app repo uses its own origin, and a different `repo` there is a compile error. Without it, the compile takes `repo` from `bay.lock`. With neither, the compile stops and names both places. `bay adopt` moves it into the lock. |
+| `repo` | string | none | The git URL that the box clones to build. Only for an app in the fleet (`projects/<name>/bay.toml`); an app repo uses its own origin, and a different `repo` there is a compile error. Without it, the compile takes `repo` from `bay.lock`. With neither, the compile stops and names both places. `bay toml move --to repo` moves it into the lock; `bay toml move --to fleet` leaves it in the lock and adds no `[build] repo`. |
 | `dockerfile` | string | `Dockerfile` | Path to the Dockerfile, relative to the repo root (not to this `bay.toml`). |
 | `context` | string | `.` | Build context, relative to the repo root. Without `watch`, a context narrower than the repo root is the set of build inputs: a push that changes no file under it (and not the Dockerfile) only tags the image (see "No-input-change push" in [build-pipeline.md](build-pipeline.md#no-input-change-push)). |
 | `strategy` | `local`, `remote`, `registry` | fleet setting | Where the image is built. |
@@ -555,14 +555,23 @@ Where `from` is read:
   lock adopts one. Moving a file beside the toml does not change that path, so no
   container is recreated.
 
-**Moving an app from the fleet into its repo.** A project whose `bay.toml` lives in
-the fleet (`projects/<name>/bay.toml`) moves into its app repo with `bay adopt <name>`,
-run in a checkout of that repo. The `bay.toml` and the files it mounts move together,
-so every `from` keeps its meaning beside the toml, and a `fleet:` mount stays in the
-fleet. The lock keeps the adopted names, so the next plan shows 0 steps. Then run
-`bay up` in that checkout, and `git push` after it: `bay up` takes the unpushed adopt
-commit and moves no code, so the push is config only on the box. See
-[plan.md, bay adopt](plan.md#bay-adopt).
+**Moving an app between the fleet and its repo.** `bay toml move <name> --to repo|fleet`
+moves the `bay.toml` and the files its mounts read together, so every `from` keeps its meaning
+beside the toml, and a `fleet:` mount stays in the fleet. The lock keeps the adopted names in
+both directions, so the next plan shows 0 steps. See
+[plan.md, bay toml move](plan.md#bay-toml-move).
+
+- `--to repo` (until 2.17.0 `bay adopt <name>`, which still works): run it in a checkout of the
+  app repo. Then run `bay up` in that checkout, and `git push` after it: `bay up` takes the
+  unpushed adopt commit and moves no code, so the push is config only on the box.
+- `--to fleet`: run it from anywhere with a fleet selected. It copies the `bay.toml` as pinned
+  into `projects/<name>/`, and refuses while the app repo holds a config change that `bay up`
+  has not deployed. Then run `bay up`, and only after it delete the files from the app repo and
+  push. That push is a normal code push.
+
+Rule of thumb: a private app of one operator can keep its `bay.toml` in its repo. An app whose
+repo is public, or that other people deploy, keeps it in the fleet: the file names the fleet, the
+domains, the secret names and other account details.
 
 **Config-only push.** In an app repo, a push that changes only the `bay.toml` and the
 files its mounts read (not `fleet:` ones) builds nothing and deploys nothing: no image, no `:latest`

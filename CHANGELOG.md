@@ -8,6 +8,29 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.17.0] - 2026-11-10
+
+A project's `bay.toml` can move from its app repo back into the fleet. `bay adopt` gets a clearer name.
+
+### Added
+- `bay toml move <name> --to fleet`: moves a project's `bay.toml` from its app repo into the fleet, at `projects/<name>/bay.toml`. Use it when an app repo goes public: the file names the fleet, the domains, the secret names and other account details. Run it from anywhere with a fleet selected. It reads the app repo at the pinned commit (the checkout you stand in, else the fleet's repo cache).
+- It copies the `bay.toml` as pinned (not the branch head) and every file its mounts read from beside it. A `fleet:` mount, and a file the compile reads from the fleet's `files/` tree, stay where they are. It adds no `[build] repo`: the compile keeps taking the lock `repo`.
+- The lock takes the fleet form: `repo` stays, `toml_path` goes, `commit` and every env `commit` become the move commit, and every env records `adopted.from_app_commit` and loses `previous`. Every other adopted name (database, role, volumes, containers, images, files) stays. Two local fleet commits: `bay: move <name> bay.toml to the fleet` and `bay: pin <name> after the move`. Nothing is pushed; the next `bay up` pushes.
+- It refuses, before it changes anything, when the fleet is not in step or has uncommitted files (exit 41, as `bay up`), when the fleet's `bay.compat.json` names a newer Bay (exit 45), when an env is `pending`, `failed`, claimed or frozen, when the `bay.toml` or a mounted file differs between the pin and WANTED (run `bay up` first), when an env sets `track = "pin"`, and when two locks name the same `bay.toml` of one repo.
+- The next `bay plan` shows 0 steps, and the first `bay up` moves no code and recreates nothing: the running image stays. The compile drops only the hold-guard keys of the build (`bay_toml_hash`, `bay_build_hash`, `bay_toml_path`, `bay_toml_files`), which the container hash leaves out.
+- `bay rollback` straight after the move is refused with "the previous pin is an app repo commit; use `bay up --at <commit>`", the mirror of the refusal after an adopt.
+- `--check` prints the files and the lock diff and changes nothing. `--json` prints one document with `files`, `kept`, `delete`, `keep_in_repo`, `lock_diff`, `fleet_commit`, `lock_commit`, `notes` and `next`.
+
+### Changed
+- `bay adopt <name>` is now `bay toml move <name> --to repo`. Same code, same rules, same output. `bay adopt` still works: it prints one note line on stderr, and `bay --help` marks it deprecated.
+- `bay adopt` (`--to repo`) removes `adopted.from_app_commit` from the lock, so a round trip leaves no stale mark. The lock schema knows the new key.
+- Docs: `docs/plan.md` "bay toml move" covers both directions (the old `#bay-adopt` link still lands there), with the order for `--to fleet`: move, `bay up`, then delete the files in the app repo and push. `docs/bay-toml.md` gains a rule of thumb: a private app of one operator can keep its `bay.toml` in its repo; an app that is public, or that other people deploy, keeps it in the fleet.
+
+### Upgrade notes
+- None needed. `bay adopt` keeps working. No box change and no container restart.
+- After `bay toml move --to fleet`, delete the `bay.toml` from the app repo only after the `bay up`. Pushed before it, the box builds that push and holds it (one `build.held` alert, nothing recreated).
+- Every machine that deploys a moved project needs 2.17.0: an older CLI rejects `adopted.from_app_commit` in the lock as an unknown key.
+
 ## [2.16.1] - 2026-11-10
 
 Two fixes: nightly log rotation no longer leaves Traefik down after a Docker restart or a reboot, and the repair hint of a broken `bay.compat.json` is correct. Plus a note on the exit code.

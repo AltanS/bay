@@ -92,6 +92,15 @@ def has_path(repo: Path, commit: str, rel: str) -> bool:
     return proc is not None and proc.returncode == 0
 
 
+def object_id(repo: Path, commit: str, rel: str) -> str | None:
+    """The git object id of ``rel`` (a file or a directory) at ``commit``, or None.
+
+    Ids are content hashes, so two clones of one repo give the same id for the
+    same content.
+    """
+    return _out(repo, "rev-parse", "--verify", "--quiet", _object(repo, commit, rel)) or None
+
+
 def _object(repo: Path, commit: str, rel: str) -> str:
     """``<commit>:./<rel>`` in a work tree; a mirror has none, so ``<commit>:<rel>`` there."""
     if (repo / "HEAD").is_file() and (repo / "objects").is_dir() and is_bare(repo):

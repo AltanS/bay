@@ -2353,6 +2353,19 @@ def _rollback(
                 f"{str(adopted_from)[:12]}). Pin an app repo commit with bay up --at, or "
                 "roll the code back with bay rollback --to <commit>.",
             )
+        moved_from = (record.get("adopted") or {}).get("from_app_commit")
+        if (not previous or not previous.get("commit")) and moved_from and proj.in_fleet:
+            from bay_cli.tomlmove import ROLLBACK_AFTER_MOVE
+
+            # bay toml move --to fleet cleared previous: it was an app repo
+            # commit, and the pin is now a fleet commit.
+            raise BayError(
+                f"{proj.name} {env}: {ROLLBACK_AFTER_MOVE}",
+                code=ErrorCode.CONFLICT,
+                hint=f"bay toml move put the bay.toml in the fleet (the app ran "
+                f"{str(moved_from)[:12]}). Pin a fleet commit with bay up --at, or roll the "
+                "code back with bay rollback --to <commit>.",
+            )
         if not previous or not previous.get("commit"):
             raise BayError(
                 f"{proj.name} has no previous pin for {env}",

@@ -1,5 +1,7 @@
 """The daily verbs: ``bay init``, ``plan``, ``approve``, ``up``, ``rollback``, ``show``, ``adopt``.
 
+``bay adopt`` is an alias of ``bay toml move <name> --to repo`` (since 2.17.0).
+
 Which project and which fleet:
 
 * Inside an app repo, the ``bay.toml`` in the working directory or above it
@@ -420,6 +422,10 @@ def init(
     console.info("Next: check bay.toml, commit it, then run `bay plan`.")
 
 
+#: The note ``bay adopt`` prints on stderr: the verb is an alias now.
+ADOPT_NOTE = "note: bay adopt is now `bay toml move {name} --to repo`"
+
+
 def adopt(
     ctx: typer.Context,
     name: Annotated[str, typer.Argument(help="The project that lives in the fleet.")],
@@ -436,22 +442,25 @@ def adopt(
     ] = False,
     as_json: _JsonOpt = False,
 ) -> None:
-    """Move a project's bay.toml and its files from the fleet into this app repo.
+    """Deprecated: use `bay toml move <name> --to repo`. It works the same.
 
-    Run it inside a checkout of the app repo, with the fleet named by
-    --fleet, BAY_FLEET or BAY_FLEET_NAME. Copies projects/<name>/bay.toml and
-    every file of the folder here, commits them in this repo (local only),
-    rewrites the lock to repo form, and commits the fleet without the folder
-    contents (the lock stays). Container, volume, database and config names
-    stay, so the next bay plan shows 0 steps. Then run bay up here, and
-    git push after it: bay up takes the unpushed adopt commit.
+    Moves a project's bay.toml and its files from the fleet into this app
+    repo. Run it inside a checkout of the app repo, with the fleet named by
+    --fleet, BAY_FLEET or BAY_FLEET_NAME. Prints one note line on stderr.
 
     Examples:
 
         bay --fleet ~/fleets/prod adopt shop
-        bay --fleet ~/fleets/prod adopt api --toml-path services/api/bay.toml
-        bay --fleet ~/fleets/prod adopt shop --check
+        bay --fleet ~/fleets/prod toml move shop --to repo
     """
+    typer.echo(ADOPT_NOTE.format(name=name), err=True)
+    run_adopt(ctx, name, toml_path=toml_path, check=check, as_json=as_json)
+
+
+def run_adopt(
+    ctx: typer.Context, name: str, *, toml_path: str | None, check: bool, as_json: bool
+) -> None:
+    """``bay toml move <name> --to repo`` (and its alias ``bay adopt``): run and print."""
     from bay_cli import adopt as adoptmod
 
     try:
@@ -489,6 +498,55 @@ def adopt(
     console.info(
         f"Then: `{push}`. The box sees a config-only push and builds nothing. "
         "Pushed before bay up, the box would rebuild and recreate the app."
+    )
+
+
+def run_move_to_fleet(ctx: typer.Context, name: str, *, check: bool, as_json: bool) -> None:
+    """``bay toml move <name> --to fleet``: run and print."""
+    from bay_cli import fleetsync, tomlmove
+
+    try:
+        here = find_bay_toml(Path.cwd())
+        _, fleet_name = _read_identity(here) if here else (None, None)
+        cx = fleet_context(ctx, fleet_name, allow_cwd=True)
+        result = tomlmove.move_to_fleet(cx, Path.cwd(), name, check=check)
+    except BayError as exc:
+        if not as_json:
+            if isinstance(exc, fleetsync.SyncError):
+                # The exit code of bay up for the same refusal (41, 43, 45).
+                console.error(str(exc))
+                if exc.hint:
+                    console.info(f"Hint: {exc.hint}")
+                raise typer.Exit(exc.exit_code) from None
+            raise
+        extra = {"reason": exc.reason} if isinstance(exc, fleetsync.SyncError) else None
+        _json_error(exc, extra)
+    if as_json:
+        _echo_json(result)
+        return
+    verb = "would copy" if check else "copied"
+    for item in result["files"]:
+        console.info(f"{verb} {item['from']} (app repo) -> {item['to']}")
+    for path in result["kept"]:
+        console.info(f"kept {path} in the fleet: the compile reads it there")
+    for note in result["notes"]:
+        console.info(f"note: {note}")
+    typer.echo("\n".join(result["lock_diff"]))
+    if check:
+        console.info("check only: nothing changed")
+        return
+    console.success(
+        f"fleet commits {result['fleet_commit'][:12]} (the move) and "
+        f"{result['lock_commit'][:12]} (the lock): {name} lives in the fleet (local: "
+        "bay up pushes them)"
+    )
+    plan_cmd, up_cmd, rm_cmd, commit_cmd, push = result["next"]
+    console.info(
+        f"Next: run `{plan_cmd}` (it must show 0 steps), then `{up_cmd}` (it moves no code)."
+    )
+    console.info(
+        f"Then, in the app repo: `{rm_cmd}`, `{commit_cmd}`, `{push}`. That push is a normal "
+        "code push. Pushed before bay up, the box builds it and holds it."
     )
 
 

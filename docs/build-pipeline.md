@@ -301,9 +301,17 @@ never config only. The webhook's
 so a push that it filters out never reaches `rebuild.sh`. A push that changes
 `bay.toml` or a mounted file always passes that filter. "Edit `bay.toml`,
 push, `bay up`" is the clean flow: the push does nothing on the box, and
-`bay up` deploys the config. The adopt commit of `bay adopt` is such a push,
-once `bay up` has written the new script: run `bay up` before `git push`
-(docs/plan.md, "bay adopt").
+`bay up` deploys the config. The adopt commit of `bay toml move --to repo`
+(`bay adopt`) is such a push, once `bay up` has written the new script: run
+`bay up` before `git push` (docs/plan.md, "bay toml move").
+
+The other direction, `bay toml move --to fleet`, ends the config hold. The
+first `bay up` after it writes a `rebuild.sh` with no `bay.toml` path, and
+from then on every push is code. Delete the `bay.toml` from the app repo
+only after that `bay up`: the delete push is then one build and one
+recreate. Pushed before it, the old script holds the build (`config changed:
+bay.toml is gone at this commit`), sends `build.held`, and recreates
+nothing.
 
 ### No-input-change push
 
