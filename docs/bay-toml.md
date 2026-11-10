@@ -559,7 +559,8 @@ Where `from` is read:
 moves the `bay.toml` and the files its mounts read together, so every `from` keeps its meaning
 beside the toml, and a `fleet:` mount stays in the fleet. The lock keeps the adopted names in
 both directions. The next plan shows 0 steps for the project's containers, database and
-volumes, and one step for the webhook receiver `bay-webhook` (recreate, safe). See
+volumes, and one `bay-webhook` recreate step (safe) for each box of the box environment that
+runs a webhook receiver. See
 [plan.md, bay toml move](plan.md#bay-toml-move).
 
 - `--to repo` (until 2.17.0 `bay adopt <name>`, which still works): run it in a checkout of the

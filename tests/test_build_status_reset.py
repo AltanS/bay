@@ -339,3 +339,155 @@ class TestFetchBuildStates:
             states = _fetch_build_states("production", "myapp", bay_dir, None)
         assert len(states) == 1
         assert states[0]["service"] == "svc"
+
+
+# ---------------------------------------------------------------------------
+# bay build reset: the file that lands on the box must be valid JSON
+# ---------------------------------------------------------------------------
+
+import os
+import shutil
+import subprocess as _sp
+from types import SimpleNamespace
+
+CLEAN_STATE = {
+    "version": 1,
+    "consecutive_failures": 0,
+    "opened_at": None,
+    "last_failure": None,
+    "alerts": {"opened_sent": False, "last_blocked_alert_at": None},
+}
+
+needs_python3 = pytest.mark.skipif(
+    shutil.which("python3") is None, reason="the remote command calls python3"
+)
+
+
+def _run_reset(monkeypatch, *, keep_history=False, existing=None):
+    """Run `bay build reset svc` with a fake remote. Return the captured commands."""
+    from bay_cli.commands import build, ops
+
+    sent: list[str] = []
+
+    def fake_run(env, cmd, **kwargs):
+        sent.append(cmd)
+        return MagicMock(stdout="", returncode=0)
+
+    cx = SimpleNamespace(framework_root=Path("/unused"), fleet_root=Path("/unused"))
+    monkeypatch.setattr(build, "context_from", lambda ctx: cx)
+    monkeypatch.setattr(build, "_is_multi_region", lambda cx: False)
+    monkeypatch.setattr(build, "_read_telegram_creds", lambda cx, env: ("", ""))
+    monkeypatch.setattr(build, "_fetch_single_state", lambda *a, **k: existing)
+    monkeypatch.setattr(ops, "_validate_env", lambda env, root: None)
+    monkeypatch.setattr(ops, "_read_stack_name", lambda root: "stk")
+    monkeypatch.setattr(ops, "_resolve_target_host", lambda *a, **k: None)
+    monkeypatch.setattr(ops, "_validate_service_name", lambda name, root: None)
+    monkeypatch.setattr(ops, "_run_on_host", fake_run)
+    build.reset(
+        MagicMock(),
+        service="svc",
+        env="production",
+        region=None,
+        all_services=False,
+        force=True,
+        keep_history=keep_history,
+    )
+    return sent
+
+
+@needs_python3
+class TestResetWritesValidJson:
+    def _land(self, cmd: str, tmp_path: Path) -> Path:
+        """Run the captured command in a real local shell against a temp dir."""
+        state_dir = tmp_path / "opt" / "stk" / "state"
+        state_dir.mkdir(parents=True)
+        local = cmd.replace("/opt/stk/state", str(state_dir))
+        assert str(state_dir) in local
+        proc = _sp.run(["sh", "-c", local], capture_output=True, text=True)
+        assert proc.returncode == 0, proc.stderr
+        return state_dir / "svc.json"
+
+    def test_reset_command_lands_valid_json(self, monkeypatch, tmp_path):
+        (cmd,) = _run_reset(monkeypatch)
+        # Only the two quotes that wrap the Python code: nothing for the shell to eat.
+        assert cmd.count('"') == 2
+        target = self._land(cmd, tmp_path)
+        assert json.loads(target.read_text()) == CLEAN_STATE
+
+    def test_reset_file_has_the_directory_owner_and_mode_0664(self, monkeypatch, tmp_path):
+        (cmd,) = _run_reset(monkeypatch)
+        target = self._land(cmd, tmp_path)
+        dir_stat = target.parent.stat()
+        st = target.stat()
+        assert (st.st_uid, st.st_gid) == (dir_stat.st_uid, dir_stat.st_gid)
+        assert st.st_mode & 0o777 == 0o664
+        assert [p.name for p in target.parent.iterdir()] == ["svc.json"]  # no temp file left
+
+    def test_keep_history_survives_shell_hostile_text(self, monkeypatch, tmp_path):
+        last = {
+            "sha": "abc123",
+            "stage": "Build",
+            "reason": 'it said "no" and \'maybe\' $HOME `id` \\n ; rm -rf / # 100%\nline 2',
+            "at": "2026-11-10T08:00:00Z",
+        }
+        existing = {**CLEAN_STATE, "consecutive_failures": 5, "last_failure": last}
+        (cmd,) = _run_reset(monkeypatch, keep_history=True, existing=existing)
+        target = self._land(cmd, tmp_path)
+        assert json.loads(target.read_text()) == {**CLEAN_STATE, "last_failure": last}
+
+    def test_missing_state_dir_fails_and_creates_nothing(self, monkeypatch, tmp_path):
+        (cmd,) = _run_reset(monkeypatch)
+        missing = tmp_path / "nope" / "state"
+        proc = _sp.run(
+            ["sh", "-c", cmd.replace("/opt/stk/state", str(missing))],
+            capture_output=True, text=True,
+        )
+        assert proc.returncode != 0
+        assert not missing.exists()
+
+
+# ---------------------------------------------------------------------------
+# bay build status: a state file that is not valid JSON is named, not hidden
+# ---------------------------------------------------------------------------
+
+
+class TestStatusInvalidStateFile:
+    BROKEN = "{version: 1, consecutive_failures: 0, opened_at: null}"
+
+    def _remote(self, files: dict[str, str]) -> MagicMock:
+        return MagicMock(stdout=json.dumps(files), returncode=0)
+
+    def test_fetch_marks_invalid_file_and_keeps_the_others(self, tmp_path):
+        good = json.dumps(CLEAN_STATE)
+        with patch(
+            "bay_cli.commands.ops._run_on_host",
+            return_value=self._remote({"bad": self.BROKEN, "ok": good}),
+        ):
+            states = _fetch_build_states("production", "stk", tmp_path, None)
+        by_name = {s["service"]: s for s in states}
+        assert by_name["bad"].get("invalid") is True
+        assert by_name["ok"]["cb_state"] == "closed"
+
+    def test_status_prints_the_invalid_file_line(self, monkeypatch, tmp_path, capsys):
+        from bay_cli.commands import build, ops
+
+        cx = SimpleNamespace(framework_root=tmp_path, fleet_root=tmp_path)
+        monkeypatch.setattr(build, "context_from", lambda ctx: cx)
+        monkeypatch.setattr(build, "_is_multi_region", lambda cx: False)
+        monkeypatch.setattr(ops, "_validate_env", lambda env, root: None)
+        monkeypatch.setattr(ops, "_read_stack_name", lambda root: "stk")
+        monkeypatch.setattr(ops, "_resolve_target_host", lambda *a, **k: None)
+        monkeypatch.setattr(
+            ops, "_run_on_host", lambda *a, **k: self._remote({"svc": self.BROKEN})
+        )
+        shown: list[tuple[str, str]] = []
+        monkeypatch.setattr(build.console, "warning", lambda m: shown.append(("warning", m)))
+        monkeypatch.setattr(build.console, "info", lambda m: shown.append(("info", m)))
+
+        build.status(MagicMock(), env="production", region=None, service=None, verbose=False)
+
+        assert shown == [(
+            "warning",
+            "the state file of svc is not valid JSON; run "
+            "`bay build reset svc --env production` or wait for the next build to rewrite it",
+        )]

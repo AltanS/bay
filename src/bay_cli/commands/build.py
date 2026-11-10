@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
@@ -233,7 +234,8 @@ def _fetch_build_states(
     """Fetch CB state JSON files from the target host(s).
 
     Returns a list of dicts, one per service state file found.
-    Each dict has keys:
+    A file that is not valid JSON gives {"service", "invalid": True, "region"}.
+    Every other dict has keys:
         service, cb_state, consecutive_failures, opened_at,
         last_sha, last_stage, last_reason, last_at,
         last_blocked_alert_at, region (may be None), raw
@@ -241,13 +243,15 @@ def _fetch_build_states(
     from bay_cli.commands.ops import _run_on_host
 
     state_dir = f"/opt/{stack_name}/state"
+    # The box sends each file as TEXT. The CLI parses it, so one file that is
+    # not valid JSON is named instead of failing the whole listing.
     cmd = (
         f"python3 -c \""
-        f"import os, json, sys; "
+        f"import os, json; "
         f"d='{state_dir}'; "
         f"files=[f for f in (os.listdir(d) if os.path.isdir(d) else []) if f.endswith('.json')]; "
         f"out={{}}; "
-        f"[out.update({{f[:-5]: json.loads(open(os.path.join(d,f)).read())}}) for f in files]; "
+        f"[out.update({{f[:-5]: open(os.path.join(d,f)).read()}}) for f in files]; "
         f"print(json.dumps(out))\""
     )
 
@@ -281,6 +285,14 @@ def _fetch_build_states(
 
     states: list[dict] = []
     for svc, state in sorted(data.items()):
+        if isinstance(state, str):
+            try:
+                state = json.loads(state)
+            except (json.JSONDecodeError, ValueError):
+                state = None
+            if not isinstance(state, dict):
+                states.append({"service": svc, "invalid": True, "region": None})
+                continue
         if not isinstance(state, dict):
             continue
         failures = state.get("consecutive_failures", state.get("failures", 0))
@@ -412,14 +424,29 @@ def status(
         limit = _resolve_target_host(bay_dir, region)
         all_states = _fetch_build_states(env, stack_name, bay_dir, limit)
 
+    invalid = [s for s in all_states if s.get("invalid")]
+    all_states = [s for s in all_states if not s.get("invalid")]
+    for s in invalid:
+        if service and s["service"] != service:
+            continue
+        where = f" on region {s['region']}" if s.get("region") else ""
+        console.warning(
+            f"the state file of {s['service']}{where} is not valid JSON; "
+            f"run `bay build reset {s['service']} --env {env}` "
+            "or wait for the next build to rewrite it"
+        )
+
     if not all_states:
-        console.info("No build state found")
+        if not invalid:
+            console.info("No build state found")
         return
 
     # --service: dump full state block
     if service:
         matches = [s for s in all_states if s["service"] == service]
         if not matches:
+            if any(s["service"] == service for s in invalid):
+                return
             console.warning(f"No state found for service '{service}'")
             return
         for s in matches:
@@ -428,6 +455,44 @@ def status(
 
     table = _render_status_table(all_states, multi_region=multi, verbose=verbose)
     console.console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Reset: the command that writes the state file on the box
+# ---------------------------------------------------------------------------
+
+def _reset_write_command(state_dir: str, svc: str, state: dict) -> str:
+    """Build the shell command that writes <state_dir>/<svc>.json on the box.
+
+    The command runs through a remote shell (ansible ad-hoc `shell`). The JSON
+    travels as base64 (letters, digits, + / =), so no shell can eat a quote
+    inside it. The command holds no double quote except the two that wrap the
+    Python code.
+
+    File owner, group and mode follow rebuild.sh (`_write_state`): the file
+    belongs to the owner and group of the state directory (the app user and
+    the build group, set by the git_deploy role) and has mode 0664. The ad-hoc
+    run is root, so a plain write would leave a root-owned file that the build
+    group cannot write. rebuild.sh could still replace it (it needs write on
+    the directory, not on the file), but the re-group task of the next deploy
+    would change it. The write is atomic: temp file, then rename. The command
+    does not create the directory: a missing directory means the box has no
+    build setup, and a root-owned directory would lock rebuild.sh out.
+    """
+    payload = base64.b64encode(json.dumps(state).encode()).decode()
+    return (
+        "python3 -c \""
+        "import base64, os, tempfile; "
+        f"d = '{state_dir}'; "
+        "st = os.stat(d); "
+        f"dst = os.path.join(d, '{svc}.json'); "
+        "fd, tmp = tempfile.mkstemp(dir=d); "
+        f"os.write(fd, base64.b64decode('{payload}')); "
+        "os.close(fd); "
+        "os.chown(tmp, st.st_uid, st.st_gid); "
+        "os.chmod(tmp, 0o664); "
+        "os.rename(tmp, dst)\""
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -532,37 +597,19 @@ def reset(
         console.console.print()
         typer.confirm(f"Reset CB for {svc_label} on {host_display}?", abort=True)
 
-    # Clean schema-v1 state template
+    # Clean schema-v1 state: the same document as _clean_state_json in
+    # rebuild.sh.j2 (last_failure is null, not a block of empty strings).
     clean_state = {
         "version": 1,
         "consecutive_failures": 0,
         "opened_at": None,
-        "last_failure": {
-            "sha": "",
-            "stage": "",
-            "reason": "",
-            "at": "",
-        },
+        "last_failure": None,
         "alerts": {
             "opened_sent": False,
             "last_blocked_alert_at": None,
         },
     }
-    clean_json = json.dumps(clean_state)
-
-    # Atomic write via os.rename (mirrors rebuild.sh _write_state pattern)
-    write_cmd_template = (
-        "python3 -c \""
-        "import json, os, tempfile; "
-        "d = '/opt/{stack}/state'; "
-        "os.makedirs(d, exist_ok=True); "
-        "dst = os.path.join(d, '{svc}.json'); "
-        "fd, tmp = tempfile.mkstemp(dir=d); "
-        "os.write(fd, {json_repr}); "
-        "os.close(fd); "
-        "os.chmod(tmp, 0o644); "
-        "os.rename(tmp, dst)\""
-    )
+    state_dir = f"/opt/{stack_name}/state"
 
     # Read Telegram credentials once (non-fatal if unavailable)
     token, chat_id = _read_telegram_creds(cx, env)
@@ -574,12 +621,7 @@ def reset(
                 existing = _fetch_single_state(env, stack_name, svc, bay_dir, rhost)
                 if existing and existing.get("last_failure"):
                     svc_state = {**clean_state, "last_failure": existing["last_failure"]}
-            svc_json = json.dumps(svc_state)
-            cmd = write_cmd_template.format(
-                stack=stack_name,
-                svc=svc,
-                json_repr=repr(svc_json.encode()),
-            )
+            cmd = _reset_write_command(state_dir, svc, svc_state)
             try:
                 _run_on_host(
                     env,

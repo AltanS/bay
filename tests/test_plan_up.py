@@ -4016,8 +4016,9 @@ def test_adopt_prints_plan_hint(world: dict[str, Path], tmp_path: Path, box: Fak
     # rich wraps the hint across lines at narrow widths; collapse whitespace.
     said = " ".join(_said(result).split())
     assert (
-        "run bay plan production: expect one step, bay-webhook recreate "
-        "(the webhook receiver reloads its config). Any other step: stop."
+        "run bay plan production: expect only bay-webhook recreate steps, "
+        "one per box with a webhook receiver (the receiver reloads its config). "
+        "Any other step: stop."
     ) in said
     assert "push it after bay up" in said and "Then: `git push`" in said
     assert said.index("`bay up production`") < said.index("`git push`")
@@ -4025,8 +4026,9 @@ def test_adopt_prints_plan_hint(world: dict[str, Path], tmp_path: Path, box: Fak
     doc = json.loads(cli(world, "adopt", "board", "--json", cwd=second).stdout)
     assert doc["next"] == ["bay plan production", "bay up production", "git push"]
     assert doc["notes"] == [
-        "bay plan production: expect one step, bay-webhook recreate "
-        "(the webhook receiver reloads its config). Any other step: stop."
+        "bay plan production: expect only bay-webhook recreate steps, "
+        "one per box with a webhook receiver (the receiver reloads its config). "
+        "Any other step: stop."
     ]
 
 

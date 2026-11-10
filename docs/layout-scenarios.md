@@ -784,15 +784,16 @@ domains, the secret names and the fleet name leave the public repo:
 ```
 bay --fleet ~/.config/bay/fleets/acme toml move shop --to fleet --check
 bay --fleet ~/.config/bay/fleets/acme toml move shop --to fleet
-bay --fleet ~/.config/bay/fleets/acme plan production --project shop   # only bay-webhook: recreate
+bay --fleet ~/.config/bay/fleets/acme plan production --project shop   # only bay-webhook: recreate, one per box with a receiver
 bay --fleet ~/.config/bay/fleets/acme up production --project shop     # moves no code
 cd ~/code/shop && git rm -r bay.toml site.conf && git commit -m "chore: bay.toml lives in the fleet" && git push
 ```
 
 The move copies the `bay.toml` as pinned, so it refuses while the app repo holds an undeployed
 config change. Delete the files in the app repo only after the `bay up`: then the delete push is a
-normal code push. A move in either direction shows one plan step, the recreate of the webhook
-receiver `bay-webhook`: its config file holds the `bay.toml` path. Any other step: stop. See
+normal code push. A move in either direction shows one `bay-webhook` recreate step for each box with a webhook
+receiver: its config file holds the `bay.toml` path, and `bay up` deploys the whole box
+environment. Any other step: stop. See
 [plan.md, bay toml move](plan.md#bay-toml-move).
 
 ## 8. App needs app

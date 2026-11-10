@@ -454,9 +454,9 @@ def test_move_check_changes_nothing(
     said = _said(_move(world, "--check", cwd=_elsewhere(tmp_path)))
     assert "would copy site.conf (app repo) -> projects/shop/site.conf" in said
     assert "nothing changed" in said
-    assert "expect one step, bay-webhook recreate" in " ".join(said.split())
+    assert "expect only bay-webhook recreate steps, one per box" in " ".join(said.split())
     assert any(
-        n.startswith("bay plan production --project shop: expect one step, bay-webhook")
+        n.startswith("bay plan production --project shop: expect only bay-webhook")
         for n in doc["notes"]
     )
     assert git(fleet, "rev-parse", "HEAD") == head
@@ -469,8 +469,9 @@ def test_move_text_output_names_the_order(
     assert result.exit_code == 0, _said(result)
     said = " ".join(_said(result).split())
     assert (
-        "bay plan production --project shop: expect one step, bay-webhook recreate "
-        "(the webhook receiver reloads its config). Any other step: stop."
+        "bay plan production --project shop: expect only bay-webhook recreate steps, "
+        "one per box with a webhook receiver (the receiver reloads its config). "
+        "Any other step: stop."
     ) in said
     assert said.index("`bay up production --project shop`") < said.index("`git rm -r bay.toml")
     assert "Pushed before bay up, the box builds it and holds it" in said
@@ -872,7 +873,7 @@ def test_adopt_alias_prints_the_note_and_toml_move_repo_works(
     def norm(text: str, name: str) -> str:
         import re
 
-        text = text.replace("expect one step", "expect ONE step")  # not the project name
+        text = text.replace("one per box", "ONE per box")  # not the project name
         return re.sub(r"[0-9a-f]{12,40}", "<sha>", text.replace(name, "X"))
 
     assert norm(old.stdout, "one") == norm(new.stdout, "two")

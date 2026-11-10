@@ -100,8 +100,8 @@ def move(
     the app repo and push.
 
     Either way container, volume, database and config names stay, so the next
-    bay plan shows no step for the project, and one step for the webhook receiver
-    (bay-webhook: recreate, safe).
+    bay plan shows no step for the project, and one bay-webhook recreate step (safe)
+    for each box with a webhook receiver.
 
     Examples:
 

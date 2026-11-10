@@ -27,9 +27,10 @@ recreate. Pushed first, the old script (no ``BAY_TOML_PATH``) would build and
 recreate the app. The compiled output is the same before and after apart from
 those keys: the box paths are ``config/<target>`` either way
 (:mod:`bay_cli.compiler`). So the next ``bay plan`` shows no step for the project's
-containers, database or volumes. It shows one step for the webhook receiver
-(``bay-webhook``, recreate, safe): its config file holds ``bay_toml_path``, and the
-hash of that file is a label of its container.
+containers, database or volumes. It shows one ``bay-webhook`` recreate step (safe)
+for each box of the box environment that runs a webhook receiver: the config file
+of each receiver holds ``bay_toml_path``, and the hash of that file is a label of
+its container.
 
 Bay refuses before it changes anything when a precondition fails, so a
 refusal never leaves half an adopt behind. ``check`` reports the files and
@@ -62,10 +63,10 @@ ROLLBACK_AFTER_ADOPT = (
 )
 #: What the plan shows after a move in either direction. The webhook receiver
 #: holds ``bay_toml_path`` per build service in its config file, and the hash of
-#: that file is a label of its container, so the receiver is recreated once.
+#: that file is a label of its container, so each receiver is recreated once.
 WEBHOOK_STEP = (
-    "expect one step, bay-webhook recreate (the webhook receiver reloads its config). "
-    "Any other step: stop."
+    "expect only bay-webhook recreate steps, one per box with a webhook receiver "
+    "(the receiver reloads its config). Any other step: stop."
 )
 
 

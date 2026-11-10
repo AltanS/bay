@@ -644,7 +644,11 @@ def test_plan_note_redacts_a_token_and_names_the_token_key() -> None:
     assert len(notes) == 1
     assert EMBEDDED not in notes[0]
     assert "from https://x-access-token:***@github.com/example-org/shop.git to" in notes[0]
-    assert "The build server builds from the new repo from the next push." in notes[0]
+    assert (
+        "The build server builds from the new repo from the next push or trigger file; "
+        "the deployment box recreates the container when it gets the pull signal. "
+        "Give the token SHOP_GIT_TOKEN"
+    ) in notes[0]
     assert "Give the token SHOP_GIT_TOKEN read access to the new repo" in notes[0]
 
 

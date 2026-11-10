@@ -453,7 +453,9 @@ of that URL reaches the box with the next `bay up`: it renders `rebuild.sh` with
 `bay plan` and `bay up` keep the `changed: build` step and add a note:
 `<container>: the build repo changes from <old> to <new>. The box builds from the new repo from
 the next push. Add the box's deploy key to the new repo and create its push webhook first.`
-With a token, the note names the token's vault key. A token in a URL shows as `***`. The change
+For a remote build the second sentence reads: "The build server builds from the new repo from
+the next push or trigger file; the deployment box recreates the container when it gets the pull
+signal." With a token, the note names the token's vault key. A token in a URL shows as `***`. The change
 recreates no container: the container hash leaves the `build` table out, and the receiver
 config holds no repo URL.
 
@@ -477,6 +479,40 @@ config holds no repo URL.
   so the next run builds in full too. A local build then moves the checkout with a fetch and a
   reset, because `git pull` refuses an unrelated history.
 - **The same repo in another form** is no change. `rebuild.sh` only sets the text of `origin`.
+
+**Remote strategy: who builds and who recreates.** The build server builds from the new repo at
+the next push or trigger file. It pushes the image to the registry. It never recreates the app
+container. After a build that is not held, it sends a pull signal to each deployment box. That
+box pulls the image and recreates the container. A held build (`track = "pin"` or a frozen env)
+pushes the commit tag only and sends no signal: the next `bay up` deploys it. A push through the
+webhook and a trigger file take the same path in `rebuild.sh`, so both end with the pull signal.
+A build server that has no peer webhook URL for a deployment box builds the image but sends it
+no signal.
+
+**How to check the switch worked without waiting for a recreate.** Read the build journal line
+`repo of <container> changed from <old> to <new>, checkout repointed`
+(`journalctl -u bay-build@<container>.service`). Then run `git -C <checkout> remote get-url origin`
+on the box that holds the checkout (the build server for a remote build). It must print the new
+URL.
+
+**Two things you may see on the first build after the switch.**
+
+- A repointed checkout can skip the image build. When the registry already holds an image with
+  the commit tag of the new head, the log says `already in registry, skipping build` (a local
+  build says `already exists, skipping build`). This is the normal image-exists shortcut, not
+  a "no changes" skip. A remote build still points the moving tag at that image, unless the build is held.
+- The same URL with a replaced history (a forced push with an unrelated root commit) needs no
+  step on a remote build. The URL is unchanged, so `origin` stays. The next build runs
+  `git fetch`, then `git reset --hard FETCH_HEAD`, and moves to the new head whatever its
+  history. **A local build has a known limit here.** With the same URL it still runs
+  `git pull`, which stops on a history that does not merge (`fatal: Need to specify how to
+  reconcile divergent branches`, or `refusing to merge unrelated histories`). The build fails
+  with the generic "Webhook deploy" failure and no reason, and the circuit breaker counts it.
+  The manual step: on the box, as the app user, mark the checkout for a full build, and push
+  again or write a trigger file. For each container that builds from the checkout
+  `/opt/<stack>/builds/shared/<slug>/repo`, run
+  `mkdir -p <checkout>/.git/bay-full-build && touch <checkout>/.git/bay-full-build/<container>`.
+  The next run then fetches and resets, as it does after a repo change.
 
 **Normal form.** `host/owner/repo` in lower case, without the user, the password, the port, a
 trailing `.git` or `/`. So `git@github.com:acme/shop.git`, `ssh://git@github.com/acme/shop`

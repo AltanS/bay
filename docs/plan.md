@@ -1245,12 +1245,14 @@ holds until a `bay up` to a newer fleet commit records a `previous` again.
 
 `bay toml move <name> --to repo|fleet` moves a project's `bay.toml`, and the files its mounts
 read, between the fleet and the app repo. Both directions keep every name that runs. So the next
-`bay plan` shows 0 steps for the project's containers, database and volumes. It shows one step
-for the webhook receiver `bay-webhook` (recreate, safe).
+`bay plan` shows 0 steps for the project's containers, database and volumes. It shows one
+`bay-webhook` recreate step (safe) for each box of the box environment that runs a webhook
+receiver. A box environment with four such boxes shows four steps.
 
-Why that one step: the receiver's config file holds `bay_toml_path` for each build service, and
-the hash of that file is a label of the receiver container. The move changes the file, so Bay
-recreates the receiver once. The receiver is down for about one second. A GitHub push that
+Why these steps: the receiver's config file holds `bay_toml_path` for each build service, and
+the hash of that file is a label of the receiver container. `bay up` deploys the whole box
+environment, and each receiver holds the config. The move changes the file, so Bay recreates
+each receiver once. A receiver is down for about one second. A GitHub push that
 arrives in that moment can be missed: redeliver it from the GitHub webhook page, or push
 again. On a box, the "Restart bay-webhook" handler also restarts the receiver once before the
 recreate, so `bay up` restarts it twice, each time for a short while. No app container,
@@ -1286,7 +1288,7 @@ the box builds the app and recreates its containers. `bay up` first gives the bo
 cd ~/code/shop
 bay --fleet ~/fleets/prod toml move shop --to repo --check   # the files and the lock change; changes nothing
 bay --fleet ~/fleets/prod toml move shop --to repo
-bay plan production                            # only bay-webhook: recreate
+bay plan production                            # only bay-webhook: recreate, one per box with a receiver
 bay up production                              # takes the unpushed adopt commit
 git push                                       # config only: no build, no recreate, one image tag
 ```
@@ -1373,8 +1375,8 @@ What it does:
 4. **Fleet commit.** `git rm` of the folder contents (the lock stays) and the
    moved `files/` copies, plus the new lock, in one commit:
    `bay: adopt <name> into <repo>`. Bay never pushes.
-5. **Next steps.** Bay prints them: `bay plan <env>` (expect one step, `bay-webhook`
-   recreate; any other step: stop), then `bay up <env>`, then `git push`.
+5. **Next steps.** Bay prints them: `bay plan <env>` (expect only `bay-webhook`
+   recreate steps, one per box with a webhook receiver; any other step: stop), then `bay up <env>`, then `git push`.
 
 The compiled output does not change. On the box a mounted file stays at
 `config/<name>/<from>` (or `config/<adopted path>`), wherever the file lives.
@@ -1383,7 +1385,7 @@ A project that builds from source gains `build.bay_toml_hash`,
 hold guard and the config-only rule, see [Code and config](#code-and-config)). The container hash
 leaves the `build` table out, so the plan shows no step for the app container: the first
 `bay up` after the adopt writes them to the box. The receiver config file does hold
-`bay_toml_path`, so the receiver is recreated once (see the top of this section).
+`bay_toml_path`, so each receiver is recreated once (see the top of this section).
 
 `--toml-path services/shop/bay.toml` is for a repo with several apps: the
 files then land in `services/shop/`. `--check` prints the file list and the
@@ -1402,7 +1404,7 @@ from the fleet's repo cache, as `bay plan` does.
 ```bash
 bay --fleet ~/fleets/prod toml move shop --to fleet --check   # the files and the lock change; changes nothing
 bay --fleet ~/fleets/prod toml move shop --to fleet
-bay --fleet ~/fleets/prod plan production --project shop      # only bay-webhook: recreate
+bay --fleet ~/fleets/prod plan production --project shop      # only bay-webhook: recreate, one per box with a receiver
 bay --fleet ~/fleets/prod up production --project shop        # moves no code; pushes the fleet
 cd ~/code/shop && git rm -r bay.toml site.conf && git commit -m "chore: bay.toml lives in the fleet" && git push
 ```
@@ -1445,8 +1447,8 @@ What it does:
 3. **Two fleet commits.** `bay: move <name> bay.toml to the fleet` holds the copied files. Then
    `bay: pin <name> after the move` holds the lock, which names the first commit. Bay never
    pushes: the next `bay up` pushes the fleet with its claim.
-4. **Next steps.** Bay prints them: `bay plan <env> --project <name>` (expect one step,
-   `bay-webhook` recreate; any other step: stop), then `bay up <env> --project <name>`, then `git rm -r <files>`, a commit and `git push` in
+4. **Next steps.** Bay prints them: `bay plan <env> --project <name>` (expect only
+   `bay-webhook` recreate steps, one per box with a webhook receiver; any other step: stop), then `bay up <env> --project <name>`, then `git rm -r <files>`, a commit and `git push` in
    the app repo.
 
 The compiled output is the same, apart from four keys of the build of a project that builds from
@@ -1481,7 +1483,7 @@ with `files`, `kept`, `delete`, `keep_in_repo`, `lock_diff`, `fleet_commit`, `lo
 `notes` and `next`. `--toml-path` is only for `--to repo`.
 
 Round trip: `--to fleet` and then `--to repo` gives the app repo the same `bay.toml` bytes, and
-the plan shows the same single `bay-webhook` step again.
+the plan shows the same `bay-webhook` steps again.
 
 ### bay remove
 

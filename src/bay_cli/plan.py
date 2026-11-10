@@ -1092,7 +1092,16 @@ def repo_change_notes(
         strategy = str(new_build.get("strategy") or "")
         if strategy == "registry":
             continue
-        where = "The build server" if strategy in ("remote", "push") else "The box"
+        # A remote build runs on the build server (a push or a trigger file) and
+        # sends its image to the deployment boxes with a pull signal; only the
+        # deployment box recreates the container. A local build does all on the box.
+        if strategy in ("remote", "push"):
+            where = (
+                "The build server builds from the new repo from the next push or trigger "
+                "file; the deployment box recreates the container when it gets the pull signal."
+            )
+        else:
+            where = "The box builds from the new repo from the next push."
         token = _TOKEN_KEY_RE.search(str(new_build.get("token") or ""))
         if token:
             access = f"Give the token {token.group(1)} read access to the new repo"
@@ -1102,7 +1111,7 @@ def repo_change_notes(
             access = "Add the box's deploy key to the new repo"
         out.append(
             f"{name}: the build repo changes from {redact_url(old_repo)} to "
-            f"{redact_url(new_repo)}. {where} builds from the new repo from the next push. "
+            f"{redact_url(new_repo)}. {where} "
             f"{access} and create its push webhook first."
         )
     return out

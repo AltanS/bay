@@ -29,9 +29,9 @@ the fleet sends no code target, so the running image stays. It writes the box
 a ``rebuild.sh`` without the hold-guard keys (``bay_toml_path``,
 ``bay_toml_hash``, ``bay_build_hash``, ``bay_toml_files``): those are the only
 compiled difference. ``bay plan`` ignores them for the project's containers, so it shows
-no step for them. It shows one step for the webhook receiver (``bay-webhook``, recreate,
-safe): its config file holds ``bay_toml_path``, and the hash of that file is a label of
-its container.
+no step for them. It shows one ``bay-webhook`` recreate step (safe) for each box of the
+box environment that runs a webhook receiver: the config file of each receiver holds
+``bay_toml_path``, and the hash of that file is a label of its container.
 After that ``bay up``, the push that deletes bay.toml from the app repo is a
 normal code push.
 
