@@ -132,8 +132,11 @@ def _invalid(installed: str | None, problem: str) -> Check:
         installed,
         message=(
             f"{COMPAT_FILE}: {problem}. Bay cannot tell which Bay last deployed this fleet, "
-            f"so it stops. Restore the file from git (git checkout HEAD -- {COMPAT_FILE} in "
-            "the fleet, or take it from an older commit), then run the command again."
+            f"so it stops. In the fleet, find the last good version with "
+            f"`git log -- {COMPAT_FILE}`, restore it with "
+            f"`git checkout <commit> -- {COMPAT_FILE}`, commit and push, then run "
+            "the command again. If the file was never good, delete it and commit the deletion: "
+            "the next bay up, bay rollback or remove writes it again."
         ),
     )
 

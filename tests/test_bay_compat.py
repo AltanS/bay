@@ -141,7 +141,11 @@ def test_a_file_bay_cannot_read_blocks(tmp_path: Path, text: str, said: str) -> 
     assert result.state == compat.INVALID and result.reason == "compat_invalid"
     assert said in str(result.message)
     assert str(result.message).startswith(f"{FILE}: ")
-    assert f"git checkout HEAD -- {FILE}" in str(result.message)
+    # HEAD can hold the broken file (it arrived by a pull): point at an older commit.
+    assert f"git log -- {FILE}" in str(result.message)
+    assert f"git checkout <commit> -- {FILE}" in str(result.message)
+    assert f"git checkout HEAD -- {FILE}" not in str(result.message)
+    assert "delete it and commit the deletion" in str(result.message)
     assert not compat.needs_write(result)
 
 

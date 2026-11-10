@@ -8,6 +8,11 @@
     notifempty
     create 0644 root root
     postrotate
-        docker kill --signal=USR1 {{ traefik_container_name }} 2>/dev/null || true
+        # Signal the process on the host. Do not use `docker kill`: it marks the
+        # container as stopped by hand, so Docker does not start it again after a
+        # daemon restart or a reboot. An empty or 0 pid (container absent or
+        # stopped) must never reach `kill`: `kill -USR1 0` signals our own group.
+        pid="$(docker inspect -f '{{ '{{' }}.State.Pid{{ '}}' }}' {{ traefik_container_name }} 2>/dev/null || true)"
+        if [ -n "$pid" ] && [ "$pid" != "0" ]; then kill -USR1 "$pid" 2>/dev/null || true; fi
     endscript
 }

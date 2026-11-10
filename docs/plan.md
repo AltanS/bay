@@ -361,6 +361,8 @@ The verb exits with the verdict's code:
 | receipt unpushed | 44 | Not a verdict. The deploy worked, but the push of the receipt failed twice, also after `git pull --rebase`. Run `bay fleet push`. A failed deploy keeps its own exit code (1 or 40). |
 | older Bay | 45 | Not a verdict. The fleet was last deployed with a newer Bay than this machine runs (`bay_older`), or Bay cannot read `bay.compat.json` (`compat_invalid`, `compat_newer`). Nothing was written and no box was touched. `bay up`, `bay rollback`, a remove, `bay deploy` and `bay provision` use it. `bay plan` exits 20 for the same plan. See [An older Bay does not deploy](#an-older-bay-does-not-deploy). |
 
+`bay up --json` prints the plan document when it refuses a run (exit 41, 43 or 45). Its `exit_code` stays the plan's own code (20 for a blocked plan). Branch on the process exit code, and read `reason` for the cause.
+
 `blocked` wins over `stale`, and `stale` wins over `approve`.
 
 A plan is **blocked** when:
@@ -1920,9 +1922,18 @@ after the fetch and before they write anything:
 |---|---|
 | No file, or the same or an older version than this machine runs | Goes on. |
 | A newer version than this machine runs (any part: also a patch) | Refuses (`bay_older`, exit 45). `next` is `bay self update --to v<version>`. |
-| Not valid JSON, not readable, or `deployed_with` is not `N.N.N` | Refuses (`compat_invalid`, exit 45). Restore the file from git. |
+| Not valid JSON, not readable, or `deployed_with` is not `N.N.N` | Refuses (`compat_invalid`, exit 45). Restore the last good version from an older commit, or delete the file and commit the deletion (see below). |
 | `compat_version` higher than this Bay knows | Refuses (`compat_newer`, exit 45). Run `bay self update`. |
 | This machine cannot read its own version | Goes on with one warning line, and writes nothing. |
+
+A broken `bay.compat.json` can be committed at HEAD (it arrived by a pull), so
+`git checkout HEAD -- bay.compat.json` would restore the broken file. In the
+fleet, find the last good version with `git log -- bay.compat.json`, restore it
+with `git checkout <commit> -- bay.compat.json`, commit and push, then run the
+command again. If the file was never good, delete it and commit the deletion.
+A missing file does not block, and the next `bay up`, `bay rollback` or remove
+writes it again. Commit the deletion: an uncommitted change in this file
+refuses with `reason: dirty`, also with `--allow-dirty`.
 
 `--allow-older-bay` on `bay up`, `bay rollback`, `bay deploy` and
 `bay provision` skips only `bay_older`. It is for a deliberate downgrade, for

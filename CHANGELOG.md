@@ -8,6 +8,24 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.16.1] - 2026-11-10
+
+Two fixes: nightly log rotation no longer leaves Traefik down after a Docker restart or a reboot, and the repair hint of a broken `bay.compat.json` is correct. Plus a note on the exit code.
+
+### Fixed
+- The nightly Traefik log rotation (`/etc/logrotate.d/traefik`) ran `docker kill --signal=USR1 traefik`. Docker marks a container as stopped by hand after any `docker kill`, and the mark survives a daemon restart. So after the first rotation, `systemctl restart docker` or a reboot left Traefik down, with the whole box offline from the web, until someone ran `docker start traefik`. The rotation now reads the container's main process id with `docker inspect` and sends `USR1` to it from the host with `kill`. It does nothing when the container is absent or stopped (an empty or 0 pid never reaches `kill`). Traefik still reopens its log file. Role: `docker_monitor`.
+- The `compat_invalid` message no longer says `git checkout HEAD -- bay.compat.json`. When the broken file is committed at HEAD (it arrived by a pull), that command restores the broken file. The message now says to find the last good version with `git log -- bay.compat.json`, restore it with `git checkout <commit> -- bay.compat.json`, commit and push. If the file was never good, delete it and commit the deletion: a missing file does not block, and the next `bay up`, `bay rollback` or remove writes it again.
+
+### Changed
+- Docs only: `docs/plan.md` now says that a refused `bay up --json` prints the plan document, so its `exit_code` is the plan's own code (20 for a blocked plan). Branch on the process exit code (41, 43, 45) and read `reason`. Behaviour is the same as before.
+
+### Upgrade notes
+- The Traefik fix needs two steps on each fleet, in this order:
+  1. `bay --fleet <path> deploy <env> --tags monitoring` writes the new `/etc/logrotate.d/traefik`. No container is recreated.
+  2. Restart Traefik one time on each box: `docker restart traefik` (a few seconds of downtime). This clears the mark that the old rotation already left. The new rotation does not set the mark again.
+  A box stays exposed until both steps are done. `docker inspect` does not show the mark. It is `HasBeenManuallyStopped` in `/var/lib/docker/containers/<id>/config.v2.json`.
+- The `bay.compat.json` fix needs no step.
+
 ## [2.16.0] - 2026-11-09
 
 A machine with an older Bay no longer deploys from a fleet that a newer Bay deployed last.
