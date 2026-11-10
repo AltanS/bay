@@ -769,9 +769,10 @@ Only the file location moves. The container, database, volumes and files stay as
 because the lock keeps the adopted names. The pin changes from a fleet commit to an app
 commit, and that is by design.
 
-`bay rollback` straight after an adopt is refused: the previous pin is a fleet commit. Use
-`bay up --at <commit>`. `bay rollback --to <commit>` of an app commit still works: it moves the
-pin and the code (scenario 10).
+`bay rollback` straight after an adopt is refused: the move cleared the previous pin, so there is
+no earlier app repo pin to return to. Pin an app commit with `bay up --at <commit>`.
+`bay rollback --to <commit>` of an app commit still works: it moves the pin and the code
+(scenario 10).
 
 `bay plan` on the adopt commit prints no "bay up will refuse it" note. It says the commit is the adopt
 commit and is not pushed yet, and that `bay up` takes it. Once you push, the note is gone.
@@ -782,14 +783,16 @@ domains, the secret names and the fleet name leave the public repo:
 ```
 bay --fleet ~/.config/bay/fleets/acme toml move shop --to fleet --check
 bay --fleet ~/.config/bay/fleets/acme toml move shop --to fleet
-bay --fleet ~/.config/bay/fleets/acme plan production --project shop   # must say 0 steps
+bay --fleet ~/.config/bay/fleets/acme plan production --project shop   # only bay-webhook: recreate
 bay --fleet ~/.config/bay/fleets/acme up production --project shop     # moves no code
 cd ~/code/shop && git rm -r bay.toml site.conf && git commit -m "chore: bay.toml lives in the fleet" && git push
 ```
 
 The move copies the `bay.toml` as pinned, so it refuses while the app repo holds an undeployed
 config change. Delete the files in the app repo only after the `bay up`: then the delete push is a
-normal code push. See [plan.md, bay toml move](plan.md#bay-toml-move).
+normal code push. A move in either direction shows one plan step, the recreate of the webhook
+receiver `bay-webhook`: its config file holds the `bay.toml` path. Any other step: stop. See
+[plan.md, bay toml move](plan.md#bay-toml-move).
 
 ## 8. App needs app
 

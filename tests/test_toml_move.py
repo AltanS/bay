@@ -371,6 +371,30 @@ def test_move_keeps_the_compile_and_plans_zero_steps(
     assert again["steps"] == [] and again["verdict"] == "auto", again
 
 
+def test_move_changes_the_receiver_config_so_bay_webhook_is_recreated(
+    world: dict[str, Path], shop: dict[str, Path], tmp_path: Path
+) -> None:
+    """The cause of the one plan step after a move: the receiver config loses bay_toml_path.
+
+    The receiver config file holds `bay_toml_path` per build service, and the hash of that
+    file is a label of the `bay-webhook` container, so the move recreates it once. The fake box
+    does not model that container, so the other tests see no step.
+    """
+    from test_rebuild_config import _render_webhook_config
+
+    fleet = world["fleet"]
+    before = yaml.safe_load(_body((fleet / GENERATED_SERVICES).read_text()))
+    assert _move(world, cwd=_elsewhere(tmp_path)).exit_code == 0
+    with planmod.compiled_fleet(cx_of(world), cwd=_elsewhere(tmp_path)) as comp:
+        assert comp.result is not None, comp.errors
+        after = yaml.safe_load(_body(comp.result.text()))
+    old = _render_webhook_config(before["services"])
+    new = _render_webhook_config(after["services"])
+    assert old["old-shop"]["bay_toml_path"] == "bay.toml"
+    assert "bay_toml_path" not in new["old-shop"]
+    assert old != new
+
+
 def _drop_hold_lines(text: str) -> str:
     keep = []
     skip_list = False
@@ -430,6 +454,11 @@ def test_move_check_changes_nothing(
     said = _said(_move(world, "--check", cwd=_elsewhere(tmp_path)))
     assert "would copy site.conf (app repo) -> projects/shop/site.conf" in said
     assert "nothing changed" in said
+    assert "expect one step, bay-webhook recreate" in " ".join(said.split())
+    assert any(
+        n.startswith("bay plan production --project shop: expect one step, bay-webhook")
+        for n in doc["notes"]
+    )
     assert git(fleet, "rev-parse", "HEAD") == head
 
 
@@ -439,7 +468,10 @@ def test_move_text_output_names_the_order(
     result = _move(world, cwd=_elsewhere(tmp_path))
     assert result.exit_code == 0, _said(result)
     said = " ".join(_said(result).split())
-    assert "`bay plan production --project shop` (it must show 0 steps)" in said
+    assert (
+        "bay plan production --project shop: expect one step, bay-webhook recreate "
+        "(the webhook receiver reloads its config). Any other step: stop."
+    ) in said
     assert said.index("`bay up production --project shop`") < said.index("`git rm -r bay.toml")
     assert "Pushed before bay up, the box builds it and holds it" in said
 
@@ -645,6 +677,38 @@ def test_move_fast_forwards_a_fleet_that_is_behind(
     assert git(fleet, "rev-parse", "HEAD~2") == theirs
 
 
+def test_move_refusal_for_an_unpushed_pin_names_both_places_and_the_likely_cause(
+    world: dict[str, Path], shop: dict[str, Path], tmp_path: Path
+) -> None:
+    fleet = world["fleet"]
+    path = lockfile.lock_path(fleet, "shop")
+    raw = json.loads(path.read_text())
+    raw["commit"] = "0123456789ab"  # in neither the checkout nor the cache
+    for record in raw["envs"].values():
+        record["commit"] = "0123456789ab"
+    path.write_text(json.dumps(raw, indent=2) + "\n")
+    head = commit_all(fleet, "pin a commit nobody pushed")
+    remote = str(shop["remote"])
+
+    elsewhere = _move(world, cwd=_elsewhere(tmp_path))
+    assert elsewhere.exit_code != 0
+    said = " ".join(_said(elsewhere).split())
+    assert (
+        f"shop: Bay cannot find the pinned commit 0123456789ab. It looked in the repo cache "
+        f"of {remote}, and you are not in a checkout of that repo"
+    ) in said
+    hint = " ".join(str(elsewhere.exception.hint).split())
+    assert hint.startswith("The most likely cause: the pinned commit is not pushed")
+    assert "Push it, or run the move inside the checkout that has it." in hint
+    assert hint.index("not pushed") < hint.index("repo URL")
+
+    inside = _move(world, cwd=shop["app"])
+    assert inside.exit_code != 0
+    said = " ".join(_said(inside).split())
+    assert f"the repo cache of {remote} and the checkout" in said and "where you are" in said
+    assert git(fleet, "rev-parse", "HEAD") == head
+
+
 # ── after the move ──────────────────────────────────────────────────────────
 
 
@@ -662,13 +726,16 @@ def test_rollback_after_move_refused(
     result = cli(world, "rollback", "--project", "shop", cwd=_elsewhere(tmp_path))
     assert result.exit_code != 0
     said = _said(result)
-    assert "the previous pin is an app repo commit; use `bay up --at <commit>`" in said
+    assert (
+        "shop production: bay toml move put the bay.toml in the fleet, so there is no "
+        "earlier fleet pin to return to"
+    ) in " ".join(said.split())
     assert git(world["fleet"], "rev-parse", "HEAD") == head
     assert "bay rollback --to <commit>" in str(result.exception.hint)
     # Still refused after a bay up to the same commit: there is no earlier fleet pin.
     _up(world, box, _elsewhere(tmp_path))
     again = cli(world, "rollback", "--project", "shop", cwd=_elsewhere(tmp_path))
-    assert "the previous pin is an app repo commit" in _said(again)
+    assert "there is no earlier fleet pin to return to" in " ".join(_said(again).split())
     # After a config change in the fleet, previous is a fleet commit: rollback works.
     toml = shop["folder"] / "bay.toml"
     toml.write_text(toml.read_text().replace('MODE = "two"', 'MODE = "three"'))
@@ -805,6 +872,7 @@ def test_adopt_alias_prints_the_note_and_toml_move_repo_works(
     def norm(text: str, name: str) -> str:
         import re
 
+        text = text.replace("expect one step", "expect ONE step")  # not the project name
         return re.sub(r"[0-9a-f]{12,40}", "<sha>", text.replace(name, "X"))
 
     assert norm(old.stdout, "one") == norm(new.stdout, "two")

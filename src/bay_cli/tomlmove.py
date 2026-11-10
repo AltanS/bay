@@ -28,7 +28,10 @@ the fleet with its own claim. The first ``bay up`` moves no code: a project in
 the fleet sends no code target, so the running image stays. It writes the box
 a ``rebuild.sh`` without the hold-guard keys (``bay_toml_path``,
 ``bay_toml_hash``, ``bay_build_hash``, ``bay_toml_files``): those are the only
-compiled difference, and ``bay plan`` ignores them, so it shows zero steps.
+compiled difference. ``bay plan`` ignores them for the project's containers, so it shows
+no step for them. It shows one step for the webhook receiver (``bay-webhook``, recreate,
+safe): its config file holds ``bay_toml_path``, and the hash of that file is a label of
+its container.
 After that ``bay up``, the push that deletes bay.toml from the app repo is a
 normal code push.
 
@@ -54,7 +57,9 @@ from bay_cli.fleet import FILES_DIR, LOCK_FILE, PROJECTS_DIR
 MOVE_MESSAGE = "bay: move {name} bay.toml to the fleet"
 PIN_MESSAGE = "bay: pin {name} after the move"
 #: The refusal of ``bay rollback`` straight after a move to the fleet (docs/plan.md).
-ROLLBACK_AFTER_MOVE = "the previous pin is an app repo commit; use `bay up --at <commit>`"
+ROLLBACK_AFTER_MOVE = (
+    "bay toml move put the bay.toml in the fleet, so there is no earlier fleet pin to return to"
+)
 #: Shown in a ``--check`` lock diff where the move commit will go.
 _PENDING = "<the move commit>"
 
@@ -402,10 +407,20 @@ def _prepare(cx: Context, cwd: Path, name: str, work: Path) -> MovePlan:
 def _locate(cx: Context, repo: str, commit: str, cwd: Path, name: str) -> tuple[Path, str]:
     found = reposource.find_commit(cx.fleet_root, repo, commit, cwd=cwd)
     if found.path is None or found.commit is None:
+        if found.searched_checkout is not None:
+            tried = (
+                f"the repo cache of {repo} and the checkout {found.searched_checkout}, "
+                "where you are"
+            )
+        else:
+            tried = f"the repo cache of {repo}, and you are not in a checkout of that repo"
+        cause = f" ({found.detail})" if found.detail else ""
         raise BayError(
-            f"{name}: {found.problem}",
-            hint="Check the repo URL in the lock and your access to it, or run the move "
-            "inside a checkout of the app repo.",
+            f"{name}: Bay cannot find the pinned commit {commit[:12]}. It looked in "
+            f"{tried}{cause}.",
+            hint="The most likely cause: the pinned commit is not pushed to the remote yet. "
+            "Push it, or run the move inside the checkout that has it. If it is pushed, "
+            "check the repo URL in the lock and your access to it.",
         )
     return found.path, found.commit
 
@@ -568,7 +583,7 @@ def _apply(cx: Context, plan: MovePlan) -> dict[str, Any]:
 
 
 def _result(plan: MovePlan, *, check: bool) -> dict[str, Any]:
-    from bay_cli.adopt import _lock_diff
+    from bay_cli.adopt import _lock_diff, plan_expectation
 
     env = plan.primary_env if plan.primary_env in plan.envs else (
         plan.envs[0] if plan.envs else plan.primary_env
@@ -590,7 +605,10 @@ def _result(plan: MovePlan, *, check: bool) -> dict[str, Any]:
         "lock_diff": _lock_diff(plan.lock_before, shown),
         "fleet_commit": None,
         "lock_commit": None,
-        "notes": list(plan.notes),
+        "notes": [
+            *plan.notes,
+            plan_expectation(f"bay plan {env} --project {plan.name}"),
+        ],
         "next": [
             f"bay plan {env} --project {plan.name}",
             f"bay up {env} --project {plan.name}",

@@ -4015,12 +4015,19 @@ def test_adopt_prints_plan_hint(world: dict[str, Path], tmp_path: Path, box: Fak
     assert result.exit_code == 0, _said(result)
     # rich wraps the hint across lines at narrow widths; collapse whitespace.
     said = " ".join(_said(result).split())
-    assert "now run `bay plan production`" in said
+    assert (
+        "run bay plan production: expect one step, bay-webhook recreate "
+        "(the webhook receiver reloads its config). Any other step: stop."
+    ) in said
     assert "push it after bay up" in said and "Then: `git push`" in said
     assert said.index("`bay up production`") < said.index("`git push`")
     second = _second_in_fleet(world, tmp_path)
     doc = json.loads(cli(world, "adopt", "board", "--json", cwd=second).stdout)
     assert doc["next"] == ["bay plan production", "bay up production", "git push"]
+    assert doc["notes"] == [
+        "bay plan production: expect one step, bay-webhook recreate "
+        "(the webhook receiver reloads its config). Any other step: stop."
+    ]
 
 
 def _second_in_fleet(world: dict[str, Path], tmp_path: Path) -> Path:
@@ -4404,12 +4411,15 @@ def test_rollback_after_adopt_refused(
     result = cli(world, "rollback", cwd=shop["app"])
     assert result.exit_code != 0
     message = str(result.exception)
-    assert "the previous pin is a fleet commit; use `bay up --at <commit>`" in message
+    assert (
+        "bay toml move put the bay.toml in the app repo, so there is no earlier app repo pin "
+        "to return to"
+    ) in message
     assert git(world["fleet"], "rev-parse", "HEAD") == fleet_head
     # Still refused after a bay up to the same commit: there is no earlier app pin.
     assert cli(world, "up", "--json", cwd=shop["app"]).exit_code == 0
     again = cli(world, "rollback", cwd=shop["app"])
-    assert "the previous pin is a fleet commit" in str(again.exception)
+    assert "there is no earlier app repo pin to return to" in str(again.exception)
 
 
 def test_up_at_commit(world: dict[str, Path], tmp_path: Path, box: FakeBox) -> None:

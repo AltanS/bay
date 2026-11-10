@@ -1226,25 +1226,34 @@ What you see in the half rolled-back state:
   `bay up`.
 - The stop for a missing image happens only in `bay up`, before any container changes.
 
-Straight after `bay adopt`, `bay rollback` is refused with "the previous pin
-is a fleet commit; use `bay up --at <commit>`". The adopt clears `previous`,
-because an app repo pin cannot go back to a fleet commit. The refusal holds
-until a `bay up` to a newer app commit records a `previous` again.
+Straight after `bay toml move --to repo` (the old `bay adopt`), `bay rollback` is refused with
+"bay toml move put the bay.toml in the app repo, so there is no earlier app repo pin to return
+to". The move clears `previous`, because an app repo pin cannot go back to a fleet commit. The
+refusal holds until a `bay up` to a newer app commit records a `previous` again.
 `bay rollback --to <commit>` of an app commit still works: it moves the pin and the code.
 
 The mirror holds straight after `bay toml move --to fleet`: `bay rollback` is refused with
-"the previous pin is an app repo commit; use `bay up --at <commit>`". The move clears
-`previous`, because a fleet pin cannot go back to an app commit. The refusal holds until a
-`bay up` to a newer fleet commit records a `previous` again. `bay rollback --to <commit>` still
-works: for a project in the fleet it moves only the code.
+"bay toml move put the bay.toml in the fleet, so there is no earlier fleet pin to return to".
+The move clears `previous`, because a fleet pin cannot go back to an app commit. The refusal
+holds until a `bay up` to a newer fleet commit records a `previous` again.
+`bay rollback --to <commit>` still works: for a project in the fleet it moves only the code.
 
 <a id="bay-adopt"></a>
 
 ### bay toml move
 
 `bay toml move <name> --to repo|fleet` moves a project's `bay.toml`, and the files its mounts
-read, between the fleet and the app repo. Both directions keep every name that runs, so the next
-`bay plan` shows zero steps.
+read, between the fleet and the app repo. Both directions keep every name that runs. So the next
+`bay plan` shows 0 steps for the project's containers, database and volumes. It shows one step
+for the webhook receiver `bay-webhook` (recreate, safe).
+
+Why that one step: the receiver's config file holds `bay_toml_path` for each build service, and
+the hash of that file is a label of the receiver container. The move changes the file, so Bay
+recreates the receiver once. The receiver is down for about one second. A GitHub push that
+arrives in that moment can be missed: redeliver it from the GitHub webhook page, or push
+again. On a box, the "Restart bay-webhook" handler also restarts the receiver once before the
+recreate, so `bay up` restarts it twice, each time for a short while. No app container,
+database or volume step appears, and `bay up` moves no code.
 
 - `--to repo` moves it out of the fleet into the app repo. It is the old `bay adopt`.
 - `--to fleet` moves it back into the fleet.
@@ -1276,7 +1285,7 @@ the box builds the app and recreates its containers. `bay up` first gives the bo
 cd ~/code/shop
 bay --fleet ~/fleets/prod toml move shop --to repo --check   # the files and the lock change; changes nothing
 bay --fleet ~/fleets/prod toml move shop --to repo
-bay plan production                            # must show 0 steps
+bay plan production                            # only bay-webhook: recreate
 bay up production                              # takes the unpushed adopt commit
 git push                                       # config only: no build, no recreate, one image tag
 ```
@@ -1304,7 +1313,7 @@ commit, builds nothing, moves no `:latest`, recreates nothing, and ends with exi
 `bay up` to the adopt commit finds `<image>:<commit12>`, also in `pin` mode. This also holds for a container built before 2.1.0, which has no
 `com.bay.commit` label and whose image has only `:latest`: the script then
 takes the commit that the box's checkout was at before the pull, and tags
-`:latest` when that image holds it. The next `bay plan` shows zero steps. Any
+`:latest` when that image holds it. The next `bay plan` shows no step for the project. Any
 other unpushed commit is still refused.
 
 Two projects that build from one app repo (two `bay.toml` files) are adopted one after the
@@ -1363,16 +1372,17 @@ What it does:
 4. **Fleet commit.** `git rm` of the folder contents (the lock stays) and the
    moved `files/` copies, plus the new lock, in one commit:
    `bay: adopt <name> into <repo>`. Bay never pushes.
-5. **Next steps.** Bay prints them: `bay plan <env>` (it must show 0 steps),
-   then `bay up <env>`, then `git push`.
+5. **Next steps.** Bay prints them: `bay plan <env>` (expect one step, `bay-webhook`
+   recreate; any other step: stop), then `bay up <env>`, then `git push`.
 
 The compiled output does not change. On the box a mounted file stays at
 `config/<name>/<from>` (or `config/<adopted path>`), wherever the file lives.
 A project that builds from source gains `build.bay_toml_hash`,
 `build.bay_build_hash`, `build.bay_toml_path` and `build.bay_toml_files` (the
 hold guard and the config-only rule, see [Code and config](#code-and-config)). The container hash
-leaves the `build` table out, so the plan shows no step for that: the first
-`bay up` after the adopt writes them to the box.
+leaves the `build` table out, so the plan shows no step for the app container: the first
+`bay up` after the adopt writes them to the box. The receiver config file does hold
+`bay_toml_path`, so the receiver is recreated once (see the top of this section).
 
 `--toml-path services/shop/bay.toml` is for a repo with several apps: the
 files then land in `services/shop/`. `--check` prints the file list and the
@@ -1391,7 +1401,7 @@ from the fleet's repo cache, as `bay plan` does.
 ```bash
 bay --fleet ~/fleets/prod toml move shop --to fleet --check   # the files and the lock change; changes nothing
 bay --fleet ~/fleets/prod toml move shop --to fleet
-bay --fleet ~/fleets/prod plan production --project shop      # must show 0 steps
+bay --fleet ~/fleets/prod plan production --project shop      # only bay-webhook: recreate
 bay --fleet ~/fleets/prod up production --project shop        # moves no code; pushes the fleet
 cd ~/code/shop && git rm -r bay.toml site.conf && git commit -m "chore: bay.toml lives in the fleet" && git push
 ```
@@ -1434,14 +1444,15 @@ What it does:
 3. **Two fleet commits.** `bay: move <name> bay.toml to the fleet` holds the copied files. Then
    `bay: pin <name> after the move` holds the lock, which names the first commit. Bay never
    pushes: the next `bay up` pushes the fleet with its claim.
-4. **Next steps.** Bay prints them: `bay plan <env> --project <name>` (it must show 0 steps),
-   then `bay up <env> --project <name>`, then `git rm -r <files>`, a commit and `git push` in
+4. **Next steps.** Bay prints them: `bay plan <env> --project <name>` (expect one step,
+   `bay-webhook` recreate; any other step: stop), then `bay up <env> --project <name>`, then `git rm -r <files>`, a commit and `git push` in
    the app repo.
 
 The compiled output is the same, apart from four keys of the build of a project that builds from
 source: `bay_toml_hash`, `bay_build_hash`, `bay_toml_path` and `bay_toml_files` go away. They are
 the hold guard of `rebuild.sh` (see [Code and config](#code-and-config)), a file on the box. The
-container hash leaves the `build` table out, so the plan shows no step for them. A project with
+container hash leaves the `build` table out, so the plan shows no step for the app container.
+The receiver config file holds `bay_toml_path`, so the receiver is recreated once. A project with
 two or more own builds gains `bay_project` instead, for the same reason. An image project compiles
 byte-identically.
 
@@ -1469,7 +1480,7 @@ with `files`, `kept`, `delete`, `keep_in_repo`, `lock_diff`, `fleet_commit`, `lo
 `notes` and `next`. `--toml-path` is only for `--to repo`.
 
 Round trip: `--to fleet` and then `--to repo` gives the app repo the same `bay.toml` bytes, and
-the plan shows zero steps again.
+the plan shows the same single `bay-webhook` step again.
 
 ### bay remove
 

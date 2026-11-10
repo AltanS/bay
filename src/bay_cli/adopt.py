@@ -26,7 +26,10 @@ beside it, which that script sees as a config-only push: no build, no
 recreate. Pushed first, the old script (no ``BAY_TOML_PATH``) would build and
 recreate the app. The compiled output is the same before and after apart from
 those keys: the box paths are ``config/<target>`` either way
-(:mod:`bay_cli.compiler`), so the next ``bay plan`` shows zero steps.
+(:mod:`bay_cli.compiler`). So the next ``bay plan`` shows no step for the project's
+containers, database or volumes. It shows one step for the webhook receiver
+(``bay-webhook``, recreate, safe): its config file holds ``bay_toml_path``, and the
+hash of that file is a label of its container.
 
 Bay refuses before it changes anything when a precondition fails, so a
 refusal never leaves half an adopt behind. ``check`` reports the files and
@@ -53,7 +56,23 @@ from bay_cli.fleet import FILES_DIR, FLEET_PREFIX, LOCK_FILE, PROJECTS_DIR
 APP_MESSAGE = "chore: add bay.toml (adopted from fleet {fleet})"
 FLEET_MESSAGE = "bay: adopt {name} into {repo}"
 #: The refusal of ``bay rollback`` straight after an adopt (docs/plan.md).
-ROLLBACK_AFTER_ADOPT = "the previous pin is a fleet commit; use `bay up --at <commit>`"
+ROLLBACK_AFTER_ADOPT = (
+    "bay toml move put the bay.toml in the app repo, so there is no earlier app repo pin "
+    "to return to"
+)
+#: What the plan shows after a move in either direction. The webhook receiver
+#: holds ``bay_toml_path`` per build service in its config file, and the hash of
+#: that file is a label of its container, so the receiver is recreated once.
+WEBHOOK_STEP = (
+    "expect one step, bay-webhook recreate (the webhook receiver reloads its config). "
+    "Any other step: stop."
+)
+
+
+def plan_expectation(plan_cmd: str) -> str:
+    """The line that tells the operator what the plan after a move must show."""
+    return f"{plan_cmd}: {WEBHOOK_STEP}"
+
 #: Shown in a ``--check`` lock diff where the app commit will go.
 _PENDING = "<the adopt commit>"
 
@@ -606,6 +625,7 @@ def _result(plan: AdoptPlan, *, check: bool) -> dict[str, Any]:
         "lock_diff": _lock_diff(plan.lock_before, shown),
         "app_commit": None,
         "fleet_commit": None,
+        "notes": [plan_expectation(f"bay plan {env}")],
         "next": [
             f"bay plan {env}",
             f"bay up {env}",

@@ -482,7 +482,9 @@ def run_adopt(
     for path in result["kept"]:
         console.info(f"kept {path} in the fleet: another fleet entry reads it")
     typer.echo("\n".join(result["lock_diff"]))
+    expect = result["notes"][-1]
     if check:
+        console.info(f"After the move, run {expect}")
         console.info("check only: nothing changed")
         return
     console.success(
@@ -490,11 +492,9 @@ def run_adopt(
         "after bay up)"
     )
     console.success(f"fleet commit {result['fleet_commit'][:12]}: {name} adopted")
-    plan_cmd, up_cmd, push = result["next"]
-    console.info(
-        f"Next, in this app repo: now run `{plan_cmd}` (it must show 0 steps), then "
-        f"`{up_cmd}` (it takes the unpushed adopt commit and moves no code)."
-    )
+    _plan_cmd, up_cmd, push = result["next"]
+    console.info(f"Next, in this app repo: run {expect}")
+    console.info(f"Then `{up_cmd}` (it takes the unpushed adopt commit and moves no code).")
     console.info(
         f"Then: `{push}`. The box sees a config-only push and builds nothing. "
         "Pushed before bay up, the box would rebuild and recreate the app."
@@ -529,10 +529,12 @@ def run_move_to_fleet(ctx: typer.Context, name: str, *, check: bool, as_json: bo
         console.info(f"{verb} {item['from']} (app repo) -> {item['to']}")
     for path in result["kept"]:
         console.info(f"kept {path} in the fleet: the compile reads it there")
-    for note in result["notes"]:
+    expect = result["notes"][-1]
+    for note in result["notes"][:-1]:
         console.info(f"note: {note}")
     typer.echo("\n".join(result["lock_diff"]))
     if check:
+        console.info(f"After the move, run {expect}")
         console.info("check only: nothing changed")
         return
     console.success(
@@ -540,10 +542,9 @@ def run_move_to_fleet(ctx: typer.Context, name: str, *, check: bool, as_json: bo
         f"{result['lock_commit'][:12]} (the lock): {name} lives in the fleet (local: "
         "bay up pushes them)"
     )
-    plan_cmd, up_cmd, rm_cmd, commit_cmd, push = result["next"]
-    console.info(
-        f"Next: run `{plan_cmd}` (it must show 0 steps), then `{up_cmd}` (it moves no code)."
-    )
+    _plan_cmd, up_cmd, rm_cmd, commit_cmd, push = result["next"]
+    console.info(f"Next: run {expect}")
+    console.info(f"Then `{up_cmd}` (it moves no code).")
     console.info(
         f"Then, in the app repo: `{rm_cmd}`, `{commit_cmd}`, `{push}`. That push is a normal "
         "code push. Pushed before bay up, the box builds it and holds it."

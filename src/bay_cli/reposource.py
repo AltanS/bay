@@ -136,6 +136,10 @@ class Found:
     commit: str | None
     kind: str | None  # "checkout" | "cache"
     problem: str | None = None
+    #: On a miss: the checkout that was searched (None when the directory is
+    #: no checkout of the repo) and the cache problem, if any.
+    searched_checkout: Path | None = None
+    detail: str | None = None
 
 
 def find_commit(
@@ -162,4 +166,11 @@ def find_commit(
     where = [f"the checkout {checkout}"] if checkout is not None else []
     where.append(f"the cache of {url}")
     detail = f" ({problem})" if problem else ""
-    return Found(None, None, None, f"commit {ref[:12]} is in neither {' nor '.join(where)}{detail}")
+    return Found(
+        None,
+        None,
+        None,
+        f"commit {ref[:12]} is in neither {' nor '.join(where)}{detail}",
+        searched_checkout=checkout,
+        detail=problem,
+    )
