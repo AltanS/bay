@@ -268,18 +268,21 @@ class TestRemoteStrategyRendering:
         rendered = _render_rebuild_sh(services, ["animals"])
         assert 'REPO_DIR="${REMOTE_BUILD_DIR}/animals/repo"' in rendered
 
-    def test_clone_cmd_rendered(self):
-        """Remote service has CLONE_CMD for initial clone.
+    def test_clone_runs_without_eval(self):
+        """The first clone is `_ensure_checkout`: no eval'd CLONE_CMD string.
 
-        The branch, the URL and the target directory are referenced as escaped
-        parameter expansions rather than pasted in: the string is handed to
-        `eval`, which re-parses the VALUE, so an interpolated branch holding
-        `$(...)` would run. BRANCH= and CLONE_URL= are asserted separately.
+        It passes the branch, EXPECTED_ORIGIN and the target as plain arguments
+        and the credentials as an array (GIT_AUTH) to `env`, so nothing is
+        re-parsed. 2.17.1 replaced CLONE_CMD, whose failure branch never ran
+        under `set -e`.
         """
         services = _remote_service_with_token()
         rendered = _render_rebuild_sh(services, ["animals"])
-        assert "CLONE_CMD=" in rendered
-        assert r'git clone --branch \"\${BRANCH}\" --single-branch' in rendered
+        assert "CLONE_CMD=" not in rendered
+        assert (
+            'env "${GIT_AUTH[@]}" git clone -q --branch "${BRANCH}" --single-branch -- '
+            '"${EXPECTED_ORIGIN}" "${tmp}"'
+        ) in rendered
         assert 'BRANCH="main"' in rendered
 
     def test_fetch_cmd_rendered(self):

@@ -8,6 +8,28 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.17.1] - 2026-11-10
+
+A changed `[build] repo` no longer leaves the box on the old repo. The next build uses the new repo, or fails loud.
+
+### Fixed
+- After a change of `[build] repo` and `bay up`, the box kept the old repo. A `remote` build reused its checkout, whose `origin` still named the old repo, so the build server went on building the old code with no error (with a token, only a full `bay deploy --tags git_deploy` reset `origin`; with an SSH URL, nothing did). A `local` build keys its checkout folder on repo and branch, so the new URL named a folder that only a full deploy clones: the next push failed at the repo lock with a bare "Webhook deploy failed". A changed deploy branch hit the same `local` failure.
+- `rebuild.sh` now holds the expected repo of each container (`EXPECTED_ORIGIN`) and the credentials of a fetch. Before the fetch it clones a missing checkout (into a temp folder, moved into place when complete), and it repoints a checkout whose `origin` names another repo: first `git ls-remote` of the new repo and branch, then `origin` is set, and the fetch and `reset --hard FETCH_HEAD` move the checkout to the new head, whatever its history. Log line: `repo of <container> changed from <old> to <new>, checkout repointed`. The repos are compared in the CLI's normal form (`host/owner/repo`, lower case, no user, password, port or `.git`), so the same repo in another form is no change.
+- The first build from a new or repointed checkout is a full build: the commit of the old repo decides no config-only or no-input-change tag, and a `local` build fetches and resets instead of `git pull`, which refuses an unrelated history. A mark in `.git/bay-full-build/` keeps it so until a run has built or found the image of the head.
+- A repo that the box cannot clone, check or fetch ends with one `build.failed` alert, "Repo check failed (N/MAX)" (or clone, or fetch). It names the container, the repo, the branch and the likely cause: the token cannot read it, the deploy key is not on it (GitHub takes a key on one repo only), the box has no deploy key yet, an https repo is private or missing, the branch is missing, or the host key is not pinned. Nothing is built, and the checkout and its `origin` stay as they were. The circuit breaker counts it like any failed build. Before, a failed fetch of a `remote` build fell to the ERR trap with no reason, and the HTTP 403 hint after it never ran.
+- A token in a repo URL is redacted (`***`) in every log line, alert, state file and plan note.
+- `bay up` (`--tags deploy_stack`) now also writes the GIT_ASKPASS helper of each `local` build with a token. The helper path holds the checkout slug, so a new repo or branch needed a helper that only a full deploy wrote.
+
+### Changed
+- `bay plan` and `bay up` add a note when the build repo of a container changes: `<container>: the build repo changes from <old> to <new>. The box builds from the new repo from the next push. Add the box's deploy key to the new repo and create its push webhook first.` With a token the note names its vault key. The `changed: build` step stays. Notes are not part of the plan id. A `registry` build gets no note: Bay does not clone its repo.
+- A missing `local` checkout is now cloned by the build script itself, with the key or token the box has. The SSH deploy key of a new `local` build app still comes only from `bay deploy <env>` with no `--tags`.
+- Docs: `docs/build-pipeline.md` has a new section "When the repo URL changes" (what the box does, the loud failure, the operator checklist for the deploy key, the webhook, the old hook and the old checkout folder, the circuit breaker, rollback, branch changes). `docs/bay-toml.md` links it from the `repo` key. The observability contract has row 25 for the new exit.
+
+### Upgrade notes
+- The fix reaches a box with the next `bay up` (or `bay deploy`), which renders `rebuild.sh` again. No step is needed, and the upgrade recreates no container: `rebuild.sh` is a plain file that no container hash or handler reads, and the receiver config and image map are unchanged. On a box with a `local` build that uses a token, `bay up` writes its GIT_ASKPASS helper file, with the content a full deploy already wrote.
+- A box that already lost a `local` checkout this way clones it on the next push.
+- When you change a repo URL: give the box read access to the new repo and create its push webhook before `bay up`, then push or write a trigger file. Remove the old repo's hook and deploy key afterwards. The old `local` checkout folder stays; remove it by hand. See the checklist in `docs/build-pipeline.md`.
+
 ## [2.17.0] - 2026-11-10
 
 A project's `bay.toml` can move from its app repo back into the fleet. `bay adopt` gets a clearer name.

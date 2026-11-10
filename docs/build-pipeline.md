@@ -12,6 +12,7 @@ formal exit-path/severity contract enforced by CI, see
   - [Config-only push](#config-only-push)
   - [No-input-change push](#no-input-change-push)
   - [Order of the guards on a push](#order-of-the-guards-on-a-push)
+- [When the repo URL changes](#when-the-repo-url-changes)
 - [Circuit Breaker State (rebuild.sh)](#circuit-breaker-state-rebuildsh)
 - [Webhook Auto-Build Troubleshooting](#webhook-auto-build-troubleshooting)
 - [Remote Build Strategy Gotchas (v0.72.0+)](#remote-build-strategy-gotchas-v0720)
@@ -421,7 +422,11 @@ In `rebuild.sh`, for a trigger that got through:
 4. The circuit breaker is open: exit 0 (one alert per hour).
 5. A pull signal for a held project (`track = "pin"` or frozen): fetch the commit tag only,
    exit 0. A pull-only service exits 0 here as well.
-6. Fetch or pull, and read the commit.
+6. The checkout follows `[build] repo`: a missing checkout is cloned, and one whose `origin`
+   names another repo is repointed (see "When the repo URL changes"). A repo that cannot be
+   used ends with one `build.failed` alert and exit 1. A new or repointed checkout builds in
+   full: checks 7 and the no-input-change check do not run.
+   Then fetch or pull, and read the commit.
 7. Config-only check (see "Config-only push" above): only `bay.toml`, its mounted files and
    the `bay.toml` of the other projects of the repo changed since the previous commit (the
    container's label, else the checkout's HEAD before the pull, as this service last saw it)
@@ -437,6 +442,124 @@ In `rebuild.sh`, for a trigger that got through:
    keeps the commit tag, does not move `:latest`, sends `build.held` and exits 0.
 10. Otherwise move `:latest`, recreate the container, run the health check and stamp the
     receipt. A failed health check rolls back on the box and exits 1.
+
+## When the repo URL changes
+
+An app in the fleet names its repo in `[build] repo` of `projects/<name>/bay.toml`. A change
+of that URL reaches the box with the next `bay up`: it renders `rebuild.sh` with the new URL
+(`EXPECTED_ORIGIN`, one per container). Before 2.17.1 the box kept building the old repo
+(remote strategy) or failed on the next push with no reason (local strategy).
+
+`bay plan` and `bay up` keep the `changed: build` step and add a note:
+`<container>: the build repo changes from <old> to <new>. The box builds from the new repo from
+the next push. Add the box's deploy key to the new repo and create its push webhook first.`
+With a token, the note names the token's vault key. A token in a URL shows as `***`. The change
+recreates no container: the container hash leaves the `build` table out, and the receiver
+config holds no repo URL.
+
+**What the box does on the next build** (a push or a trigger file, not `bay up`):
+
+- **Remote strategy** (on the build server). The checkout `/opt/<stack>/push-builds/<container>/repo`
+  stays in its folder. `rebuild.sh` compares its `origin` with the new URL in the normal form
+  (below). When they name two repos, it asks the new repo for the deploy branch
+  (`git ls-remote`, with the credentials of a fetch). When that answers, it sets `origin`,
+  fetches the branch and moves the checkout to its head (`git reset --hard FETCH_HEAD`). An
+  unrelated history does not matter. The log says
+  `repo of <container> changed from <old> to <new>, checkout repointed`.
+- **Local strategy**. The checkout folder `/opt/<stack>/builds/shared/<slug>/repo` is keyed on
+  the repo and the branch, so a new URL names a new folder. `rebuild.sh` clones it with the
+  credentials of a pull. The clone goes to a temp folder and moves into place when it is
+  complete, so a failed clone leaves nothing. The old folder stays.
+- **The first build is a full build.** No earlier commit counts: no config-only tag and no
+  no-input-change tag, whatever the receiver's marker says. A new or repointed checkout gets a
+  mark for each container that builds from it (`.git/bay-full-build/<container>`). A run
+  removes its own mark once the image of the head exists. A failed first build keeps the mark,
+  so the next run builds in full too. A local build then moves the checkout with a fetch and a
+  reset, because `git pull` refuses an unrelated history.
+- **The same repo in another form** is no change. `rebuild.sh` only sets the text of `origin`.
+
+**Normal form.** `host/owner/repo` in lower case, without the user, the password, the port, a
+trailing `.git` or `/`. So `git@github.com:acme/shop.git`, `ssh://git@github.com/acme/shop`
+and `https://x-access-token:<token>@github.com/acme/shop` are one repo. A local path or a
+`file://` URL gives its absolute path. The CLI uses the same rule
+(`bay_cli.reposource.normalize_url`).
+
+**The loud failure.** When the box cannot clone the new repo, check it or fetch from it, the run
+ends with one `build.failed` alert, "Repo check failed (N/MAX)" (or clone, or fetch). It names
+the container, the repo (redacted), the branch and the likely cause:
+
+| Auth | Likely cause in the alert |
+| ---- | ------------------------- |
+| token | the token cannot read the repo |
+| SSH deploy key (local) | the key is not on the repo; GitHub takes a key on one repo only |
+| no deploy key on the box yet (local) | run `bay deploy <env> --tags git_deploy` to make it |
+| https URL, no token | the repo does not exist, or it is private |
+| SSH URL, no token (remote) | the SSH key of the build user on the build server cannot read it |
+| any | the branch does not exist; the host key of the server is not pinned (Bay pins github.com) |
+
+Nothing is built. The checkout and its `origin` stay as they were. A token in a URL never
+reaches the log, the alert or the state file. The circuit breaker counts the failure like any
+failed build. A failed fetch outside a repo change ends the same way.
+
+**Operator checklist.**
+
+1. Give the box read access to the new repo first.
+   - SSH deploy key (local strategy). The key is per container, on the box:
+     `/opt/<stack>/builds/<container>/.deploy_key.pub` (read it with `sudo cat`). Bay has no
+     verb that prints it. GitHub takes one deploy key on one repo only: remove it from the
+     deploy keys of the old repo, then add it to the new repo (read only). Two containers that
+     build from one repo each need their own key on it.
+   - A new key instead: on the box, delete `.deploy_key` and `.deploy_key.pub` of the container.
+     Run `bay deploy <env> --tags git_deploy`: it makes a new key, and its clone step stops
+     until the key is on GitHub. Add the key, then run it again.
+   - Token. Give it read access to the new repo. The compile picks the token from
+     `repo_tokens` in `bay.fleet.toml` by URL prefix, so a new owner may need a new entry.
+   - Remote strategy, SSH URL, no token. The SSH key of the build user on the build server must
+     read the new repo.
+2. Create the push webhook on the new repo: payload URL
+   `https://<webhook domain>/webhook/<container>`, the `[webhook] secret`, content type
+   `application/json`, push events. Bay has no verb that creates it.
+   `bay validate --check-webhook-health` probes it after step 3.
+3. Change `[build] repo`, commit, run `bay up`.
+4. Push to the deploy branch of the new repo, or write a trigger file on the box that builds
+   (the build server for a remote build):
+   `printf '%s\n' "operator-$(date +%s)" > /opt/<stack>/triggers/<container>.trigger`.
+   `bay up` builds nothing. With `track = "branch"` the push deploys; with `track = "pin"` it
+   builds, holds, and the next `bay up` deploys.
+5. If `bay build status` shows the circuit breaker of the container open, run
+   `bay build reset <container>`. A repo change does not reset it (see below).
+6. Remove the hook of the old repo, in its GitHub settings, or with
+   `gh api repos/<owner>/<old repo>/hooks` and `gh api -X DELETE repos/<owner>/<old repo>/hooks/<id>`.
+   `bay service prune-webhooks` does not find it: its URL still names a known container. Until
+   it is gone, a push to the old repo starts a build, now of the new repo.
+7. The old checkout folder of a local build stays: `/opt/<stack>/builds/shared/<old slug>/`.
+   Bay never removes it. When no container builds from it, remove it on the box with
+   `sudo rm -rf /opt/<stack>/builds/shared/<old slug>`. The image tags `<image>:<old commit12>`
+   stay. They are harmless, and `bay rollback` uses them.
+
+**Circuit breaker and failed commits.** A repo change neither resets nor bypasses the breaker.
+A reset could hide a real failure that has nothing to do with the repo (a full disk, a dead
+registry). A run past an open breaker would report its own failure only as a suppressed
+re-trip. So the push is blocked as before, with the `build.push_blocked` alert that names
+`bay build reset`. The failed-commits record (`/var/lib/bay/failed-commits/<container>`) is
+keyed on the commit and the image ID. Old-repo commits stay failed, and a new-repo commit never
+matches them.
+
+**Rollback.** The pin of a project in the fleet is a fleet commit. A plain `bay rollback` moves
+it back to the fleet commit before the change, so `[build] repo` goes back to the old URL. The
+next build follows it: a remote build repoints its checkout back, and a local build uses its
+old folder again (or clones it when it is gone). The old repo must still accept the box's key
+or token. The code goes back to the image of the previous pin, `<image>:<old commit12>`, which
+is still on the box. `bay rollback --to <commit>` keeps the pin, so the new URL, and moves only
+the code to an image that is on the box, also one of an old-repo commit. Both freeze the env:
+a push builds but does not deploy until a `bay up` to a newer commit.
+
+**A changed deploy branch** (`[deploy.<env>] branch`) takes the same path. A local build gets a
+new folder (its slug holds the branch) and clones it. A remote build fetches the new branch into
+the same checkout. The first build after a new local folder is a full build.
+
+**Registry strategy.** The box never clones the repo of a `registry` build, so its URL does not
+matter to Bay. Only the system that builds the image reads it. `bay plan` adds no note for it.
 
 ## Circuit Breaker State (rebuild.sh)
 

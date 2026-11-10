@@ -862,9 +862,10 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
    Watchtower, and Zot and the identity sidecar where they are on. The rest of
    the rig (for example the cron jobs, the container monitor, backups and the
    CrowdSec allowlist) comes only from a `bay deploy <env>` with no `--tags`.
-   The first clone of a `local` build app and its SSH deploy key also come only
-   from that deploy (see
-   [layout-scenarios.md](layout-scenarios.md#11-adding-a-box)). When the plan has a `route` step, Bay
+   The SSH deploy key of a `local` build app also comes only from that deploy (see
+   [layout-scenarios.md](layout-scenarios.md#11-adding-a-box)). Since 2.17.1 the build
+   script clones a missing `local` checkout itself, with the key or token the box
+   already has ([build-pipeline.md](build-pipeline.md#when-the-repo-url-changes)). When the plan has a `route` step, Bay
    runs `--tags deploy_stack,headscale,traefik`: Headscale renders the
    split-DNS records and Traefik the route file. The `headscale` tag runs every task of the
    Headscale role, the ACL render included (when `headscale_acl_policy` is defined). So this
@@ -927,9 +928,9 @@ error, carries these fields:
 - **An app that builds from source**: the first image comes from a build that `bay up` does
   not run. `bay up` registers the container with the webhook receiver and enables its build
   trigger, so a push to the deploy branch starts a build. The build needs the repo checkout on
-  the box. A `remote` build clones it in the build script, on the build server. A `local` build
-  does not: its first clone and its SSH deploy key come from a `bay deploy <env>` with no
-  `--tags`, which also builds the first image (`git_deploy`). A `local` app whose repo another
+  the box. A `remote` build clones it in the build script, on the build server. Since 2.17.1 a
+  `local` build clones it in the build script too, but its SSH deploy key comes only from a
+  `bay deploy <env>` with no `--tags`, which also clones and builds the first image (`git_deploy`). A `local` app whose repo another
   app on the box already uses shares that checkout. There is no `bay build` verb that builds: `bay build` has `status` and
   `reset` only. Until an image exists, the container cannot be created: the receipt has a
   failed action and `bay show` says `HALF` (the last `bay up` failed, see the status table of

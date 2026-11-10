@@ -619,7 +619,7 @@ def _rebuild_sh_build_fields_token(payload: str) -> str:
 
 
 def _rebuild_sh_build_fields_remote(payload: str) -> str:
-    """Same fields, remote strategy — CLONE_CMD and FETCH_CMD."""
+    """Same fields, remote strategy — FETCH_CMD, EXPECTED_ORIGIN and GIT_AUTH."""
     from test_rebuild_config import _render_rebuild_sh
 
     services = {

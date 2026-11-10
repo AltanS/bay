@@ -53,6 +53,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import tomllib
@@ -1058,6 +1059,53 @@ def _step(
 
 def _changed_keys(old: Mapping[str, Any], new: Mapping[str, Any]) -> list[str]:
     return sorted(k for k in set(old) | set(new) if old.get(k) != new.get(k))
+
+
+_TOKEN_KEY_RE = re.compile(r"secrets\.([A-Za-z0-9_]+)")
+
+
+def repo_change_notes(
+    current: Mapping[str, Any], wanted: Mapping[str, Any], steps: list[dict[str, Any]]
+) -> list[str]:
+    """One note for each build container of ``steps`` whose build repo changes.
+
+    ``current`` is the fleet's compiled services file, which is what the boxes
+    build from now; ``wanted`` is the new compile. The repos are compared in the
+    normal form (:func:`bay_cli.reposource.same_repo`), so ``git@host:o/r`` and
+    ``https://host/o/r.git`` are no change. Tokens in a URL are redacted. A
+    ``registry`` build is left out: Bay does not clone its repo. Notes are not
+    hashed into the plan id, and the container step stays as it is.
+    """
+    from bay_cli.reposource import redact_url, same_repo
+
+    old_all, new_all = _entries(current), _entries(wanted)
+    stepped = {str(s["container"]) for s in steps if s.get("container")}
+    out: list[str] = []
+    for name in sorted(stepped):
+        old_build = (old_all.get(name) or {}).get("build")
+        new_build = (new_all.get(name) or {}).get("build")
+        if not isinstance(old_build, Mapping) or not isinstance(new_build, Mapping):
+            continue
+        old_repo, new_repo = str(old_build.get("repo") or ""), str(new_build.get("repo") or "")
+        if not old_repo or not new_repo or same_repo(old_repo, new_repo):
+            continue
+        strategy = str(new_build.get("strategy") or "")
+        if strategy == "registry":
+            continue
+        where = "The build server" if strategy in ("remote", "push") else "The box"
+        token = _TOKEN_KEY_RE.search(str(new_build.get("token") or ""))
+        if token:
+            access = f"Give the token {token.group(1)} read access to the new repo"
+        elif new_build.get("token"):
+            access = "Give its token read access to the new repo"
+        else:
+            access = "Add the box's deploy key to the new repo"
+        out.append(
+            f"{name}: the build repo changes from {redact_url(old_repo)} to "
+            f"{redact_url(new_repo)}. {where} builds from the new repo from the next push. "
+            f"{access} and create its push webhook first."
+        )
+    return out
 
 
 #: Build keys that only the build side reads (the hold guard, docs/plan.md,
@@ -2509,6 +2557,9 @@ def _compile_and_diff(
             owners=comp.owners,
             running_scope=names,
         )
+        # A changed build repo keeps its "changed: build" step and gets a note:
+        # the box follows the new repo from the next push (rebuild.sh).
+        notes.extend(repo_change_notes(current, out.wanted_data, out.steps))
         # Tailnet routes (spec M117/07): steps, and a blocker off the ingress env.
         from bay_cli import routes
 

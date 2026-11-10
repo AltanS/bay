@@ -405,8 +405,9 @@ way out is steps 3 and 4: push code, wait for the build, run `bay up` again.
 The push of step 1 builds nothing, because the webhook receiver does not know `shop` until
 `bay up` registers it. The first image comes from a push made after `bay up` (step 3), or from a
 `bay deploy production` with no `--tags`, which clones and builds. The push of step 3 builds only
-when the repo checkout is on the box. `shop` is a `local` build (the default), and only the full
-deploy clones a `local` repo, so run it once before step 3 (below). Followed in this order, `bay show` says `HALF` until the
+when the box can read the repo. `shop` is a `local` build (the default) with an SSH repo URL, and
+only the full deploy makes its deploy key, so run it once before step 3 (below). The build script
+clones a missing checkout itself (2.17.1), with the key or token the box already has. Followed in this order, `bay show` says `HALF` until the
 build has finished and a `bay up` has run again ([plan.md](plan.md#the-first-image)). The push
 reaches the box through the webhook receiver: you register the GitHub hook by hand, in the repo
 settings, with the payload URL `https://<webhook domain>/webhook/<container name>` (`shop` here). The
@@ -1074,8 +1075,8 @@ Which verb puts what on the new box:
 - `bay up` also renders the webhook side of each build container on the box: the receiver config
   and image, and the build trigger `bay-build@<container>.path`. It stops the trigger of a container
   that left the box. A box with no build app gets none of it, from `bay up` or from `--rig`.
-- The first clone of a `local` build app and its SSH deploy key come only from a
-  `bay deploy <env>` with no `--tags` (see scenario 4, step 8).
+- The SSH deploy key of a `local` build app comes only from a `bay deploy <env>` with no
+  `--tags` (see scenario 4, step 8). The build script clones a missing checkout itself (2.17.1).
 
 `bay provision production` would run on every host of the box env, `eu-1` included. The code has no
 guard against that, and no doc states that each provision role is safe to repeat on a live box (the

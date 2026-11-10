@@ -29,6 +29,11 @@
     - git_deploy_rebuild_services | default([]) | length > 0
     - (_all_build_services | default([]) | length > 0)
       or (_is_build_server | bool and (_global_remote_build_services | default([]) | length > 0))
+  # The local builds with a token, one entry per checkout (see the last two tasks).
+  vars:
+    _local_token_groups: >-
+      {{ services | bay_repo_groups(git_deploy_services | default([]))
+         | selectattr('has_token') | list }}
   block:
     - name: Ensure bin directory exists for rebuild.sh
       ansible.builtin.file:
@@ -81,4 +86,32 @@
         - services[item].build.token is defined
       become: true
       become_user: "{{ app_user }}"
+      no_log: true
+
+    # The same for each local build with a token: one helper per checkout
+    # (repo and branch), at {{ git_deploy_build_dir }}/.git-askpass-<slug>.
+    # The slug changes with the repo URL or the branch, so after such a change
+    # rebuild.sh clones a new checkout with a helper that only clone_repos.yml
+    # wrote, under [build, git_deploy]. Same file, owner and mode as there (a
+    # full deploy renders the same content, no change).
+    - name: Ensure the build directory exists for the local credential helpers
+      ansible.builtin.file:
+        path: "{{ git_deploy_build_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        # 0700, same as "Ensure build directory exists" in main.yml.
+        mode: "0700"
+      when: _local_token_groups | length > 0
+
+    - name: Install the git credential helper of each local build with a token
+      ansible.builtin.template:
+        src: git-askpass.sh.j2
+        dest: "{{ git_deploy_build_dir }}/.git-askpass-{{ item.slug }}"
+        owner: "{{ app_user }}"
+        mode: "0700"
+      vars:
+        _askpass_token: "{{ item.token }}"
+      loop: "{{ _local_token_groups }}"
+      loop_control:
+        label: "{{ item.slug }}"
       no_log: true

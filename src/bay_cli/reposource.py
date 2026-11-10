@@ -66,6 +66,20 @@ def same_repo(a: str | None, b: str | None) -> bool:
     return bool(a) and bool(b) and normalize_url(str(a)) == normalize_url(str(b))
 
 
+_PASSWORD_RE = re.compile(r"([a-z][a-z0-9+.-]*://[^/@:\s]*):[^/@\s]*@", re.IGNORECASE)
+_HTTP_USER_RE = re.compile(r"(https?://)[^/@:\s]+@", re.IGNORECASE)
+
+
+def redact_url(text: str) -> str:
+    """``text`` with the secret part of each URL in it replaced by ``***``.
+
+    The password of ``user:password@`` and the whole user part of an http(s)
+    URL (where a token goes) become ``***``. A plain SSH user (``git@``) stays.
+    The same rule as ``_redact_url`` in rebuild.sh.
+    """
+    return _HTTP_USER_RE.sub(r"\1***@", _PASSWORD_RE.sub(r"\1:***@", text))
+
+
 def cache_slug(url: str) -> str:
     """A directory name for ``url``: readable, and the same for every form of it.
 

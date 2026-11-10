@@ -73,6 +73,9 @@ BAY_ALERT_FAILURE_CONTEXT="service=${SERVICE} host=${HOSTNAME}"
 # Commit SHA — set later per strategy, used for notification dedup. Always the
 # 12-character commit: it is also the image's commit tag.
 SHA=""
+# 1 when this run builds in full: the checkout is new or follows another repo
+# (_full_build_mark, docs/build-pipeline.md "When the repo URL changes").
+FULL_BUILD=0
 # Extra `docker run` labels for a webhook recreate (the carried config hash).
 EXTRA_LABELS=()
 
@@ -446,6 +449,178 @@ _seen_head() {
 #   $1  the checkout
 _mark_seen() {
   git -C "$1" update-ref "refs/bay/seen/${SERVICE}" HEAD >/dev/null 2>&1 || true
+}
+
+# ── Repo of the checkout (docs/build-pipeline.md, "When the repo URL changes") ──
+# EXPECTED_ORIGIN is the URL the service builds from. Every deploy renders it
+# from `[build] repo` (bay up too), so it is the truth, and the checkout follows
+# it: _ensure_checkout clones a missing checkout, _check_origin points an
+# existing one at a changed repo. It carries no token: a token reaches git
+# through GIT_ASKPASS (GIT_AUTH). Both run under the build lock (fd 9).
+
+# The normal form of a clone URL: host/owner/repo in lower case, without the
+# user, the password, the port, a trailing ".git" or "/". So git@host:o/r,
+# ssh://git@host/o/r and https://host/o/r.git are one repo. A local path or a
+# file:// URL gives its absolute path. The same rule as the CLI
+# (bay_cli.reposource.normalize_url).
+#   $1  the URL
+_repo_norm() {
+  local raw="$1" host="" path="" out
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  if [[ "${raw,,}" == file://* ]]; then
+    path="${raw:7}"
+  elif [[ "${raw}" =~ ^[A-Za-z][A-Za-z0-9+.-]*://([^@/]+@)?([^/:]+)(:[0-9]+)?(/.*)?$ ]]; then
+    host="${BASH_REMATCH[2]}"
+    path="${BASH_REMATCH[4]}"
+  elif [[ "${raw}" != [/.~]* && "${raw}" =~ ^([^@/:]+@)?([^/:]+):(.+)$ ]]; then
+    host="${BASH_REMATCH[2]}"
+    path="${BASH_REMATCH[3]}"
+    [[ "${path}" == //* ]] && { host=""; path="${raw}"; }
+  else
+    path="${raw}"
+  fi
+  if [[ -z "${host}" ]]; then
+    out=$(realpath -m -- "${path/#\~/${HOME}}" 2>/dev/null || printf '%s' "${path}")
+  else
+    while [[ "${path}" == /* ]]; do path="${path#/}"; done
+    out="${host}/${path}"
+  fi
+  while [[ "${out}" == */ ]]; do out="${out%/}"; done
+  out="${out%.git}"
+  while [[ "${out}" == */ ]]; do out="${out%/}"; done
+  [[ -n "${host}" ]] && out="${out,,}"
+  printf '%s' "${out}"
+}
+
+# A URL, or text that holds one, fit for a log line or an alert: the password of
+# user:password@ and the whole user part of an http(s) URL (where a token goes)
+# become ***. A plain SSH user (git@) stays.
+#   $1  the text
+_redact_url() {
+  printf '%s' "$1" | sed -E \
+    -e 's#([A-Za-z][A-Za-z0-9+.-]*://[^/@:[:space:]]*):[^/@[:space:]]*@#\1:***@#g' \
+    -e 's#([Hh][Tt][Tt][Pp][Ss]?://)[^/@:[:space:]]+@#\1***@#g'
+}
+
+# Full build marks: one empty file per service in .git/bay-full-build of the
+# checkout. A new checkout, or one that now follows another repo, marks every
+# service that shares it (local builds) or this service (remote builds). While
+# its mark is there, a run of the service builds in full: no earlier commit
+# decides anything (no config-only, no no-input-change tag), and a local build
+# moves the checkout with fetch and reset instead of a pull, which refuses an
+# unrelated history. The mark goes once the run has built or found the image of
+# the head (_full_build_done), so a failed first build keeps it for the next run.
+# Sets FULL_BUILD=1 for this run.
+_full_build_mark() {
+  local dir="${REPO_DIR}/.git/bay-full-build" s
+  local svcs=("${SERVICE}")
+  # A length test here would open a Jinja comment; a non-empty join says the same.
+  if [[ -n "${CHECKOUT_SERVICES[*]:-}" ]]; then
+    svcs=("${CHECKOUT_SERVICES[@]}")
+  fi
+  FULL_BUILD=1
+  mkdir -p "${dir}" 2>/dev/null || true
+  for s in "${svcs[@]}"; do
+    : > "${dir}/${s}" 2>/dev/null || true
+  done
+  return 0
+}
+
+_full_build_pending() {
+  [[ -f "${REPO_DIR}/.git/bay-full-build/${SERVICE}" ]]
+}
+
+_full_build_done() {
+  rm -f "${REPO_DIR}/.git/bay-full-build/${SERVICE}" 2>/dev/null || true
+}
+
+# The loud end of a checkout that cannot follow EXPECTED_ORIGIN: the clone, the
+# check of a changed repo or the fetch failed. One build.failed alert through
+# _record_failure (the circuit breaker counts it) that names the service, the
+# repo (redacted), the branch and the likely cause. Nothing is built, and the
+# checkout and its origin stay as they were. Always exits 1.
+#   $1  clone, check or fetch   $2  git's output   $3  git's exit code
+#   $4  the cause, when the caller knows it (optional)
+_repo_failed() {
+  local what="$1" out="$2" rc="${3:-1}" cause="${4:-}" repo
+  trap - ERR
+  repo=$(_redact_url "${EXPECTED_ORIGIN}")
+  out=$(_redact_url "${out}" | tail -c 400)
+  if [[ -z "${cause}" ]]; then
+    if [[ "${what}" == "check" && "${rc}" == "2" ]]; then
+      cause="the branch ${BRANCH} does not exist in this repo"
+    elif [[ "${out}" == *"Host key verification failed"* ]]; then
+      cause="the SSH host key of the repo's server is not pinned on this box (Bay pins github.com only)"
+    elif [[ "${REPO_AUTH}" == "token" ]]; then
+      cause="the token in vault key ${CLONE_TOKEN_KEY:-unknown} cannot read this repo; give it read access to the repo contents"
+    elif [[ "${EXPECTED_ORIGIN,,}" == http://* || "${EXPECTED_ORIGIN,,}" == https://* ]]; then
+      cause="the repo does not exist, or it is private; a private repo needs a token (repo_tokens in bay.fleet.toml) or an SSH URL and a deploy key"
+    elif [[ "${REPO_AUTH}" == "deploy-key" && ! -f "${DEPLOY_KEY:-}" ]]; then
+      cause="this box has no deploy key for ${SERVICE}; run bay deploy ${RECEIPT_ENV} --tags git_deploy to make it, then add ${DEPLOY_KEY:-its key}.pub to the repo as a read-only deploy key"
+    elif [[ "${REPO_AUTH}" == "deploy-key" ]]; then
+      cause="the deploy key ${DEPLOY_KEY}.pub of this box is not on this repo; GitHub takes a key on one repo only, so remove it from the old repo first, then add it here (read only)"
+    else
+      cause="the SSH key of user $(id -un) on this build server cannot read this repo"
+    fi
+  fi
+  _log "repo ${what} failed for ${SERVICE}: cannot use ${repo} (branch ${BRANCH}); likely cause: ${cause}"
+  _record_failure "" "Repo ${what}" "$(printf 'Repo: %s\nBranch: %s\nLikely cause: %s.\n\n%s' "${repo}" "${BRANCH}" "${cause}" "${out}")"
+  exit 1
+}
+
+# Clone the checkout when it is missing: a new repo or branch of a local build
+# (its folder is keyed on both), a new build app, or a folder someone removed.
+# The clone goes to a temp folder beside REPO_DIR and moves into place only when
+# it is complete, so a failed clone leaves nothing and the next run tries again.
+# The build lock (fd 9) that every rebuild.sh run holds keeps two runs from
+# cloning one folder at once; a checkout that appeared meanwhile is used as is.
+# A new checkout means a full build (_full_build_mark).
+_ensure_checkout() {
+  local tmp out rc=0
+  [[ -d "${REPO_DIR}/.git" ]] && return 0
+  if [[ -e "${REPO_DIR}" ]] && ! rmdir "${REPO_DIR}" 2>/dev/null; then
+    _repo_failed clone "" 1 "${REPO_DIR} exists but is not a git checkout; move it away"
+  fi
+  mkdir -p "$(dirname "${REPO_DIR}")"
+  chmod 0700 "$(dirname "${REPO_DIR}")" 2>/dev/null || true
+  tmp="${REPO_DIR}.clone.$$"
+  rm -rf "${tmp}"
+  _log "Cloning $(_redact_url "${EXPECTED_ORIGIN}") (branch ${BRANCH}) for ${SERVICE}"
+  out=$(env "${GIT_AUTH[@]}" git clone -q --branch "${BRANCH}" --single-branch -- "${EXPECTED_ORIGIN}" "${tmp}" 2>&1) || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    rm -rf "${tmp}"
+    _repo_failed clone "${out}" "${rc}"
+  fi
+  if ! mv -T "${tmp}" "${REPO_DIR}" 2>/dev/null; then
+    rm -rf "${tmp}"
+    [[ -d "${REPO_DIR}/.git" ]] || _repo_failed clone "" 1 "the clone could not be moved to ${REPO_DIR}"
+  fi
+  _full_build_mark
+}
+
+# Point the checkout at EXPECTED_ORIGIN. The same repo in another form (normal
+# form, _repo_norm): only origin's text is set. Another repo: first ask it for
+# the deploy branch (git ls-remote, with the credentials of a fetch). When that
+# fails, the run ends in _repo_failed and the checkout keeps its old origin.
+# When it answers, the services of the checkout are marked for a full build and
+# origin is set. The fetch that follows moves the checkout to the new head with
+# reset --hard FETCH_HEAD, so an unrelated history does not matter.
+_check_origin() {
+  local have out rc=0
+  have=$(git -C "${REPO_DIR}" remote get-url origin 2>/dev/null || true)
+  [[ "${have}" == "${EXPECTED_ORIGIN}" ]] && return 0
+  if [[ -n "${have}" && "$(_repo_norm "${have}")" == "$(_repo_norm "${EXPECTED_ORIGIN}")" ]]; then
+    git -C "${REPO_DIR}" remote set-url origin "${EXPECTED_ORIGIN}" >/dev/null 2>&1 || true
+    _log "origin of ${SERVICE} set to $(_redact_url "${EXPECTED_ORIGIN}") (the same repo)"
+    return 0
+  fi
+  out=$(env "${GIT_AUTH[@]}" git -C "${REPO_DIR}" ls-remote --exit-code -- "${EXPECTED_ORIGIN}" "refs/heads/${BRANCH}" 2>&1) || rc=$?
+  [[ ${rc} -eq 0 ]] || _repo_failed check "${out}" "${rc}"
+  _full_build_mark
+  git -C "${REPO_DIR}" remote set-url origin "${EXPECTED_ORIGIN}" >/dev/null 2>&1 \
+    || git -C "${REPO_DIR}" remote add origin "${EXPECTED_ORIGIN}"
+  _log "repo of ${SERVICE} changed from $(_redact_url "${have:-none}") to $(_redact_url "${EXPECTED_ORIGIN}"), checkout repointed"
 }
 
 # True when both name the same commit: hex, one a prefix of the other, the
@@ -1019,7 +1194,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   context holding `$(...)` was a command substitution that ran at assignment
   time, as the build user, on every rebuild.
 
-  `evq(v)` is for the three command strings that are later handed to `eval`.
+  `evq(v)` is for the command strings that are later handed to `eval`.
   Escaping for the assignment is not enough there: eval re-parses the VALUE,
   so the value itself has to carry shell quoting. `| quote` produces that
   quoting and `dq` then protects it from the assignment. Both layers are
@@ -1142,7 +1317,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   # The services that share this checkout (local builds: one per repo and branch).
   CHECKOUT_SERVICES=({% for s in _checkout %}"{{ dq(s) }}"{% if not loop.last %} {% endif %}{% endfor %})
 {#
-  The three command strings below are handed to `eval`, so every consumer
+  The command strings below (FETCH_CMD, PULL_CMD) are handed to `eval`, so every consumer
   value in them is referenced as an ESCAPED parameter expansion — `\"\${BRANCH}\"`
   renders the literal text `"${BRANCH}"` into the variable, which eval then
   expands inside double quotes. Interpolating the value itself (or expanding
@@ -1151,8 +1326,6 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
 #}
 {% if strategy == 'remote' %}
   CLONE_URL="{{ dq(clone_url) }}"
-  GIT_AUTH_ENV="GIT_ASKPASS={{ evq(askpass_remote) }} GIT_TERMINAL_PROMPT=0"
-  CLONE_CMD="GIT_ASKPASS={{ evq(askpass_remote) }} GIT_TERMINAL_PROMPT=0 git clone --branch \"\${BRANCH}\" --single-branch \"\${CLONE_URL}\" \"\${REPO_DIR}\""
   FETCH_CMD="GIT_ASKPASS={{ evq(askpass_remote) }} GIT_TERMINAL_PROMPT=0 git -c url.\"\${CLONE_URL}\".insteadOf=\"\${CLONE_REPO}\" fetch origin \"\${BRANCH}\""
 {% set _token_key = namespace(val='unknown') %}
 {% if has_token and secrets is defined %}{% for _k, _v in secrets.items() %}{% if _v == build.token %}{% set _token_key.val = _k %}{% endif %}{% endfor %}{% endif %}
@@ -1168,6 +1341,20 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
 {% else %}
   DEPLOY_KEY="${BUILD_DIR}/{{ dq(svc_name) }}/.deploy_key"
   PULL_CMD="GIT_SSH_COMMAND='ssh -i ${DEPLOY_KEY} -o StrictHostKeyChecking=yes -o UserKnownHostsFile={{ dq(git_deploy_known_hosts) }}' GIT_TERMINAL_PROMPT=0 git pull origin \"\${BRANCH}\""
+{% endif %}
+  # The repo the checkout must follow, and the credentials of a clone, a repo
+  # check and a fetch (_ensure_checkout, _check_origin). No token in either:
+  # a token is read by the GIT_ASKPASS helper.
+  EXPECTED_ORIGIN="{{ dq(clone_url) }}"
+{% if strategy == 'remote' %}
+  GIT_AUTH=(GIT_TERMINAL_PROMPT=0 "GIT_ASKPASS={{ dq(askpass_remote) }}")
+  REPO_AUTH="{{ 'token' if has_token else 'ssh' }}"
+{% elif has_token %}
+  GIT_AUTH=(GIT_TERMINAL_PROMPT=0 "GIT_ASKPASS={{ dq(askpass_local) }}")
+  REPO_AUTH="token"
+{% else %}
+  GIT_AUTH=(GIT_TERMINAL_PROMPT=0 "GIT_SSH_COMMAND=ssh -i ${DEPLOY_KEY} -o StrictHostKeyChecking=yes -o UserKnownHostsFile={{ dq(git_deploy_known_hosts) }}")
+  REPO_AUTH="deploy-key"
 {% endif %}
 {% if build.args is defined %}
   BUILD_ARGS=(
@@ -1607,46 +1794,34 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
   # ── Remote strategy: fetch, build, push to registry ──
   # No container restart — deployment servers pull via S2 fan-out.
 
-  # Ensure clone directory exists
-  mkdir -p "$(dirname "${REPO_DIR}")"
-
-  # Clone if repo doesn't exist yet
-  if [[ ! -d "${REPO_DIR}/.git" ]]; then
-    _log "Cloning repository for ${SERVICE}"
-    _CLONE_STDERR=$(eval "${CLONE_CMD}" 2>&1)
-    _CLONE_EXIT=$?
-    if [[ ${_CLONE_EXIT} -ne 0 ]]; then
-      if grep -q "403" <<<"${_CLONE_STDERR}"; then
-        _log "clone failed (HTTP 403)"
-        _log "  repo: ${CLONE_REPO}"
-        _log "  token: ${CLONE_TOKEN_KEY}"
-        _log "hint: verify the PAT has Contents:Read (fine-grained) or repo (classic) scope."
-      else
-        echo "${_CLONE_STDERR}" >&2
-      fi
-      exit ${_CLONE_EXIT}
-    fi
-  fi
+  # The checkout: cloned when missing (a new build app, a removed folder).
+  _ensure_checkout
 
   # Acquire repo lock
   exec 200>"${REPO_DIR}/.git/rebuild.lock"
   flock -x 200
   _log "Acquired repo lock for ${SERVICE}"
 
-  # Fetch + reset (force-push safe)
+  # The checkout follows the repo `[build] repo` names now (a changed URL
+  # repoints it), and a new or repointed checkout builds in full.
   cd "${REPO_DIR}"
-  _FETCH_STDERR=$(eval "${FETCH_CMD}" 2>&1)
-  _FETCH_EXIT=$?
+  _check_origin
+  if _full_build_pending; then
+    FULL_BUILD=1
+  fi
+
+  # Fetch + reset (force-push safe). A failed fetch ends loud, with the likely
+  # cause (_repo_failed), and changes nothing.
+  _FETCH_EXIT=0
+  _FETCH_STDERR=$(eval "${FETCH_CMD}" 2>&1) || _FETCH_EXIT=$?
   if [[ ${_FETCH_EXIT} -ne 0 ]]; then
     if grep -q "403" <<<"${_FETCH_STDERR}"; then
-      _log "clone failed (HTTP 403)"
-      _log "  repo: ${CLONE_REPO}"
+      _log "fetch failed (HTTP 403)"
+      _log "  repo: $(_redact_url "${CLONE_REPO}")"
       _log "  token: ${CLONE_TOKEN_KEY}"
       _log "hint: verify the PAT has Contents:Read (fine-grained) or repo (classic) scope."
-    else
-      echo "${_FETCH_STDERR}" >&2
     fi
-    exit ${_FETCH_EXIT}
+    _repo_failed fetch "${_FETCH_STDERR}" "${_FETCH_EXIT}"
   fi
   # The commit this checkout last built, before it moves to the pushed one.
   _PREV_HEAD=$(git rev-parse --short=12 HEAD 2>/dev/null || true)
@@ -1659,7 +1834,14 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
   # commit is the running container's (a build server that also runs it), else
   # the commit this checkout was at before the fetch. Its image must be in the
   # registry (_config_only_source): a failed build of it pushed nothing.
+  # A full build (a new checkout, a changed repo) has no previous commit: the
+  # old one belongs to another history, so it builds whatever the marker says.
   PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")
+  if [[ "${FULL_BUILD}" == "1" ]]; then
+    _log "full build of ${SERVICE} at ${SHA}: the checkout is new or follows another repo"
+    PREV_COMMIT=""
+    NO_INPUT_CHANGE=0
+  fi
   if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then
     _config_only_push "${IMAGE_REPO}" "${PREV_COMMIT}" \
       || _log "config-only push ${SHA}: no image of ${PREV_COMMIT:0:12} in the registry, building"
@@ -1789,6 +1971,8 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
       rm -f "${SECRETS_DIR}/${SERVICE}-${key}"
     done
   fi
+  # The image of the head is in the registry: a full build is done.
+  _full_build_done
 
   # Release repo lock
   exec 200>&-
@@ -1874,17 +2058,38 @@ fi
 # When two services share a repo and both webhooks fire, the second
 # waits here until the first finishes building — then S2 dedup kicks
 # in and retags from the primary instead of rebuilding.
+#
+# The checkout folder is keyed on repo and branch, so a changed `[build] repo`
+# or deploy branch names a folder nobody cloned yet: clone it first (with the
+# credentials of a pull). The old folder stays (docs/build-pipeline.md, "When
+# the repo URL changes").
+_ensure_checkout
 exec 200>"${REPO_DIR}/.git/rebuild.lock"
 flock -x 200
 _log "Acquired repo lock for ${SERVICE}"
 
 # ── Pull latest code ──
 cd "${REPO_DIR}"
+_check_origin
+if _full_build_pending; then
+  FULL_BUILD=1
+fi
 # The commit the checkout was at before the pull, as this service last saw it
 # (the checkout is shared, _seen_head): the previous commit of the config-only
 # check when the running container has no com.bay.commit label.
 _PREV_HEAD=$(_seen_head "${REPO_DIR}")
-eval "${PULL_CMD}"
+if [[ "${FULL_BUILD}" == "1" ]]; then
+  # A new or repointed checkout: fetch and move to the head. A pull would refuse
+  # to merge an unrelated history.
+  _FETCH_EXIT=0
+  _FETCH_STDERR=$(env "${GIT_AUTH[@]}" git fetch -q origin "${BRANCH}" 2>&1) || _FETCH_EXIT=$?
+  if [[ ${_FETCH_EXIT} -ne 0 ]]; then
+    _repo_failed fetch "${_FETCH_STDERR}" "${_FETCH_EXIT}"
+  fi
+  git reset -q --hard FETCH_HEAD
+else
+  eval "${PULL_CMD}"
+fi
 _mark_seen "${REPO_DIR}"
 
 # ── Get new commit SHA (12 characters: the image's commit tag) ──
@@ -1893,8 +2098,13 @@ SHA=$(git rev-parse --short=12 HEAD)
 # ── Config-only push: before the build and the hold guard ──
 # The previous commit is the one the running container was built from, else
 # the one the checkout was at before this service's pull (a container from
-# before 2.1.0).
+# before 2.1.0). A full build has none: see the remote path above.
 PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")
+if [[ "${FULL_BUILD}" == "1" ]]; then
+  _log "full build of ${SERVICE} at ${SHA}: the checkout is new or follows another repo"
+  PREV_COMMIT=""
+  NO_INPUT_CHANGE=0
+fi
 if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then
   _config_only_push "${IMAGE_NAME}" "${PREV_COMMIT}" \
     || _log "config-only push ${SHA}: no image known to hold ${PREV_COMMIT:0:12}, building"
@@ -1956,6 +2166,8 @@ else
     rm -f "/tmp/build-secret-${SERVICE}-${key}"
   done
 fi
+# The image of the head exists: a full build is done.
+_full_build_done
 
 # ── Hold guard, on the checkout of the pushed commit (still under the lock) ──
 HOLD_REASON=$(_hold_reason "${REPO_DIR}")
