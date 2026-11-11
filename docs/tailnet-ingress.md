@@ -743,7 +743,14 @@ policy untouched, and keeps the rejected file at
 the failure is otherwise badly delayed — a running tailnet coasts on its cached
 policy until the container actually dies, so a crash-loop surfaces long after the
 deploy that caused it. Validation is skipped, with a warning, when the headscale
-image isn't present locally to run the check.
+container is not running, because the check runs inside it.
+
+Since 2.20.0 a dry run validates too. `bay deploy <env> --tags headscale -- --check --diff`
+stages the policy, runs `headscale policy check` in the running container, and
+fails on an invalid policy, before any real run. It then removes the staged file
+again. Only the install is skipped in a dry run. Before 2.20.0 check mode skipped
+the container probe and printed that the container was not running, which was
+false, so a new policy was first checked in the real run.
 
 Enrolling a device that lives outside the Ansible inventory (e.g. via `bay
 gateway enroll`) under a default-deny policy like this one needs the same treatment

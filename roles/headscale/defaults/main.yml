@@ -180,4 +180,7 @@ headscale_server_user: "{{ stack_name }}"
 #       - action: accept
 #         src: ["infra"]
 #         dst: ["laptop:8787"]   # homelab-app ingress — infra-only
+# The role validates the policy with `headscale policy check` in the running
+# container before it installs it. Since 2.20.0 this also runs in a dry run
+# (`-- --check`), so a dry run fails on an invalid policy.
 # See docs/tailnet-ingress.md. Left undefined here — opt in per consumer.

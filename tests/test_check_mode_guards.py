@@ -118,15 +118,14 @@ def test_tailscale_register_never_acts_without_the_fact() -> None:
 
 
 def test_headscale_policy_install_is_guarded_against_check_mode() -> None:
-    """The staged source does not exist in check mode, so the copy would abort.
+    """Installing is precisely the host write a dry run must not perform.
 
-    `Stage headscale ACL policy for validation` is a `template`, which supports
-    check mode and therefore writes nothing while still reporting "changed" —
-    `is not skipped` would NOT hold it back. `Remove staged headscale ACL
-    policy` deletes the staged file at the end of every real run, so it is
-    never left behind for a later dry run to find. `ansible_check_mode` is the
-    only honest signal, and installing is precisely the host write a dry run
-    must not perform.
+    Since 2.20.0 the staging write and `headscale policy check` run in check
+    mode too (tests/test_headscale_acl_check_mode.py), but on a fresh host a
+    dry run stages nothing, and the copy would abort with "Source does not
+    exist". The staging `template` reports "changed" rather than "skipped", so
+    `is not skipped` would NOT hold the install back. `ansible_check_mode` is
+    the only honest signal.
     """
     task = _find(_load(_HEADSCALE), "Install validated headscale ACL policy", _HEADSCALE)
     when = _when_str(task)

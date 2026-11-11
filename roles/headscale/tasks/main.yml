@@ -216,16 +216,13 @@
 # runs before deploy_stack recreates the container. Version-gated policy semantics
 # (e.g. 0.29 resolving `*` to the CGNAT/ULA ranges instead of all IPs) must be
 # pre-checked out of band against the target image before bumping.
-
-- name: Stage headscale ACL policy for validation
-  ansible.builtin.template:
-    src: policy.hujson.j2
-    dest: /opt/headscale/config/.policy.hujson.staged
-    owner: "{{ app_user }}"
-    mode: "0644"
-  when: headscale_acl_policy is defined
-  changed_when: false
-  tags: [headscale]
+#
+# CHECK MODE (2.20.0): the probe, the staging write, the validation and the
+# cleanup carry `check_mode: false`. They only read, or write a hidden staging
+# file that the last task removes. So `--check` validates the new policy too,
+# and a dry run fails on an invalid one. Before, check mode skipped the probe,
+# printed that the container was not running (false), and the policy was first
+# validated in the real run. Only the install task stays skipped in check mode.
 
 - name: Check headscale container is running for policy validation
   ansible.builtin.command:
@@ -233,9 +230,26 @@
   register: headscale_container_check
   changed_when: false
   failed_when: false
+  check_mode: false
   become: true
   become_user: root
   when: headscale_acl_policy is defined
+  tags: [headscale]
+
+# In check mode the config folder may not exist yet (a fresh host: the
+# folder task above only predicts it). Stage only when the container runs
+# there, which proves the folder exists; then there is something to validate.
+- name: Stage headscale ACL policy for validation
+  ansible.builtin.template:
+    src: policy.hujson.j2
+    dest: /opt/headscale/config/.policy.hujson.staged
+    owner: "{{ app_user }}"
+    mode: "0644"
+  check_mode: false
+  when:
+    - headscale_acl_policy is defined
+    - not ansible_check_mode or (headscale_container_check.stdout | default('') | trim) != ''
+  changed_when: false
   tags: [headscale]
 
 - name: Warn that headscale ACL policy cannot be validated
@@ -257,11 +271,26 @@
   register: headscale_policy_check
   changed_when: false
   failed_when: false
+  check_mode: false
   become: true
   become_user: root
   when:
     - headscale_acl_policy is defined
     - (headscale_container_check.stdout | default('') | trim) != ''
+  tags: [headscale]
+
+# A dry run leaves nothing behind, also when the assert below fails it. A
+# real run keeps a rejected policy for inspection and removes a valid one at
+# the end.
+- name: Remove the staged headscale ACL policy after a dry-run check
+  ansible.builtin.file:
+    path: /opt/headscale/config/.policy.hujson.staged
+    state: absent
+  check_mode: false
+  when:
+    - headscale_acl_policy is defined
+    - ansible_check_mode
+  changed_when: false
   tags: [headscale]
 
 - name: Assert headscale ACL policy is valid
@@ -271,31 +300,24 @@
     fail_msg: >-
       headscale_acl_policy is INVALID — refusing to install it. The live policy on
       the host is untouched and the tailnet is unaffected. Fix headscale_acl_policy
-      in group_vars and re-run; the rejected policy is kept at
-      /opt/headscale/config/.policy.hujson.staged for inspection. headscale said:
+      in group_vars and re-run{{ ' (found by a dry run)' if ansible_check_mode else
+      '; the rejected policy is kept at /opt/headscale/config/.policy.hujson.staged
+      for inspection' }}. headscale said:
       {{ (headscale_policy_check.stderr | default('') ~ ' ' ~ headscale_policy_check.stdout | default('')) | trim }}
     success_msg: headscale ACL policy is valid.
   when:
     - headscale_acl_policy is defined
-    # `is not skipped` rather than re-testing the container probe: a command task
-    # skipped by check mode still registers rc 0, which would assert on a check
-    # that never ran.
+    # `is not skipped` rather than re-testing the container probe: it is
+    # skipped exactly when the probe found no running container.
     - headscale_policy_check is not skipped
   tags: [headscale]
 
-# In --check mode the staging template above renders nothing to the host, so
-# this copy aborts with "Source /opt/headscale/config/.policy.hujson.staged
-# does not exist" and kills the play. The staged file is also removed at the
-# end of every real run, so it is never left behind for a later dry run to
-# find. Nothing to install in a dry run — the staging task already showed the
-# rendered policy as a diff, and installing is exactly the host write that
-# check mode must not perform.
+# Nothing to install in a dry run: installing is exactly the host write that
+# check mode must not perform. The validation above already ran in check mode.
 #
-# NOT guarded on the staging task's registered result: `template` supports
-# check mode, so it reports "changed" rather than "skipped" and `is not
-# skipped` would let this run anyway. `ansible_check_mode` is the only honest
-# signal here. (The validation chain above is a `command`, which IS skipped,
-# and is guarded with `headscale_policy_check is not skipped`.)
+# NOT guarded on the staging task's registered result: `ansible_check_mode`
+# is the only honest signal here. In check mode on a fresh host nothing was
+# staged, and a copy from the missing staged file would abort the play.
 - name: Install validated headscale ACL policy
   ansible.builtin.copy:
     src: /opt/headscale/config/.policy.hujson.staged
@@ -309,10 +331,13 @@
   notify: Restart headscale
   tags: [headscale]
 
+# check_mode: false, or a dry run would leave the staged file behind. Removing
+# a file that is not there changes nothing, also on a fresh host.
 - name: Remove staged headscale ACL policy
   ansible.builtin.file:
     path: /opt/headscale/config/.policy.hujson.staged
     state: absent
+  check_mode: false
   when: headscale_acl_policy is defined
   changed_when: false
   tags: [headscale]
