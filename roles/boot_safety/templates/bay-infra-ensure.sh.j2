@@ -19,7 +19,9 @@
 # reconciler. This script NEVER removes or replaces it. The compose file on the
 # box is not what the reconciler deploys, so a compose-made replacement can
 # differ from the Bay spec, and the next rig deploy then plans a recreate. A
-# labelled container in a bad state gets one `docker restart`, then a WARNING.
+# labelled container that is dead or restarting gets one `docker restart`, then
+# a WARNING. An exited or created one is left alone: a container someone stopped
+# on purpose stays stopped, and Docker's restart policy brings back the rest.
 # Compose create is only for a container that does not exist at all.
 
 set -euo pipefail
@@ -109,7 +111,7 @@ for name in "${CONTAINER_NAMES[@]}"; do
     continue
   fi
   case "$state" in
-    exited|dead|restarting|created)
+    dead|restarting)
       echo "bay-infra-ensure: $name is $state (Bay-managed, never replaced) — restarting once"
       restarted="$restarted$name "
       docker restart "$name" >/dev/null || echo "bay-infra-ensure: WARNING — docker restart $name failed"

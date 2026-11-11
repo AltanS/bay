@@ -122,8 +122,18 @@ def test_labelled_port_bound_after_restart_is_ok(tmp_path: Path) -> None:
     assert "port 80 bound after restart" in result.stdout
 
 
-def test_labelled_exited_is_restarted_once_not_replaced(tmp_path: Path) -> None:
+def test_labelled_exited_stays_stopped(tmp_path: Path) -> None:
     ctx = _setup(tmp_path, state="exited", label="abc123", port80=False)
+    result, calls = _run(ctx)
+    verbs = _verbs(calls)
+    assert result.returncode == 0, result.stderr
+    assert "restart" not in verbs
+    assert "rm" not in verbs
+    assert not [c for c in calls if c.startswith("docker compose") and " up " in c]
+
+
+def test_labelled_restarting_is_restarted_once_not_replaced(tmp_path: Path) -> None:
+    ctx = _setup(tmp_path, state="restarting", label="abc123", port80=False)
     result, calls = _run(ctx)
     verbs = _verbs(calls)
     assert result.returncode == 0, result.stderr
