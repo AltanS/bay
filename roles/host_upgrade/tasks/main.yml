@@ -1,0 +1,372 @@
+---
+# host_upgrade: upgrade the OS packages of one box. Run by host_upgrade.yml
+# (`bay host upgrade <env> --box <box>`). See docs/host-upgrade.md.
+#
+# Order: refuse a busy box, take the deploy lock, record the state before,
+# run `apt-get dist-upgrade` in a detached systemd unit and poll it, finish
+# dpkg, repair the firewall when the nftables upgrade flushed it, reboot when
+# asked and needed, run the checks. The lock is released and the result is
+# written on every path (always).
+#
+# Check mode (`bay host upgrade ... -- --check`) changes nothing on the box:
+# the lock is not written, apt does not run, nothing restarts or reboots. The
+# read-only tasks still run (`check_mode: false`), so the result lists the
+# packages an upgrade would install (against the package lists already on the
+# box) and the checks of the box as it is.
+
+- name: Upgrade the box
+  block:
+    # ── Refuse a busy box ──────────────────────────────────────────────
+    - name: Read the clock of the box
+      ansible.builtin.command:
+        argv: [date, +%s]
+      register: _host_upgrade_now
+      changed_when: false
+      check_mode: false
+
+    - name: Read the deploy lock
+      ansible.builtin.stat:
+        path: "{{ host_upgrade_lock_path }}"
+      register: _host_upgrade_lock_stat
+
+    - name: Read the holder of the deploy lock
+      ansible.builtin.slurp:
+        src: "{{ host_upgrade_lock_path }}"
+      register: _host_upgrade_lock_raw
+      when: _host_upgrade_lock_stat.stat.exists
+
+    - name: Check whether an earlier upgrade unit still runs
+      ansible.builtin.command:
+        argv: [systemctl, is-active, "{{ host_upgrade_unit }}.service"]
+      register: _host_upgrade_unit_state
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Describe the holder of the deploy lock
+      ansible.builtin.set_fact:
+        _host_upgrade_holder: >-
+          {{ (_lock_text | from_json) if _lock_text.startswith('{') else {} }}
+        _host_upgrade_lock_age: >-
+          {{ (_host_upgrade_now.stdout | int) - (_host_upgrade_lock_stat.stat.mtime | default(0) | int) }}
+      vars:
+        _lock_text: >-
+          {{ (_host_upgrade_lock_raw.content | b64decode | trim)
+             if (_host_upgrade_lock_raw is not skipped and _host_upgrade_lock_raw.content is defined)
+             else '' }}
+
+    - name: Name the reason this box is busy
+      ansible.builtin.set_fact:
+        _host_upgrade_reason: >-
+          {{ 'upgrade_running' if (_host_upgrade_unit_state.stdout | default('') | trim) in ['active', 'activating', 'reloading']
+             else 'box_locked' }}
+      when: >-
+        (_host_upgrade_unit_state.stdout | default('') | trim) in ['active', 'activating', 'reloading']
+        or (_host_upgrade_lock_stat.stat.exists
+            and (_host_upgrade_lock_age | int) < (host_upgrade_lock_timeout | int))
+
+    - name: Stop when an earlier upgrade still runs
+      ansible.builtin.fail:
+        msg: >-
+          The unit {{ host_upgrade_unit }} still runs on this box: an earlier upgrade
+          has not ended. Read {{ host_upgrade_log }} on the box. Run the upgrade again
+          when the unit has ended.
+      when: _host_upgrade_reason | default('') == 'upgrade_running'
+
+    - name: Stop when the deploy lock is held
+      ansible.builtin.fail:
+        msg: >-
+          The deploy lock {{ host_upgrade_lock_path }} is held:
+          {{ 'a host upgrade' if _host_upgrade_holder.kind | default('') == 'host_upgrade' else 'a deploy' }}
+          by {{ _host_upgrade_holder.user | default('an unknown user') }}
+          since {{ _host_upgrade_holder.started_at | default('an unknown time') }}.
+          Wait for it to end. A lock left by a dead run is ignored
+          {{ (host_upgrade_lock_timeout | int) - (_host_upgrade_lock_age | int) }} s from now.
+      when: _host_upgrade_reason | default('') == 'box_locked'
+
+    # ── Take the lock ──────────────────────────────────────────────────
+    # The same file a deploy takes (roles/deploy_stack, `Acquire deploy lock`).
+    # A deploy started now stops at the guard (tasks/guard.yml) or at that task.
+    - name: Take the deploy lock for the upgrade
+      ansible.builtin.copy:
+        dest: "{{ host_upgrade_lock_path }}"
+        content: >-
+          {{ {'kind': 'host_upgrade', 'user': lookup('env', 'USER'),
+              'started_at': '%Y-%m-%dT%H:%M:%SZ' | strftime(_host_upgrade_now.stdout | int, utc=true),
+              'unit': host_upgrade_unit, 'log': host_upgrade_log} | to_json }}
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        mode: "0644"
+
+    - name: Record that this run holds the lock
+      ansible.builtin.set_fact:
+        _host_upgrade_lock_held: "{{ not ansible_check_mode }}"
+
+    # ── The state before ───────────────────────────────────────────────
+    - name: Read the running kernel before the upgrade
+      ansible.builtin.command:
+        argv: [uname, -r]
+      register: _host_upgrade_kernel_before
+      changed_when: false
+      check_mode: false
+
+    - name: List the containers that run before the upgrade
+      ansible.builtin.command:
+        argv: [docker, ps, --format, "{{ '{{' }}.Names{{ '}}' }}"]
+      register: _host_upgrade_ps_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Read when nftables.service last started
+      ansible.builtin.command:
+        argv: [systemctl, show, nftables.service, --property=ActiveEnterTimestampMonotonic, --value]
+      register: _host_upgrade_nft_started_before
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Record the state before the upgrade
+      ansible.builtin.set_fact:
+        _host_upgrade_containers_before: >-
+          {{ (_host_upgrade_ps_before.stdout_lines | default([]) | map('trim') | select | sort | list)
+             if (_host_upgrade_ps_before.rc | default(1)) == 0 else [] }}
+
+    # ── The upgrade ────────────────────────────────────────────────────
+    # Skipped in check mode (command): the package lists stay as they are.
+    - name: Update the package lists  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        argv: [apt-get, -q, -o, "DPkg::Lock::Timeout={{ host_upgrade_dpkg_lock_timeout }}", update]
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      changed_when: false
+
+    # Read-only (a simulation), so it runs in check mode too: the dry run
+    # lists what a real run would install.
+    - name: List the packages the upgrade installs  # noqa: command-instead-of-module
+      ansible.builtin.command:
+        argv: [apt-get, -s, -q, -o, Debug::NoLocking=1, dist-upgrade]
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: _host_upgrade_simulation
+      changed_when: false
+      check_mode: false
+
+    - name: Record the packages the upgrade installs
+      ansible.builtin.set_fact:
+        _host_upgrade_packages: "{{ _host_upgrade_simulation.stdout_lines | default([]) | host_upgrade_packages }}"
+
+    - name: Ensure the upgrade state directory exists
+      ansible.builtin.file:
+        path: "{{ host_upgrade_state_dir }}"
+        state: directory
+        owner: "{{ host_upgrade_state_owner }}"
+        group: "{{ host_upgrade_state_owner }}"
+        mode: "0755"
+
+    - name: Remove the exit code of an earlier upgrade
+      ansible.builtin.file:
+        path: "{{ host_upgrade_state_dir }}/rc"
+        state: absent
+
+    # Detached: the unit runs apt-get outside this SSH session, so a tailscale
+    # or openssh upgrade that drops the session does not stop it. `--collect`
+    # removes the unit when it ends, also when it fails, so the next run can
+    # use the name again; the exit code is in `<state_dir>/rc`.
+    # NEEDRESTART_MODE=l: needrestart only lists services, it restarts none
+    # behind this run's back (docker included). The reboot is the restart.
+    - name: Start the upgrade in a detached unit
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - "--unit={{ host_upgrade_unit }}"
+          - --collect
+          - --quiet
+          - --setenv=DEBIAN_FRONTEND=noninteractive
+          - --setenv=NEEDRESTART_MODE=l
+          - /bin/sh
+          - -c
+          - >-
+            echo "== bay host upgrade $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> {{ host_upgrade_log | quote }};
+            apt-get -q -y
+            -o DPkg::Lock::Timeout={{ host_upgrade_dpkg_lock_timeout }}
+            -o Dpkg::Options::=--force-confdef
+            -o Dpkg::Options::=--force-confold
+            dist-upgrade >> {{ host_upgrade_log | quote }} 2>&1;
+            echo $? > {{ (host_upgrade_state_dir ~ '/rc.tmp') | quote }}
+            && mv {{ (host_upgrade_state_dir ~ '/rc.tmp') | quote }} {{ (host_upgrade_state_dir ~ '/rc') | quote }}
+      register: _host_upgrade_started
+      changed_when: true
+      when: _host_upgrade_packages | length > 0
+
+    - name: Wait for the upgrade unit to end
+      ansible.builtin.include_tasks: poll_round.yml
+      loop: "{{ range(((host_upgrade_timeout | int) // ((host_upgrade_poll_delay | int) * (host_upgrade_poll_retries | int))) + 1) | list }}"
+      loop_control:
+        loop_var: _host_upgrade_round
+        label: "round {{ _host_upgrade_round + 1 }}"
+      when:
+        - _host_upgrade_started is not skipped
+        - _host_upgrade_started is defined
+
+    - name: Fail when the upgrade unit has not ended in time
+      ansible.builtin.fail:
+        msg: >-
+          The upgrade did not end within about {{ host_upgrade_timeout }} s. It still runs
+          on the box as the unit {{ host_upgrade_unit }}; read {{ host_upgrade_log }}.
+          A deploy stays refused while the unit runs.
+      when:
+        - _host_upgrade_started is not skipped
+        - not (_host_upgrade_done | default(false) | bool)
+
+    - name: Fail when apt-get failed
+      ansible.builtin.fail:
+        msg: >-
+          apt-get dist-upgrade exited {{ _host_upgrade_rc }}. Read {{ host_upgrade_log }} on the box.
+      when:
+        - _host_upgrade_started is not skipped
+        - (_host_upgrade_rc | default('0') | string | trim) != '0'
+
+    # A known race: the postinst of the CrowdSec firewall bouncer starts the
+    # bouncer while crowdsec restarts, the start fails and dpkg leaves the
+    # package half-configured. Finish every such package.
+    - name: Finish every package that is not configured
+      ansible.builtin.command:
+        argv: [dpkg, --force-confdef, --force-confold, --configure, -a]
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      register: _host_upgrade_dpkg
+      changed_when: (_host_upgrade_dpkg.stdout | default('')) | length > 0
+
+    # ── The firewall ───────────────────────────────────────────────────
+    - name: Repair the firewall after the upgrade
+      ansible.builtin.include_tasks: firewall.yml
+      when: not ansible_check_mode
+
+    # ── Reboot ─────────────────────────────────────────────────────────
+    - name: Read the reboot-required file
+      ansible.builtin.stat:
+        path: "{{ host_upgrade_reboot_required_file }}"
+      register: _host_upgrade_reboot_file
+
+    - name: List the installed kernels
+      ansible.builtin.find:
+        paths: "{{ host_upgrade_modules_dir }}"
+        file_type: directory
+      register: _host_upgrade_kernels
+
+    - name: Decide whether the box needs a reboot
+      ansible.builtin.set_fact:
+        _host_upgrade_newest_kernel: "{{ _newest }}"
+        _host_upgrade_reboot_required: >-
+          {{ _host_upgrade_reboot_file.stat.exists
+             or (_newest | length > 0 and _newest != (_host_upgrade_kernel_before.stdout | trim)) }}
+      vars:
+        _newest: >-
+          {{ _host_upgrade_kernels.files | default([]) | map(attribute='path') | map('basename')
+             | host_upgrade_newest_kernel }}
+
+    - name: Reboot the box
+      ansible.builtin.reboot:
+        reboot_timeout: "{{ host_upgrade_reboot_timeout | int }}"
+        msg: "Reboot by bay host upgrade"
+      register: _host_upgrade_rebooted
+      when:
+        - host_upgrade_reboot | bool
+        - _host_upgrade_reboot_required | bool
+        - not ansible_check_mode
+
+    # The lock file is on disk, so it survives the reboot. Touch it so it stays
+    # fresh for the checks.
+    - name: Keep the deploy lock fresh after the reboot
+      ansible.builtin.file:
+        path: "{{ host_upgrade_lock_path }}"
+        state: touch
+        mode: "0644"
+      when: _host_upgrade_rebooted is not skipped
+
+    - name: Read the running kernel after the upgrade
+      ansible.builtin.command:
+        argv: [uname, -r]
+      register: _host_upgrade_kernel_after
+      changed_when: false
+      check_mode: false
+
+    - name: Say that a reboot is pending
+      ansible.builtin.debug:
+        msg: >-
+          A reboot is pending on {{ inventory_hostname }}: running kernel
+          {{ _host_upgrade_kernel_after.stdout | trim }}, newest installed
+          {{ _host_upgrade_newest_kernel or 'unknown' }}. Run the upgrade again with --reboot.
+      when:
+        - _host_upgrade_reboot_required | bool
+        - _host_upgrade_rebooted is skipped
+
+    # ── The checks ─────────────────────────────────────────────────────
+    - name: Check the box
+      ansible.builtin.include_tasks: checks.yml
+
+  rescue:
+    - name: Record the failed task
+      ansible.builtin.set_fact:
+        _host_upgrade_failed_task: "{{ ansible_failed_task.name | default('unknown') }}"
+        _host_upgrade_failed_msg: "{{ ansible_failed_result.msg | default('') }}"
+
+    - name: Fail the upgrade
+      ansible.builtin.fail:
+        msg: "{{ _host_upgrade_failed_task }}: {{ _host_upgrade_failed_msg }}"
+
+  always:
+    - name: Release the deploy lock
+      ansible.builtin.file:
+        path: "{{ host_upgrade_lock_path }}"
+        state: absent
+      when: _host_upgrade_lock_held | default(false) | bool
+
+    - name: Write the result on the controller
+      ansible.builtin.copy:
+        dest: "{{ host_upgrade_result_path }}"
+        content: "{{ _result | to_nice_json }}\n"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      check_mode: false
+      when: host_upgrade_result_path | length > 0
+      vars:
+        _result:
+          host: "{{ inventory_hostname }}"
+          box: "{{ host_upgrade_box }}"
+          dry_run: "{{ ansible_check_mode | bool }}"
+          ok: "{{ _host_upgrade_failed_task is not defined }}"
+          reason: "{{ _host_upgrade_reason | default('failed' if _host_upgrade_failed_task is defined else none) }}"
+          failed_task: "{{ _host_upgrade_failed_task | default(none) }}"
+          error: "{{ _host_upgrade_failed_msg | default(none) }}"
+          packages: "{{ _host_upgrade_packages | default([]) }}"
+          packages_upgraded: >-
+            {{ 0 if (ansible_check_mode or _host_upgrade_started | default({'skipped': true}) is skipped
+                     or not (_host_upgrade_done | default(false) | bool))
+               else (_host_upgrade_packages | default([]) | length) }}
+          reboot_required: "{{ _host_upgrade_reboot_required | default(false) | bool }}"
+          rebooted: "{{ _host_upgrade_rebooted is defined and _host_upgrade_rebooted is not skipped }}"
+          kernel:
+            before: "{{ (_host_upgrade_kernel_before.stdout | default('') | trim) or none }}"
+            after: "{{ (_host_upgrade_kernel_after.stdout | default('') | trim) or none }}"
+            newest_installed: "{{ _host_upgrade_newest_kernel | default(none) }}"
+          containers:
+            before: "{{ _host_upgrade_containers_before | default([]) }}"
+            after: "{{ _host_upgrade_container_state.running | default([]) }}"
+            missing: "{{ _host_upgrade_container_state.missing | default([]) }}"
+            unhealthy: >-
+              {{ (_host_upgrade_container_state.unhealthy | default([]))
+                 + (_host_upgrade_container_state.starting | default([])) }}
+            restart_loop: "{{ _host_upgrade_restart_state.looping | default([]) }}"
+            restart_counts: "{{ _host_upgrade_restart_state.counts | default({}) }}"
+            logs: >-
+              {{ dict(_host_upgrade_loop_logs.results | default([]) | map(attribute='item')
+                      | zip(_host_upgrade_loop_logs.results | default([])
+                            | map(attribute='stdout_lines', default=[]))) }}
+          firewall:
+            repaired: "{{ _host_upgrade_fw_repair | default(false) | bool }}"
+            why: "{{ _host_upgrade_fw_why | default([]) }}"
+          checks: "{{ _host_upgrade_checks | default([]) }}"
+          log: "{{ host_upgrade_log }}"

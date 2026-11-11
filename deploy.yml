@@ -17,6 +17,18 @@
   vars_files:
     - version.yml
 
+  pre_tasks:
+    # `bay host upgrade` holds the box: apt runs, Docker may restart. Stop
+    # here, before any role touches the box, with a message that says so.
+    # See roles/host_upgrade/tasks/guard.yml.
+    - name: Stop while a host upgrade runs on the box
+      ansible.builtin.include_role:
+        name: host_upgrade
+        tasks_from: guard
+        apply:
+          tags: [always]
+      tags: [always]
+
   roles:
     # Runs before anything else touches the host: a pre-1.0 host still has
     # pre-1.0 units running and an old webhook container holding the webhook

@@ -52,6 +52,16 @@
       when: bay_minimum_version is defined
       tags: [always]
 
+    # `bay host upgrade` holds the box and runs apt: a provision now would die
+    # on the apt lock half way. See roles/host_upgrade/tasks/guard.yml.
+    - name: Stop while a host upgrade runs on the box
+      ansible.builtin.include_role:
+        name: host_upgrade
+        tasks_from: guard
+        apply:
+          tags: [always]
+      tags: [always]
+
     # A fresh Debian image has no python3-apt, and the apt module cannot
     # install it for itself on Python 3.13 (its respawn fails). Install it
     # with raw before the first apt task. Ubuntu images already have it, so

@@ -51,6 +51,7 @@ the topic you need below.
 
 | Doc | What it covers |
 |-----|----------------|
+| [host-upgrade.md](host-upgrade.md) | `bay host upgrade`: OS package upgrades of one box, the deploy lock it holds, the firewall repair after an nftables upgrade, the checks and the reboot. |
 | [backups.md](backups.md) | restic backups — S3 config, per-accessory repos, retention, restore, and monitoring. |
 | [multi-region.md](multi-region.md) | Deploying one stack to multiple regional servers from a single fleet. |
 | [alerting.md](alerting.md) | Where alerts go — Telegram plus an optional generic webhook sink (Campfire/Slack/raw), and the fail-open guarantees. |

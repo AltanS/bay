@@ -8,6 +8,20 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.19.0] - 2026-11-11
+
+### Added
+- `bay host upgrade <env> --box <box> [--reboot] [--json] [--log <file>]` upgrades the OS packages of one box. It runs `apt-get dist-upgrade` (keeping local config files) in a detached systemd unit, `bay-host-upgrade`, so a dropped SSH session does not stop it, then `dpkg --configure -a`. It checks Docker, every container that ran before (healthy where it has a healthcheck), nftables and the Bay tables, Docker's chains, one published port, CrowdSec, the bouncer and tailscale. A container that is `restarting`, or whose restart count grew during the wait, fails the run (`container_restarts`), and its last log lines are printed: after a cold boot, Traefik looped until tailscaled had its address. Where tailscale is installed, `tailscale ip -4` must give an address. A failed check fails the run with its name. `--reboot` reboots when a reboot is needed and waits for the box. Without it, the command says that a reboot is pending. `-- --check` changes nothing on the box. It writes no receipt and no lock record. See `docs/host-upgrade.md`.
+- The upgrade refuses to start while a `bay up` holds a claim on the box env (`env_busy`, exit 43), while the box holds the deploy lock (`box_locked`, exit 43), or while an earlier upgrade unit still runs (`upgrade_running`, exit 43). It holds the deploy lock while it runs and touches it at each poll round.
+- An upgrade of the `nftables` package flushes the whole ruleset (`ExecStop=nft flush ruleset`), Docker's rules included. When the package was upgraded, when `nftables.service` started again, or when a Docker chain is missing, the upgrade loads `/etc/nftables.conf` again, then restarts Docker, then the CrowdSec bouncer.
+
+### Changed
+- `deploy.yml` and `provision.yml` start with a guard: they stop before any role touches the box while a host upgrade runs on it (a fresh lock of kind `host_upgrade`, or the unit `bay-host-upgrade` active). Before, a deploy died on the apt lock half way.
+- The `deploy_stack` lock message says when a host upgrade holds the lock.
+
+### Upgrade notes
+- Nothing to run. The guard is part of every deploy and provision from 2.19.0. A machine on an older Bay does not know the guard, so upgrade the machines that deploy before you run `bay host upgrade`.
+
 ## [2.18.1] - 2026-11-11
 
 A HALF project stays HALF until every box it waits for got a deploy. A later run that skips such a box no longer clears it.

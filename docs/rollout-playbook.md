@@ -69,3 +69,9 @@ an end-to-end operation, not a sequence of per-host successes.
    was already broken, with evidence (`docker inspect --format
    '{{.State.StartedAt}} Restarts={{.RestartCount}}'`). Don't hide
    pre-existing outages in a "mostly green" summary.
+
+8. **OS package upgrades go through `bay host upgrade`, one box at a time.**
+   Run `bay host upgrade <env> --box alpha`, read the checks, then do `beta`.
+   It holds the deploy lock, so it never collides with a `bay up`, and it
+   repairs the firewall when the nftables upgrade flushed it. See
+   [host-upgrade.md](host-upgrade.md).

@@ -62,6 +62,7 @@ MUTATING_VERBS: frozenset[str] = frozenset(
         # boxes
         "deploy",
         "provision",
+        "host upgrade",
         "restore",
         "restart",
         "prune",

@@ -1,0 +1,62 @@
+---
+# Stop a deploy or a provision while `bay host upgrade` runs on the box.
+#
+# Included at the start of deploy.yml and provision.yml (tags: always), before
+# any role touches apt or a container. Without it a deploy started during an
+# upgrade reached deploy_stack's lock check only after the build and the rig
+# roles, and a provision died on the apt lock half way.
+#
+# Busy means either:
+#   - the deploy lock holds `"kind": "host_upgrade"` and is younger than the
+#     lock timeout (the upgrade keeps it fresh while it runs), or
+#   - the detached unit that runs apt-get is still active. This holds also
+#     when the controller of the upgrade died and its lock went stale.
+# A deploy lock of another deploy is left to deploy_stack, as before.
+#
+# Read-only: it runs in check mode too.
+
+- name: Read the deploy lock for a host upgrade
+  ansible.builtin.stat:
+    path: "{{ host_upgrade_lock_path }}"
+  register: _host_upgrade_guard_stat
+  become: true
+  become_user: root
+
+- name: Read the holder of the deploy lock
+  ansible.builtin.slurp:
+    src: "{{ host_upgrade_lock_path }}"
+  register: _host_upgrade_guard_raw
+  become: true
+  become_user: root
+  when: _host_upgrade_guard_stat.stat.exists
+
+- name: Read the clock and the upgrade unit of the box
+  ansible.builtin.command:
+    argv:
+      - sh
+      - -c
+      - "date +%s; systemctl is-active {{ host_upgrade_unit | quote }}.service || true"
+  register: _host_upgrade_guard_probe
+  changed_when: false
+  check_mode: false
+
+- name: Stop while a host upgrade runs on this box
+  ansible.builtin.fail:
+    msg: >-
+      A host upgrade runs on {{ inventory_hostname }}
+      since {{ _holder.started_at | default('an unknown time') }}
+      (by {{ _holder.user | default('an unknown user') }}).
+      Wait for it to end, then run this again. Its log is {{ host_upgrade_log }} on the box.
+  when: _unit_active or (_holder.kind | default('') == 'host_upgrade' and _fresh)
+  vars:
+    _lines: "{{ _host_upgrade_guard_probe.stdout_lines | default([]) }}"
+    _now: "{{ _lines[0] | default(0) | int }}"
+    _unit_active: "{{ (_lines[1] | default('') | trim) in ['active', 'activating', 'reloading'] }}"
+    _text: >-
+      {{ (_host_upgrade_guard_raw.content | b64decode | trim)
+         if (_host_upgrade_guard_raw is not skipped and _host_upgrade_guard_raw.content is defined)
+         else '' }}
+    _holder: "{{ (_text | from_json) if _text.startswith('{') else {} }}"
+    _fresh: >-
+      {{ _host_upgrade_guard_stat.stat.exists
+         and ((_now | int) - (_host_upgrade_guard_stat.stat.mtime | default(0) | int)) < (host_upgrade_lock_timeout | int) }}

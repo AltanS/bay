@@ -43,9 +43,27 @@
     path: "{{ deploy_lock_path }}"
   register: docker_compose_deploy_lock_stat
 
+# `bay host upgrade` takes this same lock, with `"kind": "host_upgrade"` in it
+# (roles/host_upgrade). Read the holder so the message can say which it is.
+- name: Read the holder of the deploy lock
+  ansible.builtin.slurp:
+    src: "{{ deploy_lock_path }}"
+  register: _deploy_stack_lock_raw
+  when: docker_compose_deploy_lock_stat.stat.exists
+
 - name: Fail if deploy lock exists and is recent
   ansible.builtin.fail:
-    msg: "Deploy lock exists at {{ deploy_lock_path }}. Another deploy may be in progress."
+    msg: >-
+      Deploy lock exists at {{ deploy_lock_path }}.
+      {{ 'A host upgrade (bay host upgrade) holds this box. Wait for it to end.'
+         if _holder.kind | default('') == 'host_upgrade'
+         else 'Another deploy may be in progress.' }}
+  vars:
+    _text: >-
+      {{ (_deploy_stack_lock_raw.content | b64decode | trim)
+         if (_deploy_stack_lock_raw is not skipped and _deploy_stack_lock_raw.content is defined)
+         else '' }}
+    _holder: "{{ (_text | from_json) if _text.startswith('{') else {} }}"
   when:
     - docker_compose_deploy_lock_stat.stat.exists
     - (ansible_facts['date_time']['epoch'] | int) - (docker_compose_deploy_lock_stat.stat.mtime | int) < deploy_lock_timeout

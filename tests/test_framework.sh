@@ -37,7 +37,7 @@ done
 # ── Playbook syntax checks ──────────────────────────────────────────────
 section "Playbook syntax"
 
-for playbook in provision.yml deploy.yml restore.yml; do
+for playbook in provision.yml deploy.yml restore.yml host_upgrade.yml; do
   output=$(uv run ansible-playbook "$BAY_DIR/$playbook" --syntax-check \
       -e target_host=all -e accessory=postgres -e backup_file=/dev/null 2>&1) || true
   if grep -q "playbook:" <<<"$output"; then

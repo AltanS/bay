@@ -1,0 +1,73 @@
+---
+# host_upgrade: upgrade the OS packages of one box (`bay host upgrade`).
+# See docs/host-upgrade.md.
+#
+# The lock. The upgrade holds the SAME lock file as a deploy
+# (roles/deploy_stack, `Acquire deploy lock`), with `"kind": "host_upgrade"` in
+# it. So a deploy started during the upgrade stops, and an upgrade does not
+# start during a deploy. A lock is stale after `host_upgrade_lock_timeout`
+# seconds (by its mtime), as a deploy lock is. The upgrade touches the lock
+# while it polls, so a long upgrade keeps it fresh. When the controller dies,
+# nobody touches it any more and it goes stale within the timeout. While the
+# detached apt unit still runs, the guard (tasks/guard.yml) refuses a deploy
+# anyway, also with a stale lock.
+host_upgrade_lock_path: "{{ deploy_lock_path | default(stack_dir ~ '/.deploy.lock') }}"
+host_upgrade_lock_timeout: "{{ deploy_lock_timeout | default(3600) }}"
+
+# The transient systemd unit that runs apt-get, detached from the SSH session:
+# an upgrade of tailscale or openssh can drop the session, and the upgrade must
+# go on. Its output goes to `host_upgrade_log`; its exit code to
+# `<host_upgrade_state_dir>/rc`.
+host_upgrade_unit: bay-host-upgrade
+host_upgrade_log: /var/log/bay-host-upgrade.log
+host_upgrade_state_dir: /var/lib/bay/host-upgrade
+host_upgrade_state_owner: root
+
+# The poll. One round asks every `host_upgrade_poll_delay` seconds, up to
+# `host_upgrade_poll_retries` times (10 minutes). A dropped connection ends the
+# round; the next one waits for the connection first. The run fails when the
+# unit has not ended after `host_upgrade_timeout` seconds. Keep that below the
+# lock timeout.
+host_upgrade_timeout: 2400
+host_upgrade_poll_delay: 10
+host_upgrade_poll_retries: 60
+# apt waits this long for a dpkg lock someone else holds (unattended-upgrades).
+host_upgrade_dpkg_lock_timeout: 600
+
+# Reboot only when the CLI asks (`--reboot`), and then only when a reboot is
+# needed: the reboot-required file exists, or the newest kernel in
+# `host_upgrade_modules_dir` is not the running one.
+host_upgrade_reboot: false
+host_upgrade_reboot_timeout: 900
+host_upgrade_reboot_required_file: /var/run/reboot-required
+host_upgrade_modules_dir: /lib/modules
+
+# How long the checks wait for the containers that ran before to run again
+# (and to be healthy, when they have a healthcheck).
+host_upgrade_container_wait: 300
+host_upgrade_container_poll: 5
+# After the containers are back, watch them this long more. A container that
+# is `restarting`, or whose restart count grew from the start of the wait to
+# the end of this window, fails the `container_restarts` check, and its last
+# `host_upgrade_log_lines` log lines are printed. After a cold boot, Traefik
+# bound to a tailnet address looped until tailscaled had the address.
+host_upgrade_restart_window: 30
+host_upgrade_log_lines: 20
+
+# The firewall. nftables.service has `ExecStop=nft flush ruleset`, so an
+# upgrade of the nftables package flushes the WHOLE ruleset: Docker's NAT and
+# filter rules and the CrowdSec sets too. The role then loads this file again
+# (it includes /etc/nftables.d/*.conf, so the egress and pre-routing tables
+# come back), and restarts Docker after it, so Docker writes its rules again.
+host_upgrade_nftables_conf: "{{ nftables_config_path | default('/etc/nftables.conf') }}"
+host_upgrade_nftables_dir: /etc/nftables.d
+# Docker's chains, read with iptables (works for the nft and the legacy
+# backend). A missing one starts the repair and fails the check.
+host_upgrade_docker_chains:
+  - { table: nat, chain: DOCKER }
+  - { table: filter, chain: DOCKER }
+
+# Where the result goes, on the CONTROLLER. The CLI sets it. Empty: no file.
+host_upgrade_result_path: ""
+# The fleet box this host is, for the result only.
+host_upgrade_box: ""

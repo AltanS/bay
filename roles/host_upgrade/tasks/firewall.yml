@@ -1,0 +1,95 @@
+---
+# Repair the firewall after the upgrade (main.yml, not in check mode).
+#
+# nftables.service has `ExecStop=nft flush ruleset`. An upgrade of the
+# nftables package stops and starts the unit, and the stop flushes the WHOLE
+# ruleset: Docker's NAT and filter rules and the CrowdSec sets too. The start
+# loads only /etc/nftables.conf. Docker writes its rules only when it starts,
+# so its published ports and its container egress stay broken until Docker
+# restarts. On a live box that took 49 s, by luck: the Docker package was in
+# the same upgrade.
+#
+# So, when the nftables package was upgraded, when nftables.service started
+# again during the run, or when a Docker chain is missing: load the Bay
+# firewall (the file that includes /etc/nftables.d/*.conf, so the egress and
+# pre-routing tables return), THEN restart Docker so it writes its rules on
+# top, then restart the CrowdSec bouncer so its sets return. Order matters: a
+# reload after the Docker restart would not flush Docker's rules (the Bay file
+# deletes only its own tables), but Docker must start on a loaded firewall.
+
+- name: Check whether nftables.service is installed
+  ansible.builtin.command:
+    argv: [systemctl, list-unit-files, nftables.service, --no-legend]
+  register: _host_upgrade_nft_unit
+  changed_when: false
+  failed_when: false
+
+- name: Read when nftables.service last started, after the upgrade
+  ansible.builtin.command:
+    argv: [systemctl, show, nftables.service, --property=ActiveEnterTimestampMonotonic, --value]
+  register: _host_upgrade_nft_started_after
+  changed_when: false
+  failed_when: false
+
+- name: Look for Docker's chains
+  ansible.builtin.command:
+    argv: [iptables, -t, "{{ item.table }}", -n, -L, "{{ item.chain }}"]
+  loop: "{{ host_upgrade_docker_chains }}"
+  loop_control:
+    label: "{{ item.table }}/{{ item.chain }}"
+  register: _host_upgrade_chains_after
+  changed_when: false
+  failed_when: false
+
+- name: Decide whether the firewall needs a repair
+  ansible.builtin.set_fact:
+    _host_upgrade_fw_why: "{{ _why }}"
+    _host_upgrade_fw_repair: "{{ _installed and (_why | length > 0) }}"
+  vars:
+    _installed: "{{ (_host_upgrade_nft_unit.rc | default(1)) == 0 and (_host_upgrade_nft_unit.stdout | default('') | trim | length > 0) }}"
+    _before: "{{ _host_upgrade_nft_started_before.stdout | default('') | trim }}"
+    _after: "{{ _host_upgrade_nft_started_after.stdout | default('') | trim }}"
+    _lost: >-
+      {{ _host_upgrade_chains_after.results | default([])
+         | rejectattr('rc', 'equalto', 0) | map(attribute='item')
+         | map(attribute='chain') | list }}
+    _why: >-
+      {{ (['the nftables package was upgraded'] if 'nftables' in (_host_upgrade_packages | default([])) else [])
+         + (['nftables.service started again'] if (_before != _after and _after not in ['', '0']) else [])
+         + (['a Docker chain is missing'] if _lost | length > 0 else []) }}
+
+- name: Load the Bay firewall again
+  ansible.builtin.command:
+    argv: [nft, -f, "{{ host_upgrade_nftables_conf }}"]
+  changed_when: true
+  when: _host_upgrade_fw_repair | bool
+
+- name: Restart Docker so it writes its rules again  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    argv: [systemctl, restart, docker.service]
+  changed_when: true
+  when: _host_upgrade_fw_repair | bool
+
+# The bouncer keeps its sets in its own table; a flush removed them. It is
+# also the package of the known postinst race, which can leave it stopped.
+- name: Check whether the CrowdSec bouncer is installed
+  ansible.builtin.command:
+    argv: [systemctl, list-unit-files, crowdsec-firewall-bouncer.service, --no-legend]
+  register: _host_upgrade_bouncer_unit
+  changed_when: false
+  failed_when: false
+
+- name: Read the state of the CrowdSec bouncer
+  ansible.builtin.command:
+    argv: [systemctl, is-active, crowdsec-firewall-bouncer.service]
+  register: _host_upgrade_bouncer_state
+  changed_when: false
+  failed_when: false
+
+- name: Restart the CrowdSec bouncer  # noqa: command-instead-of-module
+  ansible.builtin.command:
+    argv: [systemctl, restart, crowdsec-firewall-bouncer.service]
+  changed_when: true
+  when:
+    - (_host_upgrade_bouncer_unit.stdout | default('') | trim | length) > 0
+    - (_host_upgrade_fw_repair | bool) or (_host_upgrade_bouncer_state.stdout | default('') | trim) != 'active'
