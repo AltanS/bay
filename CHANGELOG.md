@@ -34,6 +34,7 @@ This release adds three things. Hosts alert when a reboot stays pending. The Hea
 
 ### Fixed
 - `bay deploy` and `bay up` printed "This deploy changed no containers" after a run that had recreated containers. The reconciler runs once per pass, and a run can have several passes on one host: the narrow headscale, tailnet-identity and webhook passes, then `deploy_stack`. Each pass wrote the same report file, so the last pass replaced the others. Each pass now writes its own file (`<host>.<pass>.json`) and the summary merges them all. When a report file is unreadable, the summary prints no "changed" or "no containers" line and shows every service in one list.
+- `bay deploy -- --check` pushed the local fleet commits before the dry run. A dry run (`--check` or `-C` after `--`) now pushes nothing. It still fetches, fast-forwards a fleet that is behind, and refuses a diverged fleet, an unreachable remote and uncommitted files, as a real run does. It prints one note that the local fleet commits were not pushed because this is a dry run. `bay provision` follows the same rule.
 
 ### Upgrade notes
 - Reboot alert: the probe is part of the `outbound_monitor` role, and that role runs from `provision.yml` only. A deploy does not install it. On each existing host, run `bay provision <env> --tags outbound_monitor`. A host that is not re-provisioned has no check and sends no alert.

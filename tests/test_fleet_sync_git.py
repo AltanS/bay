@@ -409,3 +409,110 @@ def test_git_detail_rules() -> None:
     assert gitrepo.git_detail("\n  plain first\nplain last\n") == "plain first"
     assert gitrepo.git_detail("") == ""
 
+
+
+# ── 10. a dry run pushes nothing ────────────────────────────────────────────
+
+
+def test_dry_run_does_not_push_local_commits(repos: dict[str, Path]) -> None:
+    """`bay deploy -- --check` used to push the fleet's local commits first."""
+    a = repos["a"]
+    before = _rev(repos["origin"])
+    _commit(a, "lock", "2\n", "local")
+    lines: list[str] = []
+    fleetsync.prepare_playbook(a, verb="deploy", dry_run=True, say=lines.append)
+    assert _rev(repos["origin"]) == before
+    assert len(lines) == 1
+    assert "not pushed" in lines[0] and "dry run" in lines[0] and "deploy" in lines[0]
+
+
+def test_dry_run_still_pushes_nothing_but_a_real_run_pushes(repos: dict[str, Path]) -> None:
+    a = repos["a"]
+    commit = _commit(a, "lock", "2\n", "local")
+    fleetsync.prepare_playbook(a, verb="deploy", say=lambda _line: None)
+    assert _rev(repos["origin"]) == commit
+
+
+def test_dry_run_with_nothing_ahead_says_nothing(repos: dict[str, Path]) -> None:
+    lines: list[str] = []
+    fleetsync.prepare_playbook(repos["a"], verb="deploy", dry_run=True, say=lines.append)
+    assert lines == []
+
+
+def test_dry_run_still_refuses_a_diverged_fleet(repos: dict[str, Path]) -> None:
+    a = repos["a"]
+    b = repos["tmp"] / "b"
+    _clone(repos["origin"], b)
+    _commit(b, "other", "b\n", "B")
+    g(b, "push", "-q")
+    _commit(a, "lock", "2\n", "A")
+    with pytest.raises(fleetsync.SyncError) as err:
+        fleetsync.prepare_playbook(a, verb="deploy", dry_run=True)
+    assert err.value.reason == "diverged"
+
+
+def test_dry_run_still_refuses_an_unreachable_remote(repos: dict[str, Path]) -> None:
+    a = repos["a"]
+    g(a, "remote", "set-url", "origin", str(repos["tmp"] / "gone.git"))
+    _commit(a, "lock", "2\n", "local")
+    with pytest.raises(fleetsync.SyncError) as err:
+        fleetsync.prepare_playbook(a, verb="deploy", dry_run=True)
+    assert err.value.reason == "remote_unreachable"
+
+
+def test_dry_run_still_refuses_uncommitted_paths(repos: dict[str, Path]) -> None:
+    a = repos["a"]
+    (a / "scratch").write_text("x\n")
+    with pytest.raises(fleetsync.SyncError) as err:
+        fleetsync.prepare_playbook(a, verb="deploy", dry_run=True)
+    assert err.value.reason == "dirty"
+
+
+def test_dry_run_still_fast_forwards_a_fleet_that_is_behind(repos: dict[str, Path]) -> None:
+    a = repos["a"]
+    b = repos["tmp"] / "b"
+    _clone(repos["origin"], b)
+    newest = _commit(b, "lock", "b\n", "B")
+    g(b, "push", "-q")
+    fleetsync.prepare_playbook(a, verb="deploy", dry_run=True, say=lambda _line: None)
+    assert g(a, "rev-parse", "HEAD") == newest
+
+
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        (["--check"], True),
+        (["--diff", "-C"], True),
+        (["--diff"], False),
+        ([], False),
+        (None, False),
+        (["-e", "x=y"], False),
+    ],
+)
+def test_the_gate_reads_a_dry_run_from_the_passthrough(args: list[str] | None, expected: bool) -> None:
+    from bay_cli.commands import ops
+
+    assert ops._is_dry_run(args) is expected
+
+
+@pytest.mark.parametrize("verb", ["deploy", "provision"])
+@pytest.mark.parametrize("flag, dry", [("--check", True), ("-C", True), ("--diff", False)])
+def test_fleet_gate_passes_dry_run_for_both_verbs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, verb: str, flag: str, dry: bool
+) -> None:
+    from types import SimpleNamespace
+
+    from bay_cli import compat
+    from bay_cli.commands import ops
+
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        fleetsync, "prepare_playbook", lambda repo, **kw: seen.update(kw)
+    )
+    monkeypatch.setattr(compat, "require", lambda *a, **k: None)
+    monkeypatch.setattr(fleetsync, "run_lock", lambda *a, **k: __import__("contextlib").nullcontext())
+    ctx = SimpleNamespace(args=[flag], with_resource=lambda cm: cm)
+    cx = SimpleNamespace(fleet_root=tmp_path)
+    ops._fleet_gate(ctx, cx, verb, "production", offline=False, allow_dirty=False)
+    assert seen["dry_run"] is dry
+    assert seen["verb"] == verb

@@ -2170,12 +2170,12 @@ they check the fleet first:
 | Only behind | Fast-forwards, then runs. |
 | Diverged | Refuses (`diverged`, exit 41). |
 | Uncommitted files (tracked or untracked, `plans/` left out) | Refuses (`dirty`, exit 41) and lists up to 20 paths, unless `--allow-dirty`. An edit in a lock or in `services.yml` refuses also with `--allow-dirty`. The files would deploy, and no other machine can see them. Config files are the exception: `bay deploy` copies them from the committed fleet and the pinned project commits, also with `--allow-dirty`. |
-| Ahead | Pushes first (the claim). A refused push stops the run before the box (exit 42). |
+| Ahead | Pushes first (the claim). A refused push stops the run before the box (exit 42). A dry run does not push. |
 | Last deployed with a newer Bay | Refuses (`bay_older`, exit 45), unless `--allow-older-bay`. Writes nothing. See [An older Bay does not deploy](#an-older-bay-does-not-deploy). |
 | `--offline` | No fetch and no push. Bay prints a warning: the result is not on the remote, so run `bay fleet push` after it. A `bay deploy` still compiles the fleet for its config files, and stops when a pinned app commit is not in the local repo cache. |
 
 A fleet with no remote, or inside a bigger repo, gets the dirty check only.
-A dry run (`-- --check`) follows the same rules. No flag is named `--force`.
+A dry run (`-- --check` or `-C`) follows the same rules, but it pushes nothing: it fetches, applies the same refusals, and says in one note that local fleet commits were not pushed. No flag is named `--force`.
 
 The working rule: Bay pulls for you. Commit and push a config change before
 you deploy it. Bay refuses to deploy what is not on the remote. Never merge

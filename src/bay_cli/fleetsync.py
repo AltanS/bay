@@ -1317,6 +1317,7 @@ def prepare_playbook(
     verb: str,
     offline: bool = False,
     allow_dirty: bool = False,
+    dry_run: bool = False,
     say: Echo = notice,
 ) -> Pulled | None:
     """The fleet checks of ``bay deploy`` and ``bay provision``, before the playbook.
@@ -1326,7 +1327,9 @@ def prepare_playbook(
     refuses, uncommitted paths refuse (unless ``allow_dirty``; a hand edit in a
     file only Bay writes always refuses, :func:`hand_edited`), a fleet that
     is only behind is fast-forwarded, and a fleet that is ahead is pushed
-    first (the claim; a refused push stops the run). A fleet with no remote
+    first (the claim; a refused push stops the run). A dry run (``dry_run``,
+    Ansible ``--check``) fetches and refuses the same way, but pushes nothing:
+    it says so in one note. A fleet with no remote
     or inside a bigger repo gets the dirty check only. Raises
     :class:`SyncError`; returns the fast-forward, if one ran.
     """
@@ -1360,6 +1363,11 @@ def prepare_playbook(
     if remote and st.behind:
         pulled = fast_forward(repo)
         say(pulled.line())
+    elif remote and st.ahead and dry_run:
+        say(
+            f"fleet: {st.ahead} local commit(s) were not pushed to {st.upstream} because this "
+            f"{verb} is a dry run. Run `bay fleet push` to push them."
+        )
     elif remote and st.ahead:
         _push_ahead(repo, st, verb, say)
     if offline:

@@ -241,6 +241,11 @@ def _config_files_root(cx: Context, reach: bool) -> Iterator[Path | None]:
         yield comp.files_root
 
 
+def _is_dry_run(args: list[str] | None) -> bool:
+    """True when the Ansible passthrough asks for a check-mode run (``--check`` or ``-C``)."""
+    return any(a in ("--check", "-C") for a in (args or []))
+
+
 def _fleet_gate(
     ctx: typer.Context,
     cx: Context,
@@ -255,6 +260,9 @@ def _fleet_gate(
 
     Here, not in :func:`_run_playbook`: ``bay up`` runs that too, and has its
     own claim. The lock is released when the command's context closes.
+
+    A dry run (``--check`` or ``-C`` in the passthrough) fetches and refuses
+    as a real run does, but pushes no local fleet commit.
 
     After the fetch, the fleet's Bay version floor (:func:`bay_cli.compat.require`):
     an older Bay stops (exit 45) unless ``allow_older_bay``. Nothing is written.
@@ -272,7 +280,11 @@ def _fleet_gate(
                 allow_older_bay = True
     ctx.with_resource(fleetsync.run_lock(cx.fleet_root, verb, env))
     fleetsync.prepare_playbook(
-        cx.fleet_root, verb=verb, offline=offline, allow_dirty=allow_dirty
+        cx.fleet_root,
+        verb=verb,
+        offline=offline,
+        allow_dirty=allow_dirty,
+        dry_run=_is_dry_run(ctx.args),
     )
     compat.require(cx, allow_older=allow_older_bay)
 
@@ -580,7 +592,7 @@ def deploy(
     The fleet first: a fleet that is only behind its remote is pulled, one
     that is ahead is pushed first, and a diverged fleet, an unreachable
     remote or uncommitted files refuse (--offline, --allow-dirty). A dry run
-    follows the same rules. A fleet last deployed with a newer Bay refuses
+    (-- --check) follows the same rules but pushes nothing. A fleet last deployed with a newer Bay refuses
     with exit 45 (bay_older; --allow-older-bay runs anyway).
 
     Config files come from a scratch compile, as in `bay up`: the committed
