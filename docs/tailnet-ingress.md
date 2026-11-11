@@ -796,6 +796,11 @@ two edits each new proxied port needs.
   rewrites XFF to the actual tailnet peer. **Do not put a trusted proxy/CDN in front of
   Traefik and add it to `trustedIPs`** without revisiting this — it would let clients
   forge XFF and thus their device identity.
+- **Stops on SIGTERM.** The sidecar is PID 1 in its container. Linux does not apply the
+  default SIGTERM action to PID 1, so before 2.20.0 `docker stop` waited 30 s and then
+  killed it. The server now has a SIGTERM and SIGINT handler: it stops listening, exits
+  0 and `docker stop` returns at once. The image carries the new `app.py`, so the next
+  `bay deploy <env> --tags tailnet_identity` rebuilds it and recreates the sidecar alone.
 - **Serve passthrough caveat.** `tailscale serve` overwrites the `Tailscale-*`
   headers (with its whois of the caller) but forwards custom `X-*` headers. Verify
   `X-Tailnet-Device` survives the serve hop to the app at cutover; if a future serve
