@@ -14,7 +14,7 @@ Hosts now tell you when a reboot has been pending for a long time.
 
 ### Added
 - New alert `host.reboot_pending` (level `warn`, on by default). A daily timer, `bay-reboot-alert.timer`, checks `/var/run/reboot-required`. `unattended-upgrades` installs a kernel update but never reboots, so a host could run for months on an old kernel with no word to anyone. When the file is older than the threshold, the alert names the host, the days pending, the first five packages from `/var/run/reboot-required.pkgs`, and the running kernel against the newest installed one.
-- New `outbound_monitor` variables: `reboot_alert_enabled` (default `true`), `reboot_alert_threshold_days` (default `7`) and `reboot_alert_repeat_days` (default `7`). The first alert comes when the file reaches the threshold. After that, one reminder per repeat interval while it stays pending. The last alert time is kept in `/var/lib/bay-outbound-check/reboot-alert.state`, and it is cleared when the file is gone. Set `reboot_alert_enabled: false` to stop and mask the timer.
+- New `outbound_monitor` variables: `reboot_alert_enabled` (default `true`), `reboot_alert_threshold_days` (default `7`) and `reboot_alert_repeat_days` (default `7`). The first alert comes when the file reaches the threshold. After that, one reminder per repeat interval while it stays pending. The age counts from the first time the probe saw the file, so a later package that rewrites the file does not restart the clock. The state (`first_seen` and `last_alert`) is kept in `/var/lib/bay-outbound-check/reboot-alert.state`, and it is cleared when the file is gone. Set `reboot_alert_enabled: false` to stop and mask the timer.
 - Docs: `docs/alerting.md` has a new section "Pending reboot alert".
 
 ### Upgrade notes

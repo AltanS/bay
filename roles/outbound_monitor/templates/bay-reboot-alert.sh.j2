@@ -9,11 +9,18 @@
 #
 # Alert rhythm: nothing while the file is young. The first alert comes when the
 # file reaches the threshold. After that, one reminder per repeat interval.
-# The state file holds the epoch time of the last alert. It is removed when
-# the file is gone, so the next pending reboot starts the cycle again.
 #
-# The age is the mtime of the flag file. A later package that needs a reboot
-# touches the file again and so restarts the clock.
+# The age is counted from first_seen: the smaller of the stored first_seen and
+# the file mtime. Ubuntu rewrites the file for every package that needs a
+# reboot, so the mtime alone would restart the clock and a host that gets an
+# update every few days would never alert.
+#
+# The state file has two lines, parsed with a strict regex and never sourced:
+#   first_seen=<epoch>   when the reboot was first seen pending
+#   last_alert=<epoch>   when the last alert went out (absent before the first)
+# It is written on every run while the file exists. It is removed when the
+# file is gone, so the next pending reboot starts the cycle again. Any other
+# content (garbage, the old one-number format) counts as no state.
 
 set -uo pipefail
 
@@ -35,26 +42,48 @@ fi
 
 now=$(date +%s)
 flag_mtime=$(stat -c %Y "${FLAG_FILE}" 2>/dev/null || echo "${now}")
-age_secs=$(( now - flag_mtime ))
+
+# Read the state. Only two exact key=value lines count.
+stored_first=""
+last_alert=""
+if [[ -f "${STATE_FILE}" ]]; then
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ^first_seen=([0-9]{1,12})$ ]]; then
+      stored_first="${BASH_REMATCH[1]}"
+    elif [[ "${line}" =~ ^last_alert=([0-9]{1,12})$ ]]; then
+      last_alert="${BASH_REMATCH[1]}"
+    fi
+  done < "${STATE_FILE}"
+fi
+
+# first_seen survives a later touch of the file: keep the older of the two.
+first_seen="${flag_mtime}"
+if [[ -n "${stored_first}" && "${stored_first}" -lt "${flag_mtime}" ]]; then
+  first_seen="${stored_first}"
+fi
+
+mkdir -p "${STATE_DIR}"
+write_state() {
+  {
+    echo "first_seen=${first_seen}"
+    if [[ -n "${last_alert}" ]]; then echo "last_alert=${last_alert}"; fi
+  } > "${STATE_FILE}"
+}
+write_state
+
+age_secs=$(( now - first_seen ))
 if [[ "${age_secs}" -lt 0 ]]; then
   age_secs=0
 fi
 
-# Young flag: stay silent.
+# Young: stay silent.
 if [[ "${age_secs}" -lt $(( THRESHOLD_DAYS * 86400 )) ]]; then
   exit 0
 fi
 
 # Inside the repeat interval since the last alert: stay silent.
-mkdir -p "${STATE_DIR}"
-if [[ -f "${STATE_FILE}" ]]; then
-  last_alert=$(cat "${STATE_FILE}" 2>/dev/null || echo 0)
-  if [[ ! "${last_alert}" =~ ^[0-9]+$ ]]; then
-    last_alert=0
-  fi
-  if [[ $(( now - last_alert )) -lt $(( REPEAT_DAYS * 86400 )) ]]; then
-    exit 0
-  fi
+if [[ -n "${last_alert}" && $(( now - last_alert )) -lt $(( REPEAT_DAYS * 86400 )) ]]; then
+  exit 0
 fi
 
 age_days=$(( age_secs / 86400 ))
@@ -88,4 +117,5 @@ Packages: <code>$(bay_html_escape "${pkg_lines}")</code>${pkg_note}
 ${kernel_line}"
 
 bay_notify host.reboot_pending "${message}"
-echo "${now}" > "${STATE_FILE}"
+last_alert="${now}"
+write_state

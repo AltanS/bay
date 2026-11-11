@@ -72,6 +72,14 @@ class Probe:
         if pkgs is not None:
             self.pkgs.write_text(pkgs)
 
+    @property
+    def flag_mtime(self) -> int:
+        return int(self.flag.stat().st_mtime)
+
+    def state_values(self) -> dict[str, int]:
+        pairs = (line.split("=", 1) for line in self.state.read_text().splitlines())
+        return {key: int(value) for key, value in pairs}
+
     def run(self) -> subprocess.CompletedProcess:
         env = dict(os.environ, NOTIFY_LOG=str(self.log))
         proc = subprocess.run(
@@ -110,11 +118,12 @@ def test_no_flag_file_is_silent(probe):
     assert not probe.state.exists()
 
 
-def test_young_flag_file_is_silent(probe):
+def test_young_flag_file_is_silent_and_records_first_seen(probe):
     probe.flag_age(2)
     probe.run()
     assert probe.alerts() == []
-    assert not probe.state.exists()
+    assert probe.state_values()["first_seen"] == probe.flag_mtime
+    assert "last_alert" not in probe.state_values()
 
 
 def test_old_flag_file_sends_one_alert_with_the_details(probe):
@@ -128,7 +137,9 @@ def test_old_flag_file_sends_one_alert_with_the_details(probe):
     assert "<code>30</code> days" in message
     assert "libc6, linux-image-6.8.0-99-generic" in message
     assert "Kernel: running <code>" in message
-    assert probe.state.read_text().strip().isdigit()
+    values = probe.state_values()
+    assert values["first_seen"] == probe.flag_mtime
+    assert values["last_alert"] >= int(time.time()) - 5
 
 
 def test_package_list_is_cut_to_five_with_a_count(probe):
@@ -165,16 +176,23 @@ def test_second_run_inside_the_repeat_interval_is_silent(probe):
 def test_run_after_the_repeat_interval_alerts_again(probe):
     probe.flag_age(30)
     probe.run()
-    probe.state.write_text(f"{int(time.time()) - 8 * _DAY}\n")
+    first = probe.state_values()["first_seen"]
+    probe.state.write_text(
+        f"first_seen={first}\nlast_alert={int(time.time()) - 8 * _DAY}\n"
+    )
     probe.run()
     assert len(probe.alerts()) == 2
-    assert int(probe.state.read_text()) >= int(time.time()) - 5
+    assert probe.state_values()["last_alert"] >= int(time.time()) - 5
+    assert probe.state_values()["first_seen"] == first
 
 
 def test_run_just_inside_the_repeat_interval_stays_silent(probe):
     probe.flag_age(30)
     probe.run()
-    probe.state.write_text(f"{int(time.time()) - 6 * _DAY}\n")
+    first = probe.state_values()["first_seen"]
+    probe.state.write_text(
+        f"first_seen={first}\nlast_alert={int(time.time()) - 6 * _DAY}\n"
+    )
     probe.run()
     assert len(probe.alerts()) == 1
 
@@ -199,6 +217,57 @@ def test_garbage_state_file_does_not_block_the_alert(probe):
     probe.state.write_text("not a number\n")
     probe.run()
     assert len(probe.alerts()) == 1
+    assert probe.state_values()["first_seen"] == probe.flag_mtime
+
+
+def test_old_one_number_state_file_counts_as_no_state(probe):
+    """The first draft stored one epoch. It must not suppress or crash."""
+    probe.flag_age(30)
+    probe.state_dir.mkdir()
+    probe.state.write_text(f"{int(time.time())}\n")
+    probe.run()
+    assert len(probe.alerts()) == 1
+    assert set(probe.state_values()) == {"first_seen", "last_alert"}
+
+
+def test_state_file_is_parsed_never_sourced(probe, tmp_path):
+    marker = tmp_path / "pwned"
+    probe.flag_age(30)
+    probe.state_dir.mkdir()
+    probe.state.write_text(f"first_seen=1; touch {marker}\nlast_alert=$(touch {marker})\n")
+    probe.run()
+    assert not marker.exists()
+    assert len(probe.alerts()) == 1
+
+
+def test_a_later_touch_of_the_flag_does_not_restart_the_clock(probe):
+    """Ubuntu rewrites the file for every package that needs a reboot."""
+    probe.flag_age(5)
+    probe.run()
+    assert probe.alerts() == []
+    first = probe.state_values()["first_seen"]
+    # Three days later: another package touches the file, mtime is now.
+    probe.state.write_text(f"first_seen={first - 3 * _DAY}\n")
+    probe.flag_age(0)
+    probe.run()
+    assert probe.state_values()["first_seen"] == first - 3 * _DAY
+    assert len(probe.alerts()) == 1, "8 days since first_seen: alert on schedule"
+    # And the reminder still waits for the repeat interval.
+    probe.flag_age(0)
+    probe.run()
+    assert len(probe.alerts()) == 1
+
+
+def test_old_state_survives_a_touch_then_alerts_with_the_old_age(probe):
+    probe.flag_age(30)
+    probe.run()
+    old_first = probe.state_values()["first_seen"]
+    probe.state.write_text(f"first_seen={old_first}\n")  # no alert recorded yet
+    probe.flag_age(0)  # touched to now
+    probe.run()
+    (_, message), = probe.alerts()[-1:]
+    assert "<code>30</code> days" in message
+    assert probe.state_values()["first_seen"] == old_first
 
 
 def test_threshold_and_repeat_come_from_the_variables(probe):

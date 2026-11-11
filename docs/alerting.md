@@ -692,8 +692,10 @@ The rules are short:
 - The file is gone (the host rebooted): the state is cleared. The next
   pending reboot starts a new cycle.
 
-The age is the modification time of the file. A package that asks for a
-reboot later touches the file again, so the clock restarts.
+The age counts from the first time the probe saw the file pending. Ubuntu
+rewrites the file for every package that needs a reboot. That does not restart
+the clock, so a host that gets an update every few days still alerts on
+schedule.
 
 The alert names the host and the days pending. It lists the first five
 packages from `/var/run/reboot-required.pkgs`. When `/boot` holds a newer
@@ -706,8 +708,9 @@ reboot_alert_threshold_days: 7      # first alert at this file age
 reboot_alert_repeat_days: 7         # one reminder per interval while pending
 ```
 
-The last alert time lives in `/var/lib/bay-outbound-check/reboot-alert.state`
-(the state directory of the disk alert). Bay never reboots a host for you.
+The state lives in `/var/lib/bay-outbound-check/reboot-alert.state` (the state
+directory of the disk alert). It has two lines, `first_seen=<epoch>` and
+`last_alert=<epoch>`. Bay never reboots a host for you.
 Pick a quiet time and run `sudo reboot` yourself.
 
 The probe belongs to the `outbound_monitor` role, which is in `provision.yml`

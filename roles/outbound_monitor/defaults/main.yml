@@ -36,10 +36,12 @@ disk_alert_interval: "15min"
 # and nobody hears about it. A daily timer (bay-reboot-alert) alerts
 # (host.reboot_pending, level warn) when that file is older than
 # reboot_alert_threshold_days. While the reboot stays pending it repeats once
-# per reboot_alert_repeat_days, never daily. The last alert time lives in
-# <outbound_check_state_dir>/reboot-alert.state and is cleared when the file
-# is gone. The file age is its mtime, so a later package that needs a reboot
-# restarts the clock. Like the disk alert, this role runs from provision.yml:
+# per reboot_alert_repeat_days, never daily. The state file
+# <outbound_check_state_dir>/reboot-alert.state holds first_seen and last_alert
+# (two key=value lines) and is cleared when the file is gone. The age counts
+# from first_seen, the older of the stored value and the file mtime. A later
+# package that needs a reboot rewrites the file but does not restart the
+# clock. Like the disk alert, this role runs from provision.yml:
 # install on existing hosts with `bay provision <env> --tags outbound_monitor`.
 reboot_alert_enabled: true
 reboot_alert_threshold_days: 7
