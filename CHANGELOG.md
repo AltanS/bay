@@ -8,6 +8,29 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.20.0] - 2026-11-12
+
+This release fixes six findings: a stale `docker` group on the debug user, a nightly prune that deleted volumes, a dry run that failed on a new timer, a sidecar that ignored SIGTERM, an always-changed buildkit task, and a new validator warning.
+
+### Fixed
+- Debug agent: the `debugbot` account kept its membership of the `docker` group on a host that an older Bay version provisioned. The group is root-equivalent. The role only ever added groups (`append: true`), so it never took the membership away. With `debug_agent_docker_access: false` the role now reads `id -nG` and runs `gpasswd -d <user> docker` when the account is a member. The step is idempotent. The primary group and the other groups stay. It runs in check mode as a read only and skips the removal. `docs/debug-agent.md` says so.
+- Cron jobs: the nightly or weekly `docker system prune -af --volumes` deleted every volume that no container used at that moment. The data volume of a service whose deploy failed shortly before is such a volume. New variable `docker_prune_volumes` (default `false`). Without it the job runs `docker system prune -af`. The cost: an anonymous volume of a removed container stays on disk, a small leak. Set `docker_prune_volumes: true` to get the old command back. The comments in `roles/cronjobs` and the docs that quoted `--volumes` say the same.
+- Dry runs: `bay provision <env> --tags outbound_monitor -- --check` failed on a host that had no `bay-reboot-alert.timer` yet, with `Could not find the requested service`. Check mode writes no unit file, so the systemd module could not find the unit. The enable and the disable tasks of the three timers of `outbound_monitor` (outbound check, disk alert, reboot alert) now skip in check mode when the task that writes their unit file reports `changed`. The same flaw was in the backup timers and the maintenance timers (`backup`), the trigger watchdog timer (`git_deploy`) and the CrowdSec data refresh timer (`crowdsec`). They follow the same rule. A real run is not affected.
+- Tailnet identity: the `tailnet-identity` sidecar ignored SIGTERM. The server is PID 1 in its container, Linux does not apply the default SIGTERM action to PID 1, so `docker stop` waited 30 s and then killed it. The server now handles SIGTERM and SIGINT, stops listening and exits 0. A test starts it as PID 1 of a fresh PID namespace and checks that SIGTERM ends it in under 3 s.
+- Build server: the task `Apply memory limit to the bay buildx container` (and `Apply memory limit to builder container` for local builds) had `changed_when: rc == 0`. `docker update` exits 0 also when nothing moves, so the task said `changed` on every deploy. It now reads memory and swap of the container before and after, and reports `changed` only when they differ. See Upgrade notes for the part that is not a bug.
+
+### Added
+- `bay validate` warns when a tag in `headscale_acl_policy.tagOwners` has more than one owner, an owner that is a `group:` or an `autogroup:*`, or the owner `*`. The warning names the tag and says: every owner can enrol a node with that tag and so gets every grant of the tag. It never fails the run. See `docs/tailnet-naming.md`.
+- New variable `docker_prune_volumes` (see Fixed).
+
+### Upgrade notes
+- Debug agent: the role is in `provision.yml` (tags `users` and `agent-debug`). Run `bay provision <env> --tags agent-debug` on each existing host that has `debug_agent_enabled: true`. No container is touched. An SSH session that the account already has keeps its old groups until it logs in again.
+- Cron jobs: the role is in `deploy.yml` and is a rig role. Run `bay deploy <env> --tags cronjobs`. It rewrites one cron line. No container is touched. A fleet that wants `--volumes` back sets `docker_prune_volumes: true` in group_vars.
+- Dry runs: nothing to apply. The change is in the task files. `outbound_monitor` and `crowdsec` are in `provision.yml`, `backup` and `git_deploy` are in `deploy.yml`.
+- Tailnet identity: run `bay deploy <env> --tags tailnet_identity` on the control and ingress env. The build context changed, so the role rebuilds the image, and the reconciler **recreates the `tailnet-identity` sidecar** (and only that container). Requests that use `identity_inject` fail for a few seconds while it restarts. Later stops are fast. A plain `bay up` of that box env does the same as a recreate step.
+- Build server: run `bay deploy <env> --tags git_deploy` to see the new reporting. No container is recreated. Fleets that share one build server share one buildkit container, so they share one memory cap. If two such fleets set different values of `git_deploy_buildkit_memory_max`, each deploy resets the cap that the other fleet set. The task also sets swap equal to memory, which turns container swap off. A fleet that pins memory and swap by hand sets `git_deploy_buildkit_memory_max: ""` at the `all` scope, and every other fleet on that build server must set the same value. `docs/services.md` says so.
+- Validator: nothing to run. Run `bay validate` and read the new warning, if any.
+
 ## [2.19.1] - 2026-11-11
 
 ### Fixed
