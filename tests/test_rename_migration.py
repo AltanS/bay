@@ -47,10 +47,13 @@ def test_rename_migration_runs_from_both_playbooks() -> None:
         )
 
 
-# Units born after the rename (2.3.0 [[jobs]]): there is no pre-1.0 unit to remove.
+# Units born after the rename (2.3.0 [[jobs]], 2.19.0 reboot alert): there is no
+# pre-1.0 unit to remove.
 _POST_RENAME_UNITS = {
     "bay-job@.service",
     "bay-job@.timer",
+    "bay-reboot-alert.service",
+    "bay-reboot-alert.timer",
 }
 
 
@@ -80,6 +83,7 @@ _POST_RENAME_SCRIPTS = {
     "bay-job.sh",  # 2.3.0 [[jobs]]
     "bay-prerouting.conf",  # 2.7.0 nftables pre-routing table (GH#4)
     "bay-egress.conf",  # egress containers (bay.toml egress)
+    "bay-reboot-alert.sh",  # 2.19.0 pending reboot alert
 }
 
 

@@ -8,6 +8,20 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.19.0] - 2026-11-11
+
+Hosts now tell you when a reboot has been pending for a long time.
+
+### Added
+- New alert `host.reboot_pending` (level `warn`, on by default). A daily timer, `bay-reboot-alert.timer`, checks `/var/run/reboot-required`. `unattended-upgrades` installs a kernel update but never reboots, so a host could run for months on an old kernel with no word to anyone. When the file is older than the threshold, the alert names the host, the days pending, the first five packages from `/var/run/reboot-required.pkgs`, and the running kernel against the newest installed one.
+- New `outbound_monitor` variables: `reboot_alert_enabled` (default `true`), `reboot_alert_threshold_days` (default `7`) and `reboot_alert_repeat_days` (default `7`). The first alert comes when the file reaches the threshold. After that, one reminder per repeat interval while it stays pending. The age counts from the first time the probe saw the file, so a later package that rewrites the file does not restart the clock. The state (`first_seen` and `last_alert`) is kept in `/var/lib/bay-outbound-check/reboot-alert.state`, and it is cleared when the file is gone. Set `reboot_alert_enabled: false` to stop and mask the timer.
+- Docs: `docs/alerting.md` has a new section "Pending reboot alert".
+
+### Upgrade notes
+- The probe is part of the `outbound_monitor` role, and that role runs from `provision.yml` only. A deploy does not install it. On each existing host, run `bay provision <env> --tags outbound_monitor`. A host that is not re-provisioned has no check and sends no alert.
+- Expect one alert per host that has had a pending reboot for 7 days or more, on the first run after the install.
+- Bay does not reboot hosts. Reboot at a quiet time, one box at a time.
+
 ## [2.18.1] - 2026-11-11
 
 A HALF project stays HALF until every box it waits for got a deploy. A later run that skips such a box no longer clears it.

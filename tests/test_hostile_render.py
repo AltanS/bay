@@ -560,6 +560,18 @@ def _disk_alert(payload: str) -> str:
     )
 
 
+def _reboot_alert(payload: str) -> str:
+    return _render(
+        "roles/outbound_monitor/templates/bay-reboot-alert.sh.j2",
+        ansible_managed="test",
+        outbound_check_state_dir=payload,
+        reboot_alert_threshold_days=7,
+        reboot_alert_repeat_days=7,
+        inventory_hostname="host1",
+        region="",
+    )
+
+
 def _rebuild_sh(payload: str) -> str:
     from test_rebuild_config import _render_rebuild_sh
 
@@ -745,6 +757,7 @@ _CASES: list[Case] = [
         _log_archive_setup,
     ),
     Case("roles/outbound_monitor/templates/bay-disk-alert.sh.j2", _disk_alert),
+    Case("roles/outbound_monitor/templates/bay-reboot-alert.sh.j2", _reboot_alert),
     Case(
         "roles/git_deploy/templates/rebuild.sh.j2",
         _rebuild_sh,

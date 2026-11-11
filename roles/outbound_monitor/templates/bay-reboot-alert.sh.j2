@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# bay-reboot-alert, Pending reboot probe
+# Managed by Ansible (outbound_monitor role). Do not edit manually.
+#
+# unattended-upgrades installs packages but never reboots. When a package
+# needs a reboot (a new kernel, libc), Ubuntu and Debian create
+# /var/run/reboot-required. This probe tells the operator when that file has
+# been there longer than the threshold.
+#
+# Alert rhythm: nothing while the file is young. The first alert comes when the
+# file reaches the threshold. After that, one reminder per repeat interval.
+#
+# The age is counted from first_seen: the smaller of the stored first_seen and
+# the file mtime. Ubuntu rewrites the file for every package that needs a
+# reboot, so the mtime alone would restart the clock and a host that gets an
+# update every few days would never alert.
+#
+# The state file has two lines, parsed with a strict regex and never sourced:
+#   first_seen=<epoch>   when the reboot was first seen pending
+#   last_alert=<epoch>   when the last alert went out (absent before the first)
+# It is written on every run while the file exists. It is removed when the
+# file is gone, so the next pending reboot starts the cycle again. Any other
+# content (garbage, the old one-number format) counts as no state.
+
+set -uo pipefail
+
+STATE_DIR={{ outbound_check_state_dir | quote }}
+STATE_FILE="${STATE_DIR}/reboot-alert.state"
+FLAG_FILE={{ reboot_alert_flag_file | default('/var/run/reboot-required') | quote }}
+PKGS_FILE="${FLAG_FILE}.pkgs"
+THRESHOLD_DAYS={{ reboot_alert_threshold_days | int }}
+REPEAT_DAYS={{ reboot_alert_repeat_days | int }}
+MAX_PKGS=5
+
+{% include '_notify.sh.j2' %}
+
+# No flag file: no reboot is pending. Forget any earlier alert.
+if [[ ! -e "${FLAG_FILE}" ]]; then
+  rm -f "${STATE_FILE}"
+  exit 0
+fi
+
+now=$(date +%s)
+flag_mtime=$(stat -c %Y "${FLAG_FILE}" 2>/dev/null || echo "${now}")
+
+# Read the state. Only two exact key=value lines count.
+stored_first=""
+last_alert=""
+if [[ -f "${STATE_FILE}" ]]; then
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ^first_seen=([0-9]{1,12})$ ]]; then
+      stored_first="${BASH_REMATCH[1]}"
+    elif [[ "${line}" =~ ^last_alert=([0-9]{1,12})$ ]]; then
+      last_alert="${BASH_REMATCH[1]}"
+    fi
+  done < "${STATE_FILE}"
+fi
+
+# first_seen survives a later touch of the file: keep the older of the two.
+first_seen="${flag_mtime}"
+if [[ -n "${stored_first}" && "${stored_first}" -lt "${flag_mtime}" ]]; then
+  first_seen="${stored_first}"
+fi
+
+mkdir -p "${STATE_DIR}"
+write_state() {
+  {
+    echo "first_seen=${first_seen}"
+    if [[ -n "${last_alert}" ]]; then echo "last_alert=${last_alert}"; fi
+  } > "${STATE_FILE}"
+}
+write_state
+
+age_secs=$(( now - first_seen ))
+if [[ "${age_secs}" -lt 0 ]]; then
+  age_secs=0
+fi
+
+# Young: stay silent.
+if [[ "${age_secs}" -lt $(( THRESHOLD_DAYS * 86400 )) ]]; then
+  exit 0
+fi
+
+# Inside the repeat interval since the last alert: stay silent.
+if [[ -n "${last_alert}" && $(( now - last_alert )) -lt $(( REPEAT_DAYS * 86400 )) ]]; then
+  exit 0
+fi
+
+age_days=$(( age_secs / 86400 ))
+
+# First few package names that asked for the reboot.
+pkg_lines=""
+pkg_note=""
+if [[ -r "${PKGS_FILE}" ]]; then
+  pkg_lines=$(sort -u "${PKGS_FILE}" | head -n "${MAX_PKGS}" | paste -sd ',' - | sed 's/,/, /g')
+  pkg_total=$(sort -u "${PKGS_FILE}" | wc -l | tr -d ' ')
+  if [[ "${pkg_total}" -gt "${MAX_PKGS}" ]]; then
+    pkg_note=" (+$(( pkg_total - MAX_PKGS )) more)"
+  fi
+fi
+if [[ -z "${pkg_lines}" ]]; then
+  pkg_lines="(not listed)"
+fi
+
+# Running kernel against the newest installed one, when /boot lists them.
+running_kernel=$(uname -r)
+newest_kernel=$(ls /boot/vmlinuz-* 2>/dev/null | sed 's|.*/vmlinuz-||' | sort -V | tail -n 1)
+kernel_line="Kernel: running <code>$(bay_html_escape "${running_kernel}")</code>"
+if [[ -n "${newest_kernel}" && "${newest_kernel}" != "${running_kernel}" ]]; then
+  kernel_line="${kernel_line}, newest installed <code>$(bay_html_escape "${newest_kernel}")</code>"
+fi
+
+message="⚠️ <b>[REBOOT PENDING]</b>
+Host: <code>${BAY_HOST}</code>
+A reboot has been pending for <code>${age_days}</code> days (alert after ${THRESHOLD_DAYS}, repeat every ${REPEAT_DAYS}).
+Packages: <code>$(bay_html_escape "${pkg_lines}")</code>${pkg_note}
+${kernel_line}"
+
+bay_notify host.reboot_pending "${message}"
+last_alert="${now}"
+write_state
