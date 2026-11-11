@@ -118,14 +118,15 @@ def test_default_adds_the_admin_router():
     assert labels[f"{ADMIN}.rule"] == (
         f"Host(`{DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/swagger`))"
     )
-    assert labels[f"{ADMIN}.middlewares"] == "public-chain,headscale-admin-allow"
+    assert labels[f"{ADMIN}.middlewares"] == "headscale-client-ip,public-chain,headscale-admin-allow"
     assert labels[ALLOW] == "127.0.0.1/32,::1/128"
     assert labels[f"{ADMIN}.service"] == "headscale"
     assert labels[f"{ADMIN}.tls.certresolver"] == "letsencrypt"
     assert labels[f"{ADMIN}.entrypoints"] == "websecure"
-    # The main router is untouched: same rule, same public chain.
+    # The main router keeps its rule and the public chain (2.20.0 puts the
+    # True-Client-IP strip in front, test_headscale_trusted_proxies.py).
     assert labels["traefik.http.routers.headscale.rule"] == f"Host(`{DOMAIN}`)"
-    assert labels["traefik.http.routers.headscale.middlewares"] == "public-chain"
+    assert labels["traefik.http.routers.headscale.middlewares"] == "headscale-client-ip,public-chain"
 
 
 @pytest.mark.parametrize("value", [False, "false", "no"])
@@ -240,8 +241,8 @@ def test_admin_router_does_not_use_the_tailnet_allowlist():
     """2.20.0: vpn-chain let every tailnet node (tenants too) reach the API."""
     middlewares = _built_labels()[f"{ADMIN}.middlewares"].split(",")
     assert "vpn-chain" not in middlewares and "vpn-only" not in middlewares
-    # The main router's headers and compression, plus the dedicated allowlist.
-    assert middlewares == ["public-chain", "headscale-admin-allow"]
+    # The main router's middlewares, plus the dedicated allowlist.
+    assert middlewares == ["headscale-client-ip", "public-chain", "headscale-admin-allow"]
 
 
 def test_default_allowlist_is_loopback_only():

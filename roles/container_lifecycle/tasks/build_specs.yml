@@ -347,7 +347,7 @@
       traefik.http.routers.headscale-admin.priority: "1000"
       traefik.http.routers.headscale-admin.entrypoints: "{{ 'websecure,websecure_tailnet' if traefik_split_entrypoints | default(false) | bool else 'websecure' }}"
       traefik.http.routers.headscale-admin.tls.certresolver: letsencrypt
-      traefik.http.routers.headscale-admin.middlewares: public-chain,headscale-admin-allow
+      traefik.http.routers.headscale-admin.middlewares: headscale-client-ip,public-chain,headscale-admin-allow
       traefik.http.routers.headscale-admin.service: headscale
       traefik.http.middlewares.headscale-admin-allow.ipallowlist.sourcerange: >-
         {{ (headscale_admin_api_allowed_ips | default(['127.0.0.1/32', '::1/128'])) | join(',') }}
@@ -389,7 +389,12 @@
         traefik.http.routers.headscale.rule: "Host(`{{ headscale_domain }}`)"
         traefik.http.routers.headscale.entrypoints: websecure
         traefik.http.routers.headscale.tls.certresolver: letsencrypt
-        traefik.http.routers.headscale.middlewares: public-chain
+        traefik.http.routers.headscale.middlewares: headscale-client-ip,public-chain
+        # Removes a True-Client-IP the client sent. Headscale reads that header
+        # first once Traefik is in headscale_trusted_proxies (2.20.0), and
+        # Traefik, unlike X-Real-IP and X-Forwarded-For, passes it through. An
+        # empty value removes the header.
+        traefik.http.middlewares.headscale-client-ip.headers.customrequestheaders.True-Client-IP: ""
         traefik.http.services.headscale.loadbalancer.server.port: "8080"
         com.centurylinklabs.watchtower.enable: "false"
 

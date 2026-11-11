@@ -24,6 +24,14 @@
 #   them. Use `bay gateway status` to check headscale health, or ansible
 #   ad-hoc for direct container access.
 #
+# Client IPs (since 2.20.0):
+#
+# - **Headscale trusts Traefik's proxy headers.** `headscale_trusted_proxies`
+#   (below) defaults to the gateway of the docker network Traefik uses to reach
+#   the container, as a /32. Before, Headscale logged that gateway for every
+#   request. Both headscale routers remove a client-sent True-Client-IP
+#   (middleware `headscale-client-ip`), because Headscale reads it first.
+#
 # Admin API (since 2.19.0):
 #
 # - **The REST API is closed.** `/api/...` and `/swagger` on headscale_domain
@@ -59,6 +67,38 @@
 
 headscale_domain: ""
 headscale_dns_global_nameservers: []
+
+# ── Trusted proxies (2.20.0) ────────────────────────────────────────────────
+# Traefik fronts Headscale on the same host. Without `trusted_proxies` in
+# config.yaml, Headscale logs every request with Traefik's address, not the
+# client's. With it, Headscale takes the client IP from the proxy headers
+# (True-Client-IP, then X-Real-IP, then X-Forwarded-For, rightmost untrusted)
+# when the TCP peer is in the list, and strips those headers from any other
+# peer. Key and semantics checked against the config-example.yaml and
+# hscontrol/realip.go of headscale 0.29.7. Headscale accepts only prefixes
+# ("a.b.c.d/32", not a bare IP) and refuses 0.0.0.0/0 and ::/0; the role
+# stops on both, because Headscale would crash-loop.
+#
+# Which address does Headscale see? Traefik runs with host networking and
+# reaches the container on its IP in the docker network that
+# `traefik.docker.network` names (traefik_docker_network). The kernel sends
+# that from the host's own address on the bridge, which is the network's
+# gateway. So the computed default is that gateway as a /32 (a /128 for an
+# IPv6 gateway), read with `docker network inspect` on each run. Not the
+# whole subnet: every container on that network has an address in it, and
+# could then set the headers and pick the IP Headscale logs. Only processes
+# on the host itself (Traefik, and other host-network containers) use the
+# gateway address. Empty when the network cannot be read: then nothing is
+# rendered and Headscale behaves as before.
+#
+# Traefik removes X-Real-IP and X-Forwarded-For sent by a client and sets its
+# own, but it passes True-Client-IP through, and Headscale reads that header
+# first. So the headscale routers also carry the middleware
+# `headscale-client-ip`, which removes True-Client-IP
+# (container_lifecycle/tasks/build_specs.yml).
+#
+# Override with your own list of prefixes. `[]` turns it off.
+headscale_trusted_proxies: "{{ _headscale_proxy_gateways | default([]) }}"
 # Operator-defined split-DNS A records, merged into extra-records.json and
 # config.yaml's dns.nameservers.split alongside the auto-generated
 # `access: vpn` service and `tailnet_proxies` records (same seen_domains

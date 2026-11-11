@@ -105,6 +105,69 @@
   become_user: root
   tags: [headscale]
 
+# -- Trusted proxy (Traefik) --------------------------------------------------
+# headscale_trusted_proxies (defaults/main.yml) is computed from the gateway of
+# the docker network Traefik uses to reach the container. The traefik role
+# creates that network later in the play, so create it here first: on a fresh
+# host the first deploy then already renders trusted_proxies. Same task as in
+# roles/traefik, idempotent.
+
+- name: Ensure the docker network between Traefik and headscale exists
+  community.docker.docker_network:
+    name: "{{ traefik_docker_network | default('services') }}"
+    state: present
+  tags: [headscale]
+
+# Read-only, so it also runs in check mode. A missing network (a fresh host
+# in check mode) leaves the list empty, and nothing is rendered.
+- name: Read the docker network between Traefik and headscale
+  ansible.builtin.command:
+    cmd: docker network inspect {{ traefik_docker_network | default('services') }}
+  register: _headscale_network_inspect
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+  tags: [headscale]
+
+- name: Compute the address Traefik reaches headscale from
+  ansible.builtin.set_fact:
+    _headscale_proxy_gateways: >-
+      {{ (_gateways | reject('search', ':') | map('regex_replace', '$', '/32') | list)
+         + (_gateways | select('search', ':') | map('regex_replace', '$', '/128') | list) }}
+  vars:
+    _gateways: >-
+      {{ _ipam | selectattr('Gateway', 'defined') | map(attribute='Gateway')
+         | select | map('string') | list }}
+    _inspect_ok: >-
+      {{ _headscale_network_inspect is not skipped
+         and (_headscale_network_inspect.rc | default(1)) == 0
+         and (_headscale_network_inspect.stdout | default('') | trim | length) > 0 }}
+    _ipam: >-
+      {{ ((_headscale_network_inspect.stdout | from_json | first).IPAM.Config | default([], true))
+         if _inspect_ok else [] }}
+  tags: [headscale]
+
+- name: Validate headscale_trusted_proxies
+  ansible.builtin.assert:
+    that:
+      - headscale_trusted_proxies is not string
+      - headscale_trusted_proxies is iterable
+      - headscale_trusted_proxies | select('string') | list | length == headscale_trusted_proxies | length
+      - >-
+        headscale_trusted_proxies
+        | reject('match', '^([0-9]{1,3}[.]){3}[0-9]{1,3}/([1-9]|[12][0-9]|3[0-2])$')
+        | reject('match', '^[0-9A-Fa-f]*:[0-9A-Fa-f:.]*/([1-9][0-9]?|1[01][0-9]|12[0-8])$')
+        | list | length == 0
+    fail_msg: >-
+      headscale_trusted_proxies must be a list of prefixes such as
+      "172.18.0.1/32". It is {{ headscale_trusted_proxies }}. Headscale refuses
+      a bare IP, 0.0.0.0/0 and ::/0, and would crash-loop on start. Use [] to
+      turn it off.
+    quiet: true
+  tags: [headscale]
+
 # -- Configuration ------------------------------------------------------------
 
 - name: Template headscale config

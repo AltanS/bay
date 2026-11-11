@@ -588,12 +588,25 @@ and exists only on the machine that made it.
 | `tailnet_identity_source` | `api` | IP→device source: `api` (HTTP API, no mount — recommended) or `sqlite` (DB read, mounts state) |
 | `tailnet_identity_api_key` | `""` | Headscale API key (vault ref) — required when source is `api` |
 | `headscale_admin_api_public` | `false` | `false`: `/api` and `/swagger` on the Headscale host name answer only to `headscale_admin_api_allowed_ips`. `true`: open to the internet, as before 2.19.0 |
+| `headscale_trusted_proxies` | gateway of `traefik_docker_network`, as a `/32` | Prefixes whose proxy headers Headscale trusts (`trusted_proxies` in `config.yaml`). `[]` turns it off |
 | `headscale_admin_api_allowed_ips` | `["127.0.0.1/32", "::1/128"]` | IPs or CIDRs that reach the admin API while it is closed. Add a device's tailnet IP as a `/32` to open it for that device |
 | `tailnet_identity_unknown_action` | `pass` | Unknown client IP: `pass` (200 + `unknown`) or `deny` (403) |
 | `<route>.identity` (compiled `identity_inject`) | `false` | Per-route opt-in to the identity header |
 
 ## Notes & gotchas
 
+- **Headscale logs the client, not Traefik (2.20.0).** Traefik runs with host
+  networking and reaches the headscale container from the gateway of the
+  docker network (`traefik_docker_network`). The `headscale` role reads that
+  gateway with `docker network inspect` and renders it as a `/32` into
+  `trusted_proxies` in `config.yaml`. Headscale then takes the client IP from
+  the proxy headers when the request comes from that address, and strips the
+  headers from any other peer. Only the gateway is trusted, not the subnet:
+  any container on the network could otherwise set the headers. Traefik passes
+  `True-Client-IP` through, and Headscale reads it first, so both headscale
+  routers remove it (middleware `headscale-client-ip`). Set
+  `headscale_trusted_proxies` to your own prefixes, or `[]` to turn it off.
+  Headscale refuses a bare IP and `0.0.0.0/0`, so the deploy stops on them.
 - **One wildcard per zone.** All proxy hostnames should share one
   `tailnet_ingress_cert_domain`; a hostname outside it triggers a separate cert.
 - **Split-DNS staleness** (as with VPN services): after changing a route,

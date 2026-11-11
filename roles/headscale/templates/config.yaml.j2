@@ -5,6 +5,16 @@ server_url: "https://{{ headscale_domain }}"
 disable_check_updates: true
 listen_addr: 0.0.0.0:8080
 metrics_listen_addr: 127.0.0.1:9090
+{% if headscale_trusted_proxies | default([]) | length > 0 %}
+# Traefik fronts headscale from the host (network_mode: host), so its TCP
+# address is the gateway of the docker network. Headscale trusts the proxy
+# headers only from these prefixes. See headscale_trusted_proxies in
+# roles/headscale/defaults/main.yml.
+trusted_proxies:
+{% for _proxy in headscale_trusted_proxies %}
+  - "{{ _proxy }}"
+{% endfor %}
+{% endif %}
 noise:
   private_key_path: /var/lib/headscale/noise_private.key
 prefixes:
