@@ -1,9 +1,18 @@
 ---
 # Cronjobs role defaults
 
-# Docker system prune — removes unused images, containers, networks, and volumes
+# Docker system prune — removes unused images, containers and networks
 docker_prune_enabled: true
 docker_prune_schedule: "0 3 * * 0"              # Weekly Sunday 03:00
+
+# Volumes are NOT pruned by default. The job runs `docker system prune -af`.
+# With `--volumes` it deletes every volume that no container uses at that
+# moment, for example the data volume of a service whose deploy failed shortly
+# before, so the next deploy would start with an empty one. Leaving it off has
+# one cost: an anonymous volume of a removed container stays on disk, a small
+# leak. Set this to true only if you accept that risk and want the job to run
+# `docker system prune -af --volumes`.
+docker_prune_volumes: false
 
 # Docker builder prune — cleans build cache (docker system prune does NOT touch this)
 docker_prune_builder_enabled: true
@@ -17,8 +26,9 @@ bay_buildx_builder: "argo-builder"  # kept-argo: live buildx builder name on hos
 # Builders the prune sweeps, in order. `default` catches cache from plain
 # `docker build`; the bay builder uses the docker-container driver, whose
 # cache lives in its own volume (buildx_buildkit_<name>0_state) and is
-# invisible to BOTH `docker builder prune` and `docker system prune -af
-# --volumes` — the volume is in use by the running buildkit container.
+# invisible to BOTH `docker builder prune` and `docker system prune -af`
+# (also with `--volumes`) — the volume is in use by the running buildkit
+# container.
 # Until v0.111.2 only the default builder was pruned, so the cache the
 # framework actually creates grew unbounded: a deployment host reached
 # 41 GB of stale cache while every prune logged "Total reclaimed space: 0B"
@@ -63,8 +73,8 @@ docker_prune_build_server_schedule: "0 3 * * *"              # Daily 03:00
 #
 # The cache lives in the builder's own Docker volume
 # (buildx_buildkit_<builder>0_state), which `docker system df` does not report
-# and `docker system prune -af --volumes` cannot touch while the buildkit
-# container holds it open — so nothing else in this file bounds it.
+# and `docker system prune -af` (with or without `--volumes`) cannot touch
+# while the buildkit container holds it open — so nothing else in this file bounds it.
 #
 # Four times a day keeps the peak near reserve + a quarter-day of churn, and
 # leaves the 2 GB reserve (docker_prune_builder_keep_storage) doing its job of

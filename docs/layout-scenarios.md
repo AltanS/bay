@@ -981,7 +981,7 @@ bay rollback production --project shop --to 0123456789ab
 for an app whose `bay.toml` is in its repo it moves the pin to that commit too: config and code.
 It works when the image of that commit still exists on the box. Otherwise it refuses before
 anything moves and lists the commit tags the box has. A second plain rollback undoes the first.
-How far back that reaches: nothing counts commit tags, but the `docker system prune -af --volumes` cron job
+How far back that reaches: nothing counts commit tags, but the `docker system prune -af` cron job
 of the box (weekly by default) removes every image that no container uses, tags and all
 ([plan.md](plan.md#bay-rollback), "How far back `--to` reaches").
 
@@ -1125,8 +1125,8 @@ container stays.
 
 - The container stops on `eu-1`.
 - The volumes and the database stay on `eu-1`. Bay never deletes them. The weekly cron job
-  `docker system prune -af --volumes` does not delete them either: on Docker Engine 23 and later
-  it removes only anonymous volumes, and Bay gives every volume a name (`<stack_name>_<volume>`).
+  `docker system prune -af` does not delete them either: it runs without `--volumes`
+  (`docker_prune_volumes`, default `false`).
 - The app starts on `eu-2` with empty volumes and a new database.
 
 The plan lists the old volumes and the old database by name. It prints the
@@ -1371,8 +1371,8 @@ box env is deployed once).
 
 Only a receipt that confirms the containers are gone deletes the env from the lock. With no
 env left, `projects/shop/` leaves the fleet. The volumes and the database stay. The weekly
-`docker system prune -af --volumes` keeps them too, because it removes only anonymous volumes on
-Docker Engine 23 and later. See
+`docker system prune -af` keeps them too, because it runs without `--volumes`
+(`docker_prune_volumes`, default `false`). See
 [plan.md](plan.md#bay-remove).
 
 **The app side.** `bay remove` changes the fleet and the boxes only. It never touches the app
