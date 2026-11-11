@@ -295,6 +295,11 @@ policy. A delete returns you to no policy.
 - **`tagOwners` members need the trailing `@`.** `["alice@"]`, not `["alice"]`. The
   at-form is how a user is written in policy; without it the entry does not resolve
   to the user you meant.
+- **A tag with wide owners is a wide door.** Every owner of a tag can enrol a node with
+  that tag, and that node gets every grant of the tag. `bay validate` warns (never fails)
+  when a tag in `tagOwners` has more than one owner, an owner that is a `group:` or an
+  `autogroup:*`, or `*`. The warning names the tag. Name one user per tag unless a wider
+  set is on purpose.
 - **`policy check` is static.** It validates syntax and internal references — it will
   happily pass a policy naming a user or tag that does not exist on the tailnet.
   **Create the user before deploying a policy that references it**, or you ship a

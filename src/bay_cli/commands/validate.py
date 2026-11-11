@@ -2189,6 +2189,64 @@ def _validate_headscale_oidc(
         )
 
 
+def _tag_owner_problems(owners: Any) -> list[str]:
+    """What is wide about the owners of one ACL tag. An empty list is fine."""
+    if isinstance(owners, str):
+        owners = [owners]
+    if not isinstance(owners, (list, tuple)):
+        return []
+    names = [str(o) for o in owners]
+    problems: list[str] = []
+    if len(names) > 1:
+        problems.append(f"it has {len(names)} owners ({', '.join(names)})")
+    for name in names:
+        if name == "*":
+            problems.append("its owner is '*', which is every user")
+        elif name.startswith("autogroup:"):
+            problems.append(f"its owner '{name}' is a built-in group")
+        elif name.startswith("group:"):
+            problems.append(f"its owner '{name}' is a group")
+    return problems
+
+
+def _validate_acl_tag_owners(
+    parsed_files: dict[str, Any],
+    result: ValidationResult,
+) -> None:
+    """Warn when an ACL tag has wide owners (never a failure).
+
+    ``tagOwners`` maps a tag to the users who may apply it. Whoever owns a tag
+    can enrol a node with it, and that node gets every grant of the tag. More
+    than one owner, a group, ``autogroup:*`` or ``*`` widens that set. A wide
+    set can be on purpose, so this only warns.
+    """
+    policy: Any = None
+    for _rel_path, data in parsed_files.items():
+        if isinstance(data, dict) and data.get("headscale_acl_policy"):
+            policy = data["headscale_acl_policy"]
+            break
+    if not isinstance(policy, dict):
+        return
+    tag_owners = policy.get("tagOwners")
+    if not isinstance(tag_owners, dict) or not tag_owners:
+        return
+    console.header("Headscale ACL tag owners")
+    wide = 0
+    for tag, owners in tag_owners.items():
+        problems = _tag_owner_problems(owners)
+        if not problems:
+            continue
+        wide += 1
+        result.warn(
+            f"ACL tag owners      {tag}: {'; '.join(problems)}. Every owner can "
+            f"enrol a node with that tag and so gets every grant of the tag. "
+            "Name one user in tagOwners unless this is on purpose. "
+            "See docs/tailnet-naming.md."
+        )
+    if not wide:
+        result.ok(f"ACL tag owners      {len(tag_owners)} tag(s), one user each")
+
+
 def _validate_tailnet_routes(
     root: Path,
     parsed_files: dict[str, Any],
@@ -3378,6 +3436,9 @@ def run_validation(
 
     # 8c. Tailnet routes in bay.fleet.toml, and the ACL that guards their upstreams
     _validate_tailnet_routes(root, parsed, result)
+
+    # 8c1. Wide tagOwners in the ACL policy (warn only)
+    _validate_acl_tag_owners(parsed, result)
 
     # 8c2. The ingress box is the Headscale host
     _validate_ingress_box(root, parsed, bay_dir, result)
