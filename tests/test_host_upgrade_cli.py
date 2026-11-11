@@ -62,9 +62,13 @@ class Playbook:
         self.calls: list[dict[str, Any]] = []
         self.result: dict[str, Any] | None = {"ok": True, "reason": None}
         self.fail = False
+        #: Printed as the playbook output (it goes to --log when given).
+        self.output: str | None = None
 
     def __call__(self, cx: Any, playbook: str, env: str, tags: Any, extra: list[str], **kw: Any) -> None:
         variables = json.loads(extra[extra.index("-e") + 1])
+        if self.output is not None:
+            print(self.output, flush=True)
         self.calls.append({"playbook": playbook, "env": env, "tags": tags, "extra": extra,
                            "vars": variables})
         if self.result is not None:
@@ -315,3 +319,73 @@ def test_the_verb_prints_the_fleet_line() -> None:
     from bay_cli import fleet_line
 
     assert "host upgrade" in fleet_line.MUTATING_VERBS
+
+
+# ── the apt repair pass in the result ───────────────────────────────────────
+
+
+def test_a_failed_apt_step_still_carries_the_checks(fleet: dict[str, Path], playbook: Playbook) -> None:
+    playbook.result = {
+        "ok": False, "reason": "failed", "failed_task": "Fail when apt-get failed",
+        "error": "apt-get dist-upgrade exited 100, the repair pass exited 100.",
+        "packages_upgraded": 0, "apt_first_rc": 100, "apt_repair": True, "apt_rc": 100,
+        "dpkg_audit": [], "rebooted": False,
+        "reboot_note": "Not rebooted: the apt step failed. Repair the packages, then run the upgrade again with --reboot.",
+        "containers": {"before": ["api"], "after": ["api"], "missing": [], "unhealthy": []},
+        "checks": [{"name": "crowdsec_bouncer", "ok": False, "detail": "inactive"}],
+    }
+    playbook.fail = True
+    result = upgrade(fleet, "production", "--box", "box-1", "--reboot", "--json")
+    assert result.exit_code == 1
+    doc = json.loads(result.stdout)
+    assert doc["failed_task"] == "Fail when apt-get failed"
+    assert doc["apt_repair"] is True and doc["apt_first_rc"] == 100 and doc["apt_rc"] == 100
+    assert doc["checks"] and doc["containers"]["after"] == ["api"]
+    assert doc["rebooted"] is False and doc["reboot_note"].startswith("Not rebooted")
+    plain = upgrade(fleet, "production", "--box", "box-1", "--reboot")
+    assert "apt-get exited 100; the repair pass exited 100" in plain.stdout
+    assert "Not rebooted: the apt step failed" in plain.stdout
+
+
+# ── the end summary with --log and no --json ────────────────────────────────
+
+_RECAP = (
+    "\x1b[0;32mPLAY RECAP *********************************************************\x1b[0m\n"
+    "\x1b[0;33mhost-a\x1b[0m                     : \x1b[0;32mok=41  \x1b[0m \x1b[0;33mchanged=6   \x1b[0m "
+    "unreachable=0    \x1b[0;31mfailed=1   \x1b[0m skipped=9    rescued=1    ignored=0   \n"
+)
+
+
+def test_log_without_json_ends_with_a_summary_on_the_terminal(
+    fleet: dict[str, Path], playbook: Playbook, tmp_path: Path
+) -> None:
+    log = tmp_path / "upgrade.log"
+    log.write_text("PLAY RECAP ***\nold-host : ok=1 changed=0 unreachable=0 failed=0\n")
+    playbook.output = _RECAP
+    playbook.result = {
+        "ok": False, "reason": "failed", "failed_task": "Fail when a check failed",
+        "error": "Check failed: containers.",
+        "checks": [{"name": "containers", "ok": False, "detail": "missing: api"}],
+    }
+    playbook.fail = True
+    result = upgrade(fleet, "production", "--box", "box-1", "--log", str(log))
+    assert result.exit_code == 1
+    out = result.output
+    assert "host upgrade of box box-1" in out and "FAILED (failed)" in out
+    assert "packages upgraded: 2" in out
+    assert "FAIL containers: missing: api" in out
+    assert "host-a: ok=41 changed=6 failed=1" in out
+    assert "old-host" not in out  # only what this run appended
+    assert f"log: {log}" in out
+    assert "PLAY RECAP" not in out  # the playbook output itself stays in the log
+
+
+def test_a_refusal_with_log_still_prints_the_summary(
+    fleet: dict[str, Path], playbook: Playbook, tmp_path: Path
+) -> None:
+    log = tmp_path / "upgrade.log"
+    result = upgrade(fleet, "production", "--box", "nope", "--log", str(log))
+    assert result.exit_code != 0
+    assert "bay host upgrade: FAILED (error)" in result.output
+    assert "no PLAY RECAP in the log" in result.output
+    assert f"log: {log}" in result.output

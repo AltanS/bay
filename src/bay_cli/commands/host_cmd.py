@@ -28,7 +28,7 @@ from typing import Annotated, Any
 import typer
 
 from bay_cli import console
-from bay_cli.commands.output import LogOpt
+from bay_cli.commands.output import LogOpt, log_offset, print_summary, recap_lines
 from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError, ErrorCode
 
@@ -164,8 +164,13 @@ def _doc(env: str, box: str, host: str | None, boxes: list[str]) -> dict[str, An
         "box_touched": False,
         "packages_upgraded": 0,
         "packages": [],
+        "apt_first_rc": None,
+        "apt_repair": False,
+        "apt_rc": None,
+        "dpkg_audit": [],
         "reboot_required": False,
         "rebooted": False,
+        "reboot_note": None,
         "kernel": {"before": None, "after": None, "newest_installed": None},
         "containers": {"before": [], "after": [], "missing": [], "unhealthy": [],
                        "restart_loop": [], "restart_counts": {}, "logs": {}},
@@ -189,7 +194,9 @@ def merge_result(doc: dict[str, Any], result: dict[str, Any] | None, *, run_fail
         return out
     for key in (
         "dry_run", "reason", "error", "failed_task", "packages_upgraded", "packages",
-        "reboot_required", "rebooted", "kernel", "containers", "firewall", "checks", "log",
+        "apt_first_rc", "apt_repair", "apt_rc", "dpkg_audit",
+        "reboot_required", "rebooted", "reboot_note", "kernel", "containers", "firewall",
+        "checks", "log",
     ):
         if key in result:
             out[key] = result[key]
@@ -221,10 +228,18 @@ def _render(doc: dict[str, Any]) -> str:
         lines.append(f"  packages upgraded: {doc.get('packages_upgraded', 0)}")
     if packages:
         lines.append("    " + ", ".join(packages))
+    if doc.get("apt_repair"):
+        lines.append(
+            f"  apt-get exited {doc.get('apt_first_rc')}; the repair pass exited {doc.get('apt_rc')}"
+        )
+    for line in doc.get("dpkg_audit") or []:
+        lines.append(f"  dpkg --audit: {line}")
     kernel = doc.get("kernel") or {}
     lines.append(f"  kernel: {kernel.get('before')} -> {kernel.get('after')}")
     if doc.get("rebooted"):
         lines.append("  rebooted: yes")
+    elif doc.get("reboot_note"):
+        lines.append(f"  {doc['reboot_note']}")
     elif doc.get("reboot_required"):
         lines.append(
             "  a reboot is pending: run `bay host upgrade "
@@ -294,6 +309,7 @@ def upgrade(
 
     cx = context_from(ctx)
     doc = _doc(env, box, None, [])
+    offset = log_offset(log)
     try:
         with routed_output(as_json, log) as say:
             if not as_json:
@@ -344,11 +360,16 @@ def upgrade(
         )
         doc.update(getattr(exc, "extra", {}) or {})
         if not as_json:
+            if log is not None:
+                # The redirect is undone: the terminal gets the summary.
+                print_summary([f"bay host upgrade: FAILED ({doc['reason']})", *recap_lines(log, offset)])
             raise
         typer.echo(json.dumps(doc, indent=2))
         raise typer.Exit(exc.exit_code) from None
     if as_json:
         typer.echo(json.dumps(doc, indent=2))
+    elif log is not None:
+        typer.echo("\n".join([_render(doc), *recap_lines(log, offset)]))
     else:
         typer.echo(_render(doc))
     raise typer.Exit(exit_code_for(doc))

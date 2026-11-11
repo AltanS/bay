@@ -1,0 +1,81 @@
+---
+# The repair pass after a failed first apt pass (apt.yml). Runs once.
+
+- name: Record that a repair pass runs
+  ansible.builtin.set_fact:
+    _host_upgrade_apt_repair: true
+
+- name: Check whether crowdsec is installed
+  ansible.builtin.command:
+    argv: [systemctl, list-unit-files, crowdsec.service, --no-legend]
+  register: _host_upgrade_crowdsec_unit
+  changed_when: false
+  failed_when: false
+
+# The bouncer's postinst needs the local API. Wait, bounded, until crowdsec
+# answers; go on either way, the repair pass shows the rest.
+- name: Wait until crowdsec answers  # noqa: ignore-errors
+  ansible.builtin.command:
+    argv: [cscli, lapi, status]
+  register: _host_upgrade_lapi
+  until: _host_upgrade_lapi.rc | default(1) == 0
+  retries: "{{ ((host_upgrade_crowdsec_wait | int) // 2) | int }}"
+  delay: 2
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+  when: (_host_upgrade_crowdsec_unit.stdout | default('') | trim | length) > 0
+
+- name: Configure what the first pass left half done
+  ansible.builtin.command:
+    argv: [dpkg, --force-confdef, --force-confold, --configure, -a]
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: _host_upgrade_repair_configure
+  changed_when: true
+  failed_when: false
+
+# `--collect` removes the first unit when it ends; its name is free again a
+# moment after the rc file appears.
+- name: Wait until the first upgrade unit is gone  # noqa: ignore-errors
+  ansible.builtin.command:
+    argv: [systemctl, is-active, "{{ host_upgrade_unit }}.service"]
+  register: _host_upgrade_unit_gone
+  until: (_host_upgrade_unit_gone.stdout | default('') | trim) not in ['active', 'activating', 'deactivating']
+  retries: 30
+  delay: 1
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+
+- name: Remove the exit code of the first pass
+  ansible.builtin.file:
+    path: "{{ host_upgrade_state_dir }}/rc"
+    state: absent
+
+- name: Start the repair pass in a detached unit
+  ansible.builtin.command:
+    argv:
+      - systemd-run
+      - "--unit={{ host_upgrade_unit }}"
+      - --collect
+      - --quiet
+      - --setenv=DEBIAN_FRONTEND=noninteractive
+      - --setenv=NEEDRESTART_MODE=l
+      - /bin/sh
+      - -c
+      - >-
+        echo "== bay host upgrade repair pass $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> {{ host_upgrade_log | quote }};
+        ({{ _host_upgrade_apt }} -f install && {{ _host_upgrade_apt }} dist-upgrade) >> {{ host_upgrade_log | quote }} 2>&1;
+        echo $? > {{ (host_upgrade_state_dir ~ '/rc.tmp') | quote }}
+        && mv {{ (host_upgrade_state_dir ~ '/rc.tmp') | quote }} {{ (host_upgrade_state_dir ~ '/rc') | quote }}
+  register: _host_upgrade_repair_started
+  changed_when: true
+
+- name: Reset the poll for the repair pass
+  ansible.builtin.set_fact:
+    _host_upgrade_done: false
+    _host_upgrade_rc: ""
+
+- name: Wait for the repair pass
+  ansible.builtin.include_tasks: unit_wait.yml

@@ -11,6 +11,7 @@ flushed it, reboots on request, and checks the box. It replaces the manual
 - [Why a command](#why-a-command)
 - [Usage](#usage)
 - [What it does on the box](#what-it-does-on-the-box)
+- [When apt fails](#when-apt-fails)
 - [The firewall after an upgrade](#the-firewall-after-an-upgrade)
 - [The checks](#the-checks)
 - [The deploy lock](#the-deploy-lock)
@@ -73,15 +74,50 @@ bay host upgrade production --box alpha --json --log /tmp/upgrade.log
    upgrade of tailscale or openssh can drop the session and apt goes on. A
    dropped session ends one poll round; the next round waits for the
    connection again. The run fails after `host_upgrade_timeout` (2400 s).
-7. It runs `dpkg --configure -a`. This repairs a known race: the postinst of
-   the CrowdSec firewall bouncer starts the bouncer while CrowdSec restarts,
-   the start fails, and dpkg leaves the package half configured.
-8. It repairs the firewall when needed (next section).
-9. It decides if a reboot is needed: `/var/run/reboot-required` exists, or the
-   newest kernel in `/lib/modules` is not the running one. With `--reboot` it
-   reboots and waits for the box. Without `--reboot` it says that a reboot is
-   pending.
-10. It runs the checks, releases the lock and writes the result.
+7. When apt exits with an error, it runs one repair pass (see
+   [When apt fails](#when-apt-fails)).
+8. It runs `dpkg --configure -a`, then `dpkg --audit`.
+9. It repairs the firewall when needed
+   (see [The firewall after an upgrade](#the-firewall-after-an-upgrade)).
+10. It decides if a reboot is needed: `/var/run/reboot-required` exists, or the
+    newest kernel in `/lib/modules` is not the running one. With `--reboot` it
+    reboots and waits for the box. Without `--reboot` it says that a reboot is
+    pending. It never reboots when the apt step failed.
+11. It runs the checks, releases the lock and writes the result.
+
+## When apt fails
+
+A known race: the postinst of `crowdsec-firewall-bouncer-nftables` starts the
+bouncer while CrowdSec restarts. The bouncer cannot reach the CrowdSec API, the
+start fails, and `apt-get dist-upgrade` exits 100. The package stays half
+configured. A live trial hit this on a real upgrade of 78 packages.
+
+So a failed first pass does not end the run. The command runs one repair pass:
+
+1. When CrowdSec is installed, it waits until `cscli lapi status` answers, up
+   to `host_upgrade_crowdsec_wait` (60 s). It goes on after that time also.
+2. It runs `dpkg --configure -a`.
+3. It runs `apt-get -f install -y` and then one more `dist-upgrade`, with the
+   same flags. These run in the same detached unit, and they append to the
+   same log.
+
+The apt step fails only when the repair pass fails, or when `dpkg --audit`
+still lists a package. The result says `apt_repair: true` and gives the exit
+code of the first pass in `apt_first_rc`.
+
+When the apt step fails after the unit started, the run still does the rest:
+
+- It repairs the firewall and runs every check. The result always has
+  `checks` and `containers.after`.
+- It does not reboot, also with `--reboot`. A half configured kernel or
+  initramfs can stop the box from booting. `reboot_note` says why.
+- It releases the deploy lock.
+- Then it fails, and `failed_task` names the apt step
+  (`Fail when apt-get failed`).
+
+When the unit does not end in time, apt still runs. Then the command does not
+touch the firewall, because a Docker restart in the middle of dpkg can break a
+package. It runs the checks and fails.
 
 ## The firewall after an upgrade
 
@@ -113,7 +149,9 @@ and why.
 
 ## The checks
 
-Every check has a name. A failed check fails the run with its name.
+Every check has a name. A failed check fails the run with its name. When the
+apt step failed too, the run names the apt step, and the checks are in the
+result.
 
 | Check | Passes when |
 |-------|-------------|
@@ -192,6 +230,12 @@ already on the box, and runs the checks against the box as it is.
 `--json` prints one document on stdout. With `--log`, progress and the Ansible
 output go to the log file.
 
+With `--log` and no `--json`, the terminal shows a short summary at the end:
+the result word, the key facts (packages upgraded, a repair pass, a pending or
+done reboot, every check), the PLAY RECAP counts per host (ok, changed,
+failed) and the log path. `bay deploy` and `bay provision` with `--log` end
+with the same summary, without the upgrade facts.
+
 ```json
 {
   "result_version": 1,
@@ -207,8 +251,13 @@ output go to the log file.
   "box_touched": true,
   "packages_upgraded": 2,
   "packages": ["docker-ce", "tailscale"],
+  "apt_first_rc": 100,
+  "apt_repair": true,
+  "apt_rc": 0,
+  "dpkg_audit": [],
   "reboot_required": true,
   "rebooted": false,
+  "reboot_note": null,
   "kernel": {"before": "6.1.0-25-amd64", "after": "6.1.0-25-amd64", "newest_installed": "6.1.0-26-amd64"},
   "containers": {"before": ["api", "postgres"], "after": ["api", "postgres"], "missing": [], "unhealthy": [],
                  "restart_loop": [], "restart_counts": {"api": 0, "postgres": 0}, "logs": {}},
@@ -226,6 +275,16 @@ output go to the log file.
 | 41, 42, 45 | as `bay deploy` | The fleet is not in sync, the push was refused, or the Bay version is too old. |
 | 1 | `failed` | apt failed, the unit did not end in time, or a check failed. `failed_task` and `error` say which. |
 
+The apt fields:
+
+| Field | Meaning |
+|-------|---------|
+| `apt_first_rc` | The exit code of the first `dist-upgrade` pass. `null` when apt did not run. |
+| `apt_repair` | `true` when the first pass failed and the repair pass ran. |
+| `apt_rc` | The exit code of the last pass. |
+| `dpkg_audit` | The lines of `dpkg --audit`. Empty when every package is configured. |
+| `reboot_note` | Why the box was not rebooted with `--reboot`, or `null`. |
+
 ## Settings
 
 Set these in `group_vars` to change the defaults
@@ -239,6 +298,7 @@ Set these in `group_vars` to change the defaults
 | `host_upgrade_log_lines` | `20` | Log lines printed for a container in a restart loop. |
 | `host_upgrade_reboot_timeout` | `900` | Seconds to wait for the box after a reboot. |
 | `host_upgrade_dpkg_lock_timeout` | `600` | Seconds apt waits for a dpkg lock that another process holds. |
+| `host_upgrade_crowdsec_wait` | `60` | Seconds the repair pass waits for `cscli lapi status` to answer. |
 | `host_upgrade_docker_chains` | `nat/DOCKER`, `filter/DOCKER` | The Docker chains the repair and the check look for. |
 
 ## Not tested without a real box
@@ -253,6 +313,7 @@ need a live trial on a test box:
   real restart loop and a real `tailscale ip -4` right after the boot;
 - the real flush by the nftables package, the reload, and Docker writing its
   rules again;
-- the CrowdSec bouncer race and `dpkg --configure -a`;
+- the repair pass after the CrowdSec bouncer race: the wait for
+  `cscli lapi status`, `apt-get -f install` and the second `dist-upgrade`;
 - a `bay up` or `bay deploy` started during the upgrade, which must stop at
   the guard.

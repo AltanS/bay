@@ -45,8 +45,10 @@ It writes no fleet and no config.
 The checkout at `~/.local/share/bay/framework` is the framework. The `bay` command runs
 from it, and the deploy commands read the Ansible files in it. `uv tool install --editable`
 alone is not enough to deploy: the roles and collections in `vendor/` are not in git, so
-without step 2 `bay plan --remote`, `bay up` and `bay deploy` stop on a missing role.
-`bay self update` runs steps 1 to 3 again. `bay doctor` does not check them.
+without step 2 `bay plan --remote`, `bay up`, `bay deploy` and `bay provision` stop on a
+missing role. `bay self update` runs steps 1 to 3 again. In a fresh clone of the framework,
+run `bay self update` or `make install` before the first `bay provision`: both fill
+`vendor/roles`. `bay doctor` does not check them.
 
 If your shell cannot find `bay`, run `uv tool update-shell` and open a new shell.
 

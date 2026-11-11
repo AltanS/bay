@@ -1,0 +1,119 @@
+---
+# The apt step (main.yml, inside a block whose rescue records the failure).
+#
+# Pass 1 runs `apt-get dist-upgrade` in a detached unit. When it exits
+# non-zero, a repair pass runs (apt_repair.yml): wait for crowdsec, finish
+# dpkg, then `apt-get -f install` and ONE more dist-upgrade, detached the same
+# way, appended to the same log. A live trial needed it: the postinst of
+# crowdsec-firewall-bouncer-nftables started the bouncer while crowdsec still
+# restarted, and dist-upgrade exited 100 with the package half configured.
+#
+# The step fails only when the last pass failed or `dpkg --audit` still lists
+# a package. The failure does not stop the run at once: main.yml repairs the
+# firewall and runs the checks first, then fails with this step's name.
+
+- name: Build the apt-get command of both passes
+  ansible.builtin.set_fact:
+    _host_upgrade_apt: >-
+      apt-get -q -y
+      -o DPkg::Lock::Timeout={{ host_upgrade_dpkg_lock_timeout | int }}
+      -o Dpkg::Options::=--force-confdef
+      -o Dpkg::Options::=--force-confold
+
+- name: Ensure the upgrade state directory exists
+  ansible.builtin.file:
+    path: "{{ host_upgrade_state_dir }}"
+    state: directory
+    owner: "{{ host_upgrade_state_owner }}"
+    group: "{{ host_upgrade_state_owner }}"
+    mode: "0755"
+
+- name: Remove the exit code of an earlier upgrade
+  ansible.builtin.file:
+    path: "{{ host_upgrade_state_dir }}/rc"
+    state: absent
+
+# From here on a failure of the apt step no longer stops the run at once.
+- name: Record that the apt step began
+  ansible.builtin.set_fact:
+    _host_upgrade_apt_begun: true
+
+# Detached: the unit runs apt-get outside this SSH session, so a tailscale
+# or openssh upgrade that drops the session does not stop it. `--collect`
+# removes the unit when it ends, also when it fails, so the next run can
+# use the name again; the exit code is in `<state_dir>/rc`.
+# NEEDRESTART_MODE=l: needrestart only lists services, it restarts none
+# behind this run's back (docker included). The reboot is the restart.
+- name: Start the upgrade in a detached unit
+  ansible.builtin.command:
+    argv:
+      - systemd-run
+      - "--unit={{ host_upgrade_unit }}"
+      - --collect
+      - --quiet
+      - --setenv=DEBIAN_FRONTEND=noninteractive
+      - --setenv=NEEDRESTART_MODE=l
+      - /bin/sh
+      - -c
+      - >-
+        echo "== bay host upgrade $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> {{ host_upgrade_log | quote }};
+        {{ _host_upgrade_apt }} dist-upgrade >> {{ host_upgrade_log | quote }} 2>&1;
+        echo $? > {{ (host_upgrade_state_dir ~ '/rc.tmp') | quote }}
+        && mv {{ (host_upgrade_state_dir ~ '/rc.tmp') | quote }} {{ (host_upgrade_state_dir ~ '/rc') | quote }}
+  register: _host_upgrade_started
+  changed_when: true
+  when: _host_upgrade_packages | length > 0
+
+- name: Wait for the upgrade unit
+  ansible.builtin.include_tasks: unit_wait.yml
+  when:
+    - _host_upgrade_started is defined
+    - _host_upgrade_started is not skipped
+
+- name: Record the exit code of the first pass
+  ansible.builtin.set_fact:
+    _host_upgrade_first_rc: "{{ _host_upgrade_rc | default('0') | string | trim }}"
+  when:
+    - _host_upgrade_started is defined
+    - _host_upgrade_started is not skipped
+
+- name: Repair a failed first pass
+  ansible.builtin.include_tasks: apt_repair.yml
+  when:
+    - _host_upgrade_started is defined
+    - _host_upgrade_started is not skipped
+    - _host_upgrade_first_rc | default('0') != '0'
+
+# Also after a clean pass: finish every package an earlier, broken run left.
+- name: Finish every package that is not configured
+  ansible.builtin.command:
+    argv: [dpkg, --force-confdef, --force-confold, --configure, -a]
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  register: _host_upgrade_dpkg
+  changed_when: (_host_upgrade_dpkg.stdout | default('')) | length > 0
+
+# Read-only. Empty output: every package is installed and configured.
+- name: Audit the package state
+  ansible.builtin.command:
+    argv: [dpkg, --audit]
+  register: _host_upgrade_audit
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Fail when apt-get failed
+  ansible.builtin.fail:
+    msg: "apt-get dist-upgrade exited {{ _host_upgrade_first_rc | default('0') }}{{ _repair }}{{ _audit }}. Read {{ host_upgrade_log }} on the box."
+  vars:
+    _repair: >-
+      {{ (', the repair pass exited ' ~ (_host_upgrade_rc | default('?')))
+         if (_host_upgrade_apt_repair | default(false) | bool) else '' }}
+    _audit: >-
+      {{ ', and dpkg --audit lists packages that are not configured'
+         if (_host_upgrade_audit.stdout | default('') | trim | length > 0) else '' }}
+  when: >-
+    not ansible_check_mode
+    and ((_host_upgrade_started is defined and _host_upgrade_started is not skipped
+     and (_host_upgrade_rc | default('0') | string | trim) != '0')
+    or (_host_upgrade_audit.stdout | default('') | trim | length > 0))

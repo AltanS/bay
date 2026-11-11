@@ -3,10 +3,12 @@
 # (`bay host upgrade <env> --box <box>`). See docs/host-upgrade.md.
 #
 # Order: refuse a busy box, take the deploy lock, record the state before,
-# run `apt-get dist-upgrade` in a detached systemd unit and poll it, finish
-# dpkg, repair the firewall when the nftables upgrade flushed it, reboot when
-# asked and needed, run the checks. The lock is released and the result is
-# written on every path (always).
+# run `apt-get dist-upgrade` in a detached systemd unit and poll it (apt.yml,
+# with one repair pass when it fails), finish dpkg, repair the firewall when
+# the nftables upgrade flushed it, reboot when asked and needed and apt did
+# not fail, run the checks. Once the unit started, a failed apt step still
+# gets the firewall repair and the checks; the run fails after them. The lock
+# is released and the result is written on every path (always).
 #
 # Check mode (`bay host upgrade ... -- --check`) changes nothing on the box:
 # the lock is not written, apt does not run, nothing restarts or reboots. The
@@ -156,92 +158,39 @@
       ansible.builtin.set_fact:
         _host_upgrade_packages: "{{ _host_upgrade_simulation.stdout_lines | default([]) | host_upgrade_packages }}"
 
-    - name: Ensure the upgrade state directory exists
-      ansible.builtin.file:
-        path: "{{ host_upgrade_state_dir }}"
-        state: directory
-        owner: "{{ host_upgrade_state_owner }}"
-        group: "{{ host_upgrade_state_owner }}"
-        mode: "0755"
+    # The apt step (apt.yml). A failure after the upgrade unit started does
+    # not end the run here: the firewall repair and the checks run first, and
+    # "Fail when the apt step failed" below ends the run with this step's name.
+    - name: Run the apt step
+      block:
+        - name: Upgrade the packages
+          ansible.builtin.include_tasks: apt.yml
+      rescue:
+        - name: Record the failure of the apt step
+          ansible.builtin.set_fact:
+            _host_upgrade_apt_failed: true
+            _host_upgrade_pending_task: "{{ ansible_failed_task.name | default('unknown') }}"
+            _host_upgrade_pending_msg: "{{ ansible_failed_result.msg | default('') }}"
 
-    - name: Remove the exit code of an earlier upgrade
-      ansible.builtin.file:
-        path: "{{ host_upgrade_state_dir }}/rc"
-        state: absent
+        - name: Fail at once when the apt step never began
+          ansible.builtin.fail:
+            msg: "{{ _host_upgrade_pending_msg }}"
+          when: not (_host_upgrade_apt_begun | default(false) | bool)
 
-    # Detached: the unit runs apt-get outside this SSH session, so a tailscale
-    # or openssh upgrade that drops the session does not stop it. `--collect`
-    # removes the unit when it ends, also when it fails, so the next run can
-    # use the name again; the exit code is in `<state_dir>/rc`.
-    # NEEDRESTART_MODE=l: needrestart only lists services, it restarts none
-    # behind this run's back (docker included). The reboot is the restart.
-    - name: Start the upgrade in a detached unit
-      ansible.builtin.command:
-        argv:
-          - systemd-run
-          - "--unit={{ host_upgrade_unit }}"
-          - --collect
-          - --quiet
-          - --setenv=DEBIAN_FRONTEND=noninteractive
-          - --setenv=NEEDRESTART_MODE=l
-          - /bin/sh
-          - -c
-          - >-
-            echo "== bay host upgrade $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> {{ host_upgrade_log | quote }};
-            apt-get -q -y
-            -o DPkg::Lock::Timeout={{ host_upgrade_dpkg_lock_timeout }}
-            -o Dpkg::Options::=--force-confdef
-            -o Dpkg::Options::=--force-confold
-            dist-upgrade >> {{ host_upgrade_log | quote }} 2>&1;
-            echo $? > {{ (host_upgrade_state_dir ~ '/rc.tmp') | quote }}
-            && mv {{ (host_upgrade_state_dir ~ '/rc.tmp') | quote }} {{ (host_upgrade_state_dir ~ '/rc') | quote }}
-      register: _host_upgrade_started
-      changed_when: true
-      when: _host_upgrade_packages | length > 0
-
-    - name: Wait for the upgrade unit to end
-      ansible.builtin.include_tasks: poll_round.yml
-      loop: "{{ range(((host_upgrade_timeout | int) // ((host_upgrade_poll_delay | int) * (host_upgrade_poll_retries | int))) + 1) | list }}"
-      loop_control:
-        loop_var: _host_upgrade_round
-        label: "round {{ _host_upgrade_round + 1 }}"
-      when:
-        - _host_upgrade_started is not skipped
-        - _host_upgrade_started is defined
-
-    - name: Fail when the upgrade unit has not ended in time
-      ansible.builtin.fail:
-        msg: >-
-          The upgrade did not end within about {{ host_upgrade_timeout }} s. It still runs
-          on the box as the unit {{ host_upgrade_unit }}; read {{ host_upgrade_log }}.
-          A deploy stays refused while the unit runs.
-      when:
-        - _host_upgrade_started is not skipped
-        - not (_host_upgrade_done | default(false) | bool)
-
-    - name: Fail when apt-get failed
-      ansible.builtin.fail:
-        msg: >-
-          apt-get dist-upgrade exited {{ _host_upgrade_rc }}. Read {{ host_upgrade_log }} on the box.
-      when:
-        - _host_upgrade_started is not skipped
-        - (_host_upgrade_rc | default('0') | string | trim) != '0'
-
-    # A known race: the postinst of the CrowdSec firewall bouncer starts the
-    # bouncer while crowdsec restarts, the start fails and dpkg leaves the
-    # package half-configured. Finish every such package.
-    - name: Finish every package that is not configured
-      ansible.builtin.command:
-        argv: [dpkg, --force-confdef, --force-confold, --configure, -a]
-      environment:
-        DEBIAN_FRONTEND: noninteractive
-      register: _host_upgrade_dpkg
-      changed_when: (_host_upgrade_dpkg.stdout | default('')) | length > 0
+    - name: Record whether the upgrade unit still runs
+      ansible.builtin.set_fact:
+        _host_upgrade_apt_running: >-
+          {{ _host_upgrade_started is defined and _host_upgrade_started is not skipped
+             and not (_host_upgrade_done | default(false) | bool) }}
 
     # ── The firewall ───────────────────────────────────────────────────
+    # Not while apt still runs: a docker restart in the middle of dpkg can
+    # break the package that dpkg configures.
     - name: Repair the firewall after the upgrade
       ansible.builtin.include_tasks: firewall.yml
-      when: not ansible_check_mode
+      when:
+        - not ansible_check_mode
+        - not (_host_upgrade_apt_running | bool)
 
     # ── Reboot ─────────────────────────────────────────────────────────
     - name: Read the reboot-required file
@@ -275,6 +224,21 @@
         - host_upgrade_reboot | bool
         - _host_upgrade_reboot_required | bool
         - not ansible_check_mode
+        - not (_host_upgrade_apt_failed | default(false) | bool)
+
+    # A reboot with a package half configured can leave a box that does not
+    # come back (a kernel or an initramfs not finished).
+    - name: Record why the box was not rebooted
+      ansible.builtin.set_fact:
+        _host_upgrade_reboot_note: >-
+          Not rebooted: the apt step failed{{ ' and dpkg --audit lists packages that are not configured'
+          if (_host_upgrade_audit.stdout | default('') | trim) else '' }}. Repair the packages, then run the
+          upgrade again with --reboot.
+      when:
+        - host_upgrade_reboot | bool
+        - _host_upgrade_reboot_required | bool
+        - not ansible_check_mode
+        - _host_upgrade_apt_failed | default(false) | bool
 
     # The lock file is on disk, so it survives the reboot. Touch it so it stays
     # fresh for the checks.
@@ -306,11 +270,24 @@
     - name: Check the box
       ansible.builtin.include_tasks: checks.yml
 
+    - name: Fail when the apt step failed
+      ansible.builtin.fail:
+        msg: "{{ _host_upgrade_pending_msg }}"
+      when: _host_upgrade_apt_failed | default(false) | bool
+
+    - name: Fail when a check failed
+      ansible.builtin.fail:
+        msg: >-
+          Check failed: {{ _host_upgrade_checks | rejectattr('ok') | map(attribute='name') | join(', ') }}.
+          {{ _host_upgrade_checks | rejectattr('ok') | map(attribute='detail') | join('; ') }}
+      when: _host_upgrade_checks | rejectattr('ok') | list | length > 0
+
   rescue:
+    # A failed apt step names the apt task, not "Fail when the apt step failed".
     - name: Record the failed task
       ansible.builtin.set_fact:
-        _host_upgrade_failed_task: "{{ ansible_failed_task.name | default('unknown') }}"
-        _host_upgrade_failed_msg: "{{ ansible_failed_result.msg | default('') }}"
+        _host_upgrade_failed_task: "{{ _host_upgrade_pending_task | default(ansible_failed_task.name | default('unknown')) }}"
+        _host_upgrade_failed_msg: "{{ _host_upgrade_pending_msg | default(ansible_failed_result.msg | default('')) }}"
 
     - name: Fail the upgrade
       ansible.builtin.fail:
@@ -344,10 +321,18 @@
           packages: "{{ _host_upgrade_packages | default([]) }}"
           packages_upgraded: >-
             {{ 0 if (ansible_check_mode or _host_upgrade_started | default({'skipped': true}) is skipped
-                     or not (_host_upgrade_done | default(false) | bool))
+                     or not (_host_upgrade_done | default(false) | bool)
+                     or (_host_upgrade_apt_failed | default(false) | bool))
                else (_host_upgrade_packages | default([]) | length) }}
+          apt_first_rc: >-
+            {{ (_host_upgrade_first_rc | int) if (_host_upgrade_first_rc | default('') | string | length) > 0 else none }}
+          apt_repair: "{{ _host_upgrade_apt_repair | default(false) | bool }}"
+          apt_rc: >-
+            {{ (_host_upgrade_rc | int) if (_host_upgrade_rc | default('') | string | trim | length) > 0 else none }}
+          dpkg_audit: "{{ _host_upgrade_audit.stdout_lines | default([]) }}"
           reboot_required: "{{ _host_upgrade_reboot_required | default(false) | bool }}"
           rebooted: "{{ _host_upgrade_rebooted is defined and _host_upgrade_rebooted is not skipped }}"
+          reboot_note: "{{ (_host_upgrade_reboot_note | default('') | trim) or none }}"
           kernel:
             before: "{{ (_host_upgrade_kernel_before.stdout | default('') | trim) or none }}"
             after: "{{ (_host_upgrade_kernel_after.stdout | default('') | trim) or none }}"

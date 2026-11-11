@@ -1,7 +1,7 @@
 ---
 # The checks after the upgrade (main.yml). Every task here only reads, so they
-# run in check mode too. A failed check fails the run with its name; the result
-# lists every check with a detail line.
+# run in check mode too. main.yml fails the run after them when a check failed;
+# the result lists every check with a detail line.
 
 # The restart counts at the start of the wait window. A container in a restart
 # loop (after a cold boot: Traefik bound to a tailnet address before tailscaled
@@ -155,10 +155,3 @@
          + (['table inet bay_egress', 'table bridge bay_egress']
             if (_files | selectattr('item', 'equalto', 'bay-egress.conf')
                 | map(attribute='stat.exists') | first | default(false)) else []) }}
-
-- name: Fail when a check failed
-  ansible.builtin.fail:
-    msg: >-
-      Check failed: {{ _host_upgrade_checks | rejectattr('ok') | map(attribute='name') | join(', ') }}.
-      {{ _host_upgrade_checks | rejectattr('ok') | map(attribute='detail') | join('; ') }}
-  when: _host_upgrade_checks | rejectattr('ok') | list | length > 0

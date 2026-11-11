@@ -33,6 +33,10 @@ host_upgrade_poll_delay: 10
 host_upgrade_poll_retries: 60
 # apt waits this long for a dpkg lock someone else holds (unattended-upgrades).
 host_upgrade_dpkg_lock_timeout: 600
+# When the first apt pass fails, wait up to this many seconds for crowdsec to
+# answer (`cscli lapi status`) before the repair pass. The bouncer's postinst
+# needs it.
+host_upgrade_crowdsec_wait: 60
 
 # Reboot only when the CLI asks (`--reboot`), and then only when a reboot is
 # needed: the reboot-required file exists, or the newest kernel in

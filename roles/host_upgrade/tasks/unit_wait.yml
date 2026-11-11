@@ -1,0 +1,18 @@
+---
+# Wait for one apt pass in the detached unit (apt.yml, apt_repair.yml).
+# Sets `_host_upgrade_done` and `_host_upgrade_rc` (poll_round.yml).
+
+- name: Wait for the upgrade unit to end
+  ansible.builtin.include_tasks: poll_round.yml
+  loop: "{{ range(((host_upgrade_timeout | int) // ((host_upgrade_poll_delay | int) * (host_upgrade_poll_retries | int))) + 1) | list }}"
+  loop_control:
+    loop_var: _host_upgrade_round
+    label: "round {{ _host_upgrade_round + 1 }}"
+
+- name: Fail when the upgrade unit has not ended in time
+  ansible.builtin.fail:
+    msg: >-
+      The upgrade did not end within about {{ host_upgrade_timeout }} s. It still runs
+      on the box as the unit {{ host_upgrade_unit }}; read {{ host_upgrade_log }}.
+      A deploy stays refused while the unit runs.
+  when: not (_host_upgrade_done | default(false) | bool)

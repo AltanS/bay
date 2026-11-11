@@ -56,14 +56,21 @@ if cmd == "apt-get":
         out("\n".join(f"Inst {p} [1.0] (2.0 Debian:12/stable [amd64])" for p in st["packages"]))
     if "update" in args:
         out("")
+    if "-f" in args and "install" in args:
+        out("fixed", st.get("fix_rc", 0))
     if "dist-upgrade" in args:
         if st.get("apt_flushes"):
             st["chains"] = False
             st["nft_started"] = ["999"]
         st["upgraded"] = True
+        rcs = st.get("apt_rc", 0)
+        if isinstance(rcs, list):
+            rc = rcs[0] if len(rcs) == 1 else rcs.pop(0)
+        else:
+            rc = rcs
         save()
         print("upgraded " + " ".join(st["packages"]))
-        sys.exit(st.get("apt_rc", 0))
+        sys.exit(rc)
     out("")
 if cmd == "systemd-run":
     script = args[args.index("/bin/sh") + 2]
@@ -112,7 +119,11 @@ if cmd == "docker":
         out("\n".join(names))
     out("")
 if cmd == "dpkg":
+    if "--audit" in args:
+        out(st.get("audit", ""))
     out("")
+if cmd == "cscli":
+    out("You can successfully interact with Local API (LAPI)", st.get("lapi_rc", 0))
 if cmd == "nft":
     if args[:2] == ["list", "tables"]:
         out("\n".join(st["tables"]))
@@ -130,7 +141,7 @@ out("")
 '''
 
 FAKES = ("date", "uname", "apt-get", "systemd-run", "systemctl", "docker", "dpkg", "nft",
-         "iptables", "tailscale")
+         "iptables", "tailscale", "cscli")
 
 
 def _state(**over: Any) -> dict[str, Any]:
@@ -369,21 +380,99 @@ def test_check_mode_changes_nothing(make_box) -> None:
     assert result["packages"] == ["nftables"]
     assert result["packages_upgraded"] == 0
     calls = box.calls()
-    for forbidden in ("systemd-run", "apt-get -q -o", "dpkg", "nft -f", "systemctl restart"):
+    for forbidden in ("systemd-run", "apt-get -q -o", "dpkg --force", "nft -f", "systemctl restart"):
         assert not any(c.startswith(forbidden) for c in calls), (forbidden, calls)
     assert not box.lock.exists()
     assert not (box.tmp / "state").exists()
     assert box.state().get("upgraded") is None
 
 
-def test_apt_failure_fails_the_run_and_releases_the_lock(make_box) -> None:
-    box = make_box(apt_rc=100)
+def test_a_failed_first_pass_gets_one_repair_pass(make_box) -> None:
+    # The live trial: the bouncer's postinst raced a crowdsec restart, apt
+    # exited 100. The repair pass waits for crowdsec, finishes dpkg, runs
+    # `apt-get -f install` and one more dist-upgrade.
+    box = make_box(apt_rc=[100, 0])
+    code, out, result = box.upgrade()
+    assert code == 0, out
+    assert result["ok"] is True
+    assert result["apt_repair"] is True
+    assert result["apt_first_rc"] == 100 and result["apt_rc"] == 0
+    assert result["packages_upgraded"] == 2
+    calls = box.calls()
+    first = _index(calls, "apt-get -q -y")
+    lapi = _index(calls, "cscli lapi status")
+    configure = _index(calls, "dpkg --force-confdef --force-confold --configure -a")
+    fix = next(i for i, c in enumerate(calls) if c.startswith("apt-get") and "-f install" in c)
+    second = max(i for i, c in enumerate(calls) if c.startswith("apt-get") and "dist-upgrade" in c)
+    assert first < lapi < configure < fix < second
+    assert sum(1 for c in calls if c.startswith("systemd-run")) == 2
+    log = Path(box.vars["host_upgrade_log"]).read_text()
+    assert "== bay host upgrade repair pass" in log
+    assert log.count("upgraded docker-ce tailscale") == 2  # one log, appended
+    assert not box.lock.exists()
+
+
+def test_a_clean_first_pass_runs_no_repair(make_box) -> None:
+    box = make_box()
+    code, out, result = box.upgrade()
+    assert code == 0, out
+    assert result["apt_repair"] is False and result["apt_first_rc"] == 0
+    assert not any(c.startswith("cscli") or "-f install" in c for c in box.calls())
+
+
+def test_without_crowdsec_the_repair_does_not_wait_for_it(make_box) -> None:
+    box = make_box(apt_rc=[100, 0], installed=["nftables", "tailscaled"],
+                   active=["docker", "nftables", "tailscaled"])
+    code, out, result = box.upgrade()
+    assert result["apt_repair"] is True and result["apt_rc"] == 0
+    assert not any(c.startswith("cscli") for c in box.calls())
+
+
+def test_a_failed_repair_still_runs_the_firewall_and_the_checks(make_box) -> None:
+    box = make_box(apt_rc=100, packages=["nftables"], apt_flushes=True)
     code, out, result = box.upgrade()
     assert code != 0
     assert result["ok"] is False and result["reason"] == "failed"
     assert result["failed_task"] == "Fail when apt-get failed"
-    assert "exited 100" in result["error"]
+    assert "exited 100, the repair pass exited 100" in result["error"]
+    assert result["apt_repair"] is True
+    assert result["apt_first_rc"] == 100 and result["apt_rc"] == 100
+    assert result["packages_upgraded"] == 0
+    # The firewall repair and the checks ran after the failure.
+    assert result["firewall"]["repaired"] is True
+    assert {c["name"] for c in result["checks"]} >= {"docker", "containers", "nftables"}
+    assert result["containers"]["after"] == ["api", "postgres"]
+    calls = box.calls()
+    assert _index(calls, "nft -f") < _index(calls, "systemctl restart docker.service")
     assert not box.lock.exists()
+
+
+def test_a_dirty_dpkg_audit_fails_the_apt_step(make_box) -> None:
+    box = make_box(audit="The following packages are only half configured:\n crowdsec-firewall-bouncer-nftables")
+    code, out, result = box.upgrade()
+    assert code != 0
+    assert result["failed_task"] == "Fail when apt-get failed"
+    assert "dpkg --audit lists packages" in result["error"]
+    assert result["dpkg_audit"][0].startswith("The following packages")
+    assert result["checks"] and result["containers"]["after"]
+
+
+def test_no_reboot_when_the_apt_step_failed(make_box) -> None:
+    box = make_box(apt_rc=100)
+    (Path(box.vars["host_upgrade_modules_dir"]) / "6.1.0-26-amd64").mkdir()
+    code, out, result = box.upgrade(host_upgrade_reboot=True)
+    assert code != 0
+    assert result["reboot_required"] is True and result["rebooted"] is False
+    assert "Not rebooted: the apt step failed" in result["reboot_note"]
+    assert result["failed_task"] == "Fail when apt-get failed"
+
+
+def test_a_check_failure_after_a_clean_apt_names_the_check(make_box) -> None:
+    box = make_box(apt_rc=[100, 0], after=["api"])
+    code, out, result = box.upgrade()
+    assert code != 0
+    assert result["failed_task"] == "Fail when a check failed"
+    assert result["apt_repair"] is True
 
 
 def test_a_container_that_does_not_come_back_fails_the_check(make_box) -> None:
