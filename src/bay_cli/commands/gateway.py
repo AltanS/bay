@@ -1,9 +1,12 @@
 """Access gateway management commands: status, nodes, users, routes, and device enrollment."""
 
+import contextlib
 import ipaddress
 import json
 import re
 import subprocess
+import sys
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -616,6 +619,58 @@ def _audit_acl_reachability(
     return rows, unresolvable, inert_tags
 
 
+# -- Secrets on stdout ----------------------------------------------------------
+#
+# `bay gateway key`, `apikey` (create) and `enroll` mint a secret. One rule:
+# when stdout is not a terminal, or --json is on, stdout carries ONLY the secret
+# and one newline, exactly once. The header, the hints, the fleet line and every
+# error go to stderr, so `bay gateway apikey | bay vault set <env> <name>`
+# stores the key and nothing else. On a terminal the secret still shows in the
+# alternate screen (show_ephemeral), so it is not left in the scrollback.
+# `enroll --json` keeps its document.
+
+#: Called as ``deliver(secret, screen=..., hints=..., clipboard=...)``.
+Deliver = Callable[..., None]
+
+
+@contextlib.contextmanager
+def _secret_output(*, keep_json: bool = False) -> Iterator[Deliver]:
+    """Yield the function that hands a secret to the operator, and keep stdout clean.
+
+    ``keep_json``: with ``--json`` the command prints its own document on stdout
+    (``enroll``), so nothing is redirected and the function is not used.
+    """
+    from rich.console import Console
+    from rich.markup import escape
+
+    real = sys.stdout
+    json_mode = con.is_json_mode()
+    interactive = real.isatty() and not json_mode
+
+    def deliver(secret: str, *, screen: str, hints: str = "", clipboard: str | None = None) -> None:
+        if interactive:
+            show_ephemeral(screen, clipboard=clipboard if clipboard is not None else secret)
+            return
+        real.write(secret + "\n")
+        real.flush()
+        if hints:
+            Console(stderr=True).print(hints, soft_wrap=True)
+
+    if interactive or (keep_json and json_mode):
+        yield deliver
+        return
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            yield deliver
+        except BayError as exc:
+            # The root handler prints to stdout. Here stdout belongs to the secret.
+            err = Console(stderr=True)
+            err.print(f"  [red]\u2717[/red] {escape(str(exc))}", soft_wrap=True)
+            if exc.hint:
+                err.print(f"  [blue]i[/blue] Hint: {escape(str(exc.hint))}", soft_wrap=True)
+            raise typer.Exit(exc.exit_code) from None
+
+
 def _require_headscale(config: dict) -> None:
     """Exit with error if gateway type is not headscale."""
     if config.get("access_gateway") != "headscale":
@@ -1005,31 +1060,36 @@ def key(
         bay gateway key alice
         bay gateway key ci-runner --tag tag:agent
     """
-    cx = context_from(ctx)
-    config = _get_gateway_config(cx)
-    _require_headscale(config)
-    _validate_username(name)
-    tags = _validate_tags(tag)
+    with _secret_output() as deliver:
+        cx = context_from(ctx)
+        config = _get_gateway_config(cx)
+        _require_headscale(config)
+        _validate_username(name)
+        tags = _validate_tags(tag)
 
-    con.header(f"Generating pre-auth key for: {name}")
+        con.header(f"Generating pre-auth key for: {name}")
 
-    backend = _make_backend(cx, env, region)
-    try:
-        user_id = backend.get_user_id(name)
-    except BayError:
-        con.error(f"User '{name}' not found in headscale.")
-        raise typer.Exit(1)
+        backend = _make_backend(cx, env, region)
+        try:
+            user_id = backend.get_user_id(name)
+        except BayError:
+            con.error(f"User '{name}' not found in headscale.")
+            raise typer.Exit(1)
 
-    output = backend.generate_preauth_key(user_id, tags=tags)
+        output = backend.generate_preauth_key(user_id, tags=tags)
 
-    if output:
-        show_ephemeral(
-            f"\n  [bold]Pre-auth key for {name}:[/bold]\n\n  {output}\n",
-            clipboard=output,
+        if not output:
+            con.error("No key returned from headscale.")
+            raise typer.Exit(1)
+        deliver(
+            output,
+            screen=f"\n  [bold]Pre-auth key for {name}:[/bold]\n\n  {output}\n",
+            hints=(
+                f"\n  Pre-auth key for [bold]{name}[/bold] is on stdout. It is single-use."
+                f"\n  Join: [dim]tailscale up --login-server=https://<headscale domain> "
+                f"--authkey=<key> --hostname=<name>[/dim]\n"
+            ),
         )
-    else:
-        con.error("No key returned from headscale.")
-        raise typer.Exit(1)
 
 
 # An API key prefix: 12 URL-safe base64 characters for a current key, 7 for a
@@ -1105,6 +1165,23 @@ def apikey(
         bay gateway apikey expire AbCdEf123456
         bay gateway apikey expire 3
     """
+    if action == "create":
+        with _secret_output() as deliver:
+            cx = context_from(ctx)
+            config = _get_gateway_config(cx)
+            _require_headscale(config)
+            if target is not None:
+                con.error("'apikey create' takes no PREFIX-OR-ID.")
+                raise typer.Exit(1)
+            if not _EXPIRATION_RE.match(expiration):
+                con.error(
+                    f"Invalid expiration '{expiration}': use durations like 90d, 24h, 2w "
+                    "(units ms/s/m/h/d/w/y, largest first, no decimals)."
+                )
+                raise typer.Exit(1)
+            _apikey_create(cx, config, env, region, expiration, deliver)
+        return
+
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
     _require_headscale(config)
@@ -1118,25 +1195,24 @@ def apikey(
     if target is not None:
         con.error(f"'apikey {action}' takes no PREFIX-OR-ID.")
         raise typer.Exit(1)
-    if action == "list":
-        _apikey_list(cx, config, env, region)
-        return
+    _apikey_list(cx, config, env, region)
 
-    if not _EXPIRATION_RE.match(expiration):
-        con.error(
-            f"Invalid expiration '{expiration}': use durations like 90d, 24h, 2w "
-            "(units ms/s/m/h/d/w/y, largest first, no decimals)."
-        )
-        raise typer.Exit(1)
 
+def _apikey_create(
+    cx: Context, config: dict, env: str, region: str | None, expiration: str, deliver: Deliver
+) -> None:
+    """`bay gateway apikey` (create): the key on stdout once, the advice on stderr."""
     con.header("Generating Headscale API key")
 
     backend = _make_backend(cx, env, region, config)
-    output = backend.create_api_key(expiration)
+    key = backend.create_api_key(expiration)
+    if not key:
+        con.error("No API key returned from headscale.")
+        raise typer.Exit(1)
 
-    if output:
-        key = output
-        content = (
+    deliver(
+        key,
+        screen=(
             f"\n  [bold]API key:[/bold] {key}"
             f"\n"
             f"\n  Bay does not need this key. The admin API answers only on the"
@@ -1152,11 +1228,21 @@ def apikey(
             f"\n"
             f"\n  Expire it when you no longer need it: bay gateway apikey expire <prefix>"
             f"\n"
-        )
-        show_ephemeral(content, clipboard=key)
-    else:
-        con.error("No API key returned from headscale.")
-        raise typer.Exit(1)
+        ),
+        hints=(
+            f"\n  The API key is on stdout, once. Pipe it into the vault, for example:"
+            f"\n"
+            f"\n       bay gateway apikey | bay vault set {env} <name>"
+            f"\n"
+            f"\n  Bay does not need this key. The admin API answers only on the"
+            f"\n  tailnet and on the box itself, unless headscale_admin_api_public is true."
+            f"\n  [bold]Only if the fleet registers boxes through the API[/bold]"
+            f"\n  (headscale_register_via_api: true), the name is headscale_api_key."
+            f"\n"
+            f"\n  Expire it when you no longer need it: bay gateway apikey expire <prefix>"
+            f"\n"
+        ),
+    )
 
 
 def _apikey_list(cx: Context, config: dict, env: str, region: str | None) -> None:
@@ -1275,6 +1361,35 @@ def enroll(
         bay gateway enroll --user alice --hostname alice-phone --expiry 7d
         bay gateway enroll --user ci-runner --tag tag:agent --reusable --expiry 30d
     """
+    with _secret_output(keep_json=True) as deliver:
+        _enroll(
+            ctx,
+            deliver,
+            user=user,
+            hostname=hostname,
+            no_hostname=no_hostname,
+            tag=tag,
+            reusable=reusable,
+            expiry=expiry,
+            env=env,
+            region=region,
+        )
+
+
+def _enroll(
+    ctx: typer.Context,
+    deliver: Deliver,
+    *,
+    user: str | None,
+    hostname: str | None,
+    no_hostname: bool,
+    tag: list[str] | None,
+    reusable: bool,
+    expiry: str,
+    env: str,
+    region: str | None,
+) -> None:
+    """The work of `bay gateway enroll`; the secret leaves through ``deliver``."""
     from rich.prompt import Prompt
 
     cx = context_from(ctx)
@@ -1406,7 +1521,20 @@ def enroll(
         f"\n  {join_cmd}"
         f"\n"
     )
-    show_ephemeral(content, clipboard=join_cmd)
+    hint_cmd = f"tailscale up --login-server=https://{domain} --authkey=<key>"
+    if node_name:
+        hint_cmd += f" --hostname={node_name}"
+    deliver(
+        auth_key,
+        screen=content,
+        clipboard=join_cmd,
+        hints=(
+            f"\n  The pre-auth key is on stdout, once. Run this on the device to enroll:"
+            f"\n"
+            f"\n  [dim]{hint_cmd}[/dim]"
+            f"\n"
+        ),
+    )
 
     # After the ephemeral screen, never inside it: the alternate screen is torn down
     # on dismiss, and this guidance is not a secret — it needs to survive in scrollback.

@@ -838,18 +838,23 @@ config hash, so an unchanged key is a no-op. A run that includes `deploy_stack`
 (no tags, or `--tags deploy_stack`) leaves the sidecar to `deploy_stack`, which
 does the same in its full pass.
 
-1. Mint a new key on the control host. Keep the old one until step 5.
+1. Mint a new key on the control host and store it in the vault of the control
+   env in one pipe. Keep the old key until step 5. When stdout is not a terminal,
+   `bay gateway apikey` prints only the key and one newline on stdout. The hints
+   go to stderr, and the key stays out of the shell history.
 
    ```bash
-   bay gateway apikey --expiration 90d
+   bay gateway apikey --expiration 90d | bay vault set production tailnet_identity_api_key
    ```
 
-2. Store it in the vault of the control env, from stdin so it stays out of the
-   shell history.
+   A pipe hides the exit code of the first command. A failed mint prints nothing on
+   stdout, and `bay vault set` stops with an error when stdin is empty, so a failed
+   mint stores nothing. Run the pipe under `set -o pipefail` to see the failure in
+   the exit code. To read the key first, run `bay gateway apikey` on a terminal: it
+   shows the key on a screen that leaves no scrollback.
 
-   ```bash
-   bay vault set production tailnet_identity_api_key < new-key.txt
-   ```
+2. The vault now holds the new key. `bay vault edit production` shows it, if you
+   want to check.
 
 3. Deploy the tag. `-- --check --diff` first shows the env file change; the
    check-mode reconcile reads the live env file, so it plans no recreate.

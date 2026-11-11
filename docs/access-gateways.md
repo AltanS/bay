@@ -230,6 +230,8 @@ bay gateway apikey list                # ID, prefix, expiry
 bay gateway apikey expire <prefix-or-id>
 ```
 
+`bay gateway apikey`, `bay gateway key` and `bay gateway enroll` print the secret once. On a terminal it shows on a screen that leaves no scrollback. When stdout is not a terminal, stdout carries only the secret and one newline, and the hints go to stderr, so a pipe is safe: `bay gateway apikey | bay vault set production headscale_api_key`. (`bay --json gateway enroll` keeps its JSON document.)
+
 #### 5. Create a user and pre-auth key
 
 ```bash
