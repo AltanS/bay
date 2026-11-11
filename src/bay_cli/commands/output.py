@@ -191,13 +191,13 @@ def _summary_at_end(command: str, log: Path) -> Iterator[None]:
     Click passes the exception that ends the command into the resource, so a
     ``typer.Exit(0)`` counts as ok and every other exception as failed.
     """
-    import click
+    from bay_cli.click_compat import exit_code_of
 
     offset = log_offset(log)
     try:
         yield
     except BaseException as exc:
-        ok = isinstance(exc, click.exceptions.Exit) and exc.exit_code == 0
+        ok = exit_code_of(exc) == 0
         print_summary(summary_lines(command, ok=ok, log=log, offset=offset))
         raise
     print_summary(summary_lines(command, ok=True, log=log, offset=offset))

@@ -726,9 +726,9 @@ def _apply(
     except Exception as exc:
         # Any other error (a lock that breaks its schema, an OSError): with --json
         # it is still one JSON document, never only a traceback.
-        import click
+        from bay_cli.click_compat import ClickException, Exit
 
-        if not as_json or isinstance(exc, (click.exceptions.Exit, click.ClickException)):
+        if not as_json or isinstance(exc, (Exit, ClickException)):
             raise
         wrapped = BayError(f"{type(exc).__name__}: {exc}")
         doc = _error_outcome(ctx, wrapped)

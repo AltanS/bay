@@ -8,6 +8,12 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.19.1] - 2026-11-11
+
+### Fixed
+- `bay deploy --log <file>` and `bay provision --log <file>` crashed at start with `ModuleNotFoundError: No module named 'click'`. This was so from 2.19.0 on a machine installed with `uv tool install`. Newer Typer carries Click inside itself and does not install a top-level `click`. The tests did not see it, because the test environment has `click` through its dev dependencies. The crash came before the run began, so no box was touched and nothing was deployed or provisioned. The same import sat in an error path of `bay up --json` and `bay rollback --json`, which hit it only on an unexpected error. Bay now gets the exit and error classes through Typer and no longer imports `click`. A new test bans `import click` in `src/` and runs the `--log` summary with `click` unimportable.
+- Without `--log`, `bay deploy` and `bay provision` were not affected.
+
 ## [2.19.0] - 2026-11-11
 
 This release adds three things. Hosts alert when a reboot stays pending. The Headscale admin API is closed to the internet, and a box in another region registers through the control host over SSH. `bay host upgrade` upgrades the OS packages of one box, and `bay deploy --tags tailnet_identity` rotates the sidecar key alone.
