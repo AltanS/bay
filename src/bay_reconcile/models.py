@@ -114,6 +114,15 @@ def healthcheck_to_sdk(hc: Mapping[str, object]) -> dict[str, Any]:
     return out
 
 
+def tmpfs_to_sdk(entries: Sequence[str]) -> dict[str, str]:
+    """``("/run/x", "/tmp:size=1m")`` -> ``{"/run/x": "", "/tmp": "size=1m"}`` (docker SDK form)."""
+    out: dict[str, str] = {}
+    for entry in entries:
+        path, _, options = entry.partition(":")
+        out[path] = options
+    return out
+
+
 @dataclass(frozen=True)
 class ContainerSpec:
     """Desired state of one container, fully resolved on the CLI side.
@@ -149,10 +158,20 @@ class ContainerSpec:
     #: network so the firewall can name it. Empty means docker picks.
     network_ips: Mapping[str, str] = field(default_factory=dict)
     #: Linux capabilities to drop (docker ``--cap-drop``) and security options
-    #: (docker ``--security-opt``). Bay sets them only on an egress container:
-    #: ``NET_RAW`` and ``no-new-privileges:true``. Empty means docker's default.
+    #: (docker ``--security-opt``). Bay sets them on an egress container
+    #: (``NET_RAW`` and ``no-new-privileges:true``) and on headscale (``ALL``).
+    #: Empty means docker's default.
     cap_drop: Sequence[str] = ()
     security_opt: Sequence[str] = ()
+    #: Capabilities to add back after ``cap_drop`` (docker ``--cap-add``).
+    #: Headscale keeps ``DAC_OVERRIDE`` only. Empty means none.
+    cap_add: Sequence[str] = ()
+    #: Read-only root filesystem (docker ``--read-only``). Volumes and tmpfs
+    #: mounts stay writable.
+    read_only: bool = False
+    #: tmpfs mounts, ``"<path>"`` or ``"<path>:<options>"`` (docker
+    #: ``--tmpfs``). Empty means none.
+    tmpfs: Sequence[str] = ()
     labels: Mapping[str, str] = field(default_factory=dict)
     healthcheck: Mapping[str, object] | None = None
     log_driver: str | None = None

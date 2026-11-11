@@ -36,6 +36,8 @@ headscale_node_hostname: "{{ stack_name }}{{ ('-' ~ region) if region is defined
 
 # Tailnet IP of this server — used for split-DNS extra_records.
 # Default matches the first sequential allocation from headscale_tailnet_cidr.
+# With headscale_ip_allocation `random` (the default) a NEW host gets a random
+# IP: set this after it joins (tailscale_register stops and names the IP).
 headscale_server_tailnet_ip: "100.64.0.1"
 
 

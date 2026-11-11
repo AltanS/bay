@@ -8,6 +8,28 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.18.0] - 2026-11-11
+
+Headscale hardening: random IP allocation for new nodes, a consistent and checked DB backup, a locked-down container, and tighter file modes.
+
+### Changed
+- New role variable `headscale_ip_allocation` feeds `prefixes.allocation` in the Headscale config. The default is `random`. The value must be `random` or `sequential`; the `headscale` role stops on any other value. Reason: ACL `hosts:` aliases and grants point at IPs, and with `sequential` Headscale gives the IP of a deleted node, and every grant on it, to the next node that joins.
+- `tailscale_register` now checks a host right after it registers: when its tailnet IP is not `headscale_server_tailnet_ip`, the deploy stops and the message names the IP to set. Under `random`, a fresh control host no longer gets `100.64.0.1`, the default of that variable. A host that is already registered is never stopped by this check.
+- The Headscale backup no longer copies the live database with `docker cp`. The DB runs in WAL mode, and a file copy can catch `db.sqlite` and `db.sqlite-wal` at different moments. A root helper (`/usr/local/sbin/bay-headscale-db-snapshot`) runs `sqlite3 .backup` on the live DB, runs `PRAGMA integrity_check` on the copy, and fails unless it prints `ok`. The snapshot and the noise and DERP private keys go to restic as before (`headscale.tar`, same `headscale/` layout). The live `-wal` and `-shm` files are no longer in the archive. The temp copy is 0600 in the root-only `/var/lib/bay-headscale-backup` and is removed on every exit. A failed check stores no snapshot and sends the usual `backup.failed` alert. The backup unit still runs as the app user and calls the helper through one sudoers rule (`/etc/sudoers.d/bay-headscale-backup`) that allows no arguments. Restic, retention, the size check, maintenance and alerts are unchanged. `backup_headscale_source_path` is gone; `backup_headscale_data_dir`, `backup_headscale_snapshot_bin` and `backup_headscale_snapshot_dir` are new.
+- The Headscale container runs with a read-only root filesystem, a tmpfs for its unix socket (`/var/run/headscale`, so `docker exec headscale headscale ...` keeps working), the config folder mounted `:ro`, `cap_drop: [ALL]` plus `cap_add: [DAC_OVERRIDE]`, and `no-new-privileges`. It still runs as root. DAC_OVERRIDE is the one capability it needs: the config and data folders belong to the app user, so root without it cannot read `config.yaml` or write the data folder (checked against `headscale/headscale:0.29.7`: with every capability dropped it does not find its config; with DAC_READ_SEARCH alone it cannot write its noise key). The reconciler learned the `read_only`, `tmpfs` and `cap_add` spec keys; a spec without them hashes as before, so no other container is recreated.
+- File modes: `/opt/headscale/data` is 0700 and `/opt/headscale/config` 0750 (both were 0755). `db.sqlite`, its `-wal` and `-shm` files and every DB copy in the data folder or in `/opt/headscale/backups` become 0600 (Headscale created them 0644). The role fixes the modes on every run and deletes nothing. SQLite creates new `-wal` and `-shm` files with the mode of `db.sqlite`, so they stay 0600 after a restart.
+- The `headscale` role refuses `tailnet_identity_source: sqlite`: the sidecar runs as a non-root user and can no longer read the DB. The default `api` source is unaffected.
+- Docs: `docs/backups.md` describes the snapshot helper, moves the old `-wal` and `-shm` files away before a restore, and has a new "Restore test (Headscale)" section. `docs/access-gateways.md` says how to set `headscale_server_tailnet_ip` under random allocation.
+
+### Upgrade notes
+- Run `bay deploy <env> --tags headscale,backup` against the fleet that runs Headscale (both roles are in the deploy playbook, not in provision). `headscale` sets the file modes and recreates the container with the hardened spec. `backup` installs the `sqlite3` package on the host, the helper, its folder and the sudoers rule, and renders the new backup script. A full `bay deploy --rig <env>` does the same.
+- The Headscale container restarts once (the spec hash changes). Nodes reconnect within seconds. Nothing else is recreated.
+- A plain `bay up` on that fleet also recreates the Headscale container, because `bay up` builds the same spec. `bay plan` shows it as a `headscale` recreate step. So the first `bay up` after the upgrade is not a no-op on the control host. Run the `--tags headscale,backup` deploy first, so the modes, the helper and the container change in one step.
+- IP allocation: existing nodes keep their addresses; only nodes that join after the upgrade get a random free IP. Headscale reads every assigned IP from its database as used, and its startup backfill only fills a node that has no IP. To keep the old behaviour, set `headscale_ip_allocation: sequential` in group_vars before the deploy.
+- A fleet that sets `tailnet_identity_source: sqlite` must switch to `api` first, or the `headscale` role stops.
+- The first backup after the upgrade is a new-format archive. Restore older snapshots as before; `docs/backups.md` covers both.
+- An old copy such as `/opt/headscale/backups/db.sqlite.pre-v0292-*` becomes 0600 but stays. Delete it by hand when you no longer need it.
+
 ## [2.17.3] - 2026-11-11
 
 A test fix. Nothing changes for a fleet or a box.

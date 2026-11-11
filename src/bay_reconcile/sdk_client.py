@@ -19,6 +19,7 @@ from .models import (
     ContainerState,
     healthcheck_to_sdk,
     release_command_kwargs,
+    tmpfs_to_sdk,
 )
 from .observe import (
     HASH_LABEL as _HASH_LABEL,
@@ -161,6 +162,12 @@ class SdkDockerClient:
             kwargs["cap_drop"] = list(spec.cap_drop)
         if spec.security_opt:
             kwargs["security_opt"] = list(spec.security_opt)
+        if spec.cap_add:
+            kwargs["cap_add"] = list(spec.cap_add)
+        if spec.read_only:
+            kwargs["read_only"] = True
+        if spec.tmpfs:
+            kwargs["tmpfs"] = tmpfs_to_sdk(spec.tmpfs)
         if spec.ports:
             kwargs["ports"] = _ports_to_sdk(spec.ports)
         if spec.healthcheck:

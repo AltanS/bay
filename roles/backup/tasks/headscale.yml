@@ -1,0 +1,48 @@
+---
+# Headscale state backup: the root snapshot helper and what it needs.
+# Included from main.yml only on the control-region host with
+# backup_headscale_state on (_backup_headscale_enabled).
+#
+# The backup unit (bay-backup@headscale) runs as app_user. db.sqlite is
+# root-owned 0600 inside a 0700 folder (roles/headscale), so the snapshot runs
+# as root through one sudoers rule that names the helper and allows no
+# arguments. app_user is in the docker group and can already reach the same
+# files through `docker cp`; the rule grants nothing beyond that.
+
+- name: Install sqlite3 for the Headscale snapshot
+  ansible.builtin.apt:
+    name: sqlite3
+    state: present
+  become: true
+  become_user: root
+
+- name: Create the root-only Headscale snapshot folder
+  ansible.builtin.file:
+    path: "{{ backup_headscale_snapshot_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  become: true
+  become_user: root
+
+- name: Install the Headscale snapshot helper
+  ansible.builtin.template:
+    src: headscale-db-snapshot.sh.j2
+    dest: "{{ backup_headscale_snapshot_bin }}"
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  become_user: root
+
+- name: Allow the backup unit to run the Headscale snapshot helper as root
+  ansible.builtin.template:
+    src: headscale-backup.sudoers.j2
+    dest: /etc/sudoers.d/bay-headscale-backup
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+  become: true
+  become_user: root

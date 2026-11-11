@@ -72,6 +72,14 @@
     - backup_enabled
     - item.value.container in (active_services | default({})) or item.value.container in (active_accessories | default({}))
 
+- name: Decide whether this host backs up Headscale state
+  ansible.builtin.set_fact:
+    _backup_headscale_enabled: >-
+      {{ (backup_enabled | bool)
+         and (backup_headscale_state | bool)
+         and (access_gateway | default('wireguard')) == 'headscale'
+         and (headscale_server | default(true) | bool) }}
+
 - name: Register Headscale control-plane state as a backup target (control region only)
   ansible.builtin.set_fact:
     _backup_accessories: "{{ (_backup_accessories | default([])) + [_headscale_backup_entry] }}"
@@ -85,12 +93,27 @@
       repo: "s3:{{ backup_s3_endpoint }}/{{ backup_s3_bucket }}/{{ backup_s3_prefix }}/{{ inventory_hostname }}/{{ backup_headscale_container }}"
       config:
         backup:
-          source_path: "{{ backup_headscale_source_path }}"
+          # backup.sh.j2 reads this flag inside the `file` branch and runs
+          # the root snapshot helper instead of `docker cp`.
+          headscale_snapshot: true
+  when: _backup_headscale_enabled | bool
+
+- name: Install the Headscale snapshot helper (control region only)
+  ansible.builtin.include_tasks: headscale.yml
+  when: _backup_headscale_enabled | bool
+
+# A root sudoers rule must not outlive the backup that needs it
+# (backup_headscale_state switched off, or the host is no longer the control
+# region). The helper and its empty folder are harmless and stay.
+- name: Remove the Headscale snapshot sudoers rule where it is not used
+  ansible.builtin.file:
+    path: /etc/sudoers.d/bay-headscale-backup
+    state: absent
+  become: true
+  become_user: root
   when:
     - backup_enabled
-    - backup_headscale_state | bool
-    - access_gateway | default('wireguard') == 'headscale'
-    - headscale_server | default(true) | bool
+    - not (_backup_headscale_enabled | bool)
 
 - name: Discover databases bound to accessories via service database blocks
   ansible.builtin.set_fact:

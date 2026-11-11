@@ -1551,7 +1551,7 @@ def bay_spec_hash(spec, env_digest=None):
     Covers the fields that docker_container acts on: image, volumes, env,
     labels (excluding the config-hash label itself), networks, network_mode,
     ports, command, restart_policy, mem_limit, memswap_limit, dns, network_ips,
-    cap_drop, security_opt (each only when set).  Fields that change between
+    cap_drop, cap_add, security_opt, read_only, tmpfs (each only when set).  Fields that change between
     deploys but are not part of the running container config are excluded
     (e.g. ``build``, ``type``).
 

@@ -67,6 +67,9 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         network_ips=_network_ips(d),
         cap_drop=_str_tuple(d, "cap_drop"),
         security_opt=_str_tuple(d, "security_opt"),
+        cap_add=_str_tuple(d, "cap_add"),
+        read_only=_read_only(d),
+        tmpfs=_tmpfs(d),
         labels=dict(d.get("labels") or {}),
         healthcheck=_healthcheck(d),
         log_driver=d.get("log_driver"),
@@ -96,6 +99,32 @@ def _str_tuple(d: Mapping[str, Any], key: str) -> tuple[str, ...]:
     if isinstance(raw, list | tuple) and all(isinstance(a, str) and a for a in raw):
         return tuple(raw)
     raise ValueError(f"{d.get('name')!r}: {key} must be a list of strings")
+
+
+def _read_only(d: Mapping[str, Any]) -> bool:
+    """The spec's ``read_only`` flag. Only a real bool (or absent/None) is accepted.
+
+    A string such as ``"false"`` would be truthy, so a wrong shape fails at
+    load time instead of locking a root filesystem the operator meant to leave
+    writable.
+    """
+    raw = d.get("read_only")
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    raise ValueError(f"{d.get('name')!r}: read_only must be true or false")
+
+
+def _tmpfs(d: Mapping[str, Any]) -> tuple[str, ...]:
+    """``"<absolute path>[:<options>]"`` entries, or ``()``. A bad shape fails at load time."""
+    entries = _str_tuple(d, "tmpfs")
+    for entry in entries:
+        if not entry.startswith("/"):
+            raise ValueError(
+                f"{d.get('name')!r}: tmpfs entries must be absolute paths, got {entry!r}"
+            )
+    return entries
 
 
 def _network_ips(d: Mapping[str, Any]) -> dict[str, str]:

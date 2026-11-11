@@ -739,7 +739,9 @@ two edits each new proxied port needs.
   reading the DB directly, **but** that requires mounting Headscale's data dir
   read-only — which also exposes `noise_private.key` / `derp_server_private.key` and
   the full DB to the sidecar, and reads can be slightly stale (`immutable=1` is
-  needed to open the WAL DB read-only). Prefer `api`.
+  needed to open the WAL DB read-only). Prefer `api`. The `headscale` role now refuses
+  `sqlite`: the data folder is 0700 and `db.sqlite` 0600 root-only, so the sidecar's
+  non-root user cannot read them.
 - **Anti-spoof.** The sidecar *always* sets both headers (even `unknown`), and Traefik
   `authResponseHeaders` replaces any client-supplied value — a client cannot pre-set it.
 - **Client-IP invariant.** The sidecar reads the leftmost `X-Forwarded-For`, which is

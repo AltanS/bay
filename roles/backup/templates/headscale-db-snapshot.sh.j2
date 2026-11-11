@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+#
+# Headscale state snapshot for the restic backup (backup-headscale.sh).
+#
+# Runs as root: the backup unit runs as the app user and calls this script
+# through one sudoers rule that allows no arguments
+# (/etc/sudoers.d/bay-headscale-backup). Writes a tar archive to stdout with
+# one top-level `headscale/` folder, the same layout `docker cp
+# headscale:/var/lib/headscale -` made before, so the documented restore stays
+# the same:
+#
+#   headscale/db.sqlite                  consistent online snapshot of the live DB
+#   headscale/noise_private.key          when present
+#   headscale/derp_server_private.key    when present
+#
+# The DB runs in WAL mode. A plain copy of db.sqlite (or `docker cp` of the
+# data folder) can catch the main file and the -wal file at different moments.
+# `.backup` uses the SQLite online backup API, which reads one consistent
+# state while Headscale keeps writing. The snapshot must pass
+# `PRAGMA integrity_check` (output exactly `ok`). Any failure exits non-zero
+# before one byte reaches stdout, so restic stores no snapshot and the backup
+# script sends its `backup.failed` alert.
+set -euo pipefail
+umask 077
+
+DATA_DIR={{ backup_headscale_data_dir | quote }}
+WORK_ROOT={{ backup_headscale_snapshot_dir | quote }}
+SQLITE3=/usr/bin/sqlite3
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+[ -x "$SQLITE3" ] || fail "${SQLITE3} is missing; run the backup tag of the deploy to install the sqlite3 package"
+[ -f "${DATA_DIR}/db.sqlite" ] || fail "no Headscale database at ${DATA_DIR}/db.sqlite"
+[ -d "$WORK_ROOT" ] || fail "snapshot folder ${WORK_ROOT} is missing"
+
+# Root-only (0700) folder, removed on every exit path.
+WORK=$(mktemp -d "${WORK_ROOT}/snapshot.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT
+mkdir -m 0700 "${WORK}/headscale"
+SNAP="${WORK}/headscale/db.sqlite"
+
+# .timeout: wait up to 30 s for a lock that a checkpoint holds.
+"$SQLITE3" -bail -cmd '.timeout 30000' "${DATA_DIR}/db.sqlite" ".backup '${SNAP}'" \
+  || fail "sqlite3 .backup of ${DATA_DIR}/db.sqlite failed"
+chmod 0600 "$SNAP"
+
+CHECK=$("$SQLITE3" -bail "$SNAP" 'PRAGMA integrity_check;' 2>&1) \
+  || fail "PRAGMA integrity_check could not run on the snapshot: ${CHECK:0:500}"
+[ "$CHECK" = "ok" ] || fail "PRAGMA integrity_check on the snapshot did not print ok: ${CHECK:0:500}"
+
+FILES=(headscale/db.sqlite)
+for key in noise_private.key derp_server_private.key; do
+  if [ -f "${DATA_DIR}/${key}" ]; then
+    install -m 0600 "${DATA_DIR}/${key}" "${WORK}/headscale/${key}"
+    FILES+=("headscale/${key}")
+  fi
+done
+
+# Named files only: the integrity check can leave an empty -wal or -shm beside
+# the snapshot, and the live -wal/-shm must never be in the archive.
+tar -C "$WORK" --numeric-owner -cf - "${FILES[@]}"

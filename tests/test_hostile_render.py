@@ -306,6 +306,42 @@ def _backup_sh_volume(payload: str) -> str:
     )
 
 
+def _backup_sh_headscale(payload: str) -> str:
+    """The Headscale snapshot branch: the helper path and the target name are poisoned."""
+    return _render(
+        "roles/backup/templates/backup.sh.j2",
+        ansible_managed="test",
+        accessory_name=payload,
+        method="file",
+        repo="s3:s3.example.com/b",
+        backup_restic_password="p",
+        backup_s3_access_key_id="k",
+        backup_s3_secret_access_key="s",
+        backup_scripts_dir="/opt/stack/backup",
+        backup_lock_dir="/opt/stack/backup/locks",
+        backup_restic_bin="/usr/local/bin/restic",
+        docker_monitor_alert_header="[bay] ",
+        docker_monitor_alert_footer="",
+        inventory_hostname="host1",
+        retain=7,
+        accessory_config={"backup": {"headscale_snapshot": True}},
+        backup_headscale_snapshot_bin=payload,
+        bound_databases=[],
+        region="",
+        headscale_server_tailnet_ip="",
+    )
+
+
+def _headscale_snapshot_helper(payload: str) -> str:
+    """The root snapshot helper: both host paths come from group_vars."""
+    return _render(
+        "roles/backup/templates/headscale-db-snapshot.sh.j2",
+        ansible_managed="test",
+        backup_headscale_data_dir=payload,
+        backup_headscale_snapshot_dir=payload,
+    )
+
+
 def _bay_job_sh(payload: str, *, command: object = None) -> str:
     """bay.toml [[jobs]]: every value of the job and of its main container is poisoned."""
     sys.path.insert(0, str(_REPO_ROOT / "filter_plugins"))
@@ -672,6 +708,8 @@ _CASES: list[Case] = [
     Case("roles/backup/templates/backup.sh.j2", _backup_sh_mysql),
     Case("roles/backup/templates/backup.sh.j2", _backup_sh_file),
     Case("roles/backup/templates/backup.sh.j2", _backup_sh_volume),
+    Case("roles/backup/templates/backup.sh.j2", _backup_sh_headscale),
+    Case("roles/backup/templates/headscale-db-snapshot.sh.j2", _headscale_snapshot_helper),
     Case("roles/deploy_stack/templates/bay-job.sh.j2", _bay_job_sh),
     Case("roles/deploy_stack/templates/bay-job.sh.j2", _bay_job_sh_list_command),
     Case("roles/backup/templates/maintenance.sh.j2", _maintenance_sh),

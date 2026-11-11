@@ -451,7 +451,7 @@ status.eu.example.com → 100.64.0.1  (EU server)
 status.na.example.com → 100.64.0.2  (NA server)
 ```
 
-Set `headscale_server_tailnet_ip` per region in `group_vars/<region>/main.yml`. The default is `100.64.0.1` (first node in sequential allocation).
+Set `headscale_server_tailnet_ip` per region in `group_vars/<region>/main.yml`. The default is `100.64.0.1`, the first node under `sequential` allocation. New nodes get a random free IP by default (`headscale_ip_allocation: random`), so a new host rarely gets `100.64.0.1`. Read its IP with `bay gateway nodes` after it joins, set the variable, and deploy again. The `tailscale_register` role stops the deploy that registers a host whose IP differs from this value, and the message names the IP to set. Existing nodes keep their IPs.
 
 ```yaml
 # group_vars/na/main.yml

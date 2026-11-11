@@ -43,13 +43,23 @@ backup_lock_dir: "{{ stack_dir }}/backup/locks"
 # /var/lib/headscale (bind-mounted from /opt/headscale/data on the host). Losing it
 # loses the tailnet identity, every node's IP assignment, and the keys.
 #
-# We capture it through the existing restic 'file' method (restic backup
-# --stdin-from-command -- docker cp), which reads via the docker daemon and so sidesteps the root-owned
-# on-disk DB/key permissions. It is gated to the control-region host (the only host
-# running the headscale container). The config dir (/etc/headscale) is re-rendered
-# on every deploy and is intentionally NOT backed up.
+# The DB runs in WAL mode, so a file copy of the live folder (the old `docker
+# cp`) could catch db.sqlite and db.sqlite-wal at different moments. The
+# backup script now calls a root helper (backup_headscale_snapshot_bin, through
+# one sudoers rule with no arguments) that runs `sqlite3 .backup` on the live DB
+# (the SQLite online backup API), checks the copy with `PRAGMA integrity_check`,
+# and writes a tar of the copy plus the two private keys to restic. The tar has
+# the same `headscale/` layout as before, so the restore is unchanged. The role
+# installs the distro `sqlite3` package for it. Gated to the control-region host
+# (the only host running the headscale container). The config dir
+# (/etc/headscale) is re-rendered on every deploy and is intentionally NOT
+# backed up.
 backup_headscale_state: true
 backup_headscale_container: headscale
-backup_headscale_source_path: /var/lib/headscale
 backup_headscale_schedule: "{{ backup_schedule }}"
 backup_headscale_retain: "{{ backup_retain }}"
+# Host side of the container's /var/lib/headscale bind mount.
+backup_headscale_data_dir: /opt/headscale/data
+# Root helper that makes the snapshot, and its root-only (0700) work folder.
+backup_headscale_snapshot_bin: /usr/local/sbin/bay-headscale-db-snapshot
+backup_headscale_snapshot_dir: /var/lib/bay-headscale-backup

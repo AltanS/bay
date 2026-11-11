@@ -5,8 +5,18 @@
     container_name: headscale
     restart: unless-stopped
     command: serve
+    # Same hardening as the reconciler spec (container_lifecycle/tasks/build_specs.yml).
+    read_only: true
+    tmpfs:
+      - /var/run/headscale
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+    security_opt:
+      - no-new-privileges:true
     volumes:
-      - /opt/headscale/config:/etc/headscale
+      - /opt/headscale/config:/etc/headscale:ro
       - /opt/headscale/data:/var/lib/headscale
     ports:
       - "3478:3478/udp"

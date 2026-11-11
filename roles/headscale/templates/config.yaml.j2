@@ -10,7 +10,9 @@ noise:
 prefixes:
   v4: {{ headscale_tailnet_cidr | first }}
   v6: fd7a:115c:a1e0::/48
-  allocation: sequential
+  # headscale_ip_allocation (roles/headscale/defaults/main.yml). Only new
+  # nodes are affected: existing nodes keep their addresses.
+  allocation: {{ headscale_ip_allocation | default('random') }}
 derp:
   server:
     enabled: true

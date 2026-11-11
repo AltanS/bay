@@ -181,6 +181,16 @@ fi
 # bare RDB file. restore.yml unpacks it with `docker cp - <accessory>:/data`.
 backup_from "${ACCESSORY}.rdb" \
   docker cp "${ACCESSORY}:/data/dump.rdb" -
+{% elif method == 'file' and (accessory_config.backup | default({})).headscale_snapshot | default(false) %}
+# Headscale state (roles/backup/tasks/headscale.yml). The root helper takes a
+# consistent snapshot of the live WAL-mode DB with `sqlite3 .backup`, checks it
+# with `PRAGMA integrity_check`, and prints a tar of the snapshot and the
+# noise/DERP private keys. It exits non-zero with nothing on stdout when the
+# check does not print `ok`, so restic stores no snapshot and the alert below
+# fires. sudoers allows exactly this path with no arguments.
+echo "[$(date -Iseconds)] Starting Headscale snapshot backup for ${ACCESSORY}..."
+backup_from "${ACCESSORY}.tar" \
+  /usr/bin/sudo -n {{ backup_headscale_snapshot_bin | quote }}
 {% elif method == 'file' %}
 SOURCE_PATH={{ accessory_config.backup.source_path | default('/data') | quote }}
 # The container to read from: the accessory itself, or for a volume backup

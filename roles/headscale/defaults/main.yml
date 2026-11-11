@@ -43,6 +43,22 @@ headscale_magic_dns_domain: "{{ stack_name }}.tailnet.internal"
 # image lives in roles/access_gateway/defaults/main.yml; change both together
 # or tests/test_headscale_version_pin.py fails.
 headscale_version: "0.29.7"
+# How Headscale picks the tailnet IP of a NEW node (`prefixes.allocation` in
+# config.yaml): `random` or `sequential`. The role fails on any other value.
+#
+# `random` is the default because ACL `hosts:` aliases and grants point at
+# IPs. With `sequential`, Headscale hands the IP of a deleted node to the next
+# node that joins, and that node inherits every grant the old IP had.
+# Existing nodes keep their addresses when you change this: Headscale reads
+# every assigned IP from the database as "used" and only asks the strategy for
+# the next free one.
+#
+# With `random`, a fresh control host no longer gets 100.64.0.1, which is the
+# default of `headscale_server_tailnet_ip`. After its first registration, read
+# its IP with `bay gateway nodes`, set `headscale_server_tailnet_ip` and deploy
+# again (tailscale_register stops the run with that message). Set
+# `sequential` to keep the old behaviour.
+headscale_ip_allocation: random
 headscale_oidc_issuer: ""
 headscale_oidc_client_id: ""
 headscale_oidc_client_secret: ""

@@ -1,0 +1,5 @@
+# {{ ansible_managed }}
+# The Headscale backup (bay-backup@headscale) runs as {{ app_user }} and takes
+# its DB snapshot through this one root helper. The trailing "" allows the
+# command with no arguments only. See roles/backup/tasks/headscale.yml.
+{{ app_user }} ALL=(root) NOPASSWD: {{ backup_headscale_snapshot_bin }} ""

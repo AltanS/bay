@@ -190,3 +190,40 @@
   no_log: true
   when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
   tags: [tailscale_register]
+
+# == After a registration (both paths) =========================================
+# `headscale_server_tailnet_ip` is THIS host's own tailnet IP, set per region in
+# group_vars (default 100.64.0.1). It is this host's gateway_bind_ip, and the
+# control host's config.yaml points the split-DNS record of every VPN service
+# at the value of the host that runs it. So a remote box is checked against
+# its own value, like the control host. It used to be right on a fresh control host only because
+# sequential allocation gave the first node 100.64.0.1. With
+# headscale_ip_allocation `random` (the default) a new node gets a random IP,
+# so a mismatch would leave VPN services bound to, and resolved to, an address
+# this host does not have. Checked only right after this run registered the
+# node, so an already-registered host is never stopped by it.
+
+- name: Read this host's tailnet IPv4 after registration
+  ansible.builtin.command: tailscale ip -4
+  register: _tailscale_ip_after_register
+  changed_when: false
+  become: true
+  become_user: root
+  when: _needs_registration | default(false)
+  tags: [tailscale_register]
+
+- name: Check headscale_server_tailnet_ip against the registered IP
+  ansible.builtin.assert:
+    that:
+      - (_tailscale_ip_after_register.stdout | trim) == (headscale_server_tailnet_ip | default('100.64.0.1') | string)
+    fail_msg: >-
+      This host joined the tailnet as {{ _tailscale_ip_after_register.stdout | trim }},
+      but headscale_server_tailnet_ip is {{ headscale_server_tailnet_ip | default('100.64.0.1') }}.
+      Set headscale_server_tailnet_ip: "{{ _tailscale_ip_after_register.stdout | trim }}"
+      in group_vars for this host, then deploy again. Split DNS and the VPN bind
+      address use that value.
+    quiet: true
+  when:
+    - _needs_registration | default(false)
+    - _tailscale_ip_after_register is not skipped
+  tags: [tailscale_register]

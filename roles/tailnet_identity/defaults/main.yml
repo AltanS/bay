@@ -29,6 +29,8 @@ tailnet_identity_port: 9100
 #            Headscale's data dir read-only into the sidecar, which also exposes
 #            noise_private.key, derp_server_private.key and the full DB. Only use it
 #            when you accept that trade-off and the slightly-stale reads (see app.py).
+#            The headscale role now REFUSES it: the data folder is 0700 and db.sqlite
+#            0600 root-only, which the sidecar's non-root user cannot read.
 tailnet_identity_source: "api"
 tailnet_identity_api_url: "http://headscale:8080"
 # Required when tailnet_identity_source == 'api'. Provide via vault, never plain.

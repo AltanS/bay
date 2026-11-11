@@ -14,7 +14,42 @@
       (e.g. headscale.example.com). Set it in group_vars.
   tags: [headscale]
 
+- name: Validate headscale_ip_allocation
+  ansible.builtin.assert:
+    that:
+      - headscale_ip_allocation in ['random', 'sequential']
+    fail_msg: >-
+      headscale_ip_allocation is '{{ headscale_ip_allocation }}'. It must be
+      'random' (the default) or 'sequential'. Headscale itself refuses any other
+      value and would crash-loop on start.
+    quiet: true
+  tags: [headscale]
+
+# The hardened modes below (data folder 0700, db.sqlite 0600, both root-only
+# for the DB) lock out the tailnet-identity sidecar's `sqlite` source: it runs
+# as the non-root `identity` user and reads /opt/headscale/data through a
+# read-only mount. The default `api` source reads nothing from disk.
+- name: Refuse the tailnet-identity sqlite source on a hardened data folder
+  ansible.builtin.assert:
+    that:
+      - (tailnet_identity_source | default('api')) != 'sqlite'
+    fail_msg: >-
+      tailnet_identity_source is 'sqlite', but the Headscale data folder is now
+      0700 and db.sqlite 0600 root-only, so the sidecar (user `identity`) cannot
+      read it. Use tailnet_identity_source: api (the default) with
+      tailnet_identity_api_key in the vault.
+    quiet: true
+  when: tailnet_identity_enabled | default(false) | bool
+  tags: [headscale]
+
 # -- Directory Setup ----------------------------------------------------------
+# Owner app_user, as before: the role's own template tasks run as app_user.
+# Headscale runs as root in the container with every capability dropped except
+# DAC_OVERRIDE, which is what lets it read and write these app_user folders.
+# config 0750: nothing outside app_user and the docker group reads it.
+# data 0700: noise and DERP private keys plus the node DB; the only readers
+# are Headscale itself and the root backup helper
+# (roles/backup/templates/headscale-db-snapshot.sh.j2).
 
 - name: Create headscale config directory
   ansible.builtin.file:
@@ -22,7 +57,7 @@
     state: directory
     owner: "{{ app_user }}"
     group: docker
-    mode: "0755"
+    mode: "0750"
   become: true
   become_user: root
   tags: [headscale]
@@ -33,7 +68,39 @@
     state: directory
     owner: "{{ app_user }}"
     group: docker
-    mode: "0755"
+    mode: "0700"
+  become: true
+  become_user: root
+  tags: [headscale]
+
+# Headscale runs with umask 0022, so a fresh db.sqlite is 0644. SQLite creates
+# the -wal and -shm files with the mode of db.sqlite, and removes them on a clean
+# stop, so once db.sqlite is 0600 they follow from the next start on. This also
+# tightens any DB copy an operator left beside it (db.sqlite.bak-*) or in
+# /opt/headscale/backups. It never deletes a file. On a fresh install the DB
+# does not exist yet at this point; the next run fixes it.
+- name: Find headscale database files and copies
+  ansible.builtin.find:
+    paths:
+      - /opt/headscale/data
+      - /opt/headscale/backups
+    patterns:
+      - "*.sqlite"
+      - "*.sqlite-*"
+      - "*.sqlite.*"
+    file_type: file
+  register: _headscale_db_files
+  become: true
+  become_user: root
+  tags: [headscale]
+
+- name: Restrict headscale database files to root (0600)
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    mode: "0600"
+  loop: "{{ _headscale_db_files.files | default([]) }}"
+  loop_control:
+    label: "{{ item.path }}"
   become: true
   become_user: root
   tags: [headscale]
@@ -46,7 +113,8 @@
     dest: /opt/headscale/config/config.yaml
     owner: "{{ app_user }}"
     # 0640, not 0644: this file carries headscale_oidc_client_secret. The
-    # container runs as app_user, which owns the file, so nothing is lost.
+    # container runs as root without the usual capabilities; it reads this
+    # app_user file through DAC_OVERRIDE (container_lifecycle build_specs.yml).
     mode: "0640"
   notify: Restart headscale
   tags: [headscale]

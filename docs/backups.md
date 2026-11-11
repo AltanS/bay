@@ -18,6 +18,7 @@ Bay uses [restic](https://restic.net/) for deduplicated, encrypted backups to S3
 - [Volume backups](#volume-backups)
 - [Rig infrastructure: Headscale](#rig-infrastructure-headscale)
   - [Restoring Headscale (file-method restore)](#restoring-headscale-file-method-restore)
+  - [Restore test (Headscale)](#restore-test-headscale)
 - [Retention](#retention)
 - [CLI commands](#cli-commands)
 - [Restore](#restore)
@@ -231,10 +232,30 @@ identity, every node's assigned IP, and the keys. The config dir (`/etc/headscal
 `config.yaml` + `extra-records.json`) is re-rendered on every deploy and is intentionally
 **not** backed up.
 
-It uses the same `file` method as any volume backup (`restic backup --stdin-from-command --
-docker cp headscale:/var/lib/headscale -`), so it gets its own repo, systemd timer, retention, maintenance,
+It is a `file`-method target with its own repo, systemd timer, retention, maintenance,
 and Telegram alerting like every other target. Tune via `backup_headscale_*` (see Defaults),
 or disable with `backup_headscale_state: false`.
+
+The DB runs in SQLite WAL mode, so recent writes sit in `db.sqlite-wal` until a
+checkpoint. A plain copy of the folder can catch `db.sqlite` and `db.sqlite-wal` at
+different moments. So the backup does not copy the live files. The backup script
+(`bay-backup@headscale`, runs as the app user) calls one root helper,
+`/usr/local/sbin/bay-headscale-db-snapshot`, through a sudoers rule that allows it with
+no arguments (`/etc/sudoers.d/bay-headscale-backup`). The helper:
+
+1. runs `sqlite3 /opt/headscale/data/db.sqlite ".backup '<tmp>/headscale/db.sqlite'"`, the
+   SQLite online backup API, while Headscale keeps running. `<tmp>` is a new 0700 folder in
+   the root-only `/var/lib/bay-headscale-backup`, and the copy is 0600;
+2. runs `PRAGMA integrity_check;` on the copy and stops with exit 1 unless it prints `ok`;
+3. adds `noise_private.key` and `derp_server_private.key` (each when present);
+4. writes a tar of these files to restic as `headscale.tar`, with the same `headscale/`
+   folder as before, and removes the temp folder on every exit.
+
+A failed step writes nothing to restic, so restic stores no snapshot and the script sends
+the usual `backup.failed` alert ("Dump command failed with exit code 1"). The reason is in
+the journal: `journalctl -u bay-backup@headscale`. The live `db.sqlite-wal` and
+`db.sqlite-shm` are never in the archive. The backup role installs the distro `sqlite3`
+package for the helper.
 
 ```bash
 bay backup list headscale        # snapshots
@@ -246,7 +267,7 @@ bay backup status                # headscale appears alongside accessories
 
 `bay backup restore` is database-oriented (it streams into a container and runs
 pg/redis validation), so restore the `file`-method headscale snapshot manually. On the
-control host, with the restic env loaded from `/opt/<stack>/backup/restic.env`:
+control host, as root, with the restic env loaded from `/opt/<stack>/backup/restic.env`:
 
 ```bash
 set -a; . /opt/<stack>/backup/restic.env; set +a
@@ -254,6 +275,10 @@ export RESTIC_REPOSITORY="s3:$BACKUP_S3_ENDPOINT/$BACKUP_S3_BUCKET/$BACKUP_S3_PR
 
 restic snapshots                                   # pick the snapshot to restore
 docker stop headscale
+# The archive holds db.sqlite alone. A -wal or -shm file left from the old DB would be
+# replayed onto the restored one and corrupt it, so move them away first.
+mkdir -p /root/headscale-pre-restore
+mv /opt/headscale/data/db.sqlite* /root/headscale-pre-restore/
 restic dump latest headscale.tar | tar -x -C /opt/headscale/data --strip-components=1
 docker start headscale
 bay gateway nodes                             # confirm nodes + IPs came back
@@ -263,8 +288,27 @@ The container is named `headscale` (`backup_headscale_container`). Bay creates i
 `docker run`, so stop and start it with `docker stop` and `docker start`. Do not use
 `docker compose` here: the rendered compose file only describes the stack.
 
-(`--strip-components=1` drops the leading `headscale/` directory that `docker cp` puts in
-the tar so files land directly under `/opt/headscale/data`.)
+(`--strip-components=1` drops the leading `headscale/` directory of the archive so files
+land directly under `/opt/headscale/data`. The files come back as root with mode 0600.
+Snapshots made before the snapshot helper hold a raw `docker cp` of the folder, with the
+`-wal` and `-shm` files of that moment; restore those the same way.)
+
+### Restore test (Headscale)
+
+Check a snapshot now and then without touching the live server. On the control host,
+as root, with the restic env loaded as above:
+
+```bash
+SCRATCH=$(mktemp -d)                               # 0700, root only
+restic dump latest headscale.tar | tar -x -C "$SCRATCH" --strip-components=1
+ls -l "$SCRATCH"                                   # db.sqlite + the two keys, all 0600
+sqlite3 "$SCRATCH/db.sqlite" 'PRAGMA integrity_check; select count(*) from nodes;'
+rm -rf "$SCRATCH"
+```
+
+The first line of output must be `ok`, the second the node count that
+`bay gateway nodes` shows (nodes that joined after the snapshot are missing). The folder
+holds the private keys: remove it when you are done.
 
 ## Retention
 
@@ -343,6 +387,8 @@ This provides independent locking, independent retention, and failure isolation 
 | `backup_lock_dir` | `/opt/<stack>/backup/locks` | Lock files location |
 | `backup_headscale_state` | `true` | Back up Headscale state on the control region (set `false` to disable) |
 | `backup_headscale_container` | `headscale` | Container name backed up (also the restic repo/target name) |
-| `backup_headscale_source_path` | `/var/lib/headscale` | In-container path captured (sqlite DB + noise/DERP keys) |
+| `backup_headscale_data_dir` | `/opt/headscale/data` | Host folder of the Headscale data (the DB snapshot and the noise/DERP keys come from here) |
+| `backup_headscale_snapshot_bin` | `/usr/local/sbin/bay-headscale-db-snapshot` | Root helper that makes the checked DB snapshot |
+| `backup_headscale_snapshot_dir` | `/var/lib/bay-headscale-backup` | Root-only (0700) folder for the temp snapshot |
 | `backup_headscale_schedule` | `{{ backup_schedule }}` | Headscale backup schedule (defaults to the global schedule) |
 | `backup_headscale_retain` | `{{ backup_retain }}` | Headscale retention (defaults to the global retention) |

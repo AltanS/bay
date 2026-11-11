@@ -297,6 +297,16 @@
     - headscale_server | default(false)
   vars:
     _infra_log_rotation: "{{ None | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    # Hardened. Still root, as the image's default user: the data
+    # files are root-owned. The root filesystem is read-only; Headscale writes
+    # only its data volume and its unix socket (/var/run/headscale, the socket
+    # `docker exec headscale headscale ...` talks to), which gets a tmpfs. ACME
+    # is off (Traefik terminates TLS), so there is no cache dir. Every
+    # capability is dropped except DAC_OVERRIDE: the config and data folders
+    # are owned by app_user (0750/0700) and config.yaml is 0640, so root in the
+    # container cannot read or write them without it. Proven against
+    # headscale/headscale:0.29.7 with ALL dropped (config unreadable) and with
+    # DAC_READ_SEARCH alone (noise key write denied).
     _headscale_spec:
       name: headscale
       type: infra
@@ -305,8 +315,17 @@
       restart_policy: unless-stopped
       networks:
         - "{{ traefik_docker_network | default('services') }}"
+      read_only: true
+      tmpfs:
+        - /var/run/headscale
+      cap_drop:
+        - ALL
+      cap_add:
+        - DAC_OVERRIDE
+      security_opt:
+        - no-new-privileges:true
       volumes:
-        - /opt/headscale/config:/etc/headscale
+        - /opt/headscale/config:/etc/headscale:ro
         - /opt/headscale/data:/var/lib/headscale
       ports:
         - "3478:3478/udp"
