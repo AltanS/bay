@@ -779,3 +779,55 @@ owning user. Two consequences the framework cannot check for you:
   which fails opaquely as a list of stale integers. Names survive both, because
   the operator re-creates them. Prefer the name; allowlist *both* if you want
   belt-and-braces.
+
+#### Rotating the sidecar's API key
+
+The sidecar reads its key from an env file. Docker reads an env file only when it
+creates a container, and `docker restart` keeps the old environment. Since 2.19.0,
+`bay deploy <env> --tags tailnet_identity` is enough: the role renders the env file,
+and when the file or the image changed, it recreates the sidecar alone, on the
+control host. No other container is touched. The env file is part of the sidecar's
+config hash, so an unchanged key is a no-op. A run that includes `deploy_stack`
+(no tags, or `--tags deploy_stack`) leaves the sidecar to `deploy_stack`, which
+does the same in its full pass.
+
+1. Mint a new key on the control host. Keep the old one until step 5.
+
+   ```bash
+   bay gateway apikey --expiration 90d
+   ```
+
+2. Store it in the vault of the control env, from stdin so it stays out of the
+   shell history.
+
+   ```bash
+   bay vault set production tailnet_identity_api_key < new-key.txt
+   ```
+
+3. Deploy the tag. `-- --check --diff` first shows the env file change; the
+   check-mode reconcile reads the live env file, so it plans no recreate.
+
+   ```bash
+   bay deploy production --tags tailnet_identity
+   ```
+
+   The role waits until `http://127.0.0.1:<tailnet_identity_port>/healthz` answers.
+   With the `api` source it then asks Headscale for `/api/v1/node` from inside the
+   sidecar, with the key from the sidecar's own environment, and fails the run when
+   the answer is not `200`. Only the HTTP status is printed, never the key.
+
+4. Verify. `docker logs tailnet-identity` shows `refreshed node map: <n> nodes` after
+   the first request, and no `node map refresh failed` line. A request through a
+   route with `identity = true` gets the caller's device name, not `unknown`.
+
+5. Expire the old key on the control host. List the keys, then expire the old one
+   by its prefix.
+
+   ```bash
+   bay admin-shell <control-host>
+   sudo docker exec headscale headscale apikeys list
+   sudo docker exec headscale headscale apikeys expire --prefix <old-prefix>
+   ```
+
+   A failed step 3 leaves the old key in place in Headscale, so the sidecar can go
+   back to it: set the old key in the vault and deploy the tag again.

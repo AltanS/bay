@@ -18,9 +18,11 @@ needing manual action is called out under **Upgrade notes**. Entries for
 ### Changed
 - `deploy.yml` and `provision.yml` start with a guard: they stop before any role touches the box while a host upgrade runs on it (a fresh lock of kind `host_upgrade`, or the unit `bay-host-upgrade` active). Before, a deploy died on the apt lock half way.
 - The `deploy_stack` lock message says when a host upgrade holds the lock.
+- `bay deploy <env> --tags tailnet_identity` now rotates the sidecar's Headscale API key alone. When the run does not include `deploy_stack`, the role reconciles only the `tailnet-identity` container on the control host (`container_lifecycle_only`, no orphan removal, no receipt), as the headscale role does for its container. The env file is in the sidecar's config hash, so a new key recreates it and an unchanged key is a no-op. No other container is touched. The role then waits until `/healthz` answers, and with the `api` source it checks the key against Headscale from inside the sidecar and fails the run unless the answer is `200`. Before, a rotation needed `--tags tailnet_identity,deploy_stack`, which reconciles every container on the box. Steps: `docs/tailnet-ingress.md`, "Rotating the sidecar's API key".
 
 ### Upgrade notes
-- Nothing to run. The guard is part of every deploy and provision from 2.19.0. A machine on an older Bay does not know the guard, so upgrade the machines that deploy before you run `bay host upgrade`.
+- To rotate the tailnet-identity key: `bay gateway apikey`, `bay vault set <env> tailnet_identity_api_key`, `bay deploy <env> --tags tailnet_identity`, verify, then expire the old key in Headscale.
+- Nothing to run for the guard. The guard is part of every deploy and provision from 2.19.0. A machine on an older Bay does not know the guard, so upgrade the machines that deploy before you run `bay host upgrade`.
 
 ## [2.18.1] - 2026-11-11
 

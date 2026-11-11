@@ -1,9 +1,11 @@
 ---
 # tailnet-identity ForwardAuth sidecar — build the local image and render its
-# config. The container itself is declared in deploy_stack/_tailnet_identity.j2
-# and brought up by the deploy_stack compose run. This role only runs on the
-# control/ingress host (gated in deploy.yml: tailnet_identity_enabled +
-# headscale_server).
+# config. The container spec lives in container_lifecycle/tasks/build_specs.yml
+# (the compose partial deploy_stack/_tailnet_identity.j2 is documentation only),
+# and the reconciler creates it in the deploy_stack run. A run without
+# deploy_stack (`--tags tailnet_identity`) reconciles the sidecar alone, below.
+# This role only runs on the control/ingress host (gated in deploy.yml:
+# tailnet_identity_enabled + headscale_server).
 
 - name: Create tailnet-identity stack directory
   ansible.builtin.file:
@@ -48,4 +50,114 @@
       tailnet_identity_source is 'api' but tailnet_identity_api_key is empty.
       Provide the Headscale API key via vault, or use the default 'sqlite' source.
   when: tailnet_identity_source == 'api'
+  tags: [tailnet_identity]
+
+# -- Narrow rotation ------------------------------------------------------------
+# Rendering the env file does not change the running sidecar: Docker reads an
+# env file only when it creates the container, and `docker restart` keeps the
+# old environment. Before 2.19.0 a new API key reached the sidecar only through
+# `--tags tailnet_identity,deploy_stack`, which reconciles every container on
+# the box.
+#
+# The reconciler folds a sha256 of the env file into the sidecar's config
+# hash (container_lifecycle/tasks/reconcile.yml), so a new key is a new hash.
+# When this run does not include deploy_stack, reconcile the sidecar alone,
+# through the same spec deploy_stack uses (build_specs.yml), as the headscale
+# role does for its container. A sidecar whose env and image are current is a
+# NoOp. Only the sidecar is in the bundle, so orphan removal is off and no
+# receipt is written. A run that includes deploy_stack (no tags, or
+# `--tags deploy_stack`) leaves it to deploy_stack, so it reconciles once.
+#
+# A host with no sidecar yet is left to deploy_stack, which creates it.
+
+- name: Decide whether this run reconciles the sidecar itself
+  ansible.builtin.set_fact:
+    _tailnet_identity_narrow: >-
+      {{ 'all' not in ansible_run_tags and 'deploy_stack' not in ansible_run_tags }}
+  tags: [tailnet_identity]
+
+- name: Check whether the tailnet-identity container exists
+  ansible.builtin.command:
+    argv: [docker, ps, --all, --filter, "name=^tailnet-identity$", --quiet]
+  register: _tailnet_identity_container_exists
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+  when: _tailnet_identity_narrow | bool
+  tags: [tailnet_identity]
+
+- name: Bring the tailnet-identity sidecar onto its current env file and image
+  ansible.builtin.include_role:
+    name: container_lifecycle
+    apply:
+      tags: [tailnet_identity]
+  vars:
+    container_lifecycle_only: [tailnet-identity]
+    bay_reconciler_remove_orphans: false
+  when:
+    - _tailnet_identity_narrow | bool
+    - (_tailnet_identity_container_exists.stdout | default('') | trim) | length > 0
+  tags: [tailnet_identity]
+
+- name: Record whether the reconciler recreated the sidecar
+  ansible.builtin.set_fact:
+    _tailnet_identity_reconciled: >-
+      {{ (_reconcile_result.stdout | default('{}') | from_json).changed | default(false)
+         if (_reconcile_result is defined and _reconcile_result is not skipped
+             and (_reconcile_result.stdout | default('')) | length > 0)
+         else false }}
+  when:
+    - _tailnet_identity_narrow | bool
+    - (_tailnet_identity_container_exists.stdout | default('') | trim) | length > 0
+  tags: [tailnet_identity]
+
+# The sidecar has no Docker healthcheck; /healthz answers once the server
+# listens. It is published on loopback only (build_specs.yml).
+- name: Wait for the tailnet-identity sidecar to answer
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ tailnet_identity_port }}/healthz"
+    status_code: 200
+  register: _tailnet_identity_health
+  until: _tailnet_identity_health.status | default(0) == 200
+  retries: 30
+  delay: 2
+  when:
+    - _tailnet_identity_narrow | bool
+    - _tailnet_identity_reconciled | default(false) | bool
+    - not ansible_check_mode
+  tags: [tailnet_identity]
+
+# Proves the key in the RUNNING sidecar works: the request runs inside the
+# container, with the key from its own environment, so the key is never on a
+# command line or in the output. Only the HTTP status is printed. A refused key
+# fails the run: the sidecar would keep its last map and go stale.
+- name: Check the sidecar's API key against Headscale
+  ansible.builtin.command:
+    argv:
+      - docker
+      - exec
+      - tailnet-identity
+      - python
+      - -c
+      - |
+        import os, urllib.error, urllib.request
+        url = os.environ["HEADSCALE_API_URL"].rstrip("/") + "/api/v1/node"
+        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["HEADSCALE_API_KEY"]})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                print(resp.status)
+        except urllib.error.HTTPError as exc:
+            print(exc.code)
+  register: _tailnet_identity_key_check
+  changed_when: false
+  failed_when: (_tailnet_identity_key_check.stdout | default('') | trim) != '200'
+  become: true
+  become_user: root
+  when:
+    - _tailnet_identity_narrow | bool
+    - (_tailnet_identity_container_exists.stdout | default('') | trim) | length > 0
+    - tailnet_identity_source == 'api'
+    - not ansible_check_mode
   tags: [tailnet_identity]
