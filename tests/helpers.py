@@ -122,13 +122,16 @@ def run_role_tasks(
     *,
     path_dir: Path | None = None,
     check: bool = False,
+    transform=None,
 ):
     """Run the named tasks of a role task file with ansible-playbook on localhost.
 
     Tasks are found by name, also inside a block, and run in the order given.
     `path_dir` goes first on PATH, so a test can stand a fake `id` or
     `gpasswd` in front of the real one. Returns the CompletedProcess; the
-    stdout holds the task results and the PLAY RECAP.
+    stdout holds the task results and the PLAY RECAP. `transform(task)` may
+    return a changed copy of each chosen task, for example to point a `dest`
+    at a scratch folder and drop `become`.
     """
     import os
     import subprocess
@@ -147,7 +150,7 @@ def run_role_tasks(
     chosen = []
     for name in task_names:
         assert name in by_name, f"task {name!r} not found in {tasks_file}"
-        chosen.append(by_name[name])
+        chosen.append(transform(dict(by_name[name])) if transform else by_name[name])
     work = tmp_path / "play"
     work.mkdir(parents=True, exist_ok=True)
     (work / "ansible.cfg").write_text("[defaults]\n")

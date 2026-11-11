@@ -131,6 +131,15 @@ directory in an `always:` block, also when the plan fails. Nothing is written
 to `stack_dir`. Plan-only mode only lists containers and reads local image ids.
 It makes no docker call that changes state.
 
+Systemd timers follow one rule in check mode. Check mode writes no unit file.
+On a host that does not have a timer yet, the systemd module cannot find the
+unit and would fail the dry run. So the task that enables or starts a timer
+skips when the run is a check and the task that writes its unit file reports
+`changed`. This covers the timers of the `outbound_monitor` (outbound check,
+disk alert, reboot alert), `backup` (backup and maintenance), `git_deploy`
+(trigger watchdog) and `crowdsec` (data refresh) roles. A real run is not
+affected. Example: `bay provision <env> --tags outbound_monitor -- --check`.
+
 The reconciler task reports `changed` when the plan has any action other than
 `NoOp`. The `--check` recap then counts the containers a real deploy would
 touch.
