@@ -161,18 +161,20 @@ def test_every_git_template_disables_terminal_prompt():
     )
 
 
-def test_rebuild_sh_ssh_pull_disables_terminal_prompt():
-    """Regression for the actual incident: the deploy-key (SSH, no token)
-    PULL_CMD in rebuild.sh was missing GIT_TERMINAL_PROMPT=0 on its own
-    line, even though the file-level check above would have stayed green
-    (other command strings in the same file already set it)."""
+def test_rebuild_sh_ssh_fetch_disables_terminal_prompt():
+    """Regression for the actual incident: the deploy-key (SSH, no token) git
+    call in rebuild.sh was missing GIT_TERMINAL_PROMPT=0, even though the
+    file-level check above would have stayed green (other command strings in
+    the same file already set it). Since 2.17.2 the local strategy fetches
+    with the GIT_AUTH words (no PULL_CMD any more), so that line must carry it."""
     from test_rebuild_config import _local_service, _render_rebuild_sh
 
     rendered = _render_rebuild_sh(
         _local_service(), ["localapp"], git_deploy_services=["localapp"]
     )
-    pull_lines = [
-        line for line in rendered.splitlines() if line.strip().startswith("PULL_CMD=")
+    auth_lines = [
+        line for line in rendered.splitlines() if line.strip().startswith("GIT_AUTH=(")
     ]
-    assert pull_lines, "expected a PULL_CMD assignment in the local/SSH render"
-    assert "GIT_TERMINAL_PROMPT=0" in pull_lines[0], pull_lines[0]
+    assert auth_lines, "expected a GIT_AUTH assignment in the local/SSH render"
+    assert "GIT_TERMINAL_PROMPT=0" in auth_lines[0], auth_lines[0]
+    assert "PULL_CMD" not in rendered

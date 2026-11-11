@@ -426,7 +426,9 @@ In `rebuild.sh`, for a trigger that got through:
    names another repo is repointed (see "When the repo URL changes"). A repo that cannot be
    used ends with one `build.failed` alert and exit 1. A new or repointed checkout builds in
    full: checks 7 and the no-input-change check do not run.
-   Then fetch or pull, and read the commit.
+   Then fetch the deploy branch, move the checkout to its head with a hard reset, and read the
+   commit. A fetch that fails ends with one `build.failed` alert (`Repo fetch failed`) and exit 1.
+   When the old head is not in the new history (a forced push), the build is in full as well.
 7. Config-only check (see "Config-only push" above): only `bay.toml`, its mounted files and
    the `bay.toml` of the other projects of the repo changed since the previous commit (the
    container's label, else the checkout's HEAD before the pull, as this service last saw it)
@@ -477,7 +479,7 @@ config holds no repo URL.
   mark for each container that builds from it (`.git/bay-full-build/<container>`). A run
   removes its own mark once the image of the head exists. A failed first build keeps the mark,
   so the next run builds in full too. A local build then moves the checkout with a fetch and a
-  reset, because `git pull` refuses an unrelated history.
+  reset, as every build does since 2.17.2.
 - **The same repo in another form** is no change. `rebuild.sh` only sets the text of `origin`.
 
 **Remote strategy: who builds and who recreates.** The build server builds from the new repo at
@@ -501,18 +503,27 @@ URL.
   the commit tag of the new head, the log says `already in registry, skipping build` (a local
   build says `already exists, skipping build`). This is the normal image-exists shortcut, not
   a "no changes" skip. A remote build still points the moving tag at that image, unless the build is held.
-- The same URL with a replaced history (a forced push with an unrelated root commit) needs no
-  step on a remote build. The URL is unchanged, so `origin` stays. The next build runs
-  `git fetch`, then `git reset --hard FETCH_HEAD`, and moves to the new head whatever its
-  history. **A local build has a known limit here.** With the same URL it still runs
-  `git pull`, which stops on a history that does not merge (`fatal: Need to specify how to
-  reconcile divergent branches`, or `refusing to merge unrelated histories`). The build fails
-  with the generic "Webhook deploy" failure and no reason, and the circuit breaker counts it.
-  The manual step: on the box, as the app user, mark the checkout for a full build, and push
-  again or write a trigger file. For each container that builds from the checkout
-  `/opt/<stack>/builds/shared/<slug>/repo`, run
-  `mkdir -p <checkout>/.git/bay-full-build && touch <checkout>/.git/bay-full-build/<container>`.
-  The next run then fetches and resets, as it does after a repo change.
+- The same URL with a replaced history (a forced push, also with an unrelated root commit)
+  needs no step. The URL is unchanged, so `origin` stays. Every build, remote or local, runs
+  `git fetch` of the deploy branch, then `git reset --hard FETCH_HEAD`. The checkout is
+  build-only: it holds no local commit to keep, so any history moves it. Before 2.17.2 a local
+  build ran `git pull` here, which stopped with `fatal: Need to specify how to reconcile
+  divergent branches`, failed with no reason and counted in the circuit breaker.
+  **How `rebuild.sh` decides "what changed".** After the reset it asks whether the old head
+  (the checkout's HEAD before the fetch, as this service saw it) is an ancestor of the new head
+  (`git merge-base --is-ancestor`). When it is, nothing changes: the normal push logic runs.
+  When it is not, or git cannot find the old commit, the history was rewritten. The build is
+  then a full build, with the same mark as a new checkout (`.git/bay-full-build/<container>`).
+  No config-only tag and no no-input-change tag use the old commit. The log says
+  `history of <container> was rewritten (<old12> is not in <new12>), full build`. A full build
+  can still end in `already exists, skipping build` or `already in registry, skipping build`
+  when an image of the new commit exists. A fetch that fails (the repo is gone, a key or a
+  token is refused) ends with one `Repo fetch failed` alert that names the likely cause.
+
+**A repo with no token.** `rebuild.sh` points `GIT_ASKPASS` at the helper file
+`.git-askpass-<name>` only for a service that has a token, because Ansible writes that file only
+then. A public `https://` repo that answers 401 or 404 now fails with git's own message
+(`terminal prompts disabled`, `repository not found`), not with `cannot exec ... .git-askpass-...`.
 
 **Normal form.** `host/owner/repo` in lower case, without the user, the password, the port, a
 trailing `.git` or `/`. So `git@github.com:acme/shop.git`, `ssh://git@github.com/acme/shop`

@@ -179,6 +179,114 @@ def test_build_repo_is_a_non_empty_string():
         assert {v.path for v in found} == {"build.repo"}, found
 
 
+BUILD_SECRET = "ghp_BUILD_REPO_SENTINEL_9f8e7d"
+REPO_HINT = (
+    "use for example git@github.com:org/repo.git or https://github.com/org/repo.git"
+)
+
+
+def _repo_doc(repo: str) -> dict[str, Any]:
+    doc = _doc()
+    doc.pop("image", None)
+    return {**doc, "build": {"repo": repo}}
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "git@github.com:org/repo.git",
+        "git@git.example.com:group/sub/api.git",
+        "deploy@example.com:srv/app",
+        "https://github.com/org/repo.git",
+        "https://github.com/org/repo",
+        "http://git.example.com:8080/org/repo.git",
+        "ssh://git@github.com/org/repo.git",
+        "ssh://git@git.example.com:2222/org/repo.git",
+        "git://git.example.com/org/repo.git",
+        "file:///srv/git/repo.git",
+        "/srv/git/repo.git",
+        "/tmp/a",
+    ],
+)
+def test_build_repo_accepts_a_git_location(repo: str) -> None:
+    assert bay_toml.validate(_repo_doc(repo)) == []
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "garbage value",
+        "",
+        " ",
+        "garbage",
+        "org/repo",
+        "./repo.git",
+        "../repo.git",
+        "~/repo.git",
+        "github.com/org/repo",
+        "git@github.com",
+        "git@github.com:",
+        "https://github.com",
+        "ftp://git.example.com/org/repo.git",
+        "https://github.com/org/my repo.git",
+        " git@github.com:org/repo.git",
+        "git@github.com:org/repo.git ",
+        "/srv/git/my repo.git",
+    ],
+)
+def test_build_repo_refuses_what_is_no_git_location(repo: str) -> None:
+    found = bay_toml.validate(_repo_doc(repo))
+    mine = [v for v in found if "is not a git URL or an absolute path" in v.message]
+    assert [v.path for v in mine] == ["build.repo"], found
+    assert str(mine[0]) == f'build.repo: "{repo}" is not a git URL or an absolute path; {REPO_HINT}'
+
+
+@pytest.mark.parametrize(
+    ("repo", "shown"),
+    [
+        (f"https://x-access-token:{BUILD_SECRET}@github.com/org/repo.git",
+         "https://x-access-token:***@github.com/org/repo.git"),
+        (f"https://{BUILD_SECRET}@github.com/org/repo.git", "https://***@github.com/org/repo.git"),
+        (f"http://user:{BUILD_SECRET}@git.example.com/org/repo", "http://user:***@git.example.com/org/repo"),
+        (f"ssh://git:{BUILD_SECRET}@github.com/org/repo.git", "ssh://git:***@github.com/org/repo.git"),
+    ],
+)
+def test_build_repo_with_a_secret_inside_is_refused_and_not_echoed(repo: str, shown: str) -> None:
+    found = bay_toml.validate(_repo_doc(repo))
+    assert len(found) == 1, found
+    assert found[0].path == "build.repo"
+    assert found[0].message == (
+        f'"{shown}" has a password or a token inside the URL; remove it and give the token '
+        "in repo_tokens in bay.fleet.toml instead"
+    )
+    assert BUILD_SECRET not in str(found[0]) and BUILD_SECRET not in json.dumps(found[0].to_dict())
+
+
+def test_build_repo_that_is_not_a_url_but_holds_a_secret_is_not_echoed() -> None:
+    found = bay_toml.validate(_repo_doc(f"https://user:{BUILD_SECRET}@git.example.com/org/my repo"))
+    assert found and all(BUILD_SECRET not in str(v) for v in found)
+
+
+def test_build_repo_is_checked_in_every_build_table() -> None:
+    doc = _doc()
+    doc.pop("image", None)
+    doc["services"] = {"worker": {"build": {"repo": "worker"}}}
+    doc["deploy"] = {"production": {"build": {"repo": "elsewhere"}}}
+    paths = {v.path for v in bay_toml.validate(doc) if "git URL" in v.message}
+    assert paths == {"services.worker.build.repo", "deploy.production.build.repo"}
+
+
+def test_cli_refuses_a_build_repo_that_is_no_git_location(tmp_path: Path) -> None:
+    path = tmp_path / "bay.toml"
+    toml = (FIXTURES / "build-watch-valid.toml").read_text()
+    path.write_text(toml.replace("[build]\n", '[build]\nrepo = "garbage value"\n'))
+    result = runner.invoke(app, ["toml", "validate", str(path)])
+    assert result.exit_code == 1
+    assert f'build.repo: "garbage value" is not a git URL or an absolute path; {REPO_HINT}' in (
+        result.output
+    )
+
+
 @pytest.mark.parametrize(
     ("doc", "expected"),
     [

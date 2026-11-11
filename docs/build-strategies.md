@@ -74,7 +74,7 @@ GitHub Push
 |                            |             |
 |                       rebuild.sh         |
 |                            |             |
-|                  git pull + buildx build  |
+|                 git fetch + buildx build  |
 |                            |             |
 |                  docker stop/rm/run       |
 |                            |             |

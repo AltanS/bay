@@ -76,6 +76,8 @@ SHA=""
 # 1 when this run builds in full: the checkout is new or follows another repo
 # (_full_build_mark, docs/build-pipeline.md "When the repo URL changes").
 FULL_BUILD=0
+# Why this run builds in full, for the log line of the build decision.
+FULL_BUILD_WHY="the checkout is new or follows another repo"
 # Extra `docker run` labels for a webhook recreate (the carried config hash).
 EXTRA_LABELS=()
 
@@ -533,6 +535,28 @@ _full_build_pending() {
 
 _full_build_done() {
   rm -f "${REPO_DIR}/.git/bay-full-build/${SERVICE}" 2>/dev/null || true
+}
+
+# After the checkout moved to the fetched head: was the history of the deploy
+# branch rewritten? A forced push can leave an old head that the new head does
+# not contain (an unrelated root commit, or a rewritten branch). Then no earlier
+# commit says what changed, so the run builds in full: the same mark as a new or
+# repointed checkout (_full_build_mark), and the log says why. An old head that
+# is an ancestor of the new head is a normal push and changes nothing. An old
+# head that git cannot find counts as rewritten. Nothing to compare (no old
+# head), or a run that already builds in full, changes nothing.
+#   $1  the checkout's HEAD before the fetch moved it (may be empty)
+_note_rewritten_history() {
+  local old="$1" new
+  [[ -n "${old}" ]] || return 0
+  [[ "${FULL_BUILD}" == "1" ]] && return 0
+  if git -C "${REPO_DIR}" merge-base --is-ancestor "${old}" HEAD 2>/dev/null; then
+    return 0
+  fi
+  new=$(git -C "${REPO_DIR}" rev-parse --short=12 HEAD 2>/dev/null || true)
+  _log "history of ${SERVICE} was rewritten (${old:0:12} is not in ${new:-the new head}), full build"
+  FULL_BUILD_WHY="the history of the deploy branch was rewritten"
+  _full_build_mark
 }
 
 # The loud end of a checkout that cannot follow EXPECTED_ORIGIN: the clone, the
@@ -1317,7 +1341,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   # The services that share this checkout (local builds: one per repo and branch).
   CHECKOUT_SERVICES=({% for s in _checkout %}"{{ dq(s) }}"{% if not loop.last %} {% endif %}{% endfor %})
 {#
-  The command strings below (FETCH_CMD, PULL_CMD) are handed to `eval`, so every consumer
+  The command string below (FETCH_CMD) is handed to `eval`, so every consumer
   value in them is referenced as an ESCAPED parameter expansion — `\"\${BRANCH}\"`
   renders the literal text `"${BRANCH}"` into the variable, which eval then
   expands inside double quotes. Interpolating the value itself (or expanding
@@ -1326,7 +1350,7 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
 #}
 {% if strategy == 'remote' %}
   CLONE_URL="{{ dq(clone_url) }}"
-  FETCH_CMD="GIT_ASKPASS={{ evq(askpass_remote) }} GIT_TERMINAL_PROMPT=0 git -c url.\"\${CLONE_URL}\".insteadOf=\"\${CLONE_REPO}\" fetch origin \"\${BRANCH}\""
+  FETCH_CMD="{% if has_token %}GIT_ASKPASS={{ evq(askpass_remote) }} {% endif %}GIT_TERMINAL_PROMPT=0 git -c url.\"\${CLONE_URL}\".insteadOf=\"\${CLONE_REPO}\" fetch origin \"\${BRANCH}\""
 {% set _token_key = namespace(val='unknown') %}
 {% if has_token and secrets is defined %}{% for _k, _v in secrets.items() %}{% if _v == build.token %}{% set _token_key.val = _k %}{% endif %}{% endfor %}{% endif %}
   CLONE_TOKEN_KEY="{{ dq(_token_key.val) }}"
@@ -1337,17 +1361,18 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
 {% if secrets is defined %}{% for _k, _v in secrets.items() %}{% if _v == build.token %}{% set _token_key.val = _k %}{% endif %}{% endfor %}{% endif %}
   CLONE_TOKEN_KEY="{{ dq(_token_key.val) }}"
   CLONE_REPO="{{ dq(build.repo) }}"
-  PULL_CMD="GIT_ASKPASS={{ evq(askpass_local) }} GIT_TERMINAL_PROMPT=0 git -c url.\"\${CLONE_URL}\".insteadOf=\"\${CLONE_REPO}\" pull origin \"\${BRANCH}\""
 {% else %}
   DEPLOY_KEY="${BUILD_DIR}/{{ dq(svc_name) }}/.deploy_key"
-  PULL_CMD="GIT_SSH_COMMAND='ssh -i ${DEPLOY_KEY} -o StrictHostKeyChecking=yes -o UserKnownHostsFile={{ dq(git_deploy_known_hosts) }}' GIT_TERMINAL_PROMPT=0 git pull origin \"\${BRANCH}\""
 {% endif %}
   # The repo the checkout must follow, and the credentials of a clone, a repo
   # check and a fetch (_ensure_checkout, _check_origin). No token in either:
-  # a token is read by the GIT_ASKPASS helper.
+  # a token is read by the askpass helper.
   EXPECTED_ORIGIN="{{ dq(clone_url) }}"
 {% if strategy == 'remote' %}
-  GIT_AUTH=(GIT_TERMINAL_PROMPT=0 "GIT_ASKPASS={{ dq(askpass_remote) }}")
+  # The askpass helper exists only for a service with a token (Ansible renders it
+  # then). Without one, git must fail at once with its own message, not try to run a
+  # helper that is not there.
+  GIT_AUTH=(GIT_TERMINAL_PROMPT=0{% if has_token %} "GIT_ASKPASS={{ dq(askpass_remote) }}"{% endif %})
   REPO_AUTH="{{ 'token' if has_token else 'ssh' }}"
 {% elif has_token %}
   GIT_AUTH=(GIT_TERMINAL_PROMPT=0 "GIT_ASKPASS={{ dq(askpass_local) }}")
@@ -1826,6 +1851,8 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
   # The commit this checkout last built, before it moves to the pushed one.
   _PREV_HEAD=$(git rev-parse --short=12 HEAD 2>/dev/null || true)
   git reset --hard FETCH_HEAD
+  # A forced push may have left the old head outside the new history.
+  _note_rewritten_history "${_PREV_HEAD}"
 
   # Get commit SHA (12-char for registry tags, matching remote_build.yml)
   SHA=$(git rev-parse --short=12 HEAD)
@@ -1838,7 +1865,7 @@ if [[ "${BUILD_STRATEGY}" == "remote" ]]; then
   # old one belongs to another history, so it builds whatever the marker says.
   PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")
   if [[ "${FULL_BUILD}" == "1" ]]; then
-    _log "full build of ${SERVICE} at ${SHA}: the checkout is new or follows another repo"
+    _log "full build of ${SERVICE} at ${SHA}: ${FULL_BUILD_WHY:-the checkout is new or follows another repo}"
     PREV_COMMIT=""
     NO_INPUT_CHANGE=0
   fi
@@ -2078,18 +2105,18 @@ fi
 # (the checkout is shared, _seen_head): the previous commit of the config-only
 # check when the running container has no com.bay.commit label.
 _PREV_HEAD=$(_seen_head "${REPO_DIR}")
-if [[ "${FULL_BUILD}" == "1" ]]; then
-  # A new or repointed checkout: fetch and move to the head. A pull would refuse
-  # to merge an unrelated history.
-  _FETCH_EXIT=0
-  _FETCH_STDERR=$(env "${GIT_AUTH[@]}" git fetch -q origin "${BRANCH}" 2>&1) || _FETCH_EXIT=$?
-  if [[ ${_FETCH_EXIT} -ne 0 ]]; then
-    _repo_failed fetch "${_FETCH_STDERR}" "${_FETCH_EXIT}"
-  fi
-  git reset -q --hard FETCH_HEAD
-else
-  eval "${PULL_CMD}"
+# Fetch the deploy branch and move to its head, as the remote strategy does.
+# The checkout is build-only (no local commit to keep), and a pull would refuse
+# a history that does not merge (a forced push, a new root commit). A failed
+# fetch ends loud, with the likely cause (_repo_failed), and changes nothing.
+_FETCH_EXIT=0
+_FETCH_STDERR=$(env "${GIT_AUTH[@]}" git fetch -q origin "${BRANCH}" 2>&1) || _FETCH_EXIT=$?
+if [[ ${_FETCH_EXIT} -ne 0 ]]; then
+  _repo_failed fetch "${_FETCH_STDERR}" "${_FETCH_EXIT}"
 fi
+git reset -q --hard FETCH_HEAD
+# A forced push may have left the old head outside the new history.
+_note_rewritten_history "${_PREV_HEAD}"
 _mark_seen "${REPO_DIR}"
 
 # ── Get new commit SHA (12 characters: the image's commit tag) ──
@@ -2101,7 +2128,7 @@ SHA=$(git rev-parse --short=12 HEAD)
 # before 2.1.0). A full build has none: see the remote path above.
 PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")
 if [[ "${FULL_BUILD}" == "1" ]]; then
-  _log "full build of ${SERVICE} at ${SHA}: the checkout is new or follows another repo"
+  _log "full build of ${SERVICE} at ${SHA}: ${FULL_BUILD_WHY:-the checkout is new or follows another repo}"
   PREV_COMMIT=""
   NO_INPUT_CHANGE=0
 fi

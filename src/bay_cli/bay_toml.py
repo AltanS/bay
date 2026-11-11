@@ -279,6 +279,70 @@ def _file_rules(doc: dict[str, Any]) -> Iterator[Violation]:
     yield from _egress_rules(doc, envs, services)
     yield from _path_rules(services)
     yield from _domain_rules(doc, envs, services)
+    yield from _repo_rules(doc, "")
+
+
+# ── [build] repo: a usable git location ─────────────────────────────────────
+#
+# Lenient on purpose: it only catches a value that no git could use (a bare
+# word, a relative path, a space in the middle). It does not ask the network
+# and it does not judge the host. The URL forms are the ones Bay and rebuild.sh
+# already read (reposource.normalize_url).
+
+_SERVER_URL_RE = re.compile(
+    r"^(?P<scheme>https?|ssh|git)://(?:(?P<userinfo>[^/@\s]+)@)?(?P<host>[^/@:\s]+)"
+    r"(?::\d+)?/(?P<path>[^\s]+)$",
+    re.IGNORECASE,
+)
+_FILE_URL_RE = re.compile(r"^file://(?:localhost)?/[^\s]+$", re.IGNORECASE)
+_SCP_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:(?!//)[^\s:][^\s]*$")
+_ABSOLUTE_PATH_RE = re.compile(r"^/[^\s]+$")
+
+_REPO_HINT = (
+    "use for example git@github.com:org/repo.git or https://github.com/org/repo.git"
+)
+
+
+def repo_problem(value: str) -> str | None:
+    """Why ``value`` is no usable ``[build] repo``, or None when it is one.
+
+    Accepts an ``https://``, ``http://``, ``ssh://``, ``git://`` or ``file://``
+    URL with a host and a path, an scp-like ``user@host:path`` and an absolute
+    local path. A URL that carries a password or a token is refused, and the
+    message shows it redacted.
+    """
+    # Imported here: the validator runs with nothing but the file, and the
+    # redaction is the one rule the CLI and rebuild.sh share.
+    from bay_cli.reposource import redact_url
+
+    shown = redact_url(value)
+    match = _SERVER_URL_RE.match(value)
+    if match:
+        userinfo = match.group("userinfo") or ""
+        scheme = match.group("scheme").lower()
+        if (scheme in ("http", "https") and userinfo) or ":" in userinfo:
+            return (
+                f'"{shown}" has a password or a token inside the URL; remove it and give '
+                "the token in repo_tokens in bay.fleet.toml instead"
+            )
+        return None
+    if _FILE_URL_RE.match(value) or _SCP_REPO_RE.match(value) or _ABSOLUTE_PATH_RE.match(value):
+        return None
+    return f'"{shown}" is not a git URL or an absolute path; {_REPO_HINT}'
+
+
+def _repo_rules(node: Any, path: str) -> Iterator[Violation]:
+    """Check ``repo`` of every ``build`` table: the project one, the services', the envs'."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            here = _join(path, str(key))
+            if key == "build" and isinstance(value, dict):
+                repo = value.get("repo")
+                if isinstance(repo, str) and not _TEMPLATE_RE.search(repo):
+                    problem = repo_problem(repo)
+                    if problem:
+                        yield Violation(_join(here, "repo"), problem)
+            yield from _repo_rules(value, here)
 
 
 def _dict(value: Any) -> dict[str, Any]:

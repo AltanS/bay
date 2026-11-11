@@ -21,6 +21,12 @@ the repo (redacted), the branch and the likely cause.
 These tests render the real template, cut the real strategy sections out of
 it, and run them against temp git repos. ``bay plan`` gets a note for the
 change (``repo_change_notes``).
+
+2.17.2 adds the same-URL case: a forced push that leaves the old head outside
+the new history. Both strategies fetch and reset (a local build used to pull);
+``_note_rewritten_history`` then marks a full build when the old head is not an
+ancestor of the new head. A service without a token gets no GIT_ASKPASS, since
+Ansible writes the helper only for a token.
 """
 
 from __future__ import annotations
@@ -28,8 +34,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import threading
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -173,11 +183,7 @@ def _block(rendered: str, name: str = "shop") -> str:
 
 SLUG = re.compile(r'REPO_DIR="\$\{BUILD_DIR\}/shared/([^/"]+)/repo"')
 FIXTURES = {
-    ("remote", False): (
-        REPO,
-        '"GIT_ASKPASS=/opt/teststack/push-builds/.git-askpass-shop"',
-        "ssh",
-    ),
+    ("remote", False): (REPO, "", "ssh"),
     ("remote", True): (
         "https://github.com/example-org/shop.git",
         '"GIT_ASKPASS=/opt/teststack/push-builds/.git-askpass-shop"',
@@ -210,7 +216,8 @@ def test_render_carries_the_expected_repo_and_its_credentials(
     origin, auth, kind = FIXTURES[(strategy, token)]
     slug = SLUG.search(block).group(1) if strategy == "local" else ""
     assert f'  EXPECTED_ORIGIN="{origin}"' in block
-    assert f"  GIT_AUTH=(GIT_TERMINAL_PROMPT=0 {auth.replace('{slug}', slug)})" in block
+    words = " ".join(["GIT_TERMINAL_PROMPT=0", *([auth.replace("{slug}", slug)] if auth else [])])
+    assert f"  GIT_AUTH=({words})" in block
     assert f'  REPO_AUTH="{kind}"' in block
     if strategy == "local" and not token:
         # GIT_AUTH reads DEPLOY_KEY: it must be set first.
@@ -222,14 +229,14 @@ def test_render_carries_the_expected_repo_and_its_credentials(
 
 @pytest.mark.parametrize("strategy", ["remote", "local"])
 def test_guard_runs_before_the_lock_and_the_fetch(strategy: str) -> None:
-    """Clone a missing checkout, take the repo lock, check origin, then fetch or pull."""
+    """Clone a missing checkout, take the repo lock, check origin, fetch, reset, note the history."""
     rendered = _render(strategy=strategy, token=False)
     if strategy == "remote":
         start = rendered.index('if [[ "${BUILD_STRATEGY}" == "remote" ]]; then')
         fetch = rendered.index('_FETCH_STDERR=$(eval "${FETCH_CMD}" 2>&1)', start)
     else:
         start = rendered.index("# ── Local strategy: build and restart on this server ──")
-        fetch = rendered.index('eval "${PULL_CMD}"', start)
+        fetch = rendered.index('git fetch -q origin "${BRANCH}"', start)
     ensure = rendered.index("_ensure_checkout\n", start)
     lock = rendered.index('exec 200>"${REPO_DIR}/.git/rebuild.lock"', start)
     check = rendered.index("_check_origin\n", start)
@@ -237,6 +244,9 @@ def test_guard_runs_before_the_lock_and_the_fetch(strategy: str) -> None:
     prev = rendered.index('PREV_COMMIT=$(_previous_commit "${SERVICE}" "${_PREV_HEAD}")', start)
     config_only = rendered.index('if _config_only "${REPO_DIR}" "${PREV_COMMIT}"; then', start)
     assert ensure < lock < check < fetch < config_only
+    reset = rendered.index("--hard FETCH_HEAD", fetch)
+    note = rendered.index('_note_rewritten_history "${_PREV_HEAD}"', reset)
+    assert fetch < reset < note < prev
     assert prev < rendered.index('PREV_COMMIT=""', prev) < config_only
     assert check < full
     # The mark goes once the image of the head exists, before the hold guard.
@@ -265,6 +275,7 @@ _EXTRA = (
     "_full_build_mark",
     "_full_build_pending",
     "_full_build_done",
+    "_note_rewritten_history",
     "_repo_failed",
     "_ensure_checkout",
     "_check_origin",
@@ -500,6 +511,296 @@ def test_local_folder_with_another_origin_moves_without_a_pull(two_repos, tmp_pa
     assert _head(checkout) == b_head and _origin(checkout) == str(b)
     assert "checkout repointed" in proc.stdout
     assert f"BUILD shop {b_head}" in proc.stdout
+
+
+# ── the same URL with a replaced history (2.17.2) ───────────────────────────
+
+FILES = {"app.js": "app(1)\n", "Dockerfile": "FROM scratch\n"}
+
+
+def _rewrite_history(repo: Path) -> str:
+    """A forced push with an unrelated root commit: same tree, no shared commit."""
+    _git(repo, "checkout", "-q", "--orphan", "rewritten")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "the same files under a fresh root commit")
+    _git(repo, "branch", "-q", "-M", "rewritten", "main")
+    return _git(repo, "rev-parse", "--short=12", "HEAD")
+
+
+def _push_commit(repo: Path) -> str:
+    (repo / "app.js").write_text("app(2)\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "a normal push")
+    return _git(repo, "rev-parse", "--short=12", "HEAD")
+
+
+def _local_checkout(tmp_path: Path, origin: Path) -> Path:
+    checkout = tmp_path / "builds" / "shared" / "shop-main-0000" / "repo"
+    checkout.parent.mkdir(parents=True)
+    _git(tmp_path, "clone", "-q", "--branch", "main", "--single-branch", str(origin), str(checkout))
+    return checkout
+
+
+def _rewritten_line(old: str, new: str) -> str:
+    return f"history of shop was rewritten ({old} is not in {new}), full build"
+
+
+@pytest.mark.parametrize("marker", [True, False])
+def test_local_same_url_rewritten_history_fetches_and_builds_in_full(
+    tmp_path: Path, marker: bool
+) -> None:
+    """The red test of 2.17.2: a pull stopped with exit 128 on an unrelated root commit."""
+    origin = tmp_path / "origin.git"
+    old = _repo(origin, FILES, "first commit")
+    checkout = _local_checkout(tmp_path, origin)
+    new = _rewrite_history(origin)
+    assert old != new
+    rendered = _render(strategy="local", token=False)
+
+    proc, _, alerts = _run(
+        rendered, "local", tmp_path, checkout=checkout, expected=str(origin), marker=marker
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert alerts == []
+    assert _head(checkout) == new
+    assert f"BUILD shop {new}" in proc.stdout
+    assert _rewritten_line(old, new) in proc.stdout
+    assert f"full build of shop at {new}" in proc.stdout
+    assert "no-input-change push" not in proc.stdout and "config-only push" not in proc.stdout
+    assert "checkout repointed" not in proc.stdout
+    assert (checkout / ".git" / "bay-full-build" / "shop").is_file()
+
+
+def test_local_rewritten_history_marks_every_service_of_the_checkout(tmp_path: Path) -> None:
+    origin = tmp_path / "origin.git"
+    _repo(origin, FILES, "first commit")
+    checkout = _local_checkout(tmp_path, origin)
+    _rewrite_history(origin)
+    proc, _, _ = _run(
+        _render(strategy="local", token=False),
+        "local",
+        tmp_path,
+        checkout=checkout,
+        expected=str(origin),
+        extra='CHECKOUT_SERVICES=("shop" "shop-admin")',
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    marks = checkout / ".git" / "bay-full-build"
+    assert sorted(p.name for p in marks.iterdir()) == ["shop", "shop-admin"]
+
+
+def test_local_fast_forward_is_unchanged(tmp_path: Path) -> None:
+    origin = tmp_path / "origin.git"
+    _repo(origin, FILES, "first commit")
+    checkout = _local_checkout(tmp_path, origin)
+    new = _push_commit(origin)
+    proc, _, alerts = _run(
+        _render(strategy="local", token=False),
+        "local",
+        tmp_path,
+        checkout=checkout,
+        expected=str(origin),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert alerts == []
+    assert _head(checkout) == new
+    assert f"BUILD shop {new}" in proc.stdout
+    assert "rewritten" not in proc.stdout and "full build" not in proc.stdout
+    assert not (checkout / ".git" / "bay-full-build").exists()
+
+
+def test_local_fetch_failure_is_the_loud_repo_failure(tmp_path: Path) -> None:
+    """A fetch that fails ends in _repo_failed (one alert, the likely cause), not the ERR trap."""
+    origin = tmp_path / "origin.git"
+    old = _repo(origin, FILES, "first commit")
+    checkout = _local_checkout(tmp_path, origin)
+    shutil.rmtree(origin)
+    proc, _, alerts = _run(
+        _render(strategy="local", token=False),
+        "local",
+        tmp_path,
+        checkout=checkout,
+        expected=str(origin),
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "BUILD" not in proc.stdout
+    assert _head(checkout) == old
+    assert len(alerts) == 1 and "Repo fetch failed</b> (1/3)" in alerts[0]
+    assert "Webhook deploy" not in alerts[0]
+    state = json.loads((tmp_path / "state" / "shop.json").read_text())
+    assert state["last_failure"]["stage"] == "Repo fetch"
+
+
+@pytest.mark.parametrize("marker", [True, False])
+def test_remote_same_url_rewritten_history_builds_in_full(tmp_path: Path, marker: bool) -> None:
+    """The remote path resets to FETCH_HEAD; it now also marks a rewrite as a full build.
+
+    Before 2.17.2 it built only because nothing used the old commit: the receiver writes no
+    marker for a force push, and the old commit stays in the object store after the reset.
+    With the marker set (a trigger file) a same-tree rewrite would have been a no-input-change push.
+    """
+    origin = tmp_path / "origin.git"
+    old = _repo(origin, FILES, "first commit")
+    checkout = _remote_checkout(tmp_path, origin)
+    new = _rewrite_history(origin)
+    rendered = _render(strategy="remote", token=False)
+
+    proc, _, alerts = _run(
+        rendered, "remote", tmp_path, checkout=checkout, expected=str(origin), marker=marker
+    )
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert alerts == []
+    assert _head(checkout) == new
+    assert _rewritten_line(old, new) in proc.stdout
+    assert f"full build of shop at {new}" in proc.stdout
+    assert f"BUILD shop {new}" in proc.stdout
+    assert "no-input-change push" not in proc.stdout and "config-only push" not in proc.stdout
+    assert (checkout / ".git" / "bay-full-build" / "shop").is_file()
+
+
+def test_remote_fast_forward_is_unchanged(tmp_path: Path) -> None:
+    origin = tmp_path / "origin.git"
+    _repo(origin, FILES, "first commit")
+    checkout = _remote_checkout(tmp_path, origin)
+    new = _push_commit(origin)
+    proc, _, alerts = _run(
+        _render(strategy="remote", token=False),
+        "remote",
+        tmp_path,
+        checkout=checkout,
+        expected=str(origin),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert alerts == []
+    assert _head(checkout) == new
+    assert "rewritten" not in proc.stdout and "full build" not in proc.stdout
+    assert not (checkout / ".git" / "bay-full-build").exists()
+
+
+def test_rewritten_history_rule_in_bash(tmp_path: Path) -> None:
+    """An ancestor is no rewrite; a missing old head is; no old head and a full build are not."""
+    rendered = _render(strategy="local", token=False)
+    repo = tmp_path / "co"
+    first = _repo(repo, {"a": "1\n"})
+    (repo / "a").write_text("2\n")
+    _git(repo, "commit", "-q", "-am", "second")
+    helpers = "\n".join(_bash_fn(rendered, n) for n in _EXTRA if n in rendered)
+
+    def run(old: str, full: str = "0") -> tuple[str, str]:
+        script = f"""
+set -e
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+SERVICE=shop
+CHECKOUT_SERVICES=()
+REPO_DIR={str(repo)!r}
+FULL_BUILD={full}
+FULL_BUILD_WHY=initial
+{helpers}
+_note_rewritten_history {old!r}
+printf 'FULL_BUILD=%s WHY=%s\\n' "${{FULL_BUILD}}" "${{FULL_BUILD_WHY}}"
+"""
+        proc, _, _ = _harness(rendered, script, tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        shutil.rmtree(repo / ".git" / "bay-full-build", ignore_errors=True)
+        return proc.stdout, proc.stderr
+
+    assert "FULL_BUILD=0 WHY=initial" in run(first)[0]
+    assert "FULL_BUILD=0 WHY=initial" in run("")[0]
+    gone = "0123456789ab"
+    out = run(gone)[0]
+    assert "FULL_BUILD=1" in out and "WHY=the history of the deploy branch was rewritten" in out
+    assert f"history of shop was rewritten ({gone} is not in " in out
+    # A run that already builds in full says nothing more.
+    out = run(gone, full="1")[0]
+    assert "rewritten (" not in out and "WHY=initial" in out
+
+
+# ── a service without a token has no GIT_ASKPASS (2.17.2) ───────────────────
+
+
+@pytest.mark.parametrize("strategy", ["remote", "local"])
+def test_no_token_service_renders_no_askpass(strategy: str) -> None:
+    """Ansible writes the helper only for a token: a service without one must not name it."""
+    rendered = _render(strategy=strategy, token=False)
+    block = _block(rendered)
+    assert "GIT_ASKPASS" not in block and ".git-askpass" not in block
+    assert "GIT_TERMINAL_PROMPT=0" in block
+    if strategy == "remote":
+        assert (
+            '  FETCH_CMD="GIT_TERMINAL_PROMPT=0 git -c url.\\"\\${CLONE_URL}\\".insteadOf='
+            '\\"\\${CLONE_REPO}\\" fetch origin \\"\\${BRANCH}\\""'
+        ) in block
+        assert "  GIT_AUTH=(GIT_TERMINAL_PROMPT=0)" in block
+
+
+def test_token_service_keeps_its_askpass_lines() -> None:
+    """These lines were byte-compared against the 2.17.1 render; they must not move."""
+    remote = _block(_render(strategy="remote", token=True))
+    assert (
+        '  FETCH_CMD="GIT_ASKPASS=/opt/teststack/push-builds/.git-askpass-shop GIT_TERMINAL_PROMPT=0 '
+        'git -c url.\\"\\${CLONE_URL}\\".insteadOf=\\"\\${CLONE_REPO}\\" fetch origin '
+        '\\"\\${BRANCH}\\""'
+    ) in remote
+    assert (
+        '  GIT_AUTH=(GIT_TERMINAL_PROMPT=0 "GIT_ASKPASS=/opt/teststack/push-builds/.git-askpass-shop")'
+    ) in remote
+    local = _block(_render(strategy="local", token=True))
+    slug = SLUG.search(local).group(1)
+    assert (
+        f'  GIT_AUTH=(GIT_TERMINAL_PROMPT=0 "GIT_ASKPASS=/opt/teststack/builds/.git-askpass-{slug}")'
+    ) in local
+
+
+@contextmanager
+def _answers_401():
+    """A git server that wants a login: every request gets 401."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="repo"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_address[1]}/example-org/shop.git"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_remote_no_token_repo_that_wants_a_login_fails_with_gits_own_message(
+    tmp_path: Path,
+) -> None:
+    """A 401 made git exec the missing helper: 'cannot exec ... .git-askpass-shop'."""
+    origin = tmp_path / "origin.git"
+    old = _repo(origin, FILES, "first commit")
+    checkout = _remote_checkout(tmp_path, origin)
+    with _answers_401() as url:
+        _git(checkout, "remote", "set-url", "origin", url)
+        proc, _, alerts = _run(
+            _render(strategy="remote", token=False),
+            "remote",
+            tmp_path,
+            checkout=checkout,
+            expected=url,
+            # A desktop session exports SSH_ASKPASS, which git falls back to: keep it out.
+            extra="unset SSH_ASKPASS SSH_ASKPASS_REQUIRE DISPLAY",
+        )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert _head(checkout) == old
+    assert len(alerts) == 1 and "Repo fetch failed</b> (1/3)" in alerts[0]
+    seen = proc.stdout + proc.stderr + alerts[0]
+    assert "cannot exec" not in seen and ".git-askpass" not in seen
+    assert "terminal prompts disabled" in alerts[0]
 
 
 @pytest.mark.parametrize("key_present", [False, True])

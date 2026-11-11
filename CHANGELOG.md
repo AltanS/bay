@@ -8,6 +8,25 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.17.2] - 2026-11-11
+
+A forced push to a `local` build no longer fails with no reason. `[build] repo` is checked for its shape. A service with no token no longer names a credential helper that does not exist.
+
+### Fixed
+- A `local` build with the same repo URL and a replaced history (a forced push with an unrelated root commit) ran `git pull`, which stopped with exit 128 (`fatal: Need to specify how to reconcile divergent branches`). The failure was the generic "Webhook deploy failed" with no reason, and the circuit breaker counted it. The only way out was a manual full-build mark on the box. A `local` build now updates its checkout as a `remote` build does: `git fetch` of the deploy branch, then `git reset --hard FETCH_HEAD`. The checkout is build-only, so any history moves it. A fetch that fails ends in the existing loud path ("Repo fetch failed", one `build.failed` alert with the likely cause), not in the ERR trap.
+- `rebuild.sh` now asks after the reset whether the old head (the checkout's HEAD before the fetch, as the service saw it) is an ancestor of the new head (`git merge-base --is-ancestor`). When it is not, or when git cannot find the old commit, the history was rewritten: the build is a full build, with the mark of a new checkout (`.git/bay-full-build/<container>`). No config-only tag and no no-input-change tag use the old commit. The log says `history of <container> was rewritten (<old12> is not in <new12>), full build`. When the old head is an ancestor, nothing changes. A `remote` build did not fail on this, but it did not look either: it built because nothing used the old commit (the receiver writes no no-input-change marker for a force push, and the old commit stays in the checkout for `git diff`). A trigger file with that marker, after a rewrite that kept the same tree, was a tag-only push of the old image. It now takes the same explicit full-build path.
+- A service with no token had `GIT_ASKPASS` set to a helper file that Ansible writes only for a service with a token. A public `https://` repo that answered 401 or 404 made git run the missing file, and the failure reason read `fatal: cannot exec '<...>/.git-askpass-<name>': No such file or directory`. `rebuild.sh` now sets `GIT_ASKPASS` only for a service with a token, in both strategies. A service with no token keeps `GIT_TERMINAL_PROMPT=0`, so git fails at once with its own message. The lines of a service with a token are unchanged.
+
+### Changed
+- `bay toml validate`, `bay plan` and `bay up` now refuse a `[build] repo` that is not a git URL or an absolute path. Accepted: `https://`, `http://`, `ssh://`, `git://` and `file://` URLs with a host and a path, `user@host:path`, and an absolute local path. Refused: an empty value, a space inside, a bare word, a relative path. Message: `build.repo: "<value>" is not a git URL or an absolute path; use for example git@github.com:org/repo.git or https://github.com/org/repo.git`.
+- A URL with a password or a token inside (`https://user:secret@host/...`, `https://token@host/...`) is refused too. The message shows the URL redacted and says to give the token in `repo_tokens` in `bay.fleet.toml` instead. The secret is never printed. The `bay.lock` `repo` is not checked: it is written by the CLI from the origin of a checkout, and a check there could stop a `bay up` after it touched a box.
+- Docs: `docs/build-pipeline.md` replaces the "known limit" of a local build with a replaced history by what now happens (no manual step), and explains the ancestor rule and the no-token case. `docs/bay-toml.md` names the accepted forms at the `repo` key.
+
+### Upgrade notes
+- The build script fixes reach a box with the next `bay up` (or `bay deploy`), which renders `rebuild.sh` again. The upgrade recreates no container: `rebuild.sh` is a plain file that no container hash or handler reads. The container config hash, the `com.bay.receiver-hash` (the receiver files) and the `com.bay.receiver-config-hash` (the receiver config and the image map) read none of the files this release changes.
+- The next push after the upgrade is a normal one. A `local` build moves from `git pull` to fetch and reset, with the same result for a push that adds commits.
+- Run `bay toml validate` in a project before `bay up`. A `[build] repo` that is a relative path or has a space in it was never usable by git on the box, and `bay plan` now stops on it. A token in a repo URL moves to `repo_tokens` in `bay.fleet.toml`.
+
 ## [2.17.1] - 2026-11-10
 
 A changed `[build] repo` no longer leaves the box on the old repo. The next build uses the new repo, or fails loud.

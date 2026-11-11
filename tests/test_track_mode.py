@@ -599,7 +599,7 @@ cp "${{STATE_FILE}}" {str(tmp_path / "before.json")!r}
     fetch = remote_sh.index("git reset --hard FETCH_HEAD")
     assert remote_sh.index(head) < fetch < remote_sh.index(prev, fetch)
     start = local_sh.index("# ── Local strategy")
-    pull = local_sh.index('eval "${PULL_CMD}"', start)
+    pull = local_sh.index("git reset -q --hard FETCH_HEAD", start)
     assert local_sh.count(prev) == 2, "the remote path and the local path"
     seen = local_sh.index('_PREV_HEAD=$(_seen_head "${REPO_DIR}")', start)
     mark = local_sh.index('_mark_seen "${REPO_DIR}"', pull)
@@ -1525,7 +1525,7 @@ def test_config_only_push_tags_every_shared_repo_image(tmp_path: Path) -> None:
     assert 'CHECKOUT_SERVICES=("web-next")' in _service_config(local_sh, "web-next")
     assert "CHECKOUT_SERVICES=()" in _service_config(remote_sh, "web")
     # The local path reads this service's mark before the pull and moves it after.
-    pull = local_sh.index('eval "${PULL_CMD}"', local_sh.index("# ── Local strategy"))
+    pull = local_sh.index("git reset -q --hard FETCH_HEAD", local_sh.index("# ── Local strategy"))
     assert local_sh.rindex('_PREV_HEAD=$(_seen_head "${REPO_DIR}")', 0, pull) < pull
     assert local_sh.index('_mark_seen "${REPO_DIR}"', pull) < local_sh.index("_config_only \"", pull)
     # A project whose bay.toml lives in the fleet has no config-only rule: nothing shared.
