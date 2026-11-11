@@ -5,6 +5,31 @@
 # ACME cert file is created in the root bootstrap play (deploy.yml) — requires root ownership
 # Runs as app user (become_user inherited from play)
 
+# ── Tailnet bind before tailscaled is up ────────────────────────────────
+# Must run before the config task and before any Traefik (re)start. See
+# traefik_nonlocal_bind (roles/traefik/defaults/main.yml). The play may run as
+# the app user, so root is explicit.
+
+- name: Allow Traefik to bind the tailnet address before tailscaled has it
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_nonlocal_bind
+    value: "1"
+    sysctl_file: /etc/sysctl.d/99-bay-traefik-nonlocal-bind.conf
+    sysctl_set: true
+    reload: true
+  become: true
+  become_user: root
+  when: traefik_nonlocal_bind | bool
+
+# Off again: drop the persistent file. The live value is left alone.
+- name: Remove the Traefik nonlocal-bind sysctl file when it is off
+  ansible.builtin.file:
+    path: /etc/sysctl.d/99-bay-traefik-nonlocal-bind.conf
+    state: absent
+  become: true
+  become_user: root
+  when: not (traefik_nonlocal_bind | bool)
+
 # ── Directory Setup ─────────────────────────────────────────────────────
 
 - name: Ensure Traefik log directory exists
