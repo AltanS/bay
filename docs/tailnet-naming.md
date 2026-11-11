@@ -14,6 +14,7 @@ them.
   - [Users are people](#users-are-people)
   - [Machines are named by `given_name`](#machines-are-named-by-given_name)
   - [`hosts:` aliases are labeled CIDRs](#hosts-aliases-are-labeled-cidrs)
+  - [A tailnet IP is not an admin grant](#a-tailnet-ip-is-not-an-admin-grant)
 - [`given_name` is load-bearing under `tailnet_identity`](#given_name-is-load-bearing-under-tailnet_identity)
 - [Tags are authorization classes, not names](#tags-are-authorization-classes-not-names)
   - [When a tag is right](#when-a-tag-is-right)
@@ -91,6 +92,16 @@ It carries **no** authorization by itself and no link to the node object. It map
 string to an address, nothing more — which is also its weakness: if the node's
 tailnet IP is ever reassigned, the alias silently points at the wrong machine, or
 at nothing.
+
+### A tailnet IP is not an admin grant
+
+Being on the tailnet gives a node no access to the Headscale admin API. Since
+2.20.0 `/api` and `/swagger` answer only to `headscale_admin_api_allowed_ips`,
+loopback by default. So a tenant user's node, or any other node, gets 403. To
+let one device in, list its tailnet IP there as a `/32`, the same address its
+`hosts:` alias names. The same weakness holds: if the IP is reassigned, the
+grant moves with it. See
+[tailnet-ingress.md](tailnet-ingress.md#the-headscale-admin-api-is-closed).
 
 ## `given_name` is load-bearing under `tailnet_identity`
 

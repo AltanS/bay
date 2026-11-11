@@ -27,12 +27,26 @@ headscale_magic_dns_domain: "{{ stack_name }}.tailnet.internal"
 headscale_version: "0.29.7"
 # Is the Headscale admin REST API (/api/v1/...) and /swagger open to the
 # internet on headscale_domain? false (default): Traefik answers 403 there
-# unless the client IP is in vpn_allowed_ips (loopback and the tailnet range).
-# The tailscale protocol paths stay public. true: the old behaviour, where the
-# bearer API key is the only guard. See roles/headscale/defaults/main.yml.
-# Lives here, not in the headscale role, because container_lifecycle builds the
-# Traefik labels of the headscale container from it.
+# unless the client IP is in headscale_admin_api_allowed_ips (below). The
+# tailscale protocol paths stay public. true: the old behaviour, where the
+# bearer API key is the only guard, and the list below is not used. See
+# roles/headscale/defaults/main.yml. Lives here, not in the headscale role,
+# because container_lifecycle builds the Traefik labels of the headscale
+# container from it.
 headscale_admin_api_public: false
+# Who may reach the admin API while headscale_admin_api_public is false. IPs or
+# CIDRs, matched against the address Traefik sees. Since 2.20.0 the default is
+# loopback only, so no tailnet node reaches the API, not even a tenant node.
+# Bay itself needs no entry: `bay gateway` and registration run the headscale
+# CLI in the container, and the identity sidecar uses the docker network. To
+# open the API to one device, add its tailnet IP as a /32 (read it with
+# `bay gateway nodes`), then run `bay deploy <env> --tags headscale`. The list
+# must not be empty, and each entry must be an IP or a CIDR: the deploy stops
+# otherwise, because a broken allowlist would drop the admin router and leave
+# /api to the public main router. Changing it recreates the headscale container.
+headscale_admin_api_allowed_ips:
+  - "127.0.0.1/32"
+  - "::1/128"
 # Headscale user that owns VPS server nodes — defaults to stack_name.
 # Each Bay project creates its own user, preventing collisions when
 # multiple projects share one Headscale server.

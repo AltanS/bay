@@ -26,13 +26,26 @@
 #
 # Admin API (since 2.19.0):
 #
-# - **The REST API is closed to the internet.** `/api/...` and `/swagger` on
-#   headscale_domain answer 403 unless the client IP is in vpn_allowed_ips
-#   (loopback and the tailnet range). A second Traefik router does this. Its
-#   labels are built in container_lifecycle/tasks/build_specs.yml, gated by
-#   `headscale_admin_api_public` (default false, in access_gateway defaults).
+# - **The REST API is closed.** `/api/...` and `/swagger` on headscale_domain
+#   answer 403 unless the client IP is in `headscale_admin_api_allowed_ips`
+#   (2.20.0, default loopback only: 127.0.0.1/32 and ::1/128). A second
+#   Traefik router does this, with its own ipAllowList middleware
+#   `headscale-admin-allow` behind public-chain. Its labels are built in
+#   container_lifecycle/tasks/build_specs.yml, gated by
+#   `headscale_admin_api_public` (default false). Both variables live in the
+#   access_gateway defaults. From 2.19.0 to 2.19.1 the router used vpn-chain,
+#   so every tailnet node, tenant nodes too, reached the API.
 #   The tailscale protocol paths (/ts2021, /key, /register, /oidc, /verify,
 #   /derp, /apple, /windows, /health ...) stay public; clients need them.
+# - **Open it for one device.** Add the device's tailnet IP (from
+#   `bay gateway nodes`) to the list in group_vars/all, keep the loopback
+#   entries, and run `bay deploy <env> --tags headscale`:
+#     headscale_admin_api_allowed_ips: ["127.0.0.1/32", "::1/128", "100.64.0.7/32"]
+#   The device then calls the control host's tailnet IP with the Headscale
+#   host name, for example
+#   `curl --resolve hs.example.com:443:<tailnet IP> https://hs.example.com/api/v1/node`.
+#   Under a Headscale ACL the device also needs an accept rule to the control
+#   host on port 443.
 # - **Bay itself does not need the API.** `bay gateway ...` and the local
 #   tailscale_register path run `docker exec headscale headscale ...` on the
 #   control host. A box in another region registers by a task delegated to the

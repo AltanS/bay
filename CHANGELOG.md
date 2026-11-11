@@ -10,11 +10,18 @@ needing manual action is called out under **Upgrade notes**. Entries for
 
 ## [2.20.0] - 2026-11-12
 
+### Changed
+- Headscale admin API: new variable `headscale_admin_api_allowed_ips` (access_gateway defaults, default `["127.0.0.1/32", "::1/128"]`). The `headscale-admin` router (`/api`, `/swagger`) no longer uses `vpn-chain`. It uses `public-chain`, the headers and compression of the main Headscale router, plus its own IP allowlist `headscale-admin-allow` from the new variable. In 2.19.0 and 2.19.1 every tailnet node reached the admin API, also the nodes of an external tenant, and an API key was the only guard there. Now every client outside the list gets 403, tailnet nodes included. Nothing in Bay needs the path: `bay gateway` and registration use `docker exec` on the control host, and the identity sidecar uses the docker network. `headscale_admin_api_public: true` still opens the API to everyone and adds no label.
+- Headscale admin API: the deploy stops when `headscale_admin_api_allowed_ips` is empty, is not a list, or holds a value that is not an IP or a CIDR. Traefik drops a router whose allowlist it cannot parse, and `/api` would then reach the public main router.
+- Headscale admin API, docs: `docs/tailnet-ingress.md` renames the section to "The Headscale admin API is closed" and shows how to open the API for one device. `docs/access-gateways.md`, `docs/multi-region.md`, `docs/tailnet-naming.md`, the `headscale` role defaults header and the `bay gateway apikey` hints say the same. The 2.19.0 text that said the API answers over the tailnet is gone.
+
 ### Fixed
 - Traefik: at each start, Traefik logged `middleware "vpn-only@docker" does not exist` once for each tailnet route (`<route>-tailnet@file`). The route file is loaded by the file provider, and the file provider was ready before the docker provider had read the `vpn-only` label on the traefik container. The routes worked a second later. The route file now defines its own copy of the allowlist, and each route names it as `vpn-only@file`. The docker-label routers keep `vpn-only` and `vpn-chain` as before. Both copies read `vpn_allowed_ips` with the same default, and a test renders both and compares the ranges.
 - Access gateway: the task that adds the Headscale tailnet range to `vpn_allowed_ips` is now tagged `always`. Before, `bay deploy <env> --tags traefik` skipped it, so the route file could get a shorter list than the label. It only sets a fact.
 
 ### Upgrade notes
+- Headscale admin API: run `bay deploy <env> --tags headscale` against the fleet that runs Headscale (or the next `bay up` of the control box env). The router labels change, so the `headscale` container is recreated once and every node reconnects once. A fleet with `headscale_admin_api_public: true` keeps its labels and its container.
+- Headscale admin API: check your own API clients first. A client that calls `/api/...` over the tailnet gets 403 after the deploy. Add the tailnet IP of its device to `headscale_admin_api_allowed_ips` as a `/32`, and keep the loopback entries. `docs/tailnet-ingress.md` has the steps.
 - Traefik start noise: run `bay deploy <env> --tags traefik` on the ingress box (or the next `bay up` of that box env). It rewrites `dynamic/tailnet-proxies.yml`, and Traefik reloads the file without a restart. No container is recreated: no label changes.
 
 ## [2.19.1] - 2026-11-11

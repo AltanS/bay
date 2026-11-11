@@ -1150,8 +1150,9 @@ def apikey(
 
     Bay itself needs no API key. Since 2.19.0 the admin API is closed to the
     internet (headscale_admin_api_public: false), and a box in another region
-    registers through the control host over SSH. A key is for your own API
-    clients over the tailnet, and for a fleet that opts back in to API
+    registers through the control host over SSH. Since 2.20.0 it answers only
+    to headscale_admin_api_allowed_ips (default loopback only). A key is for
+    your own API clients on an allowed IP, and for a fleet that opts back in to API
     registration (headscale_register_via_api: true plus
     headscale_admin_api_public: true, key in the vault as headscale_api_key).
     Keys belong to the control host's Headscale state: rebuilding or
@@ -1215,8 +1216,9 @@ def _apikey_create(
         screen=(
             f"\n  [bold]API key:[/bold] {key}"
             f"\n"
-            f"\n  Bay does not need this key. The admin API answers only on the"
-            f"\n  tailnet and on the box itself, unless headscale_admin_api_public is true."
+            f"\n  Bay does not need this key. The admin API answers only to the IPs in"
+            f"\n  headscale_admin_api_allowed_ips (loopback by default), unless"
+            f"\n  headscale_admin_api_public is true."
             f"\n"
             f"\n  [bold]Only if the fleet registers boxes through the API[/bold]"
             f"\n  (headscale_register_via_api: true, for a deploy machine with no SSH"
@@ -1234,8 +1236,9 @@ def _apikey_create(
             f"\n"
             f"\n       bay gateway apikey | bay vault set {env} <name>"
             f"\n"
-            f"\n  Bay does not need this key. The admin API answers only on the"
-            f"\n  tailnet and on the box itself, unless headscale_admin_api_public is true."
+            f"\n  Bay does not need this key. The admin API answers only to the IPs in"
+            f"\n  headscale_admin_api_allowed_ips (loopback by default), unless"
+            f"\n  headscale_admin_api_public is true."
             f"\n  [bold]Only if the fleet registers boxes through the API[/bold]"
             f"\n  (headscale_register_via_api: true), the name is headscale_api_key."
             f"\n"

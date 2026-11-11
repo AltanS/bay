@@ -373,9 +373,9 @@ and sudo there, the access it uses to deploy that host.
 ### Registration and the admin API
 
 Since 2.19.0 the Headscale admin REST API (`/api/...` and `/swagger`) is
-closed to the internet. Traefik answers 403 unless the client IP is in
-`vpn_allowed_ips` (loopback and the tailnet range). The tailscale protocol
-paths stay public, so clients join and stay connected as before.
+closed to the internet. Since 2.20.0 Traefik answers 403 unless the client IP
+is in `headscale_admin_api_allowed_ips` (default loopback only). The tailscale
+protocol paths stay public, so clients join and stay connected as before.
 `headscale_admin_api_public: true` in `group_vars/all` opens the API again.
 
 A remote box registers like this by default:

@@ -25,7 +25,7 @@ split-DNS routes a tailnet hostname to the server; this issues a trusted cert fo
 - [Day 2: renewals and adding apps](#day-2-renewals-and-adding-apps)
 - [Variable reference](#variable-reference)
 - [Notes & gotchas](#notes--gotchas)
-- [The Headscale admin API is tailnet-only](#the-headscale-admin-api-is-tailnet-only)
+- [The Headscale admin API is closed](#the-headscale-admin-api-is-closed)
 - [Locking the upstream: Headscale ACL (`headscale_acl_policy`)](#locking-the-upstream-headscale-acl-headscale_acl_policy)
   - [Adding a proxy under default-deny](#adding-a-proxy-under-default-deny)
 - [Per-device identity (`tailnet_identity_enabled` + `identity_inject`)](#per-device-identity-tailnet_identity_enabled--identity_inject)
@@ -587,7 +587,8 @@ and exists only on the machine that made it.
 | `tailnet_identity_enabled` | `false` | Run the identity ForwardAuth sidecar on the ingress host |
 | `tailnet_identity_source` | `api` | IP→device source: `api` (HTTP API, no mount — recommended) or `sqlite` (DB read, mounts state) |
 | `tailnet_identity_api_key` | `""` | Headscale API key (vault ref) — required when source is `api` |
-| `headscale_admin_api_public` | `false` | `false`: `/api` and `/swagger` on the Headscale host name answer only to `vpn_allowed_ips`. `true`: open to the internet, as before 2.19.0 |
+| `headscale_admin_api_public` | `false` | `false`: `/api` and `/swagger` on the Headscale host name answer only to `headscale_admin_api_allowed_ips`. `true`: open to the internet, as before 2.19.0 |
+| `headscale_admin_api_allowed_ips` | `["127.0.0.1/32", "::1/128"]` | IPs or CIDRs that reach the admin API while it is closed. Add a device's tailnet IP as a `/32` to open it for that device |
 | `tailnet_identity_unknown_action` | `pass` | Unknown client IP: `pass` (200 + `unknown`) or `deny` (403) |
 | `<route>.identity` (compiled `identity_inject`) | `false` | Per-route opt-in to the identity header |
 
@@ -616,16 +617,24 @@ and exists only on the machine that made it.
   (defaults to `headscale_server_tailnet_ip`; set `''` to disable). If you add
   another self-reached rig router, do the same.
 
-## The Headscale admin API is tailnet-only
+## The Headscale admin API is closed
 
 Since 2.19.0 Traefik puts a second router on the Headscale host name. It takes
-`PathPrefix(/api)` and `PathPrefix(/swagger)` and sends them through
-`vpn-chain`, the chain of every `access: vpn` service. So the admin REST API
-answers only to `vpn_allowed_ips`: loopback and the tailnet range. From the
-internet it answers 403. The router has priority 1000, above the main Headscale
-router, whose priority is the length of its rule. Under
-`traefik_split_entrypoints` it also binds `websecure_tailnet`, like the Zot
-router, so a tailnet client reaches it on the tailnet IP.
+`PathPrefix(/api)` and `PathPrefix(/swagger)`. The router has priority 1000,
+above the main Headscale router, whose priority is the length of its rule.
+Under `traefik_split_entrypoints` it also binds `websecure_tailnet`, like the
+Zot router.
+
+Since 2.20.0 the router sends these paths through `public-chain` (the headers
+and compression of the main router) and its own IP allowlist,
+`headscale-admin-allow`. The allowlist is `headscale_admin_api_allowed_ips`,
+default `127.0.0.1/32` and `::1/128`. Every other client gets 403: the
+internet, and every tailnet node. In 2.19.0 and 2.19.1 the router used
+`vpn-chain`, so every tailnet node reached the API, also the nodes of an
+external tenant. With an API key, such a node could manage the whole tailnet.
+The deploy stops when the list is empty or holds a value that is not an IP or
+a CIDR. Traefik would drop the router on such a value, and `/api` would then
+reach the public main router.
 
 The tailscale protocol paths stay on the main router and stay public. Clients
 need them to join and to stay connected: `/ts2021`, `/key`, `/register/...`,
@@ -636,15 +645,42 @@ Check it again when the pinned version moves.
 
 Bay does not call the API itself. `bay gateway` runs the Headscale CLI in the
 container on the control host, and a box in another region registers through
-the control host over SSH. A deploy machine with no SSH to the control host
+the control host over SSH. The tailnet-identity sidecar calls
+`http://headscale:8080` on the docker network, not through Traefik, so the
+allowlist does not touch it. A deploy machine with no SSH to the control host
 cannot enrol such a box unless the fleet opts back in
 (`headscale_register_via_api: true` and `headscale_admin_api_public: true`, see
 [multi-region.md](multi-region.md#registration-and-the-admin-api)).
 
-To reach the API from a tailnet device, send the request to the tailnet IP of
-the control host with the Headscale host name as SNI and Host header, for
-example `curl --resolve hs.example.com:443:<tailnet IP> https://hs.example.com/api/v1/node`.
-A request to the public IP comes from your public IP and gets 403.
+**Open it for one device.** Read the tailnet IP of the device with
+`bay gateway nodes`. Add it as a `/32` in `group_vars/all/access_gateway.yml`,
+and keep the loopback entries:
+
+```yaml
+headscale_admin_api_allowed_ips:
+  - "127.0.0.1/32"
+  - "::1/128"
+  - "100.64.0.7/32"   # the operator laptop
+```
+
+Run `bay deploy production --tags headscale`. The new label recreates the
+`headscale` container once, and every node reconnects once. Under a Headscale
+ACL the device also needs an accept rule to the control host on port 443. Then
+send the request to the tailnet IP of the control host with the Headscale host
+name as SNI and Host header:
+
+```bash
+curl --resolve hs.example.com:443:<tailnet IP of the control host> \
+  -H "Authorization: Bearer <key>" https://hs.example.com/api/v1/node
+```
+
+A request to the public IP comes from your public IP and gets 403. A device
+IP can change: use a node with a fixed IP, and remove the entry when the
+device no longer needs the API.
+
+**Loopback.** On the box itself, `curl --resolve hs.example.com:443:127.0.0.1`
+reaches the API. With `traefik_split_entrypoints` Traefik does not listen on
+loopback, so the default list then lets no client in.
 
 ## Locking the upstream: Headscale ACL (`headscale_acl_policy`)
 

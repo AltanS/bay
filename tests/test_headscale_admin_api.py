@@ -44,6 +44,7 @@ HEADSCALE_DEFAULTS = REPO / "roles" / "headscale" / "defaults" / "main.yml"
 
 DOMAIN = "hs.example.com"
 ADMIN = "traefik.http.routers.headscale-admin"
+ALLOW = "traefik.http.middlewares.headscale-admin-allow.ipallowlist.sourcerange"
 
 
 def _yaml(path: Path) -> Any:
@@ -117,7 +118,8 @@ def test_default_adds_the_admin_router():
     assert labels[f"{ADMIN}.rule"] == (
         f"Host(`{DOMAIN}`) && (PathPrefix(`/api`) || PathPrefix(`/swagger`))"
     )
-    assert labels[f"{ADMIN}.middlewares"] == "vpn-chain"
+    assert labels[f"{ADMIN}.middlewares"] == "public-chain,headscale-admin-allow"
+    assert labels[ALLOW] == "127.0.0.1/32,::1/128"
     assert labels[f"{ADMIN}.service"] == "headscale"
     assert labels[f"{ADMIN}.tls.certresolver"] == "letsencrypt"
     assert labels[f"{ADMIN}.entrypoints"] == "websecure"
@@ -234,18 +236,73 @@ def test_compose_partial_documents_the_same_labels():
     assert "headscale-admin" not in _compose(headscale_admin_api_public=True)
 
 
-def test_vpn_chain_carries_the_allowlist():
-    """The router leans on vpn-chain; it must hold vpn-only."""
-    import sys
+def test_admin_router_does_not_use_the_tailnet_allowlist():
+    """2.20.0: vpn-chain let every tailnet node (tenants too) reach the API."""
+    middlewares = _built_labels()[f"{ADMIN}.middlewares"].split(",")
+    assert "vpn-chain" not in middlewares and "vpn-only" not in middlewares
+    # The main router's headers and compression, plus the dedicated allowlist.
+    assert middlewares == ["public-chain", "headscale-admin-allow"]
 
-    sys.path.insert(0, str(REPO / "filter_plugins"))
-    from bay_filters import bay_traefik_global_labels
 
-    labels = bay_traefik_global_labels({"vpn_allowed_ips": ["127.0.0.1", "100.64.0.0/10"]})
-    assert "vpn-only" in labels["traefik.http.middlewares.vpn-chain.chain.middlewares"].split(",")
-    assert labels["traefik.http.middlewares.vpn-only.ipallowlist.sourcerange"] == (
-        "127.0.0.1,100.64.0.0/10"
-    )
+def test_default_allowlist_is_loopback_only():
+    assert _yaml(GATEWAY_DEFAULTS)["headscale_admin_api_allowed_ips"] == ["127.0.0.1/32", "::1/128"]
+    # build_specs and the compose partial fall back to the same list.
+    assert _built_labels()[ALLOW] == "127.0.0.1/32,::1/128"
+    assert f'"{ALLOW}=127.0.0.1/32,::1/128"' in _compose()
+
+
+def test_allowlist_follows_the_variable():
+    ips = ["127.0.0.1/32", "::1/128", "100.64.0.7/32"]
+    assert _built_labels(headscale_admin_api_allowed_ips=ips)[ALLOW] == ",".join(ips)
+    assert f'"{ALLOW}={",".join(ips)}"' in _compose(headscale_admin_api_allowed_ips=ips)
+
+
+def test_public_true_ignores_the_allowlist():
+    labels = _built_labels(headscale_admin_api_public=True,
+                           headscale_admin_api_allowed_ips=["100.64.0.7/32"])
+    assert ALLOW not in labels
+
+
+def _allowlist_check(**ctx: Any) -> bool:
+    """Run the assert task of build_specs.yml; True when every condition holds."""
+    task = _task(_yaml(BUILD_SPECS), "Check the Headscale admin API allowlist")
+    env = _env()
+    env.tests["match"] = lambda v, p: re.match(p, v) is not None
+    ips_expr = task["vars"]["_hs_admin_ips"].strip().removeprefix("{{").removesuffix("}}")
+    ips = env.compile_expression(ips_expr)(**ctx)
+    return all(env.compile_expression(str(c).strip())(_hs_admin_ips=ips, **ctx)
+               for c in task["ansible.builtin.assert"]["that"])
+
+
+@pytest.mark.parametrize("ips", [
+    None,
+    ["127.0.0.1/32", "::1/128"],
+    ["100.64.0.7/32"],
+    ["100.64.0.7", "fd7a:115c:a1e0::7/128", "10.0.0.0/8"],
+])
+def test_allowlist_check_accepts_ips_and_cidrs(ips):
+    ctx = {} if ips is None else {"headscale_admin_api_allowed_ips": ips}
+    assert _allowlist_check(**ctx)
+
+
+@pytest.mark.parametrize("ips", [
+    [],
+    "100.64.0.7/32",
+    ["100.64.0.7/32", "laptop"],
+    ["100.64.0.7/32,10.0.0.0/8"],
+    [""],
+    [7],
+])
+def test_allowlist_check_refuses_what_traefik_cannot_parse(ips):
+    assert not _allowlist_check(headscale_admin_api_allowed_ips=ips)
+
+
+def test_allowlist_check_runs_only_when_the_router_is_built():
+    task = _task(_yaml(BUILD_SPECS), "Check the Headscale admin API allowlist")
+    base = {"access_gateway": "headscale", "headscale_server": True}
+    assert _runs(task, **base)
+    assert not _runs(task, **base, headscale_admin_api_public=True)
+    assert not _runs(task, access_gateway="wireguard", headscale_server=True)
 
 
 # ── 2. tailscale_register ─────────────────────────────────────────────────

@@ -289,6 +289,35 @@
       labels:
         com.centurylinklabs.watchtower.enable: "false"
 
+# The admin API allowlist (headscale_admin_api_allowed_ips) goes into a Traefik
+# label. A value Traefik cannot parse makes it drop the headscale-admin router,
+# and /api would then match the public main router. So refuse it here, before
+# any label is built.
+- name: Check the Headscale admin API allowlist
+  ansible.builtin.assert:
+    that:
+      - _hs_admin_ips is not string
+      - _hs_admin_ips is iterable
+      - _hs_admin_ips | length > 0
+      - _hs_admin_ips | select('string') | list | length == _hs_admin_ips | length
+      - >-
+        _hs_admin_ips
+        | reject('match', '^([0-9]{1,3}[.]){3}[0-9]{1,3}(/[0-9]{1,2})?$')
+        | reject('match', '^[0-9A-Fa-f]*:[0-9A-Fa-f:.]*(/[0-9]{1,3})?$')
+        | list | length == 0
+    fail_msg: >-
+      headscale_admin_api_allowed_ips must be a non-empty list of IPs or CIDRs,
+      for example ["127.0.0.1/32", "::1/128", "100.64.0.7/32"]. It is
+      {{ _hs_admin_ips }}. Set headscale_admin_api_public: true instead to open
+      the admin API to everyone.
+    quiet: true
+  vars:
+    _hs_admin_ips: "{{ headscale_admin_api_allowed_ips | default(['127.0.0.1/32', '::1/128']) }}"
+  when:
+    - (access_gateway | default('wireguard')) == 'headscale'
+    - headscale_server | default(false)
+    - not (headscale_admin_api_public | default(false) | bool)
+
 - name: Build headscale container spec
   ansible.builtin.set_fact:
     _infra_specs: "{{ _infra_specs + [_headscale_spec | combine({'labels': _headscale_spec.labels | combine(_headscale_admin_router)}) | combine(_infra_log_rotation)] }}"
@@ -299,9 +328,11 @@
     _infra_log_rotation: "{{ None | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
     # Admin API gate (headscale_admin_api_public, default false). A second
     # router on the Headscale host name takes /api (the REST API) and /swagger
-    # and puts them behind vpn-chain: public-chain plus the vpn-only ipAllowList
-    # (vpn_allowed_ips: loopback and the tailnet range). From the internet they
-    # answer 403. Every other path (the tailscale protocol: /ts2021, /key,
+    # and puts them behind public-chain (the headers and compression of the
+    # main router) plus its own ipAllowList, headscale-admin-allow, from
+    # headscale_admin_api_allowed_ips (default loopback only, 2.20.0). Before
+    # 2.20.0 it used vpn-chain, so every tailnet node reached the API. Anyone
+    # else gets 403. Every other path (the tailscale protocol: /ts2021, /key,
     # /register, /oidc, /verify, /derp, /machine/ping-response ...) stays on
     # the main router, which is public. The explicit priority beats the main
     # router, whose priority is the length of its rule. Under
@@ -316,8 +347,10 @@
       traefik.http.routers.headscale-admin.priority: "1000"
       traefik.http.routers.headscale-admin.entrypoints: "{{ 'websecure,websecure_tailnet' if traefik_split_entrypoints | default(false) | bool else 'websecure' }}"
       traefik.http.routers.headscale-admin.tls.certresolver: letsencrypt
-      traefik.http.routers.headscale-admin.middlewares: vpn-chain
+      traefik.http.routers.headscale-admin.middlewares: public-chain,headscale-admin-allow
       traefik.http.routers.headscale-admin.service: headscale
+      traefik.http.middlewares.headscale-admin-allow.ipallowlist.sourcerange: >-
+        {{ (headscale_admin_api_allowed_ips | default(['127.0.0.1/32', '::1/128'])) | join(',') }}
     # Hardened. Still root, as the image's default user: the data
     # files are root-owned. The root filesystem is read-only; Headscale writes
     # only its data volume and its unix socket (/var/run/headscale, the socket

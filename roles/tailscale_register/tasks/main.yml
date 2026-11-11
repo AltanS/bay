@@ -276,7 +276,7 @@
 # Calls the Headscale admin REST API on headscale_domain with a bearer key.
 # Only for a deploy machine that cannot reach the control host over SSH. It
 # needs headscale_admin_api_public: true (or this box's public IP in
-# vpn_allowed_ips): the admin API is closed to the internet by default, and a
+# headscale_admin_api_allowed_ips): the admin API is closed by default, and a
 # box that is not yet on the tailnet calls it from its public IP.
 
 - name: Fail if no API key for remote registration

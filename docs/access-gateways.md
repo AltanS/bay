@@ -216,12 +216,30 @@ registers through the control host over SSH (see
 [Multi-region Headscale](#multi-region-headscale)).
 
 Since 2.19.0 the admin REST API (`/api/...`) and `/swagger` are closed to the
-internet. Traefik answers 403 unless the client IP is in `vpn_allowed_ips`
-(loopback and the tailnet range). The tailscale protocol paths stay public.
-Set `headscale_admin_api_public: true` in `group_vars/all` to open the API
-again.
+internet. Since 2.20.0 Traefik answers 403 unless the client IP is in
+`headscale_admin_api_allowed_ips`. The default is loopback only
+(`127.0.0.1/32` and `::1/128`), so no tailnet node reaches the API. From
+2.19.0 to 2.19.1 every tailnet node did, tenant nodes too. The tailscale
+protocol paths stay public. Set `headscale_admin_api_public: true` in
+`group_vars/all` to open the API to everyone again.
 
-For your own API clients over the tailnet:
+To open the API for one device, add its tailnet IP (from `bay gateway nodes`)
+and keep the loopback entries:
+
+```yaml
+# group_vars/all/access_gateway.yml
+headscale_admin_api_allowed_ips:
+  - "127.0.0.1/32"
+  - "::1/128"
+  - "100.64.0.7/32"   # the operator laptop
+```
+
+Then run `bay deploy production --tags headscale`. This recreates the
+`headscale` container once. The device calls the tailnet IP of the control
+host with the Headscale host name, see
+[tailnet-ingress.md](tailnet-ingress.md#the-headscale-admin-api-is-closed).
+
+For your own API clients on an allowed IP:
 
 ```bash
 bay gateway apikey                     # create, valid for 1 year
@@ -379,6 +397,7 @@ All servers share one tailnet — devices and services in any region can reach V
 |----------|---------|-------------|---------|
 | `headscale_control_region` | — | `group_vars/all/access_gateway.yml` | Names the region that runs the Headscale coordination server |
 | `headscale_admin_api_public` | `false` | `group_vars/all/access_gateway.yml` | `true` opens `/api` and `/swagger` to the internet again |
+| `headscale_admin_api_allowed_ips` | `["127.0.0.1/32", "::1/128"]` | `group_vars/all/access_gateway.yml` | Who reaches `/api` and `/swagger` while they are closed. Add a device's tailnet IP as a `/32` to open it for that device |
 | `headscale_register_via_api` | `false` | `group_vars/all/access_gateway.yml` | `true` registers remote boxes through the admin API, not over SSH |
 | `secrets.headscale_api_key` | none | `group_vars/production/secrets.yml` (vault, inside `secrets:` dict) | API key, only with `headscale_register_via_api: true` |
 
