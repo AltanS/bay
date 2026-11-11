@@ -73,7 +73,7 @@ bay status --json --env <env>                         # read the receipt right a
 - **Prefer `bay plan` then `bay up` for app changes.** Use `bay deploy` and
   `bay provision` for infrastructure work.
 - **Ask the operator first** before `bay up`, `bay deploy`, `bay provision`,
-  `bay rollback`, `bay restore` or a vault write on a production env. Verbs
+  `bay rollback`, `bay restore`, `bay host upgrade` or a vault write on a production env. Verbs
   that do not change a box (`show`, `plan`, `status`, `doctor`, `validate`,
   `secret missing`) are safe to run without asking. `plan` writes an
   untracked record under `plans/`; leave it or remove that one file.
@@ -149,6 +149,7 @@ bay status --json --env <env>                         # read the receipt right a
 | Recreate containers | `bay deploy production --tags deploy_stack` |
 | Dry run | `bay deploy production -- --check --diff` |
 | Provision a fresh server | `bay provision production` |
+| Upgrade the OS packages of one box | `bay host upgrade production --box <box>` (add `--reboot`; never run apt by hand) |
 | Edit secrets | `bay vault edit production` |
 | Check config before deploying | `bay validate` |
 | Add a machine to the tailnet | `bay gateway enroll <name>`, then the ACL |
@@ -222,6 +223,8 @@ to reproduce it. The flags that change what a command *means*:
 - `bay gateway user-info <name>` — Show details for a user and their nodes.
 - `bay gateway users` — List all headscale users with node counts.
 - `bay healthcheck <env>` — Hit every public service's domains and report reachability.
+- `bay host` — Operate on one box: upgrade its OS packages.
+- `bay host upgrade <env>` — Upgrade the OS packages of one box: apt dist-upgrade, checks, reboot on request.
 - `bay logs <service>` — Show container logs for a service, or operate on its log archive.
 - `bay provision <env>` — Provision and harden a server (base OS, users, firewall, Docker).
 - `bay prune <env>` — Reclaim disk space by pruning unused Docker images and build cache.
@@ -332,6 +335,7 @@ Paths are relative to the framework root (`~/.local/share/bay/framework`).
 
 **Operations**
 
+- `docs/host-upgrade.md` — `bay host upgrade`: OS package upgrades of one box, the deploy lock it holds, the firewall repair after an nftables upgrade, the checks and the reboot.
 - `docs/backups.md` — restic backups — S3 config, per-accessory repos, retention, restore, and monitoring.
 - `docs/multi-region.md` — Deploying one stack to multiple regional servers from a single fleet.
 - `docs/alerting.md` — Where alerts go — Telegram plus an optional generic webhook sink (Campfire/Slack/raw), and the fail-open guarantees.

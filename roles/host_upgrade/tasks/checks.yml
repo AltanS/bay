@@ -1,0 +1,164 @@
+---
+# The checks after the upgrade (main.yml). Every task here only reads, so they
+# run in check mode too. A failed check fails the run with its name; the result
+# lists every check with a detail line.
+
+# The restart counts at the start of the wait window. A container in a restart
+# loop (after a cold boot: Traefik bound to a tailnet address before tailscaled
+# had it) can look `Up` at one sample; a count that grows cannot.
+- name: Read the restart counts at the start of the wait
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'inspect', '--format', _fmt] + (_host_upgrade_containers_before | default([])) }}"
+  register: _host_upgrade_restarts_start
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: _host_upgrade_containers_before | default([]) | length > 0
+  vars:
+    _fmt: "{{ '{{' }}.Name{{ '}}' }}\t{{ '{{' }}.RestartCount{{ '}}' }}\t{{ '{{' }}.State.Status{{ '}}' }}"
+
+# Waits until every container that ran before runs again and none is still
+# starting its healthcheck, or until host_upgrade_container_wait is over.
+# Out of retries, Ansible marks the task failed whatever failed_when says;
+# ignore_errors keeps going, and the `containers` check below names the rest.
+- name: Wait for the containers that ran before  # noqa: ignore-errors
+  ansible.builtin.command:
+    argv: [docker, ps, --format, "{{ '{{' }}.Names{{ '}}' }}\t{{ '{{' }}.Status{{ '}}' }}"]
+  register: _host_upgrade_ps_after
+  until: >-
+    (_host_upgrade_ps_after.stdout_lines | default([])
+     | host_upgrade_containers(_host_upgrade_containers_before | default([]))).settled
+  retries: "{{ ((host_upgrade_container_wait | int) // (host_upgrade_container_poll | int)) | int }}"
+  delay: "{{ host_upgrade_container_poll | int }}"
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+  check_mode: false
+
+# Watch a little longer than "it is up": a loop needs time to show.
+- name: Watch the containers for a restart loop
+  ansible.builtin.wait_for:
+    timeout: "{{ host_upgrade_restart_window | int }}"
+  check_mode: false
+  when:
+    - host_upgrade_restart_window | int > 0
+    - _host_upgrade_containers_before | default([]) | length > 0
+
+- name: Read the restart counts at the end of the wait
+  ansible.builtin.command:
+    argv: "{{ ['docker', 'inspect', '--format', _fmt] + (_host_upgrade_containers_before | default([])) }}"
+  register: _host_upgrade_restarts_end
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: _host_upgrade_containers_before | default([]) | length > 0
+  vars:
+    _fmt: "{{ '{{' }}.Name{{ '}}' }}\t{{ '{{' }}.RestartCount{{ '}}' }}\t{{ '{{' }}.State.Status{{ '}}' }}"
+
+- name: Record the restart loops
+  ansible.builtin.set_fact:
+    _host_upgrade_restart_state: >-
+      {{ _host_upgrade_restarts_start.stdout_lines | default([])
+         | host_upgrade_restarts(_host_upgrade_restarts_end.stdout_lines | default([])) }}
+
+- name: Read the last log lines of a container in a restart loop
+  ansible.builtin.command:
+    argv: [docker, logs, --tail, "{{ host_upgrade_log_lines | int }}", "{{ item }}"]
+  loop: "{{ _host_upgrade_restart_state.looping }}"
+  register: _host_upgrade_loop_logs
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Show the last log lines of a container in a restart loop
+  ansible.builtin.debug:
+    msg: "{{ ([item.item ~ ':'] + item.stdout_lines + item.stderr_lines) }}"
+  loop: "{{ _host_upgrade_loop_logs.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Record the containers after the upgrade
+  ansible.builtin.set_fact:
+    _host_upgrade_container_state: >-
+      {{ _host_upgrade_ps_after.stdout_lines | default([])
+         | host_upgrade_containers(_host_upgrade_containers_before | default([])) }}
+
+- name: Read which Bay firewall files are on the box
+  ansible.builtin.stat:
+    path: "{{ host_upgrade_nftables_dir }}/{{ item }}"
+  loop: [bay-prerouting.conf, bay-egress.conf]
+  register: _host_upgrade_nft_files
+
+- name: Probe the services of the box
+  ansible.builtin.command:
+    argv: "{{ item.argv }}"
+  loop: "{{ _probes + _chain_probes }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _host_upgrade_probes
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  vars:
+    _probes:
+      - { name: docker_active, argv: [systemctl, is-active, docker.service] }
+      - { name: docker_info, argv: [docker, info] }
+      - { name: nftables_unit, argv: [systemctl, list-unit-files, nftables.service, --no-legend] }
+      - { name: nftables_active, argv: [systemctl, is-active, nftables.service] }
+      - { name: nft_tables, argv: [nft, list, tables] }
+      - { name: crowdsec_unit, argv: [systemctl, list-unit-files, crowdsec.service, --no-legend] }
+      - { name: crowdsec_active, argv: [systemctl, is-active, crowdsec.service] }
+      - { name: bouncer_unit, argv: [systemctl, list-unit-files, crowdsec-firewall-bouncer.service, --no-legend] }
+      - { name: bouncer_active, argv: [systemctl, is-active, crowdsec-firewall-bouncer.service] }
+      - { name: tailscaled_unit, argv: [systemctl, list-unit-files, tailscaled.service, --no-legend] }
+      - { name: tailscaled_active, argv: [systemctl, is-active, tailscaled.service] }
+      - { name: tailscale_status, argv: [tailscale, status, --json, --peers=false] }
+      - { name: tailscale_ip, argv: [tailscale, ip, "-4"] }
+    _chain_probes: "{{ host_upgrade_docker_chains | host_upgrade_chain_probes }}"
+
+# A cheap end-to-end probe: the lowest TCP port a container publishes on
+# 0.0.0.0 or 127.0.0.1 must answer on localhost. Weaker than the chain check
+# (a localhost connection may go through docker-proxy), so it is one more
+# check, not the only one. No published port: no probe.
+- name: List the published ports
+  ansible.builtin.command:
+    argv: [docker, ps, --format, "{{ '{{' }}.Ports{{ '}}' }}"]
+  register: _host_upgrade_ports
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Probe one published port on localhost  # noqa: ignore-errors
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ _host_upgrade_ports.stdout_lines | default([]) | host_upgrade_published_port }}"
+    timeout: 15
+  register: _host_upgrade_port_probe
+  ignore_errors: true
+  check_mode: false
+  when: (_host_upgrade_ports.stdout_lines | default([]) | host_upgrade_published_port) > 0
+
+- name: Judge the checks
+  ansible.builtin.set_fact:
+    _host_upgrade_checks: >-
+      {{ _host_upgrade_probes.results | default([])
+         | host_upgrade_checks(_host_upgrade_container_state, _want_tables, host_upgrade_docker_chains,
+                               {'port': _port, 'ok': _host_upgrade_port_probe is succeeded},
+                               _host_upgrade_restart_state | default({})) }}
+  vars:
+    _port: "{{ _host_upgrade_ports.stdout_lines | default([]) | host_upgrade_published_port }}"
+    _files: "{{ _host_upgrade_nft_files.results | default([]) }}"
+    _want_tables: >-
+      {{ ['table inet filter']
+         + (['table inet bay_prerouting'] if (_files | selectattr('item', 'equalto', 'bay-prerouting.conf')
+                                             | map(attribute='stat.exists') | first | default(false)) else [])
+         + (['table inet bay_egress', 'table bridge bay_egress']
+            if (_files | selectattr('item', 'equalto', 'bay-egress.conf')
+                | map(attribute='stat.exists') | first | default(false)) else []) }}
+
+- name: Fail when a check failed
+  ansible.builtin.fail:
+    msg: >-
+      Check failed: {{ _host_upgrade_checks | rejectattr('ok') | map(attribute='name') | join(', ') }}.
+      {{ _host_upgrade_checks | rejectattr('ok') | map(attribute='detail') | join('; ') }}
+  when: _host_upgrade_checks | rejectattr('ok') | list | length > 0

@@ -6,7 +6,7 @@ import typer
 
 from bay_cli import console, fleet_line
 from bay_cli.commands import fleet_sync_cmd
-from bay_cli.commands import compile_cmd, fleet_cmd, import_cmd, project_cmd, remove_cmd, route_cmd, self_cmd, skill_cmd, toml_cmd
+from bay_cli.commands import compile_cmd, fleet_cmd, host_cmd, import_cmd, project_cmd, remove_cmd, route_cmd, self_cmd, skill_cmd, toml_cmd
 from bay_cli.commands import alerts, backup, build, doctor, framework, gateway, healthcheck as healthcheck_cmd, ops, prune as prune_cmd, region, secret, server, service, test, validate, vault
 from bay_cli.context import GlobalOptions, package_root
 from bay_cli.errors import BayError, FleetSelectionError
@@ -146,6 +146,8 @@ app.add_typer(skill_cmd.app, name="skill", rich_help_panel="Framework")
 app.command(rich_help_panel="Operations", context_settings=_allow_extra)(ops.deploy)
 app.command(rich_help_panel="Operations", context_settings=_allow_extra)(ops.provision)
 app.command(rich_help_panel="Operations", context_settings=_allow_extra)(ops.restore)
+# bay host upgrade: OS packages of one box (host_upgrade.yml)
+app.add_typer(host_cmd.app, name="host", rich_help_panel="Operations")
 
 # Runtime commands (top-level)
 app.command(rich_help_panel="Operations")(ops.logs)

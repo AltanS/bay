@@ -1,0 +1,54 @@
+---
+# Bay - Package upgrade of one box
+#
+# `bay host upgrade <env> --box <box>` runs this playbook with `-l <host>`.
+# It upgrades the OS packages of exactly one host, holds the deploy lock of the
+# box while it runs, repairs the firewall when the nftables package flushed it,
+# reboots only when asked, and checks the box afterwards. See
+# docs/host-upgrade.md.
+#
+# It writes no deploy receipt and moves no pin: the fleet is not changed.
+#
+# Usage (through the CLI only):
+#   bay host upgrade production --box alpha [--reboot] [--json] [-- --check]
+
+- name: Upgrade the packages of one box
+  hosts: "{{ target_host }}"
+  become: true
+  # Root for every task. `become_user` is set on purpose: the deploy plays run
+  # as the app user, and a copied task must not inherit that here.
+  become_user: root
+  gather_facts: false
+  vars_files:
+    - version.yml
+
+  pre_tasks:
+    - name: Check framework version compatibility
+      ansible.builtin.assert:
+        that:
+          - bay_version is version(bay_minimum_version, '>=')
+        fail_msg: >-
+          Framework version {{ bay_version }} is older than the minimum
+          required version {{ bay_minimum_version }}.
+          Run 'bay self update' to update the framework.
+        success_msg: "Framework version {{ bay_version }} meets minimum requirement (>= {{ bay_minimum_version }})"
+      when: bay_minimum_version is defined
+      tags: [always]
+
+    # One host per run, never the whole environment. The CLI passes `-l` with
+    # the one host of the box; this stops a run that reached more hosts.
+    - name: Refuse to upgrade more than one host in one run
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+        fail_msg: >-
+          A host upgrade runs on exactly one host. This run reached
+          {{ ansible_play_hosts_all | length }} hosts: {{ ansible_play_hosts_all | join(', ') }}.
+          Use `bay host upgrade <env> --box <box>`.
+        quiet: true
+      run_once: true
+      tags: [always]
+
+  roles:
+    - role: host_upgrade
+      tags: [always, host_upgrade]

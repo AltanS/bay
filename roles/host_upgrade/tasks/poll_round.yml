@@ -1,0 +1,46 @@
+---
+# One poll round of the upgrade unit (main.yml loops over the rounds).
+#
+# A round waits for the connection, touches the lock (a heartbeat: a long
+# upgrade keeps it fresh), then reads `<state_dir>/rc` every
+# `host_upgrade_poll_delay` seconds until it exists. A dropped SSH session (an
+# upgrade of tailscale or openssh) ends the poll with `unreachable`; that is
+# ignored, and the next round waits for the connection again. A round after the
+# upgrade ended does nothing.
+
+- name: Wait for the connection to the box
+  ansible.builtin.wait_for_connection:
+    timeout: 300
+  when: not (_host_upgrade_done | default(false) | bool)
+
+- name: Keep the deploy lock fresh while the upgrade runs
+  ansible.builtin.file:
+    path: "{{ host_upgrade_lock_path }}"
+    state: touch
+    mode: "0644"
+  when: not (_host_upgrade_done | default(false) | bool)
+
+# A round that runs out of retries is marked failed by Ansible itself, whatever
+# failed_when says; ignore_errors keeps it from ending the run. The task after
+# the loop fails the run when no round saw the exit code.
+- name: Read the exit code of the upgrade unit  # noqa: ignore-errors
+  ansible.builtin.command:
+    argv: [cat, "{{ host_upgrade_state_dir }}/rc"]
+  register: _host_upgrade_poll
+  until: _host_upgrade_poll.rc | default(1) == 0
+  retries: "{{ host_upgrade_poll_retries | int }}"
+  delay: "{{ host_upgrade_poll_delay | int }}"
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+  ignore_unreachable: true
+  when: not (_host_upgrade_done | default(false) | bool)
+
+- name: Record the end of the upgrade unit
+  ansible.builtin.set_fact:
+    _host_upgrade_done: true
+    _host_upgrade_rc: "{{ _host_upgrade_poll.stdout | trim }}"
+  when:
+    - not (_host_upgrade_done | default(false) | bool)
+    - _host_upgrade_poll is not skipped
+    - _host_upgrade_poll.rc | default(1) == 0
