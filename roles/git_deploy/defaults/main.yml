@@ -38,6 +38,11 @@ git_deploy_build_mem_limit: "2G"
 # unified cap on upgrade. Override this var explicitly when you need
 # asymmetric caps (e.g. systemd at 2G, buildkit at 2.5G for headroom).
 # Docker accepts decimals here (`2.5G`) — systemd does not.
+# The builder container is shared by every fleet that uses the same build
+# server, so this is ONE setting for all of them. A fleet with another value
+# resets the cap on its deploy. Set it to "" in every such fleet to skip the
+# task and pin the cap by hand. The task reports `changed` only when memory or
+# swap really moved.
 git_deploy_buildkit_memory_max: "{{ git_deploy_build_mem_limit }}"
 
 # BuildKit image of the local buildx builder (bay_buildx_builder). The builder
