@@ -6,6 +6,13 @@
 # with a DNS-01 wildcard cert and gated by the vpn-only IP allowlist. When
 # traefik_split_entrypoints is on, these bind the tailnet-only entrypoint —
 # no public socket. Generated from the `tailnet_proxies` map.
+#
+# Every middleware these routers use is defined in this file, so it reaches
+# Traefik in the same file-provider load as the routers. A reference to a
+# docker-provider middleware (`vpn-only@docker`) is resolved only after the
+# docker provider has read the traefik container's labels; at each Traefik
+# start the file provider was first, and every router logged "middleware
+# vpn-only@docker does not exist" until it had.
 http:
   routers:
 {% for name, proxy in (tailnet_proxies | default({}, true)).items() %}
@@ -20,7 +27,7 @@ http:
         # trusted header (the upstream hop would otherwise collapse identity).
         - "tailnet-identity@file"
 {% endif %}
-        - "vpn-only@docker"
+        - "vpn-only@file"
       tls:
         certResolver: "{{ traefik_dns_resolver_name }}"
         domains:
@@ -39,8 +46,20 @@ http:
         servers:
           - url: "{{ proxy.upstream }}"
 {% endfor %}
-{% if tailnet_identity_enabled | default(false) %}
   middlewares:
+    # The file-provider copy of the vpn-only IP allowlist. The docker-label
+    # copy on the traefik container (`vpn-only@docker`, inside vpn-chain) is
+    # what docker-label routers use. Both read vpn_allowed_ips, with the same
+    # default as container_lifecycle/tasks/build_specs.yml, so the two ranges
+    # cannot differ within one run. tests/test_traefik_file_middlewares.py
+    # renders both and compares them.
+    vpn-only:
+      ipAllowList:
+        sourceRange:
+{% for _range in vpn_allowed_ips | default(['127.0.0.1']) %}
+          - "{{ _range }}"
+{% endfor %}
+{% if tailnet_identity_enabled | default(false) %}
     # ForwardAuth to the tailnet-identity sidecar — resolves the client tailnet
     # IP to its Headscale device name and copies the result onto the upstream
     # request. Only routes with `identity_inject: true` reference it.

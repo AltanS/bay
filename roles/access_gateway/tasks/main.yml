@@ -18,13 +18,18 @@
 # sourcerange flip-flopped (tailnet-only ↔ tailnet+static) → spurious traefik
 # recreations + an allowlist that didn't match group_vars. union() dedups, so
 # a consumer that already lists the tailnet CIDR (the common case) is unchanged.
+#
+# Tagged `always` (2.20.0): the traefik role renders the file-provider copy of
+# vpn-only (dynamic/tailnet-proxies.yml) from this same fact. A rig run with
+# `--tags traefik` skipped this task, so the file could get a shorter list
+# than the vpn-only label on the traefik container. Only sets a fact.
 - name: Ensure headscale tailnet CIDR is allowlisted (append, not replace)
   ansible.builtin.set_fact:
     vpn_allowed_ips: >-
       {{ (vpn_allowed_ips | default([]))
          + (headscale_tailnet_cidr | reject('in', vpn_allowed_ips | default([])) | list) }}
   when: access_gateway == 'headscale'
-  tags: [access_gateway]
+  tags: [always, access_gateway]
 
 - name: Include headscale role
   ansible.builtin.include_role:

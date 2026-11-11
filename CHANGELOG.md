@@ -8,6 +8,15 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.20.0] - 2026-11-12
+
+### Fixed
+- Traefik: at each start, Traefik logged `middleware "vpn-only@docker" does not exist` once for each tailnet route (`<route>-tailnet@file`). The route file is loaded by the file provider, and the file provider was ready before the docker provider had read the `vpn-only` label on the traefik container. The routes worked a second later. The route file now defines its own copy of the allowlist, and each route names it as `vpn-only@file`. The docker-label routers keep `vpn-only` and `vpn-chain` as before. Both copies read `vpn_allowed_ips` with the same default, and a test renders both and compares the ranges.
+- Access gateway: the task that adds the Headscale tailnet range to `vpn_allowed_ips` is now tagged `always`. Before, `bay deploy <env> --tags traefik` skipped it, so the route file could get a shorter list than the label. It only sets a fact.
+
+### Upgrade notes
+- Traefik start noise: run `bay deploy <env> --tags traefik` on the ingress box (or the next `bay up` of that box env). It rewrites `dynamic/tailnet-proxies.yml`, and Traefik reloads the file without a restart. No container is recreated: no label changes.
+
 ## [2.19.1] - 2026-11-11
 
 ### Fixed

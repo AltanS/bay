@@ -104,6 +104,16 @@ as good as the ACL — see [Locking the upstream](#locking-the-upstream-headscal
   always on (it also carries `tls.options.default`, which is dynamic-only
   configuration); `traefik_dns_challenge_enabled` only adds the
   `tailnet-proxies.yml` route file to `<stack_dir>/dynamic`.
+- **Allowlist of the routes:** the route file defines its own copy of the
+  `vpn-only` IP allowlist, and every route names it as `vpn-only@file`. A
+  file-provider router that names a docker-label middleware (`vpn-only@docker`)
+  logs "middleware does not exist" at each Traefik start, until the docker
+  provider has read the labels. Since 2.20.0 no route does that. Both copies
+  read `vpn_allowed_ips`, so they hold the same ranges. The file copy changes
+  when the `traefik` role runs (`bay up`, `--tags traefik` or
+  `--tags deploy_stack`), the label copy when the traefik container is
+  reconciled. Since 2.20.0 the access gateway adds the tailnet range to
+  `vpn_allowed_ips` under every tag, so `--tags traefik` renders the same list.
 - **Resolution:** the control host's Headscale config maps each proxy domain to
   its tailnet IP via split-DNS + `extra-records.json`. No public record.
 - **Fail-closed (optional):** with `traefik_split_entrypoints`, public entrypoints
