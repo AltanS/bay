@@ -95,6 +95,21 @@ traefik_cloudflare_dns_api_token: ""
 traefik_split_entrypoints: false
 traefik_public_bind_ip: "{{ netplan_address | default('') }}"
 
+# Let Traefik bind the tailnet address before tailscaled has it. Traefik runs
+# with host networking. After a cold boot tailscaled has no address until it
+# reaches the control server, so `websecure_tailnet` fails with "listen tcp
+# <ip>:443: bind: cannot assign requested address". One failed entrypoint stops
+# all of Traefik, so the public 80/443 go down too. On the Headscale host the
+# control server is served by this same Traefik: a deadlock. net.ipv4.ip_nonlocal_bind=1
+# lets the bind succeed. The listener still binds ONLY the tailnet address, so
+# nothing listens on another interface: the kernel delivers packets only to
+# addresses the host owns. True exactly when traefik_split_entrypoints is true.
+# A fleet may force false. False removes
+# /etc/sysctl.d/99-bay-traefik-nonlocal-bind.conf but does NOT reset the live
+# value (it stays 1 until the next reboot). IPv4 only: the template binds
+# "<ip>:443" with no brackets, so it cannot bind an IPv6 address.
+traefik_nonlocal_bind: "{{ traefik_split_entrypoints | default(false) | bool }}"
+
 # ── TLS options (tls.options.default) ───────────────────────────────────
 # Applied to every router that does not name its own tls.options.
 #

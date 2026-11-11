@@ -115,6 +115,18 @@ co-located with the coordinator + MagicDNS (so `ingress_box` is that host; `bay 
 [Add a route, in order](#add-a-route-in-order)). Prefer a host that doesn't serve
 public sites, so the fail-closed split has a small blast radius.
 
+**Cold boot with split entrypoints.** Traefik runs with host networking and binds
+`websecure_tailnet` to the tailnet address. After a cold boot, tailscaled has no address until
+it reaches Headscale. Traefik then exits with `listen tcp <tailnet-ip>:443: bind: cannot assign
+requested address`. One failed entrypoint stops all of Traefik, so the public 80 and 443 go down
+too. On the Headscale host this is a deadlock: Traefik serves Headscale, so tailscaled never gets
+its address. The `traefik` role fixes this. With `traefik_split_entrypoints: true` it sets
+`net.ipv4.ip_nonlocal_bind=1`, live and in `/etc/sysctl.d/99-bay-traefik-nonlocal-bind.conf`
+(variable `traefik_nonlocal_bind`, true when split is on). The listener still binds only the
+tailnet address, so nothing listens on another interface. Check it on the host with
+`sysctl net.ipv4.ip_nonlocal_bind` (expect `1`) and `docker ps` (Traefik is `Up` and not
+restarting). IPv4 only: the template cannot bind an IPv6 address.
+
 ## Routes in bay.fleet.toml (2.1)
 
 Since 2.1 a route is a table of `bay.fleet.toml`: `[tailnet.routes.<name>]`. A route is rig
