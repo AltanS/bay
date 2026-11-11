@@ -208,30 +208,26 @@ bay deploy production
 
 This deploys Headscale (public, for client enrollment) and the Tailscale daemon (VPS joins its own tailnet). There is no admin UI container.
 
-#### 4. (Multi-region only) Generate a Headscale API key
+#### 4. (Optional) The Headscale admin API
 
-Single-server setups can skip this step — enrollment below uses pre-auth keys, not
-the API key.
+Bay does not need a Headscale API key. `bay gateway` and the deploy run the
+Headscale CLI in the container on the control host. A box in another region
+registers through the control host over SSH (see
+[Multi-region Headscale](#multi-region-headscale)).
+
+Since 2.19.0 the admin REST API (`/api/...`) and `/swagger` are closed to the
+internet. Traefik answers 403 unless the client IP is in `vpn_allowed_ips`
+(loopback and the tailnet range). The tailscale protocol paths stay public.
+Set `headscale_admin_api_public: true` in `group_vars/all` to open the API
+again.
+
+For your own API clients over the tailnet:
 
 ```bash
-bay gateway apikey
-```
-
-This creates a Headscale API key (valid for 1 year by default). Use `--expiration` to change the lifetime (e.g. `--expiration 90d`).
-
-Its sole purpose is **remote-region registration**: store it as `headscale_api_key`
-in the vault so non-control regions can register with the control server's Headscale
-API during deploy. This must persist — if it expires, deploys to non-control regions
-fail at the `tailscale_register` step.
-
-```bash
-bay vault edit production
-```
-
-Then inside the `secrets:` dict:
-
-```yaml
-headscale_api_key: "hskey-api-..."
+bay gateway apikey                     # create, valid for 1 year
+bay gateway apikey --expiration 90d
+bay gateway apikey list                # ID, prefix, expiry
+bay gateway apikey expire <prefix-or-id>
 ```
 
 #### 5. Create a user and pre-auth key
@@ -267,7 +263,7 @@ The enrolled device should appear in the node list with a green status indicator
 - **Revoking access** — remove a node via `bay gateway delete-node <name>`, or delete an entire user and their devices with `bay gateway delete-user <name> --force`.
 - **Adding more devices** — repeat steps 5–6 for each user/device. Each pre-auth key is single-use by default.
 - **Managing users** — `bay gateway users` lists all users with node counts. `bay gateway user-info <name>` shows a user's devices and online status.
-- **API key renewal** — run `bay gateway apikey` again when the current key expires. Old keys stop working immediately after expiration. If you have a multi-region setup, update the vault key too (`bay vault edit production`).
+- **API keys**: `bay gateway apikey list` shows every key. `bay gateway apikey expire <prefix-or-id>` ends one at once. A fleet on the API registration path (`headscale_register_via_api: true`) also updates the vault key when it makes a new one (`bay vault edit production`).
 
 ### Enrolling external devices
 
@@ -358,7 +354,7 @@ bay gateway delete-user external-box --force   # also drops the user
 
 ### Multi-region Headscale
 
-In multi-region deployments, a single Headscale instance is shared across all regions so that every server belongs to one tailnet. The **control region** runs the Headscale coordination server and the Tailscale daemon. All other regions run only the Tailscale daemon and register via the Headscale REST API.
+In multi-region deployments, a single Headscale instance is shared across all regions so that every server belongs to one tailnet. The **control region** runs the Headscale coordination server and the Tailscale daemon. All other regions run only the Tailscale daemon. The deploy registers them through the control host over SSH.
 
 Production typically dedicates a **low-surface control host** to the control region — a server that runs only the tailnet plumbing (Headscale + registry + monitoring + Traefik, and optionally the [tailnet HTTPS ingress](#tailnet-https-ingress-for-tailnet-only-services) + identity sidecar) and serves no public app traffic. That keeps the blast radius of the control plane (and of a fail-closed ingress misconfig) small. See [multi-region.md](multi-region.md#headscale-access-gateway-in-multi-region) for the dedicated-control-host model and how to relocate the control region.
 
@@ -370,7 +366,7 @@ Control region (region == headscale_control_region)
   └── Tailscale daemon (joins tailnet, terminates tunnel)
 
 Remote region (any other region)
-  └── Tailscale daemon (registers via API, joins same tailnet)
+  └── Tailscale daemon (registered through the control host, joins same tailnet)
 ```
 
 All servers share one tailnet — devices and services in any region can reach VPN-protected services in any other region through the mesh. There is no admin UI; the tailnet is managed via `bay gateway` (which auto-targets the control host).
@@ -380,7 +376,9 @@ All servers share one tailnet — devices and services in any region can reach V
 | Variable | Default | Where to set | Purpose |
 |----------|---------|-------------|---------|
 | `headscale_control_region` | — | `group_vars/all/access_gateway.yml` | Names the region that runs the Headscale coordination server |
-| `secrets.headscale_api_key` | — | `group_vars/production/secrets.yml` (vault, inside `secrets:` dict) | API key for remote region registration |
+| `headscale_admin_api_public` | `false` | `group_vars/all/access_gateway.yml` | `true` opens `/api` and `/swagger` to the internet again |
+| `headscale_register_via_api` | `false` | `group_vars/all/access_gateway.yml` | `true` registers remote boxes through the admin API, not over SSH |
+| `secrets.headscale_api_key` | none | `group_vars/production/secrets.yml` (vault, inside `secrets:` dict) | API key, only with `headscale_register_via_api: true` |
 
 For multi-region with Headscale, set `headscale_control_region` to the region that runs it. Single-server setups leave it unset.
 
@@ -388,12 +386,15 @@ For multi-region with Headscale, set `headscale_control_region` to the region th
 
 Multi-region + headscale requires a specific deploy order:
 
-1. `bay deploy <control-region>` — deploys Headscale server and registers the control host
-2. `bay gateway apikey` — generates an API key on the control server
-3. `bay vault edit production` — add `headscale_api_key` inside the `secrets:` dict
-4. `bay deploy <remote_region>` — remote host registers via API using the key
+1. `bay deploy <control-region>`: deploys the Headscale server and registers the control host.
+2. `bay deploy <remote_region>`: the deploy runs the Headscale CLI on the control host over SSH, makes a 5-minute pre-auth key there, and the remote host joins with it.
 
-If you deploy a remote region before the control region, the deploy fails with a clear error message indicating that `headscale_api_key` is required.
+Step 2 needs the control host in the same inventory, and SSH and sudo on it from
+the deploy machine. Without that the deploy stops and says what to do. A deploy
+machine with no SSH to the control host cannot enrol a remote box unless the
+fleet opts back in: `headscale_register_via_api: true`,
+`headscale_admin_api_public: true` and `headscale_api_key` in the vault (made
+with `bay gateway apikey`).
 
 See [multi-region.md](multi-region.md#headscale-access-gateway-in-multi-region) for example group_vars layout and full setup guide.
 

@@ -23,6 +23,26 @@
 #   `services.yml`, so CLI commands that validate against it will reject
 #   them. Use `bay gateway status` to check headscale health, or ansible
 #   ad-hoc for direct container access.
+#
+# Admin API (since 2.19.0):
+#
+# - **The REST API is closed to the internet.** `/api/...` and `/swagger` on
+#   headscale_domain answer 403 unless the client IP is in vpn_allowed_ips
+#   (loopback and the tailnet range). A second Traefik router does this. Its
+#   labels are built in container_lifecycle/tasks/build_specs.yml, gated by
+#   `headscale_admin_api_public` (default false, in access_gateway defaults).
+#   The tailscale protocol paths (/ts2021, /key, /register, /oidc, /verify,
+#   /derp, /apple, /windows, /health ...) stay public; clients need them.
+# - **Bay itself does not need the API.** `bay gateway ...` and the local
+#   tailscale_register path run `docker exec headscale headscale ...` on the
+#   control host. A box in another region registers by a task delegated to the
+#   control host over SSH (tailscale_register, `headscale_register_via_api`).
+# - **Limit.** A deploy machine with no SSH to the control host cannot enrol
+#   a box of another region, unless the fleet opts back in: set
+#   `headscale_register_via_api: true` and `headscale_admin_api_public: true`
+#   and keep `headscale_api_key` in the vault.
+# - The tailnet-identity sidecar calls the API at http://headscale:8080 on the
+#   docker network, not through Traefik, so the gate does not touch it.
 
 headscale_domain: ""
 headscale_dns_global_nameservers: []

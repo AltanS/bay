@@ -291,12 +291,33 @@
 
 - name: Build headscale container spec
   ansible.builtin.set_fact:
-    _infra_specs: "{{ _infra_specs + [_headscale_spec | combine(_infra_log_rotation)] }}"
+    _infra_specs: "{{ _infra_specs + [_headscale_spec | combine({'labels': _headscale_spec.labels | combine(_headscale_admin_router)}) | combine(_infra_log_rotation)] }}"
   when:
     - (access_gateway | default('wireguard')) == 'headscale'
     - headscale_server | default(false)
   vars:
     _infra_log_rotation: "{{ None | bay_log_rotation_spec(log_rotation_defaults | default({})) }}"
+    # Admin API gate (headscale_admin_api_public, default false). A second
+    # router on the Headscale host name takes /api (the REST API) and /swagger
+    # and puts them behind vpn-chain: public-chain plus the vpn-only ipAllowList
+    # (vpn_allowed_ips: loopback and the tailnet range). From the internet they
+    # answer 403. Every other path (the tailscale protocol: /ts2021, /key,
+    # /register, /oidc, /verify, /derp, /machine/ping-response ...) stays on
+    # the main router, which is public. The explicit priority beats the main
+    # router, whose priority is the length of its rule. Under
+    # traefik_split_entrypoints it also binds websecure_tailnet, as zot does,
+    # so the API answers on the tailnet IP. `true` adds no labels: the spec,
+    # and so the container, stays as before. The route list is pinned against
+    # headscale 0.29.7 in tests/test_headscale_admin_api.py.
+    _headscale_admin_router: >-
+      {{ {} if (headscale_admin_api_public | default(false) | bool) else _headscale_admin_router_labels }}
+    _headscale_admin_router_labels:
+      traefik.http.routers.headscale-admin.rule: "Host(`{{ headscale_domain }}`) && (PathPrefix(`/api`) || PathPrefix(`/swagger`))"
+      traefik.http.routers.headscale-admin.priority: "1000"
+      traefik.http.routers.headscale-admin.entrypoints: "{{ 'websecure,websecure_tailnet' if traefik_split_entrypoints | default(false) | bool else 'websecure' }}"
+      traefik.http.routers.headscale-admin.tls.certresolver: letsencrypt
+      traefik.http.routers.headscale-admin.middlewares: vpn-chain
+      traefik.http.routers.headscale-admin.service: headscale
     # Hardened. Still root, as the image's default user: the data
     # files are root-owned. The root filesystem is read-only; Headscale writes
     # only its data volume and its unix socket (/var/run/headscale, the socket

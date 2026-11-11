@@ -208,7 +208,7 @@ to reproduce it. The flags that change what a command *means*:
 - `bay gateway acl` — Inspect the tailnet ACL policy.
 - `bay gateway acl audit` — Flag tailnet nodes that no accept rule can reach.
 - `bay gateway add-user <name>` — Create a new headscale user (headscale only).
-- `bay gateway apikey` — Generate a Headscale API key (headscale only).
+- `bay gateway apikey [action] [target]` — Create, list or expire Headscale API keys (headscale only).
 - `bay gateway delete-node <name>` — Delete a node from the tailnet.
 - `bay gateway delete-user <name>` — Delete a headscale user.
 - `bay gateway enroll` — Enroll a device: create user, generate key, print the join command.

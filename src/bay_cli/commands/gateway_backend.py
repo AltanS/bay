@@ -100,6 +100,22 @@ class LocalHeadscaleBackend:
         cmd = f"docker exec headscale headscale apikeys create --expiration {expiration}"
         return _extract_api_key(self._exec(cmd, message="Creating API key..."))
 
+    def list_api_keys(self) -> list[dict]:
+        cmd = "docker exec headscale headscale apikeys list -o json"
+        return self._exec_json(cmd, message="Fetching API keys...") or []
+
+    def expire_api_key(self, *, prefix: str = "", key_id: int | None = None) -> None:
+        """Expire one API key by its prefix or by its ID (exactly one of them).
+
+        The caller validates the prefix charset: it lands in a root shell on
+        the control host.
+        """
+        if (key_id is None) == (not prefix):
+            raise ValueError("expire_api_key takes exactly one of prefix and key_id")
+        flag = f"--id {int(key_id)}" if key_id is not None else f"--prefix {prefix}"
+        cmd = f"docker exec headscale headscale apikeys expire {flag}"
+        self._exec(cmd, message="Expiring API key...")
+
     def delete_node(self, node_id: int) -> None:
         cmd = f"docker exec headscale headscale nodes delete -i {node_id} --force"
         self._exec(cmd, message="Deleting node...")
@@ -170,6 +186,8 @@ class GatewayBackend(Protocol):
     def rename_user(self, old_name: str, new_name: str) -> None: ...
     def delete_user(self, user_id: str) -> None: ...
     def create_api_key(self, expiration: str) -> str: ...
+    def list_api_keys(self) -> list[dict]: ...
+    def expire_api_key(self, *, prefix: str = "", key_id: int | None = None) -> None: ...
     def delete_node(self, node_id: int) -> None: ...
     def rename_node(self, node_id: int, new_name: str) -> None: ...
     def list_node_routes(self, node_id: int | None = None) -> list[dict]: ...
@@ -230,6 +248,12 @@ class NullGatewayBackend:
 
     def create_api_key(self, expiration: str) -> str:
         raise self._unsupported("creating API keys")
+
+    def list_api_keys(self) -> list[dict]:
+        raise self._unsupported("listing API keys")
+
+    def expire_api_key(self, *, prefix: str = "", key_id: int | None = None) -> None:
+        raise self._unsupported("expiring API keys")
 
     def delete_node(self, node_id: int) -> None:
         raise self._unsupported("deleting nodes")

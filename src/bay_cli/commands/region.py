@@ -302,8 +302,10 @@ def add(
 
     step_num = 2
     if access_gateway == "headscale":
-        steps.append(f"  {step_num}. Ensure headscale_api_key is in vault secrets:")
-        steps.append(f"     [dim]bay vault edit {env}[/dim]")
+        steps.append(f"  {step_num}. Check that this machine can SSH to the Headscale control host.")
+        steps.append("     [dim]The deploy registers the new box there, with no API key.[/dim]")
+        steps.append("     [dim]No SSH there? Set headscale_register_via_api: true and[/dim]")
+        steps.append("     [dim]headscale_admin_api_public: true, and store headscale_api_key.[/dim]")
         step_num += 1
 
     steps.append(f"  {step_num}. Provision the new server:")

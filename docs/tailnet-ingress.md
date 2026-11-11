@@ -25,6 +25,7 @@ split-DNS routes a tailnet hostname to the server; this issues a trusted cert fo
 - [Day 2: renewals and adding apps](#day-2-renewals-and-adding-apps)
 - [Variable reference](#variable-reference)
 - [Notes & gotchas](#notes--gotchas)
+- [The Headscale admin API is tailnet-only](#the-headscale-admin-api-is-tailnet-only)
 - [Locking the upstream: Headscale ACL (`headscale_acl_policy`)](#locking-the-upstream-headscale-acl-headscale_acl_policy)
   - [Adding a proxy under default-deny](#adding-a-proxy-under-default-deny)
 - [Per-device identity (`tailnet_identity_enabled` + `identity_inject`)](#per-device-identity-tailnet_identity_enabled--identity_inject)
@@ -564,6 +565,7 @@ and exists only on the machine that made it.
 | `tailnet_identity_enabled` | `false` | Run the identity ForwardAuth sidecar on the ingress host |
 | `tailnet_identity_source` | `api` | IP→device source: `api` (HTTP API, no mount — recommended) or `sqlite` (DB read, mounts state) |
 | `tailnet_identity_api_key` | `""` | Headscale API key (vault ref) — required when source is `api` |
+| `headscale_admin_api_public` | `false` | `false`: `/api` and `/swagger` on the Headscale host name answer only to `vpn_allowed_ips`. `true`: open to the internet, as before 2.19.0 |
 | `tailnet_identity_unknown_action` | `pass` | Unknown client IP: `pass` (200 + `unknown`) or `deny` (403) |
 | `<route>.identity` (compiled `identity_inject`) | `false` | Per-route opt-in to the identity header |
 
@@ -591,6 +593,36 @@ and exists only on the machine that made it.
   the tailnet IP is likewise framework-managed, via `zot_tailnet_pin_ip`
   (defaults to `headscale_server_tailnet_ip`; set `''` to disable). If you add
   another self-reached rig router, do the same.
+
+## The Headscale admin API is tailnet-only
+
+Since 2.19.0 Traefik puts a second router on the Headscale host name. It takes
+`PathPrefix(/api)` and `PathPrefix(/swagger)` and sends them through
+`vpn-chain`, the chain of every `access: vpn` service. So the admin REST API
+answers only to `vpn_allowed_ips`: loopback and the tailnet range. From the
+internet it answers 403. The router has priority 1000, above the main Headscale
+router, whose priority is the length of its rule. Under
+`traefik_split_entrypoints` it also binds `websecure_tailnet`, like the Zot
+router, so a tailnet client reaches it on the tailnet IP.
+
+The tailscale protocol paths stay on the main router and stay public. Clients
+need them to join and to stay connected: `/ts2021`, `/key`, `/register/...`,
+`/auth/...`, `/oidc/callback`, `/verify`, `/derp`, `/bootstrap-dns`,
+`/machine/ping-response`, `/apple`, `/windows`, `/health`, `/version`.
+`tests/test_headscale_admin_api.py` checks this list against Headscale 0.29.7.
+Check it again when the pinned version moves.
+
+Bay does not call the API itself. `bay gateway` runs the Headscale CLI in the
+container on the control host, and a box in another region registers through
+the control host over SSH. A deploy machine with no SSH to the control host
+cannot enrol such a box unless the fleet opts back in
+(`headscale_register_via_api: true` and `headscale_admin_api_public: true`, see
+[multi-region.md](multi-region.md#registration-and-the-admin-api)).
+
+To reach the API from a tailnet device, send the request to the tailnet IP of
+the control host with the Headscale host name as SNI and Host header, for
+example `curl --resolve hs.example.com:443:<tailnet IP> https://hs.example.com/api/v1/node`.
+A request to the public IP comes from your public IP and gets 403.
 
 ## Locking the upstream: Headscale ACL (`headscale_acl_policy`)
 
@@ -735,7 +767,10 @@ two edits each new proxied port needs.
 - **Source.** `api` (default, recommended) queries the Headscale HTTP API
   (`/api/v1/node`, Bearer key) and **mounts nothing** — so a compromise of this
   header-parsing service can't read the coordinator's keys. Mint the key once
-  (`headscale apikeys create`) and store it in vault. `sqlite` avoids the key by
+  (`bay gateway apikey`) and store it in vault. The sidecar calls
+  `http://headscale:8080` on the docker network, not the public host name, so
+  the admin API gate (`headscale_admin_api_public: false`) does not block it.
+  `sqlite` avoids the key by
   reading the DB directly, **but** that requires mounting Headscale's data dir
   read-only — which also exposes `noise_private.key` / `derp_server_private.key` and
   the full DB to the sidecar, and reads can be slightly stale (`immutable=1` is

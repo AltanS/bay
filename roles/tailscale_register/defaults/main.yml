@@ -1,0 +1,18 @@
+---
+# How a box outside the control region (headscale_server false) gets its
+# pre-auth key.
+#
+# false (default): the deploy delegates to the Headscale control host over
+#   SSH and runs `docker exec headscale headscale ...` there. No API key, and
+#   no call to the admin REST API. The control host is the first host of the
+#   inventory group named by headscale_control_region. The deploy machine needs
+#   SSH and sudo on it, the access a deploy of that box already uses.
+# true: the old path. The box calls https://<headscale_domain>/api/v1 with the
+#   bearer key secrets.headscale_api_key. Use it only when the deploy machine
+#   cannot reach the control host over SSH. It also needs
+#   headscale_admin_api_public: true, because the admin API is closed to the
+#   internet by default and a box that is not yet on the tailnet calls it from
+#   its public IP.
+#
+# Set it in group_vars/all, next to headscale_control_region.
+headscale_register_via_api: false
