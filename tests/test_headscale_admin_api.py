@@ -123,9 +123,12 @@ def test_default_adds_the_admin_router():
     assert labels[f"{ADMIN}.service"] == "headscale"
     assert labels[f"{ADMIN}.tls.certresolver"] == "letsencrypt"
     assert labels[f"{ADMIN}.entrypoints"] == "websecure"
-    # The main router keeps its rule and the public chain (2.20.0 puts the
-    # True-Client-IP strip in front, test_headscale_trusted_proxies.py).
-    assert labels["traefik.http.routers.headscale.rule"] == f"Host(`{DOMAIN}`)"
+    # The main router leaves out the admin paths (fail-safe, 2.20.0) and keeps
+    # the public chain (with the True-Client-IP strip in front,
+    # test_headscale_trusted_proxies.py).
+    assert labels["traefik.http.routers.headscale.rule"] == (
+        f"Host(`{DOMAIN}`) && !PathPrefix(`/api`) && !PathPrefix(`/swagger`)"
+    )
     assert labels["traefik.http.routers.headscale.middlewares"] == "headscale-client-ip,public-chain"
 
 
@@ -139,7 +142,9 @@ def test_public_true_keeps_the_labels_of_before(value):
     labels = _built_labels(headscale_admin_api_public=value)
     assert not any(k.startswith(ADMIN) for k in labels)
     assert labels == _render(_headscale_task()["vars"]["_headscale_spec"]["labels"],
-                             headscale_domain=DOMAIN)
+                             headscale_domain=DOMAIN, headscale_admin_api_public=value)
+    # The main rule is exactly the rule of before 2.20.0.
+    assert labels["traefik.http.routers.headscale.rule"] == f"Host(`{DOMAIN}`)"
 
 
 def test_split_entrypoints_bind_the_tailnet_listener_too():
@@ -152,7 +157,12 @@ def test_priority_beats_the_main_router_for_any_host_name():
     labels = _built_labels()
     priority = labels[f"{ADMIN}.priority"]
     assert isinstance(priority, str)  # Docker refuses a non-string label
-    longest_main_rule = len("Host(``)") + 253
+    # The main rule now carries the two exclusions; measure the real rule.
+    longest_name = "a" * 253
+    longest_main_rule = len(_built_labels(headscale_domain=longest_name)
+                            ["traefik.http.routers.headscale.rule"])
+    assert longest_main_rule == len("Host(``)") + 253 + len(
+        " && !PathPrefix(`/api`) && !PathPrefix(`/swagger`)")
     assert int(priority) > longest_main_rule
     assert "traefik.http.routers.headscale.priority" not in labels
 
@@ -162,7 +172,7 @@ def _matches(rule: str, host: str, path: str) -> bool:
     expr = re.sub(r"Host\(`([^`]*)`\)", lambda m: repr(host == m.group(1)), rule)
     expr = re.sub(r"PathPrefix\(`([^`]*)`\)", lambda m: repr(path.startswith(m.group(1))), expr)
     expr = re.sub(r"Path\(`([^`]*)`\)", lambda m: repr(path == m.group(1)), expr)
-    expr = expr.replace("&&", " and ").replace("||", " or ")
+    expr = expr.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
     assert re.fullmatch(r"[\sA-Za-z()]*", expr), f"unparsed rule part: {expr}"
     return bool(eval(expr))  # noqa: S307 - only True/False/and/or/() are left
 
@@ -214,6 +224,23 @@ def test_protocol_paths_stay_public(path):
 @pytest.mark.parametrize("path", ADMIN_PATHS)
 def test_admin_paths_are_gated(path):
     assert _matches(_built_labels()[f"{ADMIN}.rule"], DOMAIN, path)
+
+
+@pytest.mark.parametrize("path", ADMIN_PATHS)
+def test_main_router_never_takes_the_admin_paths_while_closed(path):
+    """Fail-safe: a dropped admin router gives 404, never the public router."""
+    main = _built_labels()["traefik.http.routers.headscale.rule"]
+    assert not _matches(main, DOMAIN, path)
+    # Open: the main router serves them, as before 2.19.0.
+    open_main = _built_labels(headscale_admin_api_public=True)["traefik.http.routers.headscale.rule"]
+    assert _matches(open_main, DOMAIN, path)
+
+
+def test_compose_partial_documents_the_main_rule():
+    closed = f"Host(`{DOMAIN}`) && !PathPrefix(`/api`) && !PathPrefix(`/swagger`)"
+    assert f'"traefik.http.routers.headscale.rule={closed}"' in _compose()
+    assert f'"traefik.http.routers.headscale.rule=Host(`{DOMAIN}`)"' in _compose(
+        headscale_admin_api_public=True)
 
 
 def test_other_host_names_are_not_matched():

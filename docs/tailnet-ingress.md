@@ -646,8 +646,15 @@ internet, and every tailnet node. In 2.19.0 and 2.19.1 the router used
 `vpn-chain`, so every tailnet node reached the API, also the nodes of an
 external tenant. With an API key, such a node could manage the whole tailnet.
 The deploy stops when the list is empty or holds a value that is not an IP or
-a CIDR. Traefik would drop the router on such a value, and `/api` would then
-reach the public main router.
+a CIDR. Traefik would drop the router on such a value.
+
+**Fail-safe.** While the API is closed, the rule of the main Headscale router
+leaves out the admin paths:
+``Host(`hs.example.com`) && !PathPrefix(`/api`) && !PathPrefix(`/swagger`)``.
+So if the admin router is ever dropped, `/api` and `/swagger` get 404. They
+never fall through to the public main router. With
+`headscale_admin_api_public: true` the main rule is ``Host(`hs.example.com`)``,
+as before.
 
 The tailscale protocol paths stay on the main router and stay public. Clients
 need them to join and to stay connected: `/ts2021`, `/key`, `/register/...`,

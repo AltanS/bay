@@ -26,7 +26,8 @@
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network={{ traefik_docker_network }}"
-      - "traefik.http.routers.headscale.rule=Host(`{{ headscale_domain }}`)"
+      # Leaves out /api and /swagger while the admin API is closed (fail-safe).
+      - "traefik.http.routers.headscale.rule=Host(`{{ headscale_domain }}`){{ '' if (headscale_admin_api_public | default(false) | bool) else ' && !PathPrefix(`/api`) && !PathPrefix(`/swagger`)' }}"
       - "traefik.http.routers.headscale.entrypoints=websecure"
       - "traefik.http.routers.headscale.tls.certresolver=letsencrypt"
       - "traefik.http.routers.headscale.middlewares=headscale-client-ip,public-chain"

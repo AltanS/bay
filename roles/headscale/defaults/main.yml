@@ -42,7 +42,10 @@
 #   container_lifecycle/tasks/build_specs.yml, gated by
 #   `headscale_admin_api_public` (default false). Both variables live in the
 #   access_gateway defaults. From 2.19.0 to 2.19.1 the router used vpn-chain,
-#   so every tailnet node, tenant nodes too, reached the API.
+#   so every tailnet node, tenant nodes too, reached the API. While it is
+#   closed, the main headscale router leaves out /api and /swagger
+#   (`&& !PathPrefix(...)`), so a dropped admin router gives 404, never the
+#   public main router.
 #   The tailscale protocol paths (/ts2021, /key, /register, /oidc, /verify,
 #   /derp, /apple, /windows, /health ...) stay public; clients need them.
 # - **Open it for one device.** Add the device's tailnet IP (from

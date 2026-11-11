@@ -386,7 +386,15 @@
       labels:
         traefik.enable: "true"
         traefik.docker.network: "{{ traefik_docker_network | default('services') }}"
-        traefik.http.routers.headscale.rule: "Host(`{{ headscale_domain }}`)"
+        # While the admin API is closed, the main router leaves out /api and
+        # /swagger (2.20.0). If the headscale-admin router is ever dropped
+        # (a broken middleware, a missing label), those paths then get 404
+        # instead of falling through to this public router.
+        # headscale_admin_api_public: true keeps the rule of before.
+        traefik.http.routers.headscale.rule: >-
+          Host(`{{ headscale_domain }}`){{ ''
+          if (headscale_admin_api_public | default(false) | bool)
+          else ' && !PathPrefix(`/api`) && !PathPrefix(`/swagger`)' }}
         traefik.http.routers.headscale.entrypoints: websecure
         traefik.http.routers.headscale.tls.certresolver: letsencrypt
         traefik.http.routers.headscale.middlewares: headscale-client-ip,public-chain
