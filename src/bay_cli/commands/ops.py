@@ -17,6 +17,7 @@ import yaml
 from rich.panel import Panel
 
 from bay_cli import ansible, console, guards, paths, runner
+from bay_cli.commands.output import LogOpt, route_command_output, take_log_option
 from bay_cli.context import Context, cache_dir_for, context_from
 from bay_cli.errors import BayError
 
@@ -581,6 +582,7 @@ def deploy(
     offline: bool = _OfflineOpt,
     allow_dirty: bool = _AllowDirtyOpt,
     allow_older_bay: bool = _AllowOlderBayOpt,
+    log: LogOpt = None,
 ) -> None:
     """Deploy services to the target environment.
 
@@ -592,8 +594,12 @@ def deploy(
     The fleet first: a fleet that is only behind its remote is pulled, one
     that is ahead is pushed first, and a diverged fleet, an unreachable
     remote or uncommitted files refuse (--offline, --allow-dirty). A dry run
-    (-- --check) follows the same rules but pushes nothing. A fleet last deployed with a newer Bay refuses
-    with exit 45 (bay_older; --allow-older-bay runs anyway).
+    (-- --check) follows the same rules but pushes nothing. A fleet last
+    deployed with a newer Bay refuses with exit 45 (bay_older;
+    --allow-older-bay runs anyway).
+
+    --log <file> appends the progress and the Ansible output to the file
+    instead of the terminal, as in `bay up`.
 
     Config files come from a scratch compile, as in `bay up`: the committed
     fleet and the pinned project commits, also with --allow-dirty. A file
@@ -619,6 +625,7 @@ def deploy(
         bay deploy production -- --check --diff
         bay deploy production -- -e bay_reconciler_plan_only=true
     """
+    route_command_output(ctx, take_log_option(ctx, log))
     cx = context_from(ctx)
     console.show_banner(cx, subtitle=f"Deploy \u2192 {env}")
     bay_dir, root = cx.framework_root, cx.fleet_root
@@ -852,6 +859,7 @@ def provision(
     offline: bool = _OfflineOpt,
     allow_dirty: bool = _AllowDirtyOpt,
     allow_older_bay: bool = _AllowOlderBayOpt,
+    log: LogOpt = None,
 ) -> None:
     """Provision and harden a server (base OS, users, firewall, Docker).
 
@@ -863,7 +871,8 @@ def provision(
     tailnet \u2014 a safety assertion rejects netplan_address != ansible_host.
 
     The fleet is checked first, as for bay deploy (--offline, --allow-dirty,
-    --allow-older-bay).
+    --allow-older-bay). --log <file> appends the progress and the Ansible
+    output to the file instead of the terminal, as in `bay up`.
 
     Examples:
 
@@ -871,6 +880,7 @@ def provision(
         bay provision production --tags nftables,crowdsec
         bay provision eu -- --check --diff
     """
+    route_command_output(ctx, take_log_option(ctx, log))
     cx = context_from(ctx)
     console.show_banner(cx, subtitle=f"Provision \u2192 {env}")
     _, tags, _, region = _rescue_interspersed_args(ctx, tags=tags, region=region)

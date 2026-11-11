@@ -26,18 +26,17 @@ could not push the receipt.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import sys
 import tomllib
-from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import IO, Annotated, Any
+from typing import Annotated, Any
 
 import typer
 
 from bay_cli import console
+from bay_cli.commands.output import LogOpt as _LogOpt
+from bay_cli.commands.output import routed_output
 from bay_cli.context import (
     FLEET_ENV,
     FLEET_NAME_ENV,
@@ -59,13 +58,6 @@ _ProjectOpt = Annotated[
 ]
 _JsonOpt = Annotated[bool, typer.Option("--json", help="Print one JSON document.")]
 _NoRemoteOpt = Annotated[bool, typer.Option("--no-remote", help="Do not read the box receipt.")]
-_LogOpt = Annotated[
-    Path | None,
-    typer.Option(
-        "--log",
-        help="Append progress and deploy output to this file instead of the terminal.",
-    ),
-]
 _TakeOverOpt = Annotated[
     bool,
     typer.Option(
@@ -233,75 +225,6 @@ def whole_env_fleet(
 
 def _echo_json(doc: Any) -> None:
     typer.echo(json.dumps(doc, indent=2))
-
-
-@contextlib.contextmanager
-def routed_output(as_json: bool, log: Path | None) -> Iterator[Callable[[str], None]]:
-    """Keep stdout for the one result document.
-
-    With ``--log``, progress lines and everything the deploy prints (Ansible
-    included, stdout AND stderr) are appended to that file. Otherwise, with
-    ``--json``, they go to stderr. Otherwise nothing is redirected.
-
-    A child process gets ``sys.stdout`` and ``sys.stderr`` as its handles
-    (``runner.run`` passes them), so both Python streams point at the target.
-    Descriptors 1 (and 2 with ``--log``) are redirected too when the target
-    is a real file, so a child that only inherits them follows as well.
-
-    Yields the function that prints one progress line.
-    """
-    if log is None and not as_json:
-        yield lambda m: console.info(m)
-        return
-    from bay_cli import fleetsync
-
-    handle: IO[str] = open(log, "a", encoding="utf-8") if log is not None else sys.stderr
-    fds = (1, 2) if log is not None else (1,)
-    saved: dict[int, int] = {}
-    terminal: IO[str] | None = sys.stderr if log is not None else None
-    try:
-        on_fd2 = sys.stderr.fileno() == 2
-    except (OSError, ValueError, AttributeError):
-        on_fd2 = False
-    try:
-        target_fd = handle.fileno()
-        sys.stdout.flush()
-        sys.stderr.flush()
-        for fd in fds:
-            saved[fd] = os.dup(fd)
-            os.dup2(target_fd, fd)
-    except (OSError, ValueError, AttributeError):  # io.UnsupportedOperation is both
-        for fd, copy in saved.items():
-            os.dup2(copy, fd)
-            os.close(copy)
-        saved = {}
-    owned = 2 in saved and on_fd2
-    if owned:
-        # sys.stderr wrote to fd 2, which is the log now: the terminal is the saved copy.
-        terminal = os.fdopen(os.dup(saved[2]), "w", encoding="utf-8")
-    if terminal is not None:
-        fleetsync.TERMINAL.append(terminal)
-
-    def say(message: str) -> None:
-        print(message, file=handle, flush=True)
-
-    try:
-        with contextlib.ExitStack() as stack:
-            stack.enter_context(contextlib.redirect_stdout(handle))
-            if log is not None:
-                stack.enter_context(contextlib.redirect_stderr(handle))
-            yield say
-    finally:
-        if terminal is not None:
-            fleetsync.TERMINAL.remove(terminal)
-            if owned:
-                terminal.close()
-        handle.flush()
-        for fd, copy in saved.items():
-            os.dup2(copy, fd)
-            os.close(copy)
-        if log is not None:
-            handle.close()
 
 
 def _json_error(exc: BayError, extra: dict[str, Any] | None = None) -> None:

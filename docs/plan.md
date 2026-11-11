@@ -147,6 +147,9 @@ With `--json`, stdout holds exactly one JSON document, also for an error
 (`{"error", "hint", "code"}`). Progress lines and everything the deploy
 prints, Ansible included, go to stderr. With `--log <path>`, they are
 appended to that file instead, with or without `--json`.
+`bay deploy`, `bay provision` and `bay host upgrade` take `--log <path>` with the
+same meaning: progress and Ansible output go to the file, and the terminal gets
+nothing.
 
 The pin is a config pin. Bay compiles `bay.toml` at the pinned commit. The
 code is a separate thing: `[deploy.<env>] track` decides whether a push moves

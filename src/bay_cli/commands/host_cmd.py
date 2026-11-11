@@ -28,6 +28,7 @@ from typing import Annotated, Any
 import typer
 
 from bay_cli import console
+from bay_cli.commands.output import LogOpt
 from bay_cli.context import Context, context_from
 from bay_cli.errors import BayError, ErrorCode
 
@@ -243,11 +244,6 @@ def _render(doc: dict[str, Any]) -> str:
 
 
 _JsonOpt = Annotated[bool, typer.Option("--json", help="Print one JSON document.")]
-_LogOpt = Annotated[
-    Path | None,
-    typer.Option("--log", help="Append progress and Ansible output to this file instead of the terminal."),
-]
-
 
 @app.command(
     "upgrade",
@@ -262,7 +258,7 @@ def upgrade(
         typer.Option("--reboot", help="Reboot when the upgrade needs it, wait for the box, then check."),
     ] = False,
     as_json: _JsonOpt = False,
-    log: _LogOpt = None,
+    log: LogOpt = None,
     offline: Annotated[
         bool, typer.Option("--offline", help="Do not fetch the fleet first (as bay deploy).")
     ] = False,
@@ -294,7 +290,7 @@ def upgrade(
         bay host upgrade production --box alpha -- --check
     """
     from bay_cli.commands import ops
-    from bay_cli.commands.project_cmd import routed_output
+    from bay_cli.commands.output import routed_output
 
     cx = context_from(ctx)
     doc = _doc(env, box, None, [])

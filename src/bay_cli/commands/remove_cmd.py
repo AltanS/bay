@@ -12,6 +12,7 @@ from typing import Annotated
 
 import typer
 
+from bay_cli.commands.output import LogOpt
 from bay_cli.errors import BayError
 
 
@@ -34,10 +35,7 @@ def remove(
         bool, typer.Option("--no-remote", help="Do not read the box receipt.")
     ] = False,
     as_json: Annotated[bool, typer.Option("--json", help="Print one JSON document.")] = False,
-    log: Annotated[
-        Path | None,
-        typer.Option("--log", help="Append progress to this file instead of the terminal."),
-    ] = None,
+    log: LogOpt = None,
 ) -> None:
     """Plan the removal of a project: its containers stop, its data stays.
 
@@ -66,8 +64,8 @@ def remove(
         _read_identity,
         find_bay_toml,
         fleet_context,
-        routed_output,
     )
+    from bay_cli.commands.output import routed_output
 
     try:
         with routed_output(as_json, log):
