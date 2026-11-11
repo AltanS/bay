@@ -12,7 +12,17 @@
 #
 # Triggered on every boot by bay-infra-boot.service. The normal path (all
 # containers exist) is a fast no-op. Only acts when a container was deleted
-# outright (OOM hard kill, manual removal, corruption).
+# outright (OOM hard kill, manual removal, corruption), or when a container
+# is in a bad state.
+#
+# Rule: a container with the label com.bay.config-hash was made by the Bay
+# reconciler. This script NEVER removes or replaces it. The compose file on the
+# box is not what the reconciler deploys, so a compose-made replacement can
+# differ from the Bay spec, and the next rig deploy then plans a recreate. A
+# labelled container that is dead or restarting gets one `docker restart`, then
+# a WARNING. An exited or created one is left alone: a container someone stopped
+# on purpose stays stopped, and Docker's restart policy brings back the rest.
+# Compose create is only for a container that does not exist at all.
 
 set -euo pipefail
 
@@ -42,7 +52,42 @@ if [ "${#CONTAINER_NAMES[@]}" -eq 0 ]; then
   exit 0
 fi
 
+# True when the container carries the reconciler label.
+is_bay_managed() {
+  local h
+  h=$(docker inspect "$1" --format '{{index .Config.Labels "com.bay.config-hash"}}' 2>/dev/null || true)
+  [ -n "$h" ]
+}
+
+# Wait up to $2 seconds for container $1 to be running. Returns 0 when it is.
+wait_running() {
+  local i
+  for i in $(seq 1 "$2"); do
+    [ "$(docker inspect "$1" --format '{{.State.Status}}' 2>/dev/null || echo absent)" = "running" ] && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# Wait up to $1 seconds for port 80 to be bound. Returns 0 when it is.
+wait_port80() {
+  local i
+  for i in $(seq 1 "$1"); do
+    ss -tln 2>/dev/null | grep ':80 ' >/dev/null && return 0
+    sleep 1
+  done
+  return 1
+}
+
+# The likely cause of a bad Traefik. Traefik has host networking and binds the
+# tailnet address (traefik_split_entrypoints). Before tailscaled has an address,
+# the bind fails and Traefik exits, so a recreate cannot help.
+traefik_hint() {
+  echo "bay-infra-ensure: WARNING — likely cause: a listener address does not exist yet (the tailnet IP before tailscaled is up). Check net.ipv4.ip_nonlocal_bind (sysctl net.ipv4.ip_nonlocal_bind), 'tailscale status' and 'docker logs $TRAEFIK_CONTAINER'."
+}
+
 created=0
+restarted=" "
 for name in "${CONTAINER_NAMES[@]}"; do
   state=$(docker inspect "$name" --format '{{.State.Status}}' 2>/dev/null || echo "absent")
   if [ "$state" = "absent" ]; then
@@ -57,10 +102,28 @@ for name in "${CONTAINER_NAMES[@]}"; do
       echo "bay-infra-ensure: $name create attempt $attempt failed: $out"
       [ "$attempt" -lt 3 ] && sleep 2
     done
+    echo "bay-infra-ensure: $name was made from the compose file, not by the Bay reconciler. The next 'bay deploy --rig <env>' will recreate it under the reconciler."
     created=$((created + 1))
-  else
-    echo "bay-infra-ensure: $name exists (state=$state) — skipping"
+    continue
   fi
+  if ! is_bay_managed "$name"; then
+    echo "bay-infra-ensure: $name exists (state=$state) — skipping"
+    continue
+  fi
+  case "$state" in
+    dead|restarting)
+      echo "bay-infra-ensure: $name is $state (Bay-managed, never replaced) — restarting once"
+      restarted="$restarted$name "
+      docker restart "$name" >/dev/null || echo "bay-infra-ensure: WARNING — docker restart $name failed"
+      if ! wait_running "$name" 30; then
+        echo "bay-infra-ensure: WARNING — $name still not running 30s after the restart. The container is left as it is."
+        [ "$name" = "$TRAEFIK_CONTAINER" ] && traefik_hint
+      fi
+      ;;
+    *)
+      echo "bay-infra-ensure: $name exists (state=$state) — skipping"
+      ;;
+  esac
 done
 
 echo "bay-infra-ensure: done. ${created} container(s) created."
@@ -71,16 +134,25 @@ echo "bay-infra-ensure: done. ${created} container(s) created."
 traefik_state=$(docker inspect "$TRAEFIK_CONTAINER" --format '{{.State.Status}}' 2>/dev/null || echo "absent")
 if [ "$traefik_state" = "running" ]; then
   echo "bay-infra-ensure: verifying $TRAEFIK_CONTAINER port bindings..."
-  bound=false
-  for i in $(seq 1 30); do
-    if ss -tlnp 2>/dev/null | grep -q ':80 '; then
-      bound=true
-      break
-    fi
-    sleep 1
-  done
-  if [ "$bound" = true ]; then
+  if wait_port80 30; then
     echo "bay-infra-ensure: $TRAEFIK_CONTAINER port 80 bound — OK"
+  elif is_bay_managed "$TRAEFIK_CONTAINER"; then
+    # Never remove it: the recreate would not fix a missing listener address.
+    case "$restarted" in
+      *" $TRAEFIK_CONTAINER "*)
+        echo "bay-infra-ensure: $TRAEFIK_CONTAINER running but port 80 not bound after 30s (already restarted once)"
+        ;;
+      *)
+        echo "bay-infra-ensure: $TRAEFIK_CONTAINER running but port 80 not bound after 30s — restarting once (Bay-managed, never replaced)"
+        docker restart "$TRAEFIK_CONTAINER" >/dev/null || echo "bay-infra-ensure: WARNING — docker restart $TRAEFIK_CONTAINER failed"
+        if wait_port80 30; then
+          echo "bay-infra-ensure: $TRAEFIK_CONTAINER port 80 bound after restart — OK"
+          exit 0
+        fi
+        ;;
+    esac
+    echo "bay-infra-ensure: WARNING — $TRAEFIK_CONTAINER port 80 still not bound after the restart. The container is left as it is."
+    traefik_hint
   else
     echo "bay-infra-ensure: $TRAEFIK_CONTAINER running but port 80 not bound after 30s — recreating"
     docker rm -f "$TRAEFIK_CONTAINER"
