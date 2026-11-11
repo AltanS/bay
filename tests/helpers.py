@@ -112,3 +112,68 @@ def host_tools(directory: Path, *names: str) -> Path:
         assert found, f"{name} is not on this host's PATH"
         (directory / name).symlink_to(found)
     return directory
+
+
+def run_role_tasks(
+    tmp_path: Path,
+    tasks_file: Path,
+    task_names: list[str],
+    variables: dict,
+    *,
+    path_dir: Path | None = None,
+    check: bool = False,
+    transform=None,
+):
+    """Run the named tasks of a role task file with ansible-playbook on localhost.
+
+    Tasks are found by name, also inside a block, and run in the order given.
+    `path_dir` goes first on PATH, so a test can stand a fake `id` or
+    `gpasswd` in front of the real one. Returns the CompletedProcess; the
+    stdout holds the task results and the PLAY RECAP. `transform(task)` may
+    return a changed copy of each chosen task, for example to point a `dest`
+    at a scratch folder and drop `become`.
+    """
+    import os
+    import subprocess
+    import sys
+
+    import yaml
+
+    def flat(tasks):
+        for task in tasks:
+            if "block" in task:
+                yield from flat(task["block"])
+            else:
+                yield task
+
+    by_name = {t["name"]: t for t in flat(yaml.safe_load(tasks_file.read_text()))}
+    chosen = []
+    for name in task_names:
+        assert name in by_name, f"task {name!r} not found in {tasks_file}"
+        chosen.append(transform(dict(by_name[name])) if transform else by_name[name])
+    work = tmp_path / "play"
+    work.mkdir(parents=True, exist_ok=True)
+    (work / "ansible.cfg").write_text("[defaults]\n")
+    (work / "vars.json").write_text(json.dumps(variables))
+    (work / "play.yml").write_text(
+        yaml.safe_dump(
+            [{"hosts": "localhost", "connection": "local", "gather_facts": False,
+              "tasks": chosen}]
+        )
+    )
+    env = {
+        **os.environ,
+        "ANSIBLE_CONFIG": str(work / "ansible.cfg"),
+        "ANSIBLE_NOCOLOR": "1",
+        "ANSIBLE_FORCE_COLOR": "0",
+        "ANSIBLE_LOCALHOST_WARNING": "0",
+        "ANSIBLE_INVENTORY_UNPARSED_WARNING": "0",
+    }
+    if path_dir is not None:
+        env["PATH"] = f"{path_dir}:{env['PATH']}"
+    cmd = [sys.executable, "-m", "ansible.cli.playbook", "-i", "localhost,",
+           "-e", f"@{work / 'vars.json'}"]
+    if check:
+        cmd.append("--check")
+    cmd.append(str(work / "play.yml"))
+    return subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=180)

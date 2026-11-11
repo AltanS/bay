@@ -54,8 +54,14 @@
     group: root
     mode: "0644"
   become: true
+  register: _outbound_check_timer_unit
 
 # ── Enable path ──────────────────────────────────────────────────────────────
+# Check mode writes no unit file. On a host that does not have a timer yet, the
+# systemd module cannot find the unit and fails the dry run ("Could not find the
+# requested service"). So the enable and disable tasks of every timer in this
+# file skip when the run is a check and its unit file task reports changed.
+# A real run is not affected.
 
 - name: Enable and start outbound check timer
   ansible.builtin.systemd:
@@ -64,7 +70,9 @@
     state: started
     daemon_reload: true
   become: true
-  when: outbound_check_enabled
+  when:
+    - outbound_check_enabled
+    - not (ansible_check_mode and _outbound_check_timer_unit is changed)
 
 # ── Disable path ─────────────────────────────────────────────────────────────
 
@@ -76,7 +84,9 @@
     masked: true
     daemon_reload: true
   become: true
-  when: not outbound_check_enabled
+  when:
+    - not outbound_check_enabled
+    - not (ansible_check_mode and _outbound_check_timer_unit is changed)
 
 # ── Disk pressure alerts ──────────────────────────────────────────────────────
 # Reuses outbound_check_state_dir for the dedup state file — one directory
@@ -108,6 +118,7 @@
     group: root
     mode: "0644"
   become: true
+  register: _disk_alert_timer_unit
 
 - name: Enable and start disk alert timer
   ansible.builtin.systemd:
@@ -116,7 +127,9 @@
     state: started
     daemon_reload: true
   become: true
-  when: disk_alert_enabled | bool
+  when:
+    - disk_alert_enabled | bool
+    - not (ansible_check_mode and _disk_alert_timer_unit is changed)
 
 - name: Stop, disable and mask disk alert timer
   ansible.builtin.systemd:
@@ -126,7 +139,9 @@
     masked: true
     daemon_reload: true
   become: true
-  when: not (disk_alert_enabled | bool)
+  when:
+    - not (disk_alert_enabled | bool)
+    - not (ansible_check_mode and _disk_alert_timer_unit is changed)
 
 # ── Pending reboot alert ──────────────────────────────────────────────────────
 # Same state directory as the disk alert. Daily timer, root service unit.
@@ -157,6 +172,7 @@
     group: root
     mode: "0644"
   become: true
+  register: _reboot_alert_timer_unit
 
 - name: Enable and start reboot alert timer
   ansible.builtin.systemd:
@@ -166,7 +182,9 @@
     masked: false
     daemon_reload: true
   become: true
-  when: reboot_alert_enabled | bool
+  when:
+    - reboot_alert_enabled | bool
+    - not (ansible_check_mode and _reboot_alert_timer_unit is changed)
 
 - name: Stop, disable and mask reboot alert timer
   ansible.builtin.systemd:
@@ -176,4 +194,6 @@
     masked: true
     daemon_reload: true
   become: true
-  when: not (reboot_alert_enabled | bool)
+  when:
+    - not (reboot_alert_enabled | bool)
+    - not (ansible_check_mode and _reboot_alert_timer_unit is changed)

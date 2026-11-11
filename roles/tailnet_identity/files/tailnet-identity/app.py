@@ -29,6 +29,7 @@ port, no public router) — see _tailnet_identity.j2.
 
 import json
 import os
+import signal
 import sqlite3
 import threading
 import time
@@ -202,7 +203,24 @@ def main() -> None:
         f"unknown_action={UNKNOWN_ACTION} header={DEVICE_HEADER}"
     )
     server = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), Handler)
-    server.serve_forever()
+
+    # In a container this process is PID 1. The kernel does not apply the
+    # default action of SIGTERM to PID 1, so without a handler `docker stop`
+    # is ignored, waits its 30 s and then kills the container. The handler
+    # must not call server.shutdown() itself: shutdown() waits for
+    # serve_forever() to return, and that loop runs in this very thread, so the
+    # call would block forever. A helper thread does it.
+    def _stop(signum: int, _frame) -> None:
+        _log(f"received {signal.Signals(signum).name}, shutting down")
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+    _log("stopped")
 
 
 if __name__ == "__main__":

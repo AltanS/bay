@@ -527,8 +527,8 @@ empty on the new box. The new box gets new, empty volumes with the same names
 and a fresh database in its own postgres resource. The old box's containers of
 the project are removed (a `remove` step, so `bay approve` is still needed).
 The old volumes and the old database stay untouched on the old box. Bay never
-removes them, and the weekly `docker system prune -af --volumes` does not either: on Docker
-Engine 23 and later it removes only anonymous volumes, and Bay names every volume. The plan lists them by name in `moves` and in `notes`, with the
+removes them, and the weekly `docker system prune -af` does not either, because it runs without
+`--volumes` (`docker_prune_volumes`, default `false`). The plan lists them by name in `moves` and in `notes`, with the
 `docker volume rm <name>` and `DROP DATABASE <name>;` lines to run by hand
 later, when you no longer need the data. The notes name a volume as Docker
 knows it on the old box, `<stack_name>_<volume>`: `stack_name` from
@@ -1203,15 +1203,17 @@ depends on where the `bay.toml` lives:
 
 **How far back `--to` reaches.** Only to a commit whose tag is still on the box. Bay keeps no count
 of commit tags on a box. What removes them is the cron job `docker system prune -af --volumes`
-that the `cronjobs` role installs. That role is a rig role: a `bay deploy <env>` with no `--tags`
+that the `cronjobs` role installs (since 2.20.0 without `--volumes`, see below). That role is a rig role: a `bay deploy <env>` with no `--tags`
 runs it when the rig is due (see the README, "Deploy modes"), and `--rig` forces it. The prune
 deletes every image that no container uses, with all of its tags. It runs weekly by default (`docker_prune_schedule`, Sunday
 03:00 on the box clock) and daily on the build server (`docker_prune_build_server_schedule`). Set
 those, or `docker_prune_enabled: false`, in the fleet's group_vars. So after a prune, the box holds
 the commit tags of the images its containers use and the tags made since. A config-only push tags
-the running image, so its tag stays as long as that image runs. The prune deletes no named
-volume: on Docker Engine 23 and later, `--volumes` removes only anonymous volumes that no
-container uses, and every volume that Bay makes has a name (`<stack_name>_<volume>`).
+the running image, so its tag stays as long as that image runs. The prune deletes no volume:
+since 2.20.0 it runs without `--volumes`. An anonymous volume of a removed container stays on disk,
+a small leak. Set `docker_prune_volumes: true` in the fleet's group_vars to add `--volumes` again.
+That deletes every volume that no container uses at that moment, for example the data volume of a
+service whose deploy failed. Do so only if you accept that.
 
 #### Undo a bad push in branch mode
 
@@ -1578,8 +1580,8 @@ rests on the receipt alone. Any other change the box predicts becomes a
 --plan-id` repeat the check when the saved plan has it.
 
 **Bay never deletes data.** The containers stop and leave. The volumes and the
-database stay where they are. The weekly `docker system prune -af --volumes` keeps them too:
-on Docker Engine 23 and later it removes only anonymous volumes, and Bay names every volume. The plan and `bay up` print the lines to delete
+database stay where they are. The weekly `docker system prune -af` keeps them too:
+it runs without `--volumes` (`docker_prune_volumes`, default `false`). The plan and `bay up` print the lines to delete
 them, marked "run by hand when you are sure":
 
 ```text

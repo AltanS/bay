@@ -10,7 +10,7 @@
 #     lives inside its own Docker volume (buildx_buildkit_<builder>0_state).
 #     That volume is invisible to `docker builder prune` and, because the
 #     buildkit container holds it open, also survives
-#     `docker system prune -af --volumes`. Nothing reclaimed it — a host that
+#     `docker system prune -af` (with or without `--volumes`). Nothing reclaimed it — a host that
 #     runs no local builds at all accumulated 41 GB of stale cache and tripped
 #     an 80% disk alert while every scheduled prune logged
 #     "Total reclaimed space: 0B" (GH#34).

@@ -234,16 +234,22 @@
         # systemd unit, but the buildkit sidecar it invokes had `memory.max=max`
         # and exhausted RAM. Applied on every deploy so a bump to
         # git_deploy_buildkit_memory_max actually reaches the daemon.
+        # `docker update` exits 0 whether or not it changed anything, so the
+        # task compares the container's memory and swap before and after and
+        # reports `changed` only when they differ. Several fleets can share one
+        # build server: a fleet whose value already matches no longer shows a
+        # change on every run.
         - name: Apply memory limit to the bay buildx container
-          ansible.builtin.command:
-            cmd: >-
-              docker update
-              --memory {{ git_deploy_buildkit_memory_max }}
-              --memory-swap {{ git_deploy_buildkit_memory_max }}
-              buildx_buildkit_{{ bay_buildx_builder }}0
+          ansible.builtin.shell:
+            cmd: |
+              fmt='{% raw %}{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}{% endraw %}'
+              before=$(docker inspect --format "$fmt" buildx_buildkit_{{ bay_buildx_builder }}0) || { echo "No such container: buildx_buildkit_{{ bay_buildx_builder }}0" >&2; exit 1; }
+              docker update --memory {{ git_deploy_buildkit_memory_max }} --memory-swap {{ git_deploy_buildkit_memory_max }} buildx_buildkit_{{ bay_buildx_builder }}0 >/dev/null || exit 1
+              after=$(docker inspect --format "$fmt" buildx_buildkit_{{ bay_buildx_builder }}0) || exit 1
+              if [ "$before" = "$after" ]; then echo "memory limit unchanged ($after)"; else echo "memory limit changed: $before -> $after"; fi
           when: git_deploy_buildkit_memory_max | default('') | length > 0
           register: _remote_buildx_mem_update
-          changed_when: _remote_buildx_mem_update.rc == 0
+          changed_when: "'memory limit changed' in (_remote_buildx_mem_update.stdout | default(''))"
           failed_when:
             - _remote_buildx_mem_update.rc != 0
             - '"No such container" not in _remote_buildx_mem_update.stderr'

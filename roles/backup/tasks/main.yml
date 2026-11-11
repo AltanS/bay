@@ -231,11 +231,15 @@
   become: true
   become_user: root
   notify: Reload systemd daemon
+  register: _backup_timer_units
   when: backup_enabled
 
 - name: Flush handlers for systemd reload
   ansible.builtin.meta: flush_handlers
 
+# Check mode writes no unit file, and the systemd module fails on a timer that
+# does not exist yet ("Could not find the requested service"). So a check run
+# skips the timer whose unit file task reports changed.
 - name: Enable and start backup timers
   ansible.builtin.systemd:
     name: "bay-backup@{{ item.name }}.timer"
@@ -246,7 +250,9 @@
     label: "{{ item.name }}"
   become: true
   become_user: root
-  when: backup_enabled
+  when:
+    - backup_enabled
+    - not (ansible_check_mode and (_backup_timer_units.results | default([]) | selectattr('item.name', 'equalto', item.name) | selectattr('changed') | list | length > 0))
 
 - name: Remove legacy backup cron jobs
   ansible.builtin.cron:
@@ -306,11 +312,13 @@
   become: true
   become_user: root
   notify: Reload systemd daemon
+  register: _backup_maintenance_timer_units
   when: backup_enabled
 
 - name: Flush handlers for maintenance systemd reload
   ansible.builtin.meta: flush_handlers
 
+# Same check-mode rule as the backup timers above.
 - name: Enable and start maintenance timers
   ansible.builtin.systemd:
     name: "bay-backup-maintenance@{{ item.name }}.timer"
@@ -321,4 +329,6 @@
     label: "{{ item.name }}"
   become: true
   become_user: root
-  when: backup_enabled
+  when:
+    - backup_enabled
+    - not (ansible_check_mode and (_backup_maintenance_timer_units.results | default([]) | selectattr('item.name', 'equalto', item.name) | selectattr('changed') | list | length > 0))

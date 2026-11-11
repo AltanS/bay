@@ -952,6 +952,7 @@
     owner: root
     group: root
     mode: '0644'
+  register: _data_refresh_timer_unit
   notify: Reload systemd daemon
   when:
     - crowdsec_enabled | bool
@@ -962,6 +963,8 @@
 - name: Flush handlers before CrowdSec data refresh timer start
   ansible.builtin.meta: flush_handlers
 
+# Check mode writes no unit file, and the systemd module fails on a timer that
+# does not exist yet. A check run skips this task when the unit file is new.
 - name: Enable and start CrowdSec data refresh timer
   ansible.builtin.systemd:
     name: crowdsec-data-refresh.timer
@@ -971,6 +974,7 @@
   when:
     - crowdsec_enabled | bool
     - crowdsec_data_refresh_enabled | bool
+    - not (ansible_check_mode and _data_refresh_timer_unit is changed)
 
 # Seed run — force an initial refresh on first install or when the script is
 # updated, so a fresh host doesn't wait up to a week for the first mmdb pull.

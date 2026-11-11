@@ -54,8 +54,11 @@
     day: "{{ _docker_prune_schedule.split()[2] }}"
     month: "{{ _docker_prune_schedule.split()[3] }}"
     weekday: "{{ _docker_prune_schedule.split()[4] }}"
+    # Without `docker_prune_volumes` the job leaves volumes alone: an anonymous
+    # volume of a removed container stays on disk (a small leak), but the data
+    # volume of a service whose deploy failed is never deleted.
     job: >-
-      docker system prune -af --volumes
+      docker system prune -af{{ ' --volumes' if docker_prune_volumes | bool else '' }}
       >> /var/log/docker-prune.log 2>&1
     user: root
     state: "{{ 'present' if docker_prune_enabled else 'absent' }}"

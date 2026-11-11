@@ -66,12 +66,20 @@
   when: _buildx_inspect.rc == 0 and not (_buildx_image_drift | bool)
   changed_when: "'starting container' in (_buildx_bootstrap.stderr | default(''))"
 
+# Reports `changed` only when the container's memory or swap really moved
+# (`docker update` exits 0 either way). See main.yml, same task for the remote
+# block.
 - name: Apply memory limit to builder container
-  ansible.builtin.command:
-    cmd: "docker update --memory {{ git_deploy_buildkit_memory_max }} --memory-swap {{ git_deploy_buildkit_memory_max }} buildx_buildkit_{{ bay_buildx_builder }}0"
+  ansible.builtin.shell:
+    cmd: |
+      fmt='{% raw %}{{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}{% endraw %}'
+      before=$(docker inspect --format "$fmt" buildx_buildkit_{{ bay_buildx_builder }}0) || { echo "No such container: buildx_buildkit_{{ bay_buildx_builder }}0" >&2; exit 1; }
+      docker update --memory {{ git_deploy_buildkit_memory_max }} --memory-swap {{ git_deploy_buildkit_memory_max }} buildx_buildkit_{{ bay_buildx_builder }}0 >/dev/null || exit 1
+      after=$(docker inspect --format "$fmt" buildx_buildkit_{{ bay_buildx_builder }}0) || exit 1
+      if [ "$before" = "$after" ]; then echo "memory limit unchanged ($after)"; else echo "memory limit changed: $before -> $after"; fi
   when: git_deploy_buildkit_memory_max | default('') | length > 0
   register: _buildx_mem_update
-  changed_when: _buildx_mem_update.rc == 0
+  changed_when: "'memory limit changed' in (_buildx_mem_update.stdout | default(''))"
   failed_when:
     - _buildx_mem_update.rc != 0
     - "'No such container' not in (_buildx_mem_update.stderr | default(''))"

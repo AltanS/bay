@@ -54,6 +54,27 @@
         shell: /bin/bash
         create_home: true
 
+    # `append: true` above only ever adds groups. A host provisioned by an older
+    # version still has the account in `docker` (root-equivalent), so remove it
+    # explicitly when docker access is off. Other groups stay as they are.
+    - name: Read current groups of debug agent
+      ansible.builtin.command:
+        cmd: "id -nG {{ debug_agent_user }}"
+      register: _debug_agent_current_groups
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: not debug_agent_docker_access
+
+    - name: Remove debug agent from the docker group
+      ansible.builtin.command:
+        cmd: "gpasswd -d {{ debug_agent_user }} docker"
+      changed_when: true
+      when:
+        - not debug_agent_docker_access
+        - _debug_agent_current_groups.rc | default(1) == 0
+        - "'docker' in (_debug_agent_current_groups.stdout | default('')).split()"
+
     - name: Set authorized SSH keys for debug agent
       ansible.posix.authorized_key:
         user: "{{ debug_agent_user }}"
