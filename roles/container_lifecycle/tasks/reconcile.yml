@@ -20,9 +20,12 @@
 # `container_lifecycle_only`. `_reconcile_entries` is reset here because it is
 # a host fact: a second reconcile in the same play (the git_deploy webhook
 # pass, then deploy_stack) would otherwise append to the first run's entries.
+# `_reconcile_report_seq` counts the passes of this play for this host. It names
+# the report file below, so no pass overwrites the report of an earlier one.
 - name: Reset the reconcile bundle entries
   ansible.builtin.set_fact:
     _reconcile_entries: []
+    _reconcile_report_seq: "{{ (_reconcile_report_seq | default(0) | int) + 1 }}"
 
 # One read for every env file, instead of one slurp per container. The digest
 # formula is unchanged (sha256 over the file's bytes), so an unchanged fleet
@@ -675,9 +678,13 @@
     # terminal, so the CLI has nothing to parse. The post-deploy summary needs it
     # to say which failures are this deploy's doing.
     #
-    # ONE FILE PER HOST, on the control node. Not a merged file, and not an
-    # Ansible fact: role-scoped facts do not cross into hostvars[other_host], so
-    # each host writes its own and the CLI merges them.
+    # ONE FILE PER HOST AND PASS, on the control node (`<host>.<pass>.json`).
+    # Not a merged file, and not an Ansible fact: role-scoped facts do not cross
+    # into hostvars[other_host], so each host writes its own and the CLI merges
+    # them. A run can reconcile a host more than once (the narrow headscale,
+    # tailnet-identity and webhook passes, then deploy_stack). One file per host
+    # let the last pass overwrite the others, and the summary then said "no
+    # containers changed" about a deploy that had recreated two.
     #
     # Where: `bay_reconciler_report_dir`, a fresh temp dir the CLI makes for
     # every run (outside every working tree) and removes afterwards, so a file
@@ -701,7 +708,7 @@
       ansible.builtin.copy:
         content: "{{ _reconcile_result.stdout }}"
         dest: >-
-          {{ bay_reconciler_report_dir | default(playbook_dir ~ '/.reconcile-report') }}/{{ inventory_hostname }}.json
+          {{ bay_reconciler_report_dir | default(playbook_dir ~ '/.reconcile-report') }}/{{ inventory_hostname }}.{{ _reconcile_report_seq }}.json
         mode: "0600"
       delegate_to: localhost
       become: false

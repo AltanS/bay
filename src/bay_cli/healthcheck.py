@@ -706,7 +706,10 @@ def _render_grouped(
 # Ansible `debug` message, and that is where the knowledge used to die: the
 # playbook's stdout goes straight to the terminal (runner.py hands over the
 # fd), so there is nothing for the CLI to parse. So the reconciler also writes
-# its report to a control-node file, one per host, and this reads them back.
+# its report to a control-node file, one per host and per reconcile pass
+# (``<host>.<pass>.json``), and this reads them all back and merges them. A run
+# can reconcile a host several times (the narrow headscale, tailnet-identity and
+# webhook passes, then deploy_stack); the touched set is the union.
 #
 # Absence is normal, not an error. `--check`, a tags-filtered run, an older
 # framework on the server: all produce no report, and the caller then prints
@@ -758,8 +761,10 @@ def read_touched_services(bay_dir: Path, *, report_dir: Path | None = None) -> s
     ``report_dir`` is the directory the deploy was told to write to
     (:func:`report_dir_vars`); without it, ``<bay_dir>/.reconcile-report``.
 
-    None means no report was written at all. An empty set means the reconciler
-    ran and every container was already correct."""
+    None means the result cannot be known: no report was written at all, or a
+    report file is unreadable (it may hold a recreate, so a smaller set would be
+    a false statement). An empty set means every reconcile pass ran and every
+    container was already correct."""
     report_dir = report_dir if report_dir is not None else bay_dir / REPORT_DIRNAME
     try:
         files = sorted(report_dir.glob("*.json"))
@@ -769,21 +774,22 @@ def read_touched_services(bay_dir: Path, *, report_dir: Path | None = None) -> s
         return None
 
     touched: set[str] = set()
-    seen_any = False
     for f in files:
         try:
             data = json.loads(f.read_text())
         except (OSError, ValueError):
             # A truncated or unreadable file is not a reason to fail a deploy
-            # that already succeeded. Skip it; the group just reads smaller.
-            continue
-        seen_any = True
+            # that already succeeded. But what it held is unknown, and a
+            # smaller set would claim containers were not touched. Say nothing.
+            return None
+        if not isinstance(data, dict):
+            return None
         for entry in data.get("results") or []:
             kind = entry.get("kind")
             name = entry.get("name")
             if name and kind not in _UNTOUCHED_KINDS:
                 touched.add(name)
-    return touched if seen_any else None
+    return touched
 
 
 def summarize(results: list[CheckResult]) -> dict[str, int]:

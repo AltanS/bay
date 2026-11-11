@@ -1276,12 +1276,13 @@ class TestAttributionReports:
 
     def test_attribution_unreadable_file_does_not_fail_the_deploy(self, tmp_path):
         """The deploy already succeeded. A truncated report is not a reason to
-        blow up in the summary."""
+        blow up in the summary. But what it held is unknown, so the answer is
+        "no result" (None), never a smaller set that hides a recreate."""
         d = tmp_path / ".reconcile-report"
         d.mkdir()
-        (d / "good.json").write_text(_report(("Recreate", "api")))
+        (d / "good.json").write_text(_report(("NoOp", "api")))
         (d / "bad.json").write_text("{not json")
-        assert read_touched_services(tmp_path) == {"api"}
+        assert read_touched_services(tmp_path) is None
 
     def test_attribution_all_files_unreadable_falls_back_to_none(self, tmp_path):
         """The `seen_any` branch. If nothing could be parsed we know nothing,

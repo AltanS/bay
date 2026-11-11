@@ -126,7 +126,10 @@ def test_main_builds_specs_in_partial_mode_and_reconciles_the_selection():
 def test_reconcile_resets_entries_so_a_second_pass_does_not_accumulate():
     tasks = _load(_LIFECYCLE / "reconcile.yml")
     assert tasks[0]["name"] == "Reset the reconcile bundle entries"
-    assert tasks[0]["ansible.builtin.set_fact"] == {"_reconcile_entries": []}
+    facts = tasks[0]["ansible.builtin.set_fact"]
+    assert facts["_reconcile_entries"] == []
+    # It also counts the pass, so each pass writes its own report file.
+    assert set(facts) == {"_reconcile_entries", "_reconcile_report_seq"}
 
 
 def test_handler_restarts_tolerates_a_missing_receiver_and_skips_after_reconcile():
