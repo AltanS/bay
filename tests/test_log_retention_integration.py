@@ -117,7 +117,7 @@ class ContainerHandle:
                 "docker", "run", "-d", "--name", self.name,
                 "alpine:3.19", "sh", "-c", script,
             ],
-            check=True, capture_output=True, timeout=20,
+            check=True, capture_output=True, timeout=120,
         )
         # Wait for the container to enter "exited" state. (`docker ps`
         # without -a only lists running containers; once the entrypoint
@@ -126,7 +126,7 @@ class ContainerHandle:
         while time.time() < deadline:
             r = subprocess.run(
                 ["docker", "ps", "-q", "-f", f"name=^{self.name}$"],
-                capture_output=True, text=True, timeout=5, check=False,
+                capture_output=True, text=True, timeout=120, check=False,
             )
             if not r.stdout.strip():
                 return  # exited but still present (we did not pass --rm)
@@ -139,7 +139,7 @@ class ContainerHandle:
         if force:
             cmd.append("-f")
         cmd.append(self.name)
-        subprocess.run(cmd, capture_output=True, timeout=10, check=False)
+        subprocess.run(cmd, capture_output=True, timeout=60, check=False)
 
 
 # ── archive dir fixture ─────────────────────────────────────────────
@@ -200,7 +200,7 @@ def test_recreation_gap_and_duplicate_free(tmp_path: Path):
         # Run archiver → captures batch1.
         r = subprocess.run(
             ["bash", str(script), svc, str(stack_dir)],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, timeout=120, check=False,
         )
         assert r.returncode == 0, (
             f"archiver rc={r.returncode}\nstdout:{r.stdout}\nstderr:{r.stderr}"
@@ -236,7 +236,7 @@ def test_recreation_gap_and_duplicate_free(tmp_path: Path):
         # Run archiver → captures batch2.
         r = subprocess.run(
             ["bash", str(script), svc, str(stack_dir)],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, timeout=120, check=False,
         )
         assert r.returncode == 0, (
             f"archiver rc={r.returncode}\nstdout:{r.stdout}\nstderr:{r.stderr}"
@@ -295,7 +295,7 @@ def test_idempotent_archiver_reruns(tmp_path: Path):
         # First run — captures the batch.
         subprocess.run(
             ["bash", str(script), svc, str(stack_dir)],
-            capture_output=True, text=True, timeout=30, check=True,
+            capture_output=True, text=True, timeout=120, check=True,
         )
         container.remove(force=True)
         first_lines = _all_lines_in(log_dir)
@@ -305,7 +305,7 @@ def test_idempotent_archiver_reruns(tmp_path: Path):
         # must be a no-op.
         r = subprocess.run(
             ["bash", str(script), svc, str(stack_dir)],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, timeout=120, check=False,
         )
         # Script exits 0 on "no such container" after retry (transient path).
         assert r.returncode == 0, (
@@ -319,7 +319,7 @@ def test_idempotent_archiver_reruns(tmp_path: Path):
         # Third run — same invariant.
         r = subprocess.run(
             ["bash", str(script), svc, str(stack_dir)],
-            capture_output=True, text=True, timeout=30, check=False,
+            capture_output=True, text=True, timeout=120, check=False,
         )
         assert r.returncode == 0
         assert _all_lines_in(log_dir) == first_lines

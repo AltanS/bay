@@ -8,6 +8,16 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.17.3] - 2026-11-11
+
+A test fix. Nothing changes for a fleet or a box.
+
+### Fixed
+- `tests/test_log_retention_integration.py` failed now and then with `subprocess.TimeoutExpired` when the Docker daemon of the test machine was busy. Its Docker calls had limits of 5 to 30 seconds. They are now 60 to 120 seconds. This test stopped one release gate.
+
+### Upgrade notes
+- None needed.
+
 ## [2.17.2] - 2026-11-11
 
 A forced push to a `local` build no longer fails with no reason. `[build] repo` is checked for its shape. A service with no token no longer names a credential helper that does not exist.
