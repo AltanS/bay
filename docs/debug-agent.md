@@ -42,6 +42,8 @@ Be honest with yourself about what you are enabling. This is **not a sandbox**, 
 
 > **The `docker` group is root.** Any member can start a container that bind-mounts `/`, then read or write every file on the host — the vault password included. There is no read-only docker group. Bay therefore keeps `docker` out of the default groups and serves the read-only docker subcommands through the `bay-docker-ro` wrapper instead.
 
+When `debug_agent_docker_access` is `false`, the role also removes the account from the `docker` group if it is a member. A host that an older Bay version provisioned can still have that membership. The user task only adds groups (`append: true`), so the role runs `gpasswd -d` when `id -nG` lists `docker`. The step is idempotent. Other groups and the primary group stay. Apply it with `bay provision <env> --tags agent-debug`. A running SSH session keeps the old group until the account logs in again.
+
 ## Setup
 
 ### 1. Enable the debug agent
@@ -184,7 +186,7 @@ debug_agent_create_tmp: false
 | `debug_agent_enabled` | `false` | Master switch — must be `true` to activate |
 | `debug_agent_user` | `debugbot` | Username for the debug account |
 | `debug_agent_groups` | `[ssh-access, adm]` | Supplementary groups. `docker` is no longer among them — see `debug_agent_docker_access` |
-| `debug_agent_docker_access` | `false` | Add the account to the `docker` group. **This makes it root** |
+| `debug_agent_docker_access` | `false` | Add the account to the `docker` group. **This makes it root**. When `false`, an existing membership is removed |
 | `debug_agent_readable_paths` | `[/var/log, {{ stack_dir }}/logs]` | Directories `bay-readlog` will serve |
 | `debug_agent_keys` | `[]` | Direct SSH public keys |
 | `debug_agent_github_users` | `[]` | GitHub usernames (keys fetched automatically) |

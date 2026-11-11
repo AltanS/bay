@@ -310,3 +310,77 @@ def test_validate_ssh_hook_suite_passes():
 
 def test_validate_ssh_hook_needs_jq():
     assert shutil.which("jq"), "the hook and its tests shell out to jq"
+
+
+# ── stale docker group on a host provisioned by an older version ─────────
+
+_TASKS = ROLE / "tasks" / "main.yml"
+_GROUP_TASKS = [
+    "Read current groups of debug agent",
+    "Remove debug agent from the docker group",
+]
+
+
+def _fake_group_tools(tmp_path: Path, groups: str) -> Path:
+    """A fake `id -nG` that prints `groups` and a fake `gpasswd` that logs."""
+    bindir = tmp_path / "fakebin"
+    bindir.mkdir()
+    log = tmp_path / "gpasswd.log"
+    (bindir / "id").write_text(f'#!/bin/sh\necho "{groups}"\n')
+    (bindir / "gpasswd").write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n')
+    for tool in ("id", "gpasswd"):
+        (bindir / tool).chmod(0o755)
+    return bindir
+
+
+def _run_group_tasks(tmp_path: Path, groups: str, docker_access: bool, check=False):
+    from helpers import run_role_tasks
+
+    bindir = _fake_group_tools(tmp_path, groups)
+    proc = run_role_tasks(
+        tmp_path, _TASKS, _GROUP_TASKS,
+        {"debug_agent_user": "debugbot", "debug_agent_docker_access": docker_access},
+        path_dir=bindir, check=check,
+    )
+    log = tmp_path / "gpasswd.log"
+    return proc, (log.read_text().strip() if log.exists() else "")
+
+
+def test_stale_docker_membership_is_removed(tmp_path):
+    proc, log = _run_group_tasks(tmp_path, "debugbot adm docker ssh-access", False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert log == "-d debugbot docker"
+
+
+def test_no_docker_membership_changes_nothing(tmp_path):
+    proc, log = _run_group_tasks(tmp_path, "debugbot adm ssh-access", False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert log == ""
+    assert "changed=0" in proc.stdout
+
+
+def test_a_group_that_only_contains_docker_in_its_name_stays(tmp_path):
+    proc, log = _run_group_tasks(tmp_path, "debugbot docker-ro dockerd", False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert log == ""
+
+
+def test_docker_membership_stays_when_docker_access_is_on(tmp_path):
+    proc, log = _run_group_tasks(tmp_path, "debugbot docker", True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert log == ""
+
+
+def test_check_mode_does_not_run_the_removal_and_does_not_fail(tmp_path):
+    proc, log = _run_group_tasks(tmp_path, "debugbot docker", False, check=True)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert log == ""
+
+
+def test_removal_leaves_the_user_task_groups_alone():
+    """The user task still appends: primary group and other groups are untouched."""
+    tasks = yaml.safe_load(_TASKS.read_text())
+    block = next(t for t in tasks if "block" in t)["block"]
+    user = next(t for t in block if t.get("name") == "Create debug agent user")
+    assert user["ansible.builtin.user"]["append"] is True
+    assert "primary_group" not in user["ansible.builtin.user"]
