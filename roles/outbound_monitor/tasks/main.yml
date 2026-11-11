@@ -127,3 +127,53 @@
     daemon_reload: true
   become: true
   when: not (disk_alert_enabled | bool)
+
+# ── Pending reboot alert ──────────────────────────────────────────────────────
+# Same state directory as the disk alert. Daily timer, root service unit.
+
+- name: Deploy reboot alert probe script
+  ansible.builtin.template:
+    src: bay-reboot-alert.sh.j2
+    dest: /usr/local/bin/bay-reboot-alert
+    owner: root
+    group: root
+    mode: "0750"
+  become: true
+
+- name: Deploy reboot alert systemd service unit
+  ansible.builtin.template:
+    src: bay-reboot-alert.service.j2
+    dest: /etc/systemd/system/bay-reboot-alert.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Deploy reboot alert systemd timer unit
+  ansible.builtin.template:
+    src: bay-reboot-alert.timer.j2
+    dest: /etc/systemd/system/bay-reboot-alert.timer
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+
+- name: Enable and start reboot alert timer
+  ansible.builtin.systemd:
+    name: bay-reboot-alert.timer
+    enabled: true
+    state: started
+    masked: false
+    daemon_reload: true
+  become: true
+  when: reboot_alert_enabled | bool
+
+- name: Stop, disable and mask reboot alert timer
+  ansible.builtin.systemd:
+    name: bay-reboot-alert.timer
+    enabled: false
+    state: stopped
+    masked: true
+    daemon_reload: true
+  become: true
+  when: not (reboot_alert_enabled | bool)

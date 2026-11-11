@@ -30,3 +30,17 @@ disk_alert_enabled: true
 disk_alert_warn_pct: 80
 disk_alert_page_pct: 90
 disk_alert_interval: "15min"
+
+# Pending reboot alert. unattended-upgrades installs a kernel update but never
+# reboots, so a host can run for months with /var/run/reboot-required in place
+# and nobody hears about it. A daily timer (bay-reboot-alert) alerts
+# (host.reboot_pending, level warn) when that file is older than
+# reboot_alert_threshold_days. While the reboot stays pending it repeats once
+# per reboot_alert_repeat_days, never daily. The last alert time lives in
+# <outbound_check_state_dir>/reboot-alert.state and is cleared when the file
+# is gone. The file age is its mtime, so a later package that needs a reboot
+# restarts the clock. Like the disk alert, this role runs from provision.yml:
+# install on existing hosts with `bay provision <env> --tags outbound_monitor`.
+reboot_alert_enabled: true
+reboot_alert_threshold_days: 7
+reboot_alert_repeat_days: 7

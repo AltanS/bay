@@ -263,6 +263,7 @@ _UNITS_NEEDING_THE_FILE = [
     "backup/templates/bay-backup-maintenance@.service.j2",
     "outbound_monitor/templates/bay-outbound-check.service.j2",
     "outbound_monitor/templates/bay-disk-alert.service.j2",
+    "outbound_monitor/templates/bay-reboot-alert.service.j2",
     "log_archive/templates/bay-logrotate@.service.j2",
     "docker_monitor/templates/docker-monitor.service.j2",
 ]
@@ -288,6 +289,7 @@ def test_every_alerting_unit_points_at_the_env_file(unit):
 _EMITTER_SCRIPTS = [
     ("outbound_monitor/tasks/main.yml", "/usr/local/bin/bay-outbound-check"),
     ("outbound_monitor/tasks/main.yml", "/usr/local/bin/bay-disk-alert"),
+    ("outbound_monitor/tasks/main.yml", "/usr/local/bin/bay-reboot-alert"),
     ("log_archive/tasks/main.yml", "{{ log_archive_bin_dir }}/rotate-logs.sh"),
     ("docker_monitor/tasks/main.yml", "{{ docker_monitor_script_path }}"),
 ]

@@ -264,6 +264,13 @@ host.disk_recovered:
   enabled_by_default: false
   rate_limited: false
 
+host.reboot_pending:
+  level: warn
+  source: outbound_monitor/bay-reboot-alert.sh.j2
+  summary: A reboot has been pending (/var/run/reboot-required) longer than the threshold.
+  enabled_by_default: true
+  rate_limited: true   # state file: first alert at the threshold, then one per repeat interval
+
 # ── log archival ─────────────────────────────────────────────────────────────
 log.retention_prune:
   level: info

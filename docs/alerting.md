@@ -1,7 +1,7 @@
 # Alerting
 
 Bay sends operational alerts — container crashes, build failures, deploy
-outcomes, disk pressure, backup failures — to **any number of recipients**.
+outcomes, disk pressure, pending reboots, backup failures — to **any number of recipients**.
 A recipient is an adapter plus its configuration, with its own severity floor,
 so criticals can page an on-call sink while chat keeps taking everything.
 
@@ -27,6 +27,7 @@ so criticals can page an on-call sink while chat keeps taking everything.
 - [Guarantees](#guarantees)
   - [The delivery log](#the-delivery-log)
   - [Secret hygiene, honestly](#secret-hygiene-honestly)
+- [Pending reboot alert](#pending-reboot-alert)
 - [Not covered](#not-covered)
 - [Troubleshooting](#troubleshooting)
 <!-- /toc -->
@@ -245,7 +246,7 @@ bay provision production --tags alert_policy   # provision-only emitters (e.g. d
 ```
 
 Both commands are needed because `alert_policy` runs in `provision.yml` as
-well as `deploy.yml` — some emitters (disk pressure, outbound checks) only
+well as `deploy.yml` — some emitters (disk pressure, outbound checks, pending reboot) only
 run from provisioning, so a deploy-only apply leaves their overrides stale.
 
 **Every mute should have an expiry.** Alerts are the only observability there
@@ -418,6 +419,7 @@ A held build (`build.held`) waits for `bay up`. A one-project `bay up` deploys o
 | `host.disk_warn` | `warn` | on | `outbound_monitor/bay-disk-alert.sh.j2` | Disk usage crossed the warn threshold. |
 | `host.outbound_lost` | `critical` | on | `outbound_monitor/bay-outbound-check.j2` | The host lost outbound internet while remaining reachable over Tailscale. |
 | `host.outbound_restored` | `info` | **off** | `outbound_monitor/bay-outbound-check.j2` | Outbound internet came back. |
+| `host.reboot_pending` | `warn` | on | `outbound_monitor/bay-reboot-alert.sh.j2` | A reboot has been pending (/var/run/reboot-required) longer than the threshold. |
 | `log.retention_prune` | `info` | **off** | `log_archive/rotate-logs.sh.j2` | Log retention removed archived files (age or size threshold). |
 | `restore.completed` | `info` | **off** | `restore.yml` | A restore finished and the accessory was validated. |
 | `restore.failed` | `critical` | on | `restore.yml` | A restore failed — the pre-restore backup is the way back. |
@@ -673,6 +675,48 @@ unit drops to, can still read the value out of its own environment. The file
 narrows who can read the credential at rest, which is what was actually
 broken — a world-readable script is not.
 
+## Pending reboot alert
+
+`unattended-upgrades` installs packages, but it never reboots the host. After a
+kernel update Ubuntu and Debian create `/var/run/reboot-required`. Without a
+reboot, the host keeps running the old kernel. Bay checks for this file once a
+day (`bay-reboot-alert.timer`, 09:00 host time plus up to 30 minutes of random
+delay) and sends `host.reboot_pending` (level `warn`, on by default).
+
+The rules are short:
+
+- No file: nothing is sent.
+- A file younger than the threshold: nothing is sent.
+- A file at or past the threshold: one alert.
+- The file stays: one reminder per repeat interval, never daily.
+- The file is gone (the host rebooted): the state is cleared. The next
+  pending reboot starts a new cycle.
+
+The age is the modification time of the file. A package that asks for a
+reboot later touches the file again, so the clock restarts.
+
+The alert names the host and the days pending. It lists the first five
+packages from `/var/run/reboot-required.pkgs`. When `/boot` holds a newer
+kernel than the running one, it shows both versions.
+
+```yaml
+# group_vars/all/main.yml  (or per host)
+reboot_alert_enabled: true          # false stops and masks the timer
+reboot_alert_threshold_days: 7      # first alert at this file age
+reboot_alert_repeat_days: 7         # one reminder per interval while pending
+```
+
+The last alert time lives in `/var/lib/bay-outbound-check/reboot-alert.state`
+(the state directory of the disk alert). Bay never reboots a host for you.
+Pick a quiet time and run `sudo reboot` yourself.
+
+The probe belongs to the `outbound_monitor` role, which is in `provision.yml`
+only. A deploy does not install it:
+
+```bash
+bay provision production --tags outbound_monitor
+```
+
 ## Not covered
 
 Deliberately out of scope, and **not** part of the recipient list:
@@ -709,7 +753,7 @@ failures also land in `${stack_dir}/state/telegram-failures.log`.
 `min_level`, or muted. `bay alerts test <id>` says exactly where it would
 land.
 
-**Some alerts arrive, disk-pressure and outbound ones do not.** `outbound_monitor`
+**Some alerts arrive, disk-pressure, outbound and pending-reboot ones do not.** `outbound_monitor`
 lives in `provision.yml`, so `bay deploy` never re-renders it (GH#33). The
 `alert_policy` role is in **both** playbooks precisely to stop mutes being
 stranded this way, but the emitter itself still needs:

@@ -50,6 +50,7 @@ _CONVERTED_SCRIPTS = [
     "git_deploy/templates/bay-trigger-watchdog.sh.j2",
     "outbound_monitor/templates/bay-outbound-check.j2",
     "outbound_monitor/templates/bay-disk-alert.sh.j2",
+    "outbound_monitor/templates/bay-reboot-alert.sh.j2",
     "log_archive/templates/rotate-logs.sh.j2",
     "backup/templates/backup.sh.j2",
     "backup/templates/maintenance.sh.j2",
