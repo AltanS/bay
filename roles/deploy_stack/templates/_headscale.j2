@@ -32,5 +32,15 @@
       - "traefik.http.routers.headscale.middlewares=public-chain"
       - "traefik.http.services.headscale.loadbalancer.server.port=8080"
       - "com.centurylinklabs.watchtower.enable=false"
+{%   if not (headscale_admin_api_public | default(false) | bool) %}
+      # Admin API gate: /api and /swagger only from vpn_allowed_ips. Documentation
+      # only; the reconciler builds the labels in container_lifecycle/tasks/build_specs.yml.
+      - "traefik.http.routers.headscale-admin.rule=Host(`{{ headscale_domain }}`) && (PathPrefix(`/api`) || PathPrefix(`/swagger`))"
+      - "traefik.http.routers.headscale-admin.priority=1000"
+      - "traefik.http.routers.headscale-admin.entrypoints={{ 'websecure,websecure_tailnet' if traefik_split_entrypoints | default(false) | bool else 'websecure' }}"
+      - "traefik.http.routers.headscale-admin.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.headscale-admin.middlewares=vpn-chain"
+      - "traefik.http.routers.headscale-admin.service=headscale"
+{%   endif %}
 
 {% endif %}

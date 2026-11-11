@@ -1032,32 +1032,95 @@ def key(
         raise typer.Exit(1)
 
 
+# An API key prefix: 12 URL-safe base64 characters for a current key, 7 for a
+# legacy one. `headscale apikeys list` shows them as `hskey-api-<12>-***` and
+# `<7>***`; both forms are accepted. The value lands in a root shell on the
+# control host, so the charset stays closed (\Z, see above).
+_APIKEY_PREFIX_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
+# A full key or a display prefix: `hskey-api-<12 chars>` with anything after it.
+_APIKEY_DISPLAY_PREFIX = "hskey-api-"
+_APIKEY_PREFIX_LEN = 12
+_APIKEY_ACTIONS = ("create", "list", "expire")
+
+
+def _parse_apikey_target(target: str) -> tuple[str, int | None]:
+    """Return ``(prefix, None)`` or ``("", id)`` for `bay gateway apikey expire`.
+
+    A number is a key ID. ``hskey-api-<prefix>...`` (a display prefix, or a whole
+    key) gives its 12-character prefix; the rest is never used. Anything else is
+    a prefix. Raises ValueError when the value cannot be one.
+    """
+    value = target.strip()
+    if value.isdigit():
+        key_id = int(value)
+        if key_id < 1:
+            raise ValueError("an API key ID starts at 1")
+        return "", key_id
+    if value.startswith(_APIKEY_DISPLAY_PREFIX):
+        value = value[len(_APIKEY_DISPLAY_PREFIX):][:_APIKEY_PREFIX_LEN]
+    else:
+        # A legacy key lists as `<7 chars>***`.
+        value = value.removesuffix("***")
+    if not _APIKEY_PREFIX_RE.match(value):
+        raise ValueError(
+            "use the PREFIX or the ID that `bay gateway apikey list` prints "
+            "(letters, digits, '-' and '_' only)"
+        )
+    return value, None
+
+
 @app.command()
 def apikey(
     ctx: typer.Context,
+    action: str = typer.Argument(
+        "create", metavar="[create|list|expire]", help="create (the default), list or expire."
+    ),
+    target: str | None = typer.Argument(
+        None, metavar="[PREFIX-OR-ID]", help="For expire: the key's prefix or ID from `apikey list`."
+    ),
     env: str = typer.Option("production", "--env", "-e", help="Target environment."),
-    expiration: str = typer.Option("1y", "--expiration", help="Key lifetime (e.g. 90d, 24h, 1y)."),
+    expiration: str = typer.Option("1y", "--expiration", help="Key lifetime for create (e.g. 90d, 24h, 1y)."),
     region: str | None = typer.Option(None, "--region", "-r", help="Target a specific region."),
 ) -> None:
-    """Generate a Headscale API key (headscale only).
+    """Create, list or expire Headscale API keys (headscale only).
 
-    For remote-region registration (store as headscale_api_key in the vault
-    `secrets:` dict) and other Headscale API consumers (e.g. the
-    tailnet-identity sidecar). If the key expires, deploys to non-control
-    regions fail at the tailscale_register step — re-mint and update the
-    vault. Keys belong to the control host's Headscale state: rebuilding or
-    relocating the control host invalidates every previously minted key
-    (they 401), so re-mint there too.
+    Every action runs the headscale CLI in the container on the control host
+    (`docker exec headscale headscale apikeys ...` over SSH). None of them uses
+    the admin REST API.
+
+    Bay itself needs no API key. Since 2.19.0 the admin API is closed to the
+    internet (headscale_admin_api_public: false), and a box in another region
+    registers through the control host over SSH. A key is for your own API
+    clients over the tailnet, and for a fleet that opts back in to API
+    registration (headscale_register_via_api: true plus
+    headscale_admin_api_public: true, key in the vault as headscale_api_key).
+    Keys belong to the control host's Headscale state: rebuilding or
+    relocating the control host invalidates every key minted before.
 
     Examples:
 
         bay gateway apikey
         bay gateway apikey --expiration 90d
+        bay gateway apikey list
+        bay gateway apikey expire AbCdEf123456
+        bay gateway apikey expire 3
     """
     cx = context_from(ctx)
     config = _get_gateway_config(cx)
     _require_headscale(config)
-    control_host = _get_control_host(cx, region)
+
+    if action not in _APIKEY_ACTIONS:
+        con.error(f"Unknown action '{action}': use create, list or expire.")
+        raise typer.Exit(1)
+    if action == "expire":
+        _apikey_expire(cx, config, env, region, target)
+        return
+    if target is not None:
+        con.error(f"'apikey {action}' takes no PREFIX-OR-ID.")
+        raise typer.Exit(1)
+    if action == "list":
+        _apikey_list(cx, config, env, region)
+        return
 
     if not _EXPIRATION_RE.match(expiration):
         con.error(
@@ -1068,7 +1131,7 @@ def apikey(
 
     con.header("Generating Headscale API key")
 
-    backend = LocalHeadscaleBackend(env, cx.framework_root, limit=control_host)
+    backend = _make_backend(cx, env, region, config)
     output = backend.create_api_key(expiration)
 
     if output:
@@ -1076,18 +1139,73 @@ def apikey(
         content = (
             f"\n  [bold]API key:[/bold] {key}"
             f"\n"
-            f"\n  [bold]Multi-region deployment:[/bold]"
-            f"\n     Add to vault so remote regions can register via API:"
+            f"\n  Bay does not need this key. The admin API answers only on the"
+            f"\n  tailnet and on the box itself, unless headscale_admin_api_public is true."
+            f"\n"
+            f"\n  [bold]Only if the fleet registers boxes through the API[/bold]"
+            f"\n  (headscale_register_via_api: true, for a deploy machine with no SSH"
+            f"\n  to the control host), store it in the vault:"
             f"\n"
             f"\n       bay vault edit {env}"
             f"\n"
             f'\n     Then set: [bold]headscale_api_key: "{key}"[/bold]'
+            f"\n"
+            f"\n  Expire it when you no longer need it: bay gateway apikey expire <prefix>"
             f"\n"
         )
         show_ephemeral(content, clipboard=key)
     else:
         con.error("No API key returned from headscale.")
         raise typer.Exit(1)
+
+
+def _apikey_list(cx: Context, config: dict, env: str, region: str | None) -> None:
+    """`bay gateway apikey list`: ID, prefix, expiry and creation time of every key."""
+    con.header("Headscale API keys")
+    backend = _make_backend(cx, env, region, config)
+    try:
+        keys = backend.list_api_keys()
+    except json.JSONDecodeError:
+        con.error("Failed to parse the API key list from headscale.")
+        raise typer.Exit(1)
+    if not keys:
+        con.info("No API keys.")
+        return
+    now = datetime.now(tz=UTC).timestamp()
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("ID", justify="right")
+    table.add_column("PREFIX")
+    table.add_column("EXPIRES")
+    table.add_column("CREATED")
+    for k in keys:
+        expiration = k.get("expiration")
+        expires = _format_timestamp(expiration) or "-"
+        seconds = expiration.get("seconds") if isinstance(expiration, dict) else None
+        if isinstance(seconds, int) and _PROTO_ZERO_TIME_S < seconds <= now:
+            expires = f"[dim]{expires} (expired)[/dim]"
+        table.add_row(
+            str(k.get("id", "")), str(k.get("prefix", "")), expires, _format_timestamp(k.get("created_at"))
+        )
+    con.console.print(table)
+
+
+def _apikey_expire(
+    cx: Context, config: dict, env: str, region: str | None, target: str | None
+) -> None:
+    """`bay gateway apikey expire <prefix-or-id>`: expire one key on the control host."""
+    if not target:
+        con.error("Name the key: bay gateway apikey expire <PREFIX-OR-ID> (see `bay gateway apikey list`).")
+        raise typer.Exit(1)
+    try:
+        prefix, key_id = _parse_apikey_target(target)
+    except ValueError as exc:
+        con.error(f"Invalid API key '{target}': {exc}.")
+        raise typer.Exit(1)
+    label = f"ID {key_id}" if key_id is not None else f"prefix {prefix}"
+    con.header(f"Expiring Headscale API key ({label})")
+    backend = _make_backend(cx, env, region, config)
+    backend.expire_api_key(prefix=prefix, key_id=key_id)
+    con.success(f"API key {label} expired. A client that still sends it gets 401.")
 
 
 @app.command()

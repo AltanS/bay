@@ -102,16 +102,194 @@
   tags: [tailscale_register]
 
 # == Remote path (non-control region — headscale_server is false) ==============
-# Uses the Headscale REST API — no local container required.
+# Default since 2.19.0: run the headscale CLI on the control host. The task is
+# delegated to that host over SSH and runs `docker exec headscale headscale ...`
+# there, like the local path above. No API key, and no call to the admin REST
+# API, which Traefik closes to the internet by default
+# (headscale_admin_api_public: false).
+#
+# The control host is the first host of the inventory group named by
+# headscale_control_region, the convention deploy.yml's link resolution uses
+# (`groups[region] | first`). It is an inventory lookup on purpose: role
+# defaults and play vars do not cross into hostvars of another host.
+#
+# Limit: the deploy machine needs SSH and sudo on the control host, the access
+# it already uses to deploy that host. A machine without it sets
+# headscale_register_via_api: true (see the API path below).
+
+- name: Resolve the headscale control host
+  ansible.builtin.set_fact:
+    _headscale_control_host: >-
+      {{ groups[headscale_control_region | default('')] | default([]) | first | default('') }}
+  when:
+    - _needs_registration | default(false)
+    - not (headscale_server | default(true) | bool)
+    - not (headscale_register_via_api | default(false) | bool)
+  tags: [tailscale_register]
+
+- name: Fail if the control host is not in the inventory
+  ansible.builtin.fail:
+    msg: >-
+      This box joins the tailnet through the Headscale control host, but the
+      inventory has no host in the group '{{ headscale_control_region | default('') }}'
+      (headscale_control_region). Add the control box to that group in
+      hosts/<env> and deploy again. If this deploy machine cannot reach the
+      control box over SSH, set headscale_register_via_api: true and
+      headscale_admin_api_public: true in group_vars/all, store
+      headscale_api_key in the vault, and deploy the control region first.
+  when:
+    - _needs_registration | default(false)
+    - not (headscale_server | default(true) | bool)
+    - not (headscale_register_via_api | default(false) | bool)
+    - (_headscale_control_host | default('') | length) == 0
+  tags: [tailscale_register]
+
+- name: Check SSH access to the control host
+  ansible.builtin.ping:
+  delegate_to: "{{ _headscale_control_host | default(inventory_hostname, true) }}"
+  become: false
+  register: _headscale_control_ping
+  ignore_unreachable: true
+  failed_when: false
+  when:
+    - _needs_registration | default(false)
+    - not (headscale_server | default(true) | bool)
+    - not (headscale_register_via_api | default(false) | bool)
+  tags: [tailscale_register]
+
+- name: Fail if the control host is not reachable
+  ansible.builtin.fail:
+    msg: >-
+      This box joins the tailnet through the Headscale control host
+      {{ _headscale_control_host }}, and this deploy machine cannot reach it
+      over SSH ({{ _headscale_control_ping.msg | default('no reply') }}).
+      Fix SSH access to {{ _headscale_control_host }} (the same access a deploy
+      of that box uses) and deploy again. If this machine must not reach it,
+      set headscale_register_via_api: true and headscale_admin_api_public: true
+      in group_vars/all and store headscale_api_key in the vault.
+  when:
+    - _headscale_control_ping is not skipped
+    - (_headscale_control_ping.unreachable | default(false)) or (_headscale_control_ping.ping | default('')) != 'pong'
+  tags: [tailscale_register]
+
+- name: Check the headscale container on the control host
+  ansible.builtin.command: docker inspect --format '{{ '{{' }}.State.Status{{ '}}' }}' headscale
+  delegate_to: "{{ _headscale_control_host | default(inventory_hostname, true) }}"
+  become: true
+  become_user: root
+  register: _headscale_control_container
+  changed_when: false
+  failed_when: false
+  when:
+    - _needs_registration | default(false)
+    - not (headscale_server | default(true) | bool)
+    - not (headscale_register_via_api | default(false) | bool)
+  tags: [tailscale_register]
+
+- name: Fail if headscale is not running on the control host
+  ansible.builtin.fail:
+    msg: >-
+      Headscale is not running on the control host {{ _headscale_control_host }}.
+      Deploy the control region first, then this box.
+  when:
+    - _headscale_control_container is not skipped
+    - (_headscale_control_container.stdout | default('') | trim) != 'running'
+  tags: [tailscale_register]
+
+- name: Create headscale user (control host)
+  ansible.builtin.command: >-
+    docker exec headscale headscale users create {{ headscale_server_user }}
+  delegate_to: "{{ _headscale_control_host | default(inventory_hostname, true) }}"
+  become: true
+  become_user: root
+  register: _headscale_control_user_create
+  changed_when: _headscale_control_user_create.rc == 0
+  failed_when: >-
+    _headscale_control_user_create.rc != 0 and
+    'already exists' not in _headscale_control_user_create.stderr and
+    'UNIQUE constraint failed' not in _headscale_control_user_create.stderr
+  when:
+    - _needs_registration | default(false)
+    - not (headscale_server | default(true) | bool)
+    - not (headscale_register_via_api | default(false) | bool)
+  tags: [tailscale_register]
+
+- name: List headscale users (control host)
+  ansible.builtin.command: docker exec headscale headscale users list -o json
+  delegate_to: "{{ _headscale_control_host | default(inventory_hostname, true) }}"
+  become: true
+  become_user: root
+  register: _headscale_control_users
+  changed_when: false
+  when:
+    - _needs_registration | default(false)
+    - not (headscale_server | default(true) | bool)
+    - not (headscale_register_via_api | default(false) | bool)
+  tags: [tailscale_register]
+
+# Guarded with `is not skipped`: a command task skipped by check mode still
+# registers rc 0 with an empty stdout, and `from_json` of that fails.
+- name: Extract server user ID (control host)
+  ansible.builtin.set_fact:
+    _headscale_user_id: >-
+      {{ (_headscale_control_users.stdout | from_json
+          | selectattr('name', 'equalto', headscale_server_user)
+          | first).id }}
+  when:
+    - _headscale_control_users is not skipped
+    - (_headscale_control_users.stdout | default('') | trim | length) > 0
+  tags: [tailscale_register]
+
+- name: Generate pre-auth key (control host)
+  ansible.builtin.command: >-
+    docker exec headscale headscale preauthkeys create
+    --user {{ _headscale_user_id | int }} --expiration 5m -o json
+  delegate_to: "{{ _headscale_control_host | default(inventory_hostname, true) }}"
+  become: true
+  become_user: root
+  register: _headscale_control_preauth
+  no_log: true
+  when:
+    - _needs_registration | default(false)
+    - not (headscale_server | default(true) | bool)
+    - not (headscale_register_via_api | default(false) | bool)
+    - _headscale_user_id is defined
+  tags: [tailscale_register]
+
+- name: Connect tailscale to headscale (control host path)
+  ansible.builtin.command: >-
+    tailscale up
+    --login-server=https://{{ headscale_domain }}
+    --authkey={{ (_headscale_control_preauth.stdout | from_json).key }}
+    --accept-routes
+    --hostname={{ headscale_node_hostname }}
+  become: true
+  become_user: root
+  no_log: true
+  when:
+    - _headscale_control_preauth is defined
+    - _headscale_control_preauth is not skipped
+    - (_headscale_control_preauth.stdout | default('') | trim | length) > 0
+  tags: [tailscale_register]
+
+# == API path (opt-in: headscale_register_via_api: true) =======================
+# Calls the Headscale admin REST API on headscale_domain with a bearer key.
+# Only for a deploy machine that cannot reach the control host over SSH. It
+# needs headscale_admin_api_public: true (or this box's public IP in
+# vpn_allowed_ips): the admin API is closed to the internet by default, and a
+# box that is not yet on the tailnet calls it from its public IP.
 
 - name: Fail if no API key for remote registration
   ansible.builtin.fail:
     msg: >-
-      headscale_api_key is required in the secrets dict for remote region registration.
-      Generate one with: bay gateway apikey
+      headscale_register_via_api is true, so headscale_api_key is required in
+      the secrets dict. Generate one with: bay gateway apikey. Or set
+      headscale_register_via_api: false to register through the control host
+      over SSH (the default, no key needed).
   when: >-
     (_needs_registration | default(false)) and
     not (headscale_server | default(true) | bool) and
+    (headscale_register_via_api | default(false) | bool) and
     (secrets.headscale_api_key is not defined or secrets.headscale_api_key | length == 0)
   tags: [tailscale_register]
 
@@ -124,10 +302,27 @@
     body_format: json
     body:
       name: "{{ headscale_server_user }}"
-    status_code: [200, 409, 500]
+    status_code: [200, 403, 409, 500]
   register: _create_user_result
   no_log: true
-  when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
+  when: >-
+    (_needs_registration | default(false)) and
+    not (headscale_server | default(true) | bool) and
+    (headscale_register_via_api | default(false) | bool)
+  tags: [tailscale_register]
+
+- name: Fail if the admin API is closed to this box
+  ansible.builtin.fail:
+    msg: >-
+      Traefik refused the Headscale admin API (HTTP 403): it is closed to the
+      internet (headscale_admin_api_public is false). Set
+      headscale_admin_api_public: true in group_vars/all and run
+      `bay deploy <env> --tags headscale`, or
+      set headscale_register_via_api: false to register through the control
+      host over SSH.
+  when:
+    - _create_user_result is not skipped
+    - _create_user_result.status | default(0) == 403
   tags: [tailscale_register]
 
 - name: Fail if user creation returned unexpected error
@@ -148,16 +343,21 @@
     status_code: [200]
   register: _user_list_result
   no_log: true
-  when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
+  when: >-
+    (_needs_registration | default(false)) and
+    not (headscale_server | default(true) | bool) and
+    (headscale_register_via_api | default(false) | bool)
   tags: [tailscale_register]
 
-- name: Extract server user ID
+- name: Extract server user ID (API)
   ansible.builtin.set_fact:
     _headscale_user_id: >-
       {{ (_user_list_result.json.users
           | selectattr('name', 'equalto', headscale_server_user)
           | first).id }}
-  when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
+  when:
+    - _user_list_result is not skipped
+    - _user_list_result.json is defined
   tags: [tailscale_register]
 
 - name: Generate pre-auth key (API)
@@ -175,7 +375,10 @@
     status_code: [200]
   register: _headscale_preauthkey_api
   no_log: true
-  when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
+  when: >-
+    (_needs_registration | default(false)) and
+    not (headscale_server | default(true) | bool) and
+    (headscale_register_via_api | default(false) | bool)
   tags: [tailscale_register]
 
 - name: Connect tailscale to headscale (API path)
@@ -188,7 +391,10 @@
   become: true
   become_user: root
   no_log: true
-  when: (_needs_registration | default(false)) and not (headscale_server | default(true) | bool)
+  when: >-
+    (_needs_registration | default(false)) and
+    not (headscale_server | default(true) | bool) and
+    (headscale_register_via_api | default(false) | bool)
   tags: [tailscale_register]
 
 # == After a registration (both paths) =========================================

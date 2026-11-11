@@ -25,6 +25,14 @@ headscale_magic_dns_domain: "{{ stack_name }}.tailnet.internal"
 # tests/test_headscale_version_pin.py. Bumping only the other one upgrades
 # nothing and the deploy reports no change, which is exactly how 0.6.8 shipped.
 headscale_version: "0.29.7"
+# Is the Headscale admin REST API (/api/v1/...) and /swagger open to the
+# internet on headscale_domain? false (default): Traefik answers 403 there
+# unless the client IP is in vpn_allowed_ips (loopback and the tailnet range).
+# The tailscale protocol paths stay public. true: the old behaviour, where the
+# bearer API key is the only guard. See roles/headscale/defaults/main.yml.
+# Lives here, not in the headscale role, because container_lifecycle builds the
+# Traefik labels of the headscale container from it.
+headscale_admin_api_public: false
 # Headscale user that owns VPS server nodes — defaults to stack_name.
 # Each Bay project creates its own user, preventing collisions when
 # multiple projects share one Headscale server.

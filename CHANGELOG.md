@@ -8,6 +8,27 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.19.0] - 2026-11-11
+
+The Headscale admin API is closed to the internet. Bay no longer needs it: a box in another region registers through the control host over SSH.
+
+### Added
+- Headscale admin API: new variable `headscale_admin_api_public` (default `false`). A second Traefik router on the Headscale host name takes `PathPrefix(/api)` and `PathPrefix(/swagger)` and sends them through `vpn-chain`, the chain of every `access: vpn` service. The REST API and the Swagger page answer only to `vpn_allowed_ips` (loopback and the tailnet range). From the internet they answer 403. The router has priority 1000, above the main Headscale router, whose priority is the length of its rule. Under `traefik_split_entrypoints` it also binds `websecure_tailnet`. The tailscale protocol paths stay public: `/ts2021`, `/key`, `/register/...`, `/auth/...`, `/oidc/callback`, `/verify`, `/derp`, `/bootstrap-dns`, `/machine/ping-response`, `/apple`, `/windows`, `/health`, `/version`. A test checks this list against Headscale 0.29.7. `true` keeps the old behaviour and adds no label.
+- Headscale admin API: `bay gateway apikey list` shows the ID, prefix, expiry and creation time of every API key. `bay gateway apikey expire <prefix-or-id>` expires one key. It takes the prefix as `list` prints it (`hskey-api-<prefix>-***`), the bare prefix or the ID. Both run the Headscale CLI in the container on the control host, like every other `bay gateway` verb.
+- Headscale admin API: new variable `headscale_register_via_api` (default `false`, role `tailscale_register`). `true` keeps the old API registration path for a fleet whose deploy machine cannot reach the control host over SSH.
+
+### Changed
+- Headscale admin API: `tailscale_register` no longer calls the public REST API for a box outside the control region. It delegates to the control host, the first host of the inventory group named by `headscale_control_region`, and runs `docker exec headscale headscale ...` there as root: create the user, list users as JSON, make a 5-minute pre-auth key as JSON. The box then runs `tailscale up` with the key. No API key is needed. The deploy stops with a message that says what to do when the control host is not in the inventory, does not answer over SSH, or does not run Headscale. In check mode nothing runs, as before.
+- Headscale admin API: on the API path (`headscale_register_via_api: true`), a 403 from Traefik stops the deploy with a message that names `headscale_admin_api_public`.
+- Headscale admin API: `bay gateway apikey` says that Bay does not need the key. The next steps of `bay region add` no longer name `headscale_api_key`; they say to check SSH access to the control host. Docs: `docs/tailnet-ingress.md` has a new section "The Headscale admin API is tailnet-only". `docs/multi-region.md` has "Registration and the admin API" and new troubleshooting lines. `docs/access-gateways.md` and the `headscale` role defaults header say the same.
+- Headscale admin API, limit: a deploy machine with no SSH to the control host cannot enrol a box of another region, unless the fleet opts back in with `headscale_register_via_api: true`, `headscale_admin_api_public: true` and `headscale_api_key` in the vault.
+
+### Upgrade notes
+- Headscale admin API: run `bay deploy <env> --tags headscale` against the fleet that runs Headscale. The headscale role reconciles the `headscale` container alone. The new router labels change its spec, so the container is recreated once and every node reconnects once. A plain `bay up` of the control box env does the same and shows it as a `headscale` recreate step. A fleet that sets `headscale_admin_api_public: true` before the deploy keeps its labels, and its container is not recreated.
+- Headscale admin API: check your own API clients first. A script or tool that calls `https://<headscale_domain>/api/...` from outside the tailnet gets 403 after the deploy. Move it onto the tailnet, or set `headscale_admin_api_public: true`. The tailnet-identity sidecar is not affected: it calls `http://headscale:8080` on the docker network.
+- Headscale admin API: boxes that are already on the tailnet are not touched. The new registration path runs only when a box joins. From then on, a deploy of a remote box (also with `--limit`) runs tasks on the control host, so the deploy machine needs SSH and sudo there.
+- Headscale admin API: when the deploy is live and every remote box has joined, `headscale_api_key` has no Bay user left. Find its prefix (the 12 characters after `hskey-api-` in the key, or `bay gateway apikey list`), run `bay gateway apikey expire <prefix>`, and remove the key from the vault with `bay vault edit <env>`. Keep it if the fleet sets `headscale_register_via_api: true`, or if `tailnet_identity_api_key` or another client holds the same key.
+
 ## [2.18.1] - 2026-11-11
 
 A HALF project stays HALF until every box it waits for got a deploy. A later run that skips such a box no longer clears it.

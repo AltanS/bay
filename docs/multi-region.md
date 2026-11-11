@@ -26,6 +26,7 @@ Status: historical (Bay v1 consumer model; see docs/bay-toml.md and docs/layout-
   - [Relocating the control region](#relocating-the-control-region)
   - [Example group_vars layout](#example-group_vars-layout)
   - [Deploy order](#deploy-order)
+  - [Registration and the admin API](#registration-and-the-admin-api)
   - [Troubleshooting](#troubleshooting)
 - [Cross-Region Service Communication](#cross-region-service-communication)
   - [Why not use public domains?](#why-not-use-public-domains)
@@ -275,11 +276,11 @@ Provisions and hardens only the EU server. Add a new region by adding its host t
 
 ## Headscale Access Gateway in Multi-Region
 
-When using `access_gateway: headscale` with multi-region, a single Headscale instance serves all regions. One region (the **control region**) runs the Headscale coordination server + the Tailscale daemon. All other regions run only the Tailscale daemon and register against the control region's Headscale via its REST API. There is no admin web UI — manage the tailnet with `bay gateway` (it auto-targets the control host).
+When using `access_gateway: headscale` with multi-region, a single Headscale instance serves all regions. One region (the **control region**) runs the Headscale coordination server + the Tailscale daemon. All other regions run only the Tailscale daemon. The deploy registers them on the control host: it connects to that host over SSH and runs the Headscale CLI in its container. There is no admin web UI. Manage the tailnet with `bay gateway` (it auto-targets the control host).
 
 ### How it works
 
-Set `headscale_control_region` once in `group_vars/all/access_gateway.yml` to declare which region runs the Headscale server. All other regions automatically skip Headscale and register via API instead. Single-server setups leave this unset (everything defaults to control).
+Set `headscale_control_region` once in `group_vars/all/access_gateway.yml` to declare which region runs the Headscale server. All other regions automatically skip Headscale and register through the control host instead. Single-server setups leave this unset (everything defaults to control).
 
 All hosts join the same tailnet, so VPN-protected services on any region are reachable from any other region's Tailscale interface.
 
@@ -351,18 +352,7 @@ region: na
 domain_base: na.example.com
 ```
 
-**`group_vars/production/secrets.yml`** (vault-encrypted):
-
-```yaml
----
-secrets:
-  # ...other secrets...
-
-  # Required for remote region registration
-  headscale_api_key: "your-api-key-here"
-```
-
-Note how the remote region's `main.yml` has no headscale-specific variables — all routing is derived from `headscale_control_region`.
+No API key is needed. Note how the remote region's `main.yml` has no headscale-specific variables. All routing is derived from `headscale_control_region`.
 
 ### Deploy order
 
@@ -372,16 +362,44 @@ Multi-region + headscale requires deploying regions in a specific order:
 # 1. Deploy control region first (starts Headscale server)
 bay deploy production -- --limit eu
 
-# 2. Generate API key on control server
-bay gateway apikey
-
-# 3. Add the API key to vault secrets
-bay vault edit production
-# Add headscale_api_key inside the secrets dict
-
-# 4. Deploy remote region (registers via API)
+# 2. Deploy remote region (registers through the control host)
 bay deploy production -- --limit na
 ```
+
+Step 2 runs tasks on the control host too, even with `--limit na`. The
+control host must be in the same inventory, and the deploy machine needs SSH
+and sudo there, the access it uses to deploy that host.
+
+### Registration and the admin API
+
+Since 2.19.0 the Headscale admin REST API (`/api/...` and `/swagger`) is
+closed to the internet. Traefik answers 403 unless the client IP is in
+`vpn_allowed_ips` (loopback and the tailnet range). The tailscale protocol
+paths stay public, so clients join and stay connected as before.
+`headscale_admin_api_public: true` in `group_vars/all` opens the API again.
+
+A remote box registers like this by default:
+
+1. The deploy delegates to the control host, the first host of the inventory
+   group named by `headscale_control_region`.
+2. There it runs `docker exec headscale headscale ...` as root to create the
+   user and a 5-minute pre-auth key.
+3. The remote box runs `tailscale up` with that key.
+
+**Limit.** A deploy machine with no SSH to the control host cannot enrol a
+remote box. The deploy stops and says so. If a fleet must deploy from such a
+machine, it opts back in to the old API path:
+
+```yaml
+# group_vars/all/access_gateway.yml
+headscale_register_via_api: true
+headscale_admin_api_public: true
+```
+
+Then make a key with `bay gateway apikey` and store it as
+`headscale_api_key` inside the `secrets:` dict of the vault. Both settings
+belong in `group_vars/all`: the remote box reads them, and a remote box that
+is not yet on the tailnet calls the API from its public IP.
 
 After both regions are deployed, verify connectivity:
 
@@ -395,7 +413,10 @@ bay gateway status
 
 ### Troubleshooting
 
-- **"headscale_api_key is required"** — You deployed a remote region before adding the API key to vault. Run `bay gateway apikey` on the control region, add the key inside the `secrets:` dict in `group_vars/production/secrets.yml`, then retry.
+- **"the inventory has no host in the group ..."**: The remote box registers through the control host, and the inventory does not name it. Add the control box under the group named by `headscale_control_region`, then retry.
+- **"this deploy machine cannot reach it over SSH"**: Fix SSH access to the control host, or opt in to the API path (see "Registration and the admin API").
+- **"headscale_api_key is required"**: The fleet set `headscale_register_via_api: true` but the vault has no key. Run `bay gateway apikey`, add the key inside the `secrets:` dict in `group_vars/production/secrets.yml`, then retry.
+- **"Traefik refused the Headscale admin API (HTTP 403)"**: The fleet uses the API path, but the API is closed. Set `headscale_admin_api_public: true` in `group_vars/all` and run `bay deploy production --tags headscale`.
 - **Remote node not appearing in `gateway nodes`** — Check that the Tailscale daemon on the remote host can reach `https://<headscale_domain>`. The domain must resolve to the control region's IP.
 - **Gateway CLI targeting wrong host** — In multi-region, `bay gateway` commands auto-target the control host. Use `--region <name>` to explicitly target a specific region.
 
