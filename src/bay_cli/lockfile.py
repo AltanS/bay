@@ -17,6 +17,8 @@ Deploy record of one environment (all optional, see ``docs/plan.md``)::
         "commit": "<sha>",               # what bay up applied here
         "deployed_at": "2026-10-06T12:00:00Z",
         "result": "ok",                  # pending | ok | failed (failed = HALF)
+        "half_boxes": ["na"],            # only while pending or failed: boxes still to deploy
+                                         # (2.18.1; no list = every box of the box env)
         "plan_id": "<12 hex>",
         "last_receipt_sha256": "<64 hex>",
         "previous": {"commit": "<sha>", "deployed_at": ..., "receipt_sha256": ...,
@@ -30,6 +32,7 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +117,33 @@ def write(path: Path, raw: dict[str, Any]) -> None:
         except FileNotFoundError:
             pass
         raise
+
+
+def half_boxes(record: Mapping[str, Any], env_boxes: Iterable[str]) -> list[str]:
+    """The boxes a ``pending`` or ``failed`` record still waits for (2.18.1).
+
+    The record's ``half_boxes``. A record with no list (written before 2.18.1)
+    waits for every box of its box env (``env_boxes``) and its own box. Any
+    other record waits for none.
+    """
+    if record.get("result") not in ("pending", "failed"):
+        return []
+    listed = record.get("half_boxes")
+    if isinstance(listed, list) and listed:
+        return sorted({str(b) for b in listed})
+    own = {str(record["box"])} if record.get("box") else set()
+    return sorted(set(env_boxes) | own)
+
+
+def settle_half(record: dict[str, Any], boxes: Iterable[str]) -> None:
+    """Set ``result`` from the boxes that still need a deploy: ``failed`` while one is left."""
+    left = sorted(set(boxes))
+    if left:
+        record["result"] = "failed"
+        record["half_boxes"] = left
+    else:
+        record["result"] = "ok"
+        record.pop("half_boxes", None)
 
 
 def env_pin(raw: dict[str, Any], env: str) -> str | None:

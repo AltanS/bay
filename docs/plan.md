@@ -657,7 +657,9 @@ means that whole-environment run.
 
 **Results.** A project on a skipped box keeps its lock record. It is not
 pinned, not marked failed and not counted in the receipt commit. A skipped box
-that is down does not fail or warn the run.
+that is down does not fail or warn the run. A skipped box also keeps its place
+in the `half_boxes` list of every HALF record (see
+[A HALF record names its boxes](#a-half-record-names-its-boxes)).
 
 **The plan id.** The plan JSON has `scope` (see [The plan JSON](#the-plan-json)),
 and it is part of the plan id. `bay up --plan-id` deploys the scope of the
@@ -1070,7 +1072,56 @@ whole-environment `bay up` from the fleet directory. A deploy through another pr
 it at its pin.
 
 The JSON result lists the pinned environments in `pinned`
-(`project`, `env`, `commit`, `result`) and the left-out projects in `notes`.
+(`project`, `env`, `commit`, `result`, and `half_boxes` for a HALF record) and the
+left-out projects in `notes`.
+
+#### A HALF record names its boxes
+
+Since 2.18.1, a `pending` or `failed` lock record has `half_boxes`: the boxes
+that still need a deploy. These are the boxes where the run failed, and the
+boxes it did not reach.
+
+- **What a run marks.** `bay up` writes the list into the pending record
+  before it touches a box. For a one-project run, the list holds every box of
+  the run's scope: the run deploys them for this project (a route, a build, a
+  planned step). For a run of the whole environment, it holds the project's
+  own box and the old box of its move. After the deploy, the list keeps the
+  boxes that failed or wrote no receipt from this deploy. When every box wrote
+  an `ok` receipt but the run still failed, the list names the project's own
+  box.
+- **What a run clears.** A later run removes a box from the list only when
+  its scope covered that box and the box passed in that run. A box outside
+  the scope stays in the list. So does a box that failed again.
+- **HALF until the list is empty.** The record says `result: failed` while
+  one box is left, also after a run that passed on its own boxes. That run
+  exits 0 and adds a note:
+  `shop production stays HALF: this run did not deploy box na, where an earlier bay up failed or never reported. Run bay up production --project shop --all-boxes`.
+  When the list is empty, `result` is `ok` and the key goes.
+- **The command that covers the boxes.** A one-project run always deploys the
+  project's own box. When the list names only that box, `bay up <env> --project <name>`
+  covers it. Any other box needs `--all-boxes`: the next plan may not take it
+  into its scope, because the failed run already committed the compile.
+  `bay up <env>` in the fleet (the whole environment) covers every box too.
+- **An older lock.** A `pending` or `failed` record with no `half_boxes` (written
+  before 2.18.1, or by a remove) waits for every box of its box env. A run
+  that covers only some boxes leaves the others in the list. The first
+  `bay up <env>` of the whole environment clears it.
+- **Rollback and take-over.** `bay rollback` uses the same rule: it clears only
+  the boxes of its own scope. `--take-over` keeps the list of the claim it
+  replaces and adds its own boxes.
+- **A box that left the box env** (removed from `bay.fleet.toml`, or moved to
+  another box env) drops out of the list. It needs no deploy here.
+
+Example: `shop` runs on box `eu`. A `bay up production --project shop` also
+deploys box `na`, the build server, because the build changed. The run fails
+on `na`. The lock says `result: failed` and `half_boxes: ["na"]`. The next
+`bay up production --project shop` plans no build change, so its scope is
+`eu` only. It passes on `eu`, and `shop` stays HALF with `["na"]`.
+`bay up production --project shop --all-boxes` deploys `na`. When `na`
+passes, `shop` is `ok`.
+
+`bay plan` adds a note when the plan's scope skips a box that the project still
+waits for. `bay show` names the boxes and the command (see [bay show](#bay-show)).
 
 #### plans/ prune
 
@@ -1712,7 +1763,7 @@ box receipt), and one status word per environment:
 | `behind` | The project's HEAD is ahead of the pin, and the box does not run WANTED yet. Run `bay plan`. |
 | `drift` | The box runs something else than the pin: the receipt differs from the one `bay up` recorded, or the fleet pins a commit this environment never got. |
 | `unknown` | The box was not read, has no receipt, or `bay up` never ran here. |
-| `HALF` | The last `bay up` failed or never reported back. A pending record more than 30 minutes old says `an up from machine-a at <time> never reported`. |
+| `HALF` | The last `bay up` failed or never reported back. A pending record more than 30 minutes old says `an up from machine-a at <time> never reported`. The reason ends with the boxes that still need a deploy and the command that covers them: `box na still needs a deploy: run bay up production --project shop --all-boxes` (see [A HALF record names its boxes](#a-half-record-names-its-boxes)). `bay show --json` has the same in `envs[].half_boxes` and `envs[].next`. |
 | `deploying` | A `bay up` runs now: the record is `pending` and its `claimed_at` is less than 30 minutes old. The reason reads `claimed by machine-a 4 min ago`. |
 
 Bay checks the words in this order: `deploying`, `HALF`, `unknown`, `drift`, `ahead`, `behind`, `ok`.

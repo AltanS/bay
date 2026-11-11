@@ -469,6 +469,36 @@ def _confirmed(record: Mapping[str, Any]) -> bool:
     return record.get("result") not in ("failed", "pending")
 
 
+def _member_boxes(
+    plan: Mapping[str, Any],
+    scope: Mapping[str, Any],
+    record: Mapping[str, Any],
+    move: Mapping[str, Any] | None,
+    env_set: set[str],
+) -> set[str]:
+    """The boxes of ``box_env`` whose result counts for a project of the plan (2.18.1).
+
+    Its own box and the old box of its move. A one-project plan adds every box
+    of its scope: the run deploys them for this project (a route, a build, a
+    planned step), and a failure there leaves the project HALF.
+    """
+    mine = {str(record["box"])} if record.get("box") else set()
+    if move is not None and move.get("from"):
+        mine.add(str(move["from"]))
+    if plan.get("project") is not None:
+        mine |= {str(b) for b in scope.get("boxes") or []}
+    return mine & env_set if env_set else mine
+
+
+def _half_rest(
+    record: Mapping[str, Any], env_set: set[str], passed: set[str], bad: set[str]
+) -> set[str]:
+    """The boxes a record waits for after this run: the old list minus the boxes that
+    passed, plus ``bad``. A box that left the box env needs no deploy here."""
+    rest = (set(lockfile.half_boxes(record, env_set)) - passed) | bad
+    return rest & env_set if env_set else rest
+
+
 def _names(previous: Any, commit: str) -> bool:
     return isinstance(previous, Mapping) and previous.get("commit") == commit
 
@@ -943,6 +973,7 @@ def _apply_plan_steps(
         again=again_command(cx, action, env, plan.get("project")),
     )
     claim = fleetsync.claim_fields()
+    env_set = set(_env_boxes(cx, box_env))
     locks: dict[str, dict[str, Any]] = {}
     previous_by: dict[str, dict[str, Any] | None] = {}
     # The services file before this up's compile: the old pins' build containers.
@@ -979,9 +1010,18 @@ def _apply_plan_steps(
             )
             if box:
                 record["box"] = box
+        # The boxes this run may leave half: the ones an earlier run left (also
+        # a claim this run takes over) and the ones it deploys for this project.
+        waiting = set(lockfile.half_boxes(record, env_set)) | _member_boxes(
+            plan, scope, record, move, env_set
+        )
         record.update(
             {"commit": commit, "result": "pending", "plan_id": plan["plan_id"], **claim}
         )
+        if waiting:
+            record["half_boxes"] = sorted(waiting)
+        else:
+            record.pop("half_boxes", None)
         if previous is not None:
             record["previous"] = previous
         freeze_note = _freeze(proj, record, commit, rollback=action == "rollback")
@@ -1122,6 +1162,11 @@ def _apply_plan_steps(
             f"{box_env} gets the result of the whole deploy, as before 2.12: ok only when "
             "every receipt from this deploy says ok"
         ]
+    # Only a box this run deployed has a result: a box outside the scope keeps
+    # every record (and every half box) it has (2.18.1).
+    covered = set(scope.get("boxes") or []) or env_set
+    results = {b: r for b, r in results.items() if b in covered}
+    passed = {b for b, r in results.items() if r == "ok"}
     if failure is None and "failed" in results.values():
         failed_boxes = sorted(b for b, r in results.items() if r == "failed")
         failure = (
@@ -1133,18 +1178,21 @@ def _apply_plan_steps(
     pinned: list[dict[str, Any]] = []
     lock_files: list[Path] = []
     member_words: dict[str, str] = {}
+    # Per member: the boxes of this run that failed for it (2.18.1).
+    bad_by: dict[str, set[str]] = {}
     for proj, _ in members:
-        box = locks[proj.name]["envs"][env].get("box")
-        member_words[proj.name] = (
-            "ok" if not run_failed and results.get(str(box)) == "ok" else "failed"
-        )
+        record = locks[proj.name]["envs"][env]
+        box = record.get("box")
+        own = "ok" if not run_failed and results.get(str(box)) == "ok" else "failed"
+        bad = _member_boxes(plan, scope, record, moves.get(proj.name), env_set) - passed
+        if own == "failed" and not bad:
+            # Every box wrote an ok receipt, but the run failed after: its own box.
+            bad = {str(box)} if box else set(env_set)
+        member_words[proj.name] = "failed" if bad else "ok"
+        bad_by[proj.name] = bad
     if failure is None and "failed" in member_words.values():
         missing = sorted(
-            {
-                str(locks[name]["envs"][env].get("box"))
-                for name, w in member_words.items()
-                if w == "failed"
-            }
+            {b for name, w in member_words.items() if w == "failed" for b in bad_by[name]}
         )
         cannot = [u for u in unread if u["box"] in missing]
         if cannot:
@@ -1168,16 +1216,17 @@ def _apply_plan_steps(
         )
         slice_ = planmod.running_slice(entries, names)
         record = dict(lock["envs"][env])
-        record["result"] = member_words[proj.name]
+        # HALF until no box is left: a box this run did not cover stays marked.
+        lockfile.settle_half(
+            record, _half_rest(record, env_set, passed, bad_by[proj.name]) or bad_by[proj.name]
+        )
         record["deployed_at"] = deployed_at
         for key in CLAIM_KEYS:
             record.pop(key, None)
         record["last_receipt_sha256"] = slice_["receipt_sha256"]
         lock["envs"][env] = record
         lockfile.write(proj.lock_file, lock)
-        pinned.append(
-            {"project": proj.name, "env": env, "commit": commit, "result": member_words[proj.name]}
-        )
+        pinned.append(_pinned_row(proj.name, env, commit, record))
         lock_files.append(proj.lock_file)
     more_files, more_rows = _pin_deployed(
         cx,
@@ -1189,10 +1238,12 @@ def _apply_plan_steps(
         results=results,
         before=before,
         old_data=old_data,
+        env_set=env_set,
     )
     lock_files += more_files
     pinned += more_rows
     notes = planmod.repair_notes(plan) + list(adopt_notes) + box_notes
+    notes += _half_notes(cx, pinned, covered)
     scoped = scopemod.scope_note(scope, env)
     if scoped is not None:
         notes.insert(0, scoped)
@@ -1962,6 +2013,7 @@ def _pin_deployed(
     results: Mapping[str, str],
     before: list[dict[str, Any]] | None = None,
     old_data: Mapping[str, Any] | None = None,
+    env_set: set[str] | None = None,
 ) -> tuple[list[Path], list[dict[str, Any]]]:
     """Record the deploy in the lock of every other project it deployed.
 
@@ -1984,12 +2036,16 @@ def _pin_deployed(
     So is an env whose box failed, when this stamp would not move its pin and
     its record is ``ok``: that pin was confirmed before, and a failed box says
     nothing new about it. A pin that moves on a failed box gets ``failed``.
-    A repo project with no pinned commit was not compiled, so it is not in
+    A record that waits for other boxes (``half_boxes``, 2.18.1) loses only the
+    boxes that passed in this run (``results``), and stays ``failed`` while one
+    is left. A repo project with no pinned commit was not compiled, so it is not in
     ``commits`` and its lock stays as it is. Returns the lock files written
     and one row per env pinned.
     """
     files: list[Path] = []
     rows: list[dict[str, Any]] = []
+    boxes = env_set if env_set is not None else set(_env_boxes(cx, box_env))
+    passed = {b for b, r in results.items() if r == "ok"}
     for name in sorted(commits):
         if name in skip:
             continue
@@ -2038,26 +2094,53 @@ def _pin_deployed(
                 .get(env, {})
                 .values()
             )
+            own = {str(record.get("box") or box)} if result == "failed" else set()
+            rest = _half_rest(record, boxes, passed, own) or own
             record.update(
                 {
                     "commit": commit,
                     **stamp,
-                    "result": result,
                     "last_receipt_sha256": planmod.running_slice(entries, names)[
                         "receipt_sha256"
                     ],
                 }
             )
+            lockfile.settle_half(record, rest)
             for key in CLAIM_KEYS:
                 record.pop(key, None)
             envs[env] = record
-            rows.append({"project": name, "env": env, "commit": commit, "result": result})
+            rows.append(_pinned_row(name, env, commit, record))
             touched = True
         if touched:
             lock["commit"] = commit
             lockfile.write(other.lock_file, lock)
             files.append(other.lock_file)
     return files, rows
+
+
+def _pinned_row(project: str, env: str, commit: str, record: Mapping[str, Any]) -> dict[str, Any]:
+    """One row of ``pinned`` in the result; a HALF record names its ``half_boxes``."""
+    row = {"project": project, "env": env, "commit": commit, "result": record["result"]}
+    if record.get("half_boxes"):
+        row["half_boxes"] = list(record["half_boxes"])
+    return row
+
+
+def _half_notes(cx: Context, pinned: list[dict[str, Any]], covered: set[str]) -> list[str]:
+    """A note per record that stays HALF for a box this run did not deploy (2.18.1)."""
+    notes = []
+    for row in pinned:
+        skipped = [b for b in row.get("half_boxes") or [] if b not in covered]
+        if not skipped:
+            continue
+        lock = lockfile.read(lockfile.lock_path(cx.fleet_root, row["project"])) or {}
+        box = ((lock.get("envs") or {}).get(row["env"]) or {}).get("box")
+        notes.append(
+            f"{row['project']} {row['env']} stays HALF: this run did not deploy box "
+            f"{', '.join(skipped)}, where an earlier bay up failed or never reported. "
+            f"Run {planmod.half_next(row['project'], row['env'], row['half_boxes'], box)}"
+        )
+    return notes
 
 
 class DeployFailed(Exception):
@@ -2652,6 +2735,17 @@ def show(
         status, why = env_status(
             record, lock_commit, wanted.commit, running, code, in_fleet=proj.in_fleet
         )
+        # The boxes a HALF record waits for, and the run that covers them (2.18.1).
+        half: list[str] = []
+        next_cmd = None
+        if status == "HALF":
+            env_set = (
+                scopemod.env_boxes(proj.fleet.get("boxes") or {}, box_env) if box_env else []
+            )
+            half = [b for b in lockfile.half_boxes(record, env_set) if not env_set or b in env_set]
+            if half:
+                next_cmd = planmod.half_next(proj.name, env, half, box)
+                why = f"{why}; box {', '.join(half)} still needs a deploy: run {next_cmd}"
         drift = (
             _box_drift(cx, box, box_env, cache[box_env], maps, here)
             if remote and box_env is not None and box
@@ -2664,6 +2758,9 @@ def show(
                 "box_env": box_env,
                 "status": status,
                 "reason": why,
+                # HALF only: the boxes that still need a deploy, and the command.
+                "half_boxes": half,
+                "next": next_cmd,
                 "pinned": {
                     "commit": record.get("commit"),
                     "deployed_at": record.get("deployed_at"),

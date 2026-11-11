@@ -8,6 +8,25 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.18.1] - 2026-11-11
+
+A HALF project stays HALF until every box it waits for got a deploy. A later run that skips such a box no longer clears it.
+
+### Fixed
+- A `bay up` that failed on one box left the project HALF, but the next run cleared it even when that run did not deploy the failed box. The failed run commits its compile, so the next plan of the project often has a smaller scope: no build change (no build server), no route change (no ingress box), no move (no old box), no planned step of another project. That run passed on the project's own box and wrote `result: ok`. The fleet then said the project was fine, while the failed box never got the deploy. `bay rollback` and `bay up --take-over` cleared it the same way.
+- A run with no host map at receipt time took the env-wide result for every box of the box env, also for the boxes its scope skipped. Only the boxes of the scope get a result now.
+
+### Changed
+- A `pending` or `failed` lock record has a new key `half_boxes`: the boxes that still need a deploy. `bay up` writes it with the pending record, before it touches a box. After the deploy it keeps the boxes that failed or wrote no receipt from this deploy. A one-project run counts every box of its scope; a run of the whole environment counts the project's own box and the old box of its move.
+- A later run removes a box from the list only when its scope covered the box and the box passed. The record stays `failed` while one box is left. Such a run exits 0 and adds a note: `<project> <env> stays HALF: this run did not deploy box <box>, ... Run bay up <env> --project <project> --all-boxes`. `pinned` rows of a HALF record carry `half_boxes`.
+- `bay show` ends the HALF reason with the boxes and the command that covers them (`--all-boxes` when a box other than the project's own box is left). `bay show --json` has `envs[].half_boxes` and `envs[].next`.
+- `bay plan` adds a note when its scope skips a box that the project still waits for.
+- Docs: `docs/plan.md` has a new section "A HALF record names its boxes", and the `HALF` row of the `bay show` table names the boxes.
+
+### Upgrade notes
+- Every machine that deploys a fleet needs 2.18.1. An older CLI refuses `half_boxes` in a lock as an unknown key, so its compile, plan and deploy stop with a lock schema error. `bay.compat.json` stops it earlier: the first 2.18.1 `bay up` writes `deployed_with: 2.18.1` in the same claim commit that first writes `half_boxes`, so a 2.16.0 to 2.18.0 machine stops with `bay_older` (exit 45) before it writes anything. `lock_version` stays 2.
+- A record that is HALF before the upgrade has no list, so it waits for every box of its box env. A one-project run no longer clears it. Run `bay up <env>` in the fleet (the whole environment), or `bay up <env> --project <name> --all-boxes`, once per such project. `bay show` names the command.
+
 ## [2.18.0] - 2026-11-11
 
 Headscale hardening: random IP allocation for new nodes, a consistent and checked DB backup, a locked-down container, and tighter file modes.

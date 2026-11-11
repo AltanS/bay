@@ -82,6 +82,13 @@
           "description": "Since 2.12: an opaque name of the process that set result pending: <machine>:<pid namespace>:<pid>:<start time>, where machine is a salted hash of /etc/machine-id. Only that machine can tell that the run is gone; empty when it could not be read. Removed with claimed_by.",
           "type": "string"
         },
+        "half_boxes": {
+          "description": "Since 2.18.1: while result is pending or failed, the boxes that still need a deploy (the run failed there or did not reach them). A later bay up drops a box only when its scope covered that box and the box passed. A pending or failed record with no list (written before 2.18.1) waits for every box of its box env. Removed when result is ok.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/name" }
+        },
         "previous": { "$ref": "#/$defs/previous" },
         "frozen": {
           "description": "Set by `bay rollback`. While true, a push builds and tags its image but never deploys it, whatever `track` says. The next `bay up` to a commit newer than frozen_commit clears it.",

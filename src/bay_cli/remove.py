@@ -792,6 +792,9 @@ def _apply_remove(
         envs = lock.setdefault("envs", {})
         for row in rows:
             record = dict(envs.get(row["env"]) or {})
+            # A remove names no boxes: its pending or failed record waits for
+            # every box of the box env (lockfile.half_boxes).
+            record.pop("half_boxes", None)
             record.update(
                 {
                     "result": "pending",

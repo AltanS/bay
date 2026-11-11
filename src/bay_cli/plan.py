@@ -301,6 +301,35 @@ def box_and_env(fleet: Mapping[str, Any], box: Any) -> tuple[str | None, str | N
     return str(box), str(boxes[box]["env"])
 
 
+def half_next(project: str, env: str, half: Sequence[str], box: str | None) -> str:
+    """The ``bay up`` that covers every box a HALF record waits for (2.18.1).
+
+    A one-project run always deploys the project's own box. Any other box needs
+    ``--all-boxes``: the next plan may not take it into its scope.
+    """
+    flag = "" if set(half) <= {box} else " --all-boxes"
+    return f"bay up {env} --project {project}{flag}"
+
+
+def half_plan_note(
+    proj: ProjectRef, env: str, box: str | None, box_env: str | None, scope: Mapping[str, Any]
+) -> str | None:
+    """The note of a one-project plan whose scope skips a box the project waits for."""
+    if box_env is None:
+        return None
+    record = (proj.lock.get("envs") or {}).get(env) or {}
+    env_set = scopemod.env_boxes(proj.fleet.get("boxes") or {}, box_env)
+    half = [b for b in lockfile.half_boxes(record, env_set) if not env_set or b in env_set]
+    skipped = [b for b in half if b not in (scope.get("boxes") or [])]
+    if not skipped:
+        return None
+    return (
+        f"{proj.name} {env} is HALF: an earlier bay up failed or never reported on box "
+        f"{', '.join(skipped)}, and this plan skips it. The project stays HALF after this "
+        f"run. Run {half_next(proj.name, env, half, box)}"
+    )
+
+
 def wanted_box(fleet: Mapping[str, Any], doc: Mapping[str, Any] | None, env: str) -> str | None:
     """WANTED box: ``deploy.<env>.box`` in bay.toml, else the fleet's default box."""
     deploy = ((doc or {}).get("deploy") or {}).get(env) or {}
@@ -2993,6 +3022,9 @@ def make_plan(
         )
     scoped = diff.scope or scope_of(None, diff.steps)
     notes.extend(scoped.notes)
+    half_note = half_plan_note(proj, env, place.box, place.box_env, scoped.scope)
+    if half_note is not None:
+        notes.append(half_note)
     if place.box_env is not None:
         notes.extend(
             scopemod.drift_notes(
