@@ -14,6 +14,8 @@
       {{ docker_registries | default([])
          | selectattr('domain', 'eq', zot_domain)
          | first | default({}) }}
+  # The fact holds the admin password; without no_log, `-v` prints it.
+  no_log: true
   tags: [zot]
 
 # -- Validation ---------------------------------------------------------------
