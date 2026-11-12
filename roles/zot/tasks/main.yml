@@ -4,8 +4,8 @@
 # The container itself is managed by the container_lifecycle role.
 #
 # Auth credentials are derived from the docker_registries entry matching
-# zot_domain — no separate zot_admin_username/password vars needed. That
-# account is the admin. zot_pull_users adds pull-only accounts.
+# zot_domain — no separate zot_admin_username/password vars needed.
+# That account is the admin. zot_pull_users adds pull-only accounts.
 
 # -- Credential lookup --------------------------------------------------------
 
