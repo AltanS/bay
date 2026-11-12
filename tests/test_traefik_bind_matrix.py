@@ -174,7 +174,8 @@ class TestPublicReadTimeout:
         return template.render(**_base_context(**overrides))
 
     def test_default_is_empty(self):
-        defaults = yaml.safe_load((ROOT / "roles" / "traefik" / "defaults" / "main.yml").read_text())
+        defaults_file = ROOT / "roles" / "traefik" / "defaults" / "main.yml"
+        defaults = yaml.safe_load(defaults_file.read_text())
         assert defaults["traefik_public_read_timeout"] == ""
         # The tailnet default stays as it was.
         assert defaults["traefik_tailnet_read_timeout"] == "600s"
@@ -190,7 +191,8 @@ class TestPublicReadTimeout:
 
     @pytest.mark.parametrize("branch", _BRANCHES, ids=_IDS)
     def test_value_renders_under_websecure(self, branch):
-        eps = yaml.safe_load(self._text(traefik_public_read_timeout="900s", **branch))["entryPoints"]
+        rendered = self._text(traefik_public_read_timeout="900s", **branch)
+        eps = yaml.safe_load(rendered)["entryPoints"]
         assert eps["websecure"]["transport"]["respondingTimeouts"]["readTimeout"] == "900s"
         assert "transport" not in eps["web"]
 
