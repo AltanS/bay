@@ -8,6 +8,27 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.21.0] - 2026-11-13
+
+This release gives the Zot registry longer request time limits and adds pull-only registry accounts. It also stops a verbose run from printing the registry admin password.
+
+### Added
+- Zot: new variables `zot_http_read_timeout` and `zot_http_write_timeout` (role `zot`, default `"30m"`). They render `http.readTimeout` and `http.writeTimeout` in `config.json`. Zot's own default is 60s, an absolute limit for the whole request or response body. A layer upload that still streamed at 60s was cut: zot logged `i/o timeout` and the proxy answered 502. A large pull on a slow link was cut the same way. `""` renders nothing (zot's 60s). `"0s"` turns a limit off. The deploy refuses a value that is not a Go duration. The keys need zot v2.1.17 or later; the role pins v2.1.22.
+- Zot: new variable `zot_pull_users` (role `zot`, default `[]`), a list of `username` and `password`. Each entry is an htpasswd account that can only read (pull) every repository. The `docker_registries` entry for `zot_domain` stays the only account that can push and delete. With at least one entry, `config.json` gets `http.accessControl`: `read` on `**` for the pull accounts, and every action for the admin through `adminPolicy`. With the list empty the block is absent and zot has one account, as before. The deploy refuses an entry without a username or a password, a username that does not match `^[a-z0-9][a-z0-9._-]{0,62}$`, a duplicate, and the admin username. A machine logs in with `docker login <zot_domain> -u <username>`. A pull account cannot write a buildx registry cache (`git_deploy_registry_cache`).
+- Traefik: new variable `traefik_public_read_timeout` (role `traefik`, default `""`). It sets the request read limit of the public `websecure` entrypoint, with and without `traefik_split_entrypoints`. It applies to every router on that host. Set it only on the host that serves the registry, when machines push over the public address. Empty renders nothing, so `traefik.yml` is unchanged and Traefik keeps its 60s default. The deploy refuses a value that is not whole seconds or a Go duration.
+- Docs: `docs/build-strategies.md` has a new section "Registry accounts and time limits". `docs/build-pipeline.md` has a troubleshooting entry for a push that fails at exactly 60 seconds.
+
+### Changed
+- Zot: `htpasswd` now holds the admin line plus one line per pull account. It still changes only when something changed. The role verifies each account with `htpasswd -iv` (password on stdin), and a read-only probe compares the user names in the file with the wanted names. When either check fails, the role writes the whole file again and restarts zot. So a removed pull account and an unknown line added by hand also disappear. Both probes run in check mode too.
+
+### Fixed
+- Zot: the task that reads the admin account from `docker_registries` had no `no_log`, so a run with `-v` printed the registry admin password. It now has `no_log: true`.
+
+### Upgrade notes
+- **Zot restarts once.** The first run that applies the `zot` role on the registry host after the upgrade writes the two new time limits into `config.json` and restarts zot. That is `bay up` on that env, or a `bay deploy` that runs the rig roles. Other regions pull from this registry, so run the registry host's env first, or run `bay deploy <env> --tags zot` there before the others. To keep zot's old 60s limits and skip the restart, set both `zot_http_read_timeout` and `zot_http_write_timeout` to `""`.
+- **Pull accounts are opt-in.** Put each password in the vault, add `zot_pull_users` to the group_vars of the registry host, and run `bay deploy <env> --tags zot`. The role rewrites `htpasswd` and `config.json` and restarts zot once. A deployment host can use a pull account through its own `docker_registries` entry for `zot_domain`. The registry host and the build server must keep the admin entry.
+- **The public entrypoint limit is opt-in.** Nothing changes until you set `traefik_public_read_timeout`. When machines push to the registry over its public address, set it (for example `"30m"`) on the registry host and run `bay deploy <env> --tags traefik`. Traefik restarts once.
+
 ## [2.20.0] - 2026-11-12
 
 This release closes the Headscale admin API to every client outside a short allowlist (loopback by default), makes Headscale log the real client IP, and makes a dry run validate a new ACL policy. Traefik no longer logs a missing middleware at start for each tailnet route. It also fixes six smaller findings: a stale `docker` group on the debug user, a nightly prune that deleted volumes, a dry run that failed on a new timer, a sidecar that ignored SIGTERM, an always-changed buildkit task, and a new validator warning.
