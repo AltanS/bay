@@ -157,8 +157,11 @@ class TestPublicReadTimeout:
     _IDS = ["split-off", "split-on"]
     # The block this var adds, once per branch. Stripping it from the source
     # gives the template as it was before the var existed.
+    # Whole lines, so an indented tag (whitespace that renders even when the
+    # value is empty) makes the comparison fail.
     _BLOCK = re.compile(
-        r"\{%\s+if traefik_public_read_timeout.*?\{%\s+endif %\}\n", re.S
+        r"^[ \t]*\{%\s+if traefik_public_read_timeout.*?\{%\s+endif %\}[ \t]*\n",
+        re.S | re.M,
     )
 
     @staticmethod
