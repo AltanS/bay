@@ -16,6 +16,11 @@ entryPoints:
           scheme: https
   websecure:
     address: "{{ traefik_public_bind_ip }}:443"
+{%   if traefik_public_read_timeout | default('', true) | string | trim | length > 0 %}
+    transport:
+      respondingTimeouts:
+        readTimeout: "{{ traefik_public_read_timeout | string | trim }}"
+{%   endif %}
 {%   if gateway_bind_ip | default('', true) | trim | length > 0 %}
   websecure_tailnet:
     address: "{{ gateway_bind_ip }}:443"
@@ -35,6 +40,11 @@ entryPoints:
           scheme: https
   websecure:
     address: ":443"
+{%   if traefik_public_read_timeout | default('', true) | string | trim | length > 0 %}
+    transport:
+      respondingTimeouts:
+        readTimeout: "{{ traefik_public_read_timeout | string | trim }}"
+{%   endif %}
 {% endif %}
 {% if traefik_metrics_enabled %}
   # Metrics are unauthenticated and list every router/service. Bound to

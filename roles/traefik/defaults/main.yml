@@ -22,6 +22,19 @@ traefik_docker_network: services
 # gateway_bind_ip is set.
 traefik_tailnet_read_timeout: "600s"
 
+# Read timeout for the PUBLIC entrypoint (websecure). It raises the request
+# read limit for every router on this host, not only the registry. Set it only
+# on the host that serves the Zot registry, and only when machines push to it
+# over the public address (for example a developer machine or a build host
+# outside the tailnet). Same 60s Traefik default and same symptom as above:
+# a layer upload that streams for longer than the limit is cut. The trade-off:
+# a long limit also lets a slow client hold a public connection open for that
+# long. Zot behind it has its own limit (zot_http_read_timeout, default 30m).
+# "" (the default) renders nothing, so traefik.yml stays as before and Traefik
+# keeps its 60s default. Values: whole seconds ("900") or a Go duration
+# ("900s", "15m", "1h30m"). Rendered with or without traefik_split_entrypoints.
+traefik_public_read_timeout: ""
+
 # Prometheus metrics
 traefik_metrics_enabled: true
 traefik_metrics_port: 8082

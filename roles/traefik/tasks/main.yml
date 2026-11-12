@@ -42,6 +42,21 @@
 
 # ── Static Configuration ───────────────────────────────────────────────
 
+# Traefik reads a duration as whole seconds ("900") or a Go duration ("15m",
+# "1h30m"). A bad value stops Traefik at start, which takes every route on
+# the host down, so refuse it here instead.
+- name: Validate traefik_public_read_timeout format
+  ansible.builtin.assert:
+    that:
+      - >-
+        (traefik_public_read_timeout | default('', true) | string | trim | length == 0)
+        or (traefik_public_read_timeout | string | trim
+            is match('^([0-9]+|([0-9]+(ns|us|ms|s|m|h))+)$'))
+    fail_msg: >-
+      traefik_public_read_timeout must be "" or a duration: whole seconds
+      ("900") or digits plus ns, us, ms, s, m or h ("900s", "15m", "1h30m").
+      Got '{{ traefik_public_read_timeout }}'.
+
 - name: Deploy Traefik static config
   ansible.builtin.template:
     src: traefik.yml.j2

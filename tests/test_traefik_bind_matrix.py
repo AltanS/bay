@@ -22,8 +22,10 @@ Three findings converge on `traefik.yml.j2`:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 from helpers import make_ansible_env
@@ -137,6 +139,97 @@ class TestTailnetReadTimeout:
     def test_unset_value_renders_nothing(self):
         eps = _render(**self._SPLIT)["entryPoints"]
         assert "transport" not in eps["websecure_tailnet"]
+
+
+class TestPublicReadTimeout:
+    """`traefik_public_read_timeout` raises the read limit of the PUBLIC
+    websecure entrypoint (a machine pushing to the registry over the public
+    address). Opt-in: empty renders nothing, so no fleet gets a Traefik
+    restart from the release that added it."""
+
+    _SPLIT = dict(
+        traefik_split_entrypoints=True,
+        traefik_public_bind_ip="203.0.113.10",
+        gateway_bind_ip="100.64.0.5",
+        traefik_tailnet_read_timeout="600s",
+    )
+    _BRANCHES = [{}, _SPLIT]
+    _IDS = ["split-off", "split-on"]
+    # The block this var adds, once per branch. Stripping it from the source
+    # gives the template as it was before the var existed.
+    _BLOCK = re.compile(
+        r"\{%\s+if traefik_public_read_timeout.*?\{%\s+endif %\}\n", re.S
+    )
+
+    @staticmethod
+    def _text(source: str | None = None, **overrides) -> str:
+        env = make_ansible_env(TEMPLATE_DIR)
+        if source is None:
+            template = env.get_template("traefik.yml.j2")
+        else:
+            template = env.from_string(source)
+        return template.render(**_base_context(**overrides))
+
+    def test_default_is_empty(self):
+        defaults = yaml.safe_load((ROOT / "roles" / "traefik" / "defaults" / "main.yml").read_text())
+        assert defaults["traefik_public_read_timeout"] == ""
+        # The tailnet default stays as it was.
+        assert defaults["traefik_tailnet_read_timeout"] == "600s"
+
+    @pytest.mark.parametrize("branch", _BRANCHES, ids=_IDS)
+    @pytest.mark.parametrize("value", ["", "   ", None])
+    def test_empty_renders_the_template_as_before(self, branch, value):
+        source = (TEMPLATE_DIR / "traefik.yml.j2").read_text()
+        stripped, count = self._BLOCK.subn("", source)
+        assert count == 2, "the block must exist once in each branch"
+        extra = {} if value is None else {"traefik_public_read_timeout": value}
+        assert self._text(**branch, **extra) == self._text(stripped, **branch)
+
+    @pytest.mark.parametrize("branch", _BRANCHES, ids=_IDS)
+    def test_value_renders_under_websecure(self, branch):
+        eps = yaml.safe_load(self._text(traefik_public_read_timeout="900s", **branch))["entryPoints"]
+        assert eps["websecure"]["transport"]["respondingTimeouts"]["readTimeout"] == "900s"
+        assert "transport" not in eps["web"]
+
+    def test_tailnet_entrypoint_keeps_its_own_value(self):
+        eps = yaml.safe_load(
+            self._text(traefik_public_read_timeout="900s", **self._SPLIT)
+        )["entryPoints"]
+        assert eps["websecure_tailnet"]["transport"]["respondingTimeouts"]["readTimeout"] == "600s"
+        assert eps["websecure_tailnet"]["address"] == "100.64.0.5:443"
+
+    def test_value_is_trimmed(self):
+        eps = yaml.safe_load(self._text(traefik_public_read_timeout=" 15m "))["entryPoints"]
+        assert eps["websecure"]["transport"]["respondingTimeouts"]["readTimeout"] == "15m"
+
+
+class TestPublicReadTimeoutValidation:
+    _NAME = "Validate traefik_public_read_timeout format"
+
+    def _holds(self, value) -> bool:
+        from ansible.plugins.test.core import TestModule
+
+        tasks = yaml.safe_load((ROOT / "roles" / "traefik" / "tasks" / "main.yml").read_text())
+        task = next(t for t in tasks if t.get("name") == self._NAME)
+        env = make_ansible_env(TEMPLATE_DIR)
+        env.tests.update(TestModule().tests())
+        return all(
+            bool(env.compile_expression(c.strip())(traefik_public_read_timeout=value))
+            for c in task["ansible.builtin.assert"]["that"]
+        )
+
+    @pytest.mark.parametrize("value", ["", None, "900", "900s", "15m", "1h30m", "500ms", 900])
+    def test_good_values_pass(self, value):
+        assert self._holds(value)
+
+    @pytest.mark.parametrize("value", ["15 minutes", "1.5h", "-1s", "15M", "s", "15m;"])
+    def test_bad_values_fail(self, value):
+        assert not self._holds(value)
+
+    def test_validation_runs_before_the_config_is_written(self):
+        tasks = yaml.safe_load((ROOT / "roles" / "traefik" / "tasks" / "main.yml").read_text())
+        names = [t.get("name") for t in tasks]
+        assert names.index(self._NAME) < names.index("Deploy Traefik static config")
 
 
 class TestSplitOnWithBlankIp:
