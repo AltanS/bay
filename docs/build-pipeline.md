@@ -760,6 +760,16 @@ rollback poll down can never make the probe stricter than baseline. See
   the tailnet IP; `curl --resolve <zot_domain>:443:<tailnet-ip> https://<zot_domain>/v2/`
   should return `200`/`401`, not `404`.
 
+**Registry push fails at exactly 60 seconds (502, zot logs `i/o timeout`):**
+- Zot and Traefik each cut a request whose body is still streaming when
+  their read limit runs out. Zot's own default is 60s for the whole body.
+- The zot role now sets `zot_http_read_timeout` and `zot_http_write_timeout`
+  (default `"30m"`). Traefik's limit is `traefik_tailnet_read_timeout` on the
+  tailnet entrypoint and `traefik_public_read_timeout` (opt-in) on the public
+  one. Raise the limit on the path the push takes. See
+  [build-strategies.md](build-strategies.md), "Registry accounts and time
+  limits".
+
 ## Remote Build Strategy Gotchas (v0.72.0+)
 
 - **`strategy: remote` builds on the build server, not the controller** —

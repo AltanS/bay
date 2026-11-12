@@ -11,6 +11,7 @@ How Docker images get built, distributed, and deployed across servers.
 - [Strategy: Remote](#strategy-remote)
   - [How it works](#how-it-works-1)
   - [Registry layer cache (opt-in)](#registry-layer-cache-opt-in)
+  - [Registry accounts and time limits](#registry-accounts-and-time-limits)
   - [Shared images across services](#shared-images-across-services)
 - [Strategy: Registry](#strategy-registry)
   - [How it works](#how-it-works-2)
@@ -229,6 +230,79 @@ and pruned hard.
   the build.
 - The flag applies to the remote strategy only, on both the `bay deploy`
   path and the webhook auto-build path. The local strategy is unaffected.
+- A pull-only account (below) cannot write the cache. Zot answers 403.
+
+### Registry accounts and time limits
+
+**Time limits.** A push or a pull to the Zot registry passes two servers:
+Traefik in front, then zot. Each one cuts a request that is still running
+when its own limit runs out. The symptom is a push that fails at exactly 60
+seconds, often with a 502, while zot logs `i/o timeout`.
+
+| Variable | Role | Default | What it limits |
+|---|---|---|---|
+| `zot_http_read_timeout` | zot | `"30m"` | Zot reading the whole request body (a push). |
+| `zot_http_write_timeout` | zot | `"30m"` | Zot writing the whole response body (a pull). |
+| `traefik_tailnet_read_timeout` | traefik | `"600s"` | Traefik reading a request on `websecure_tailnet`. The zot host pushes to itself on this path (the `/etc/hosts` pin). Only with `traefik_split_entrypoints`. |
+| `traefik_public_read_timeout` | traefik | `""` | Traefik reading a request on the public `websecure` entrypoint. Off by default (Traefik's 60s). |
+
+- The zot limits cover the whole body, not idle time. `""` renders nothing,
+  so zot keeps its 60s default. `"0s"` turns a zot limit off. They need zot
+  v2.1.17 or later.
+- Traefik has no write limit by default, so a pull is limited by zot only.
+- `traefik_public_read_timeout` applies to every router on that host, not
+  only the registry. Set it only in the group_vars of the host that serves
+  the registry, and only when machines push over the public address (a
+  developer machine, or a build host outside the tailnet). A long limit also
+  lets a slow client hold a public connection open that long.
+- Traefik takes whole seconds (`"900"`) or a Go duration (`"15m"`). Zot
+  takes a Go duration only (`"30m"`, `"1h30m"`).
+
+**Pull-only accounts.** The account in `docker_registries` for `zot_domain`
+is the admin: it pushes and deletes. `zot_pull_users` adds accounts that can
+only pull, for example for developer machines:
+
+```yaml
+# group_vars of the host that runs zot
+zot_pull_users:
+  - username: dev-laptop
+    password: "{{ secrets.zot_pull_dev_laptop }}"   # from the vault
+```
+
+On the developer machine:
+
+```bash
+docker login registry.example.com -u dev-laptop   # type the password at the prompt
+docker pull registry.example.com/acme/storefront:latest
+```
+
+- A pull account gets `read` on every repository. A push, a delete or a
+  buildx registry cache write answers 403.
+- With the list empty (the default) zot has one account, as before. With at
+  least one entry, zot denies by default and grants the admin every action
+  through `adminPolicy`.
+- Usernames: lowercase letters, digits, `.`, `_` and `-`, 63 characters at
+  most, unique, and never the admin username. The deploy refuses anything
+  else.
+- A deployment host that only pulls can use a pull account too: give it its
+  own `docker_registries` entry for `zot_domain` in its group_vars. The host
+  that runs zot and the build server must keep the admin entry, because the
+  zot role reads the admin from it and builds push with it.
+
+**Upgrade.**
+
+1. The first run on the zot host after the upgrade (`bay up`, or a
+   `bay deploy` that runs the rig roles) writes the two time limits into
+   `config.json`, so zot restarts once. Other regions pull from zot, so run
+   the zot host's environment first, or run `bay deploy <env> --tags zot`
+   on it before the other environments. Nothing else changes.
+2. To add pull accounts, put the passwords in the vault, set
+   `zot_pull_users`, and run `bay deploy <env> --tags zot`. The role
+   rewrites `htpasswd` and `config.json` and restarts zot once. Later
+   deploys with the same accounts change nothing.
+3. If machines push over the public address, set
+   `traefik_public_read_timeout` (for example `"30m"`) on the zot host and
+   run `bay deploy <env> --tags traefik`. Traefik restarts once.
 
 ### Shared images across services
 
