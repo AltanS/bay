@@ -4,7 +4,8 @@
 # The container itself is managed by the container_lifecycle role.
 #
 # Auth credentials are derived from the docker_registries entry matching
-# zot_domain — no separate zot_admin_username/password vars needed.
+# zot_domain — no separate zot_admin_username/password vars needed. That
+# account is the admin. zot_pull_users adds pull-only accounts.
 
 # -- Credential lookup --------------------------------------------------------
 
@@ -63,6 +64,87 @@
       reference them from group_vars/<region>/main.yml — never inline them
       in plain group_vars.
   when: zot_storage_driver == 's3'
+  tags: [zot]
+
+# -- Validation: request time limits -----------------------------------------
+# Go duration strings only (digits plus a unit, repeatable: "30m", "1h30m",
+# "0s"). zot refuses to start on a value it cannot parse, and a bad value
+# would only show up after the restart. "" is allowed and renders nothing.
+
+- name: Validate zot request time limits
+  ansible.builtin.assert:
+    that:
+      - >-
+        (zot_http_read_timeout | default('') | string | trim | length == 0)
+        or (zot_http_read_timeout | string | trim
+            is match('^([0-9]+(ns|us|ms|s|m|h))+$'))
+      - >-
+        (zot_http_write_timeout | default('') | string | trim | length == 0)
+        or (zot_http_write_timeout | string | trim
+            is match('^([0-9]+(ns|us|ms|s|m|h))+$'))
+    fail_msg: >-
+      zot_http_read_timeout and zot_http_write_timeout must be "" or a Go
+      duration such as "30m", "1h30m" or "0s" (digits plus ns, us, ms, s, m
+      or h). Got read='{{ zot_http_read_timeout }}',
+      write='{{ zot_http_write_timeout }}'.
+  tags: [zot]
+
+# -- Validation: pull-only accounts -------------------------------------------
+# zot_pull_users entries carry passwords. The two tasks that look at whole
+# entries use no_log, so a failure prints only the task name; the name says
+# what is wrong. The username checks never touch a password, so they keep
+# their messages.
+
+- name: Validate zot_pull_users is a list of username/password entries
+  ansible.builtin.assert:
+    that:
+      - zot_pull_users | default([], true) is sequence
+      - zot_pull_users | default([], true) is not string
+      - zot_pull_users | default([], true) is not mapping
+      - zot_pull_users | default([], true) | reject('mapping') | list | length == 0
+    # No values in this message: an entry may hold a password.
+    fail_msg: >-
+      zot_pull_users must be a list of entries, each a mapping with
+      `username` and `password` keys.
+  no_log: true
+  tags: [zot]
+
+- name: Validate every zot_pull_users entry has a non-empty username and password
+  ansible.builtin.assert:
+    that:
+      - >-
+        zot_pull_users | default([], true)
+        | map(attribute='username', default='') | map('string') | map('trim')
+        | select('equalto', '') | list | length == 0
+      - >-
+        zot_pull_users | default([], true)
+        | map(attribute='password', default='') | map('string')
+        | select('equalto', '') | list | length == 0
+    fail_msg: >-
+      Every zot_pull_users entry needs a non-empty `username` and a
+      non-empty `password` (take the password from the vault).
+  no_log: true
+  tags: [zot]
+
+- name: Validate zot_pull_users usernames
+  vars:
+    _zot_pull_names: >-
+      {{ zot_pull_users | default([], true)
+         | map(attribute='username') | map('string') | list }}
+  ansible.builtin.assert:
+    that:
+      # The name goes on the htpasswd command line and into config.json.
+      - >-
+        _zot_pull_names
+        | reject('match', '^[a-z0-9][a-z0-9._-]{0,62}$') | list | length == 0
+      - _zot_pull_names | unique | list | length == _zot_pull_names | length
+      - (_zot_creds.username | string) not in _zot_pull_names
+    fail_msg: >-
+      zot_pull_users usernames must be unique, must differ from the admin
+      username '{{ _zot_creds.username }}' (the docker_registries entry for
+      {{ zot_domain }}), and must match ^[a-z0-9][a-z0-9._-]{0,62}$
+      (lowercase letters, digits, '.', '_', '-'). Got:
+      {{ _zot_pull_names | join(', ') }}.
   tags: [zot]
 
 # -- Tailnet self-reach pin (GitHub #27) --------------------------------------
@@ -145,29 +227,62 @@
   notify: Restart zot
   tags: [zot]
 
+# -- htpasswd -----------------------------------------------------------------
+# The file holds the admin line (docker_registries entry for zot_domain) plus
+# one line per zot_pull_users entry, all bcrypt.
+#
 # htpasswd -B is bcrypt, which mixes in a RANDOM SALT: regenerating the
 # hash produces different bytes on every run even for unchanged credentials.
 # Writing it unconditionally therefore reported `changed` on every deploy and
 # fired `Restart zot` every deploy — bouncing the registry that other regions
-# pull images FROM mid-rollout. So verify the stored hash FIRST and only
-# regenerate when it does not match the configured credentials.
+# pull images FROM mid-rollout. So verify the stored file FIRST and only
+# regenerate when it does not match the configured accounts.
 #
-# `htpasswd -iv` exits 0 only on a match. Every failure mode we care about is
-# non-zero and must regenerate (verified against apache2-utils):
-#   rc 1  file missing / unreadable      rc 3  password changed
-#   rc 6  username changed, or empty file (user not found)
-#   rc 7  malformed file / empty hash
-# so `rc != 0` is the correct regenerate condition — no rc allow-list.
-
+# The WHOLE file is regenerated when either check fails:
+#   1. A wanted account does not verify. `htpasswd -iv` exits 0 only on a
+#      match. Every failure mode we care about is non-zero and must
+#      regenerate (verified against apache2-utils):
+#        rc 1  file missing / unreadable      rc 3  password changed
+#        rc 6  username changed, or empty file (user not found)
+#        rc 7  malformed file / empty hash
+#      so `rc != 0` is the correct condition, no rc allow-list.
+#   2. The user names in the file differ from the wanted names. Verify alone
+#      cannot see a line that should NOT be there: a removed pull account
+#      would keep working, and so would an unknown line added by hand.
+#
 # `-i` reads the password from stdin. It used to be `-b`, which takes it as an
 # argument: no_log hides it from Ansible, but `ps` on the target host showed it
-# to any local user for the life of the call.
+# to any local user for the life of the call. The loops label each item with
+# the username only, and no_log hides the rest.
+
+- name: Collect the htpasswd accounts (admin plus pull-only)
+  ansible.builtin.set_fact:
+    _zot_htpasswd_users: "{{ [_zot_creds] + (zot_pull_users | default([], true)) }}"
+  no_log: true
+  tags: [zot]
+
+# Read-only probe. `cut` prints the field before the first ':' of every line,
+# never a hash. A missing file exits 1 with no output, which reads as "no
+# users" and so regenerates. check_mode: false for the same reason as the
+# verify below.
+- name: Read user names in the existing htpasswd file
+  ansible.builtin.command:
+    cmd: "cut -d : -f 1 -- {{ zot_config_dir }}/htpasswd"
+  register: _zot_htpasswd_names
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  tags: [zot]
+
 - name: Verify existing htpasswd file matches configured credentials
   ansible.builtin.command:
     cmd: >-
       htpasswd -ivB {{ zot_config_dir }}/htpasswd
-      {{ _zot_creds.username }}
-    stdin: "{{ _zot_creds.password }}"
+      {{ item.username }}
+    stdin: "{{ item.password }}"
+  loop: "{{ _zot_htpasswd_users }}"
+  loop_control:
+    label: "{{ item.username }}"
   register: _zot_htpasswd_check
   changed_when: false
   failed_when: false
@@ -178,28 +293,45 @@
   no_log: true
   tags: [zot]
 
+# Sorted lists, not sets: a duplicate line also counts as a difference.
+# Blank lines are ignored; htpasswd ignores them too.
+- name: Decide whether the htpasswd file must be regenerated
+  ansible.builtin.set_fact:
+    _zot_htpasswd_regenerate: >-
+      {{ (_zot_htpasswd_check.results | map(attribute='rc')
+          | reject('equalto', 0) | list | length > 0)
+         or ((_zot_htpasswd_names.stdout_lines | reject('equalto', '') | sort)
+             != (_zot_htpasswd_users | map(attribute='username')
+                 | map('string') | sort)) }}
+  tags: [zot]
+
 - name: Generate htpasswd file
   ansible.builtin.command:
     cmd: >-
-      htpasswd -iBn {{ _zot_creds.username }}
-    stdin: "{{ _zot_creds.password }}"
+      htpasswd -iBn {{ item.username }}
+    stdin: "{{ item.password }}"
+  loop: "{{ _zot_htpasswd_users }}"
+  loop_control:
+    label: "{{ item.username }}"
   register: _zot_htpasswd
   changed_when: false
   # Writes to stdout only, never to disk — safe to run under --check so the
   # write task below has real content to diff against.
   check_mode: false
   no_log: true
-  when: _zot_htpasswd_check.rc != 0
+  when: _zot_htpasswd_regenerate | bool
   tags: [zot]
 
+# Ansible strips the trailing newlines of each stdout; the join and the final
+# newline give one line per account.
 - name: Write htpasswd file
   ansible.builtin.copy:
-    content: "{{ _zot_htpasswd.stdout }}\n"
+    content: "{{ _zot_htpasswd.results | map(attribute='stdout') | join('\n') }}\n"
     dest: "{{ zot_config_dir }}/htpasswd"
     owner: "{{ app_user }}"
     mode: "0600"
   no_log: true
-  when: _zot_htpasswd_check.rc != 0
+  when: _zot_htpasswd_regenerate | bool
   notify: Restart zot
   tags: [zot]
 

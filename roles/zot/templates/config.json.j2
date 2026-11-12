@@ -51,6 +51,14 @@
     "address": "0.0.0.0",
     "port": "{{ zot_port }}",
     "realm": "{{ zot_domain }}",
+{# Request time limits (roles/zot/defaults/main.yml). Each key renders only
+   when its var is non-empty, so "" keeps zot's own 60s default. #}
+{% if zot_http_read_timeout | default('') | string | trim %}
+    "readTimeout": {{ zot_http_read_timeout | string | trim | to_json }},
+{% endif %}
+{% if zot_http_write_timeout | default('') | string | trim %}
+    "writeTimeout": {{ zot_http_write_timeout | string | trim | to_json }},
+{% endif %}
 {# docker2s2 compat is required for `docker push` to work. Zot is OCI-only by
    default and rejects Docker v2s2 manifests with HTTP 415 without this flag. #}
     "compat": ["docker2s2"],
@@ -59,7 +67,28 @@
         "path": "/etc/zot/htpasswd"
       },
       "failDelay": 5
-    }
+    }{% if zot_pull_users | default([], true) %},
+{# Pull-only accounts (zot_pull_users). With accessControl present zot denies
+   by default: the admin from docker_registries gets every action, the pull
+   accounts get read on every repository. Absent when the list is empty, so
+   the admin stays the only account, as before. #}
+    "accessControl": {
+      "repositories": {
+        "**": {
+          "policies": [
+            {
+              "users": {{ zot_pull_users | default([], true) | map(attribute='username') | map('string') | list | to_json }},
+              "actions": ["read"]
+            }
+          ]
+        }
+      },
+      "adminPolicy": {
+        "users": [{{ _zot_creds.username | string | to_json }}],
+        "actions": ["read", "create", "update", "delete"]
+      }
+    }{% endif %}
+
   },
   "log": {
     "level": "info"

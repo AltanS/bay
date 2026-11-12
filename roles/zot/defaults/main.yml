@@ -19,6 +19,12 @@
 # The role derives htpasswd from the `docker_registries` entry matching
 # `zot_domain`, so the same credential authenticates both `docker login`
 # (deployment servers, build server) and the registry's own auth challenge.
+# That account is the admin: it can push and delete. `zot_pull_users` (below)
+# adds accounts that can only pull.
+#
+# Time limits: zot and Traefik each cut a request that takes longer than
+# their own read limit. See `zot_http_read_timeout` below and the two
+# Traefik vars it names.
 #
 # Tailnet self-reach (GitHub #27): under traefik_split_entrypoints the zot
 # router binds both `websecure` and `websecure_tailnet` so infra-originated
@@ -67,7 +73,57 @@ zot_storage_root: /var/lib/registry
 
 # Auth credentials are derived from the docker_registries entry matching
 # zot_domain. No separate credential vars needed — docker_registries is
-# the single source of truth for all registry authentication.
+# the single source of truth for the admin account.
+
+# ── Pull-only accounts ────────────────────────────────────────────
+# A list of {username, password}. Each account may read (pull) every
+# repository and nothing else. The admin account (the docker_registries
+# entry for zot_domain) stays the only one that can push and delete.
+# Use these for developer machines and, if you want, for deployment
+# hosts that only pull.
+#
+# Take every password from the vault, never inline it:
+#
+#   zot_pull_users:
+#     - username: dev-laptop
+#       password: "{{ secrets.zot_pull_dev_laptop }}"
+#
+# A machine logs in with `docker login <zot_domain> -u <username>` and
+# types the password at the prompt.
+#
+# A pull account cannot write a buildx registry cache
+# (git_deploy_registry_cache): that is a push, and zot answers 403.
+#
+# Empty (the default) renders no `accessControl` block, so the admin
+# account is the only account, as before. With at least one entry, zot
+# switches to deny by default: the admin gets every action through
+# `adminPolicy`, the pull accounts get `read`. Usernames: lowercase
+# letters, digits, `.`, `_`, `-`; 63 characters at most; unique; never
+# the admin username. Adding or removing an account rewrites htpasswd
+# and config.json and restarts zot once.
+zot_pull_users: []
+
+# ── Request time limits ───────────────────────────────────────────
+# zot's `http.readTimeout` is an absolute limit for reading the WHOLE
+# request, body included. `http.writeTimeout` is the same for writing
+# the whole response. Zot's own default is 60s for both. A blob upload
+# that still streams at 60s is cut: zot logs `i/o timeout` and the proxy
+# answers 502. A large pull over a slow link is cut the same way on the
+# write side.
+#
+# "30m" covers a large layer on a slow link. "" renders nothing, so zot
+# uses its 60s default. "0s" turns the limit off. Values are Go
+# durations (digits plus ns, us, ms, s, m or h, e.g. "45m", "1h30m").
+# The keys need zot v2.1.17 or later. Zot reads them only at start, so
+# a change restarts zot.
+#
+# Traefik, in front of zot, has its own read limit (60s by default):
+# `traefik_tailnet_read_timeout` for the tailnet entrypoint and
+# `traefik_public_read_timeout` for the public one (both in
+# roles/traefik/defaults/main.yml). A slow push needs both limits raised
+# on the path it takes.
+zot_http_read_timeout: "30m"
+zot_http_write_timeout: "30m"
 
 # ── Garbage collection ────────────────────────────────────────────
 # gcDelay: minimum age of a blob before it's eligible for GC. Must be
