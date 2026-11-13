@@ -765,6 +765,8 @@ def _egress_rules(
     (Watchtower would recreate it outside Bay). ``dns`` is required and every
     resolver must be a public IPv4 address. ``egress_clients`` names the
     sibling services that may call it; the main container always may.
+    ``egress_fleet = "web"`` (only with ``egress``, never inherited) also opens
+    tcp 80 and 443 on the public address of every fleet box.
     """
     from bay_reconcile.egressnet import is_blocked_v4
 
@@ -781,6 +783,12 @@ def _egress_rules(
                 yield Violation(
                     _join(base, "egress_clients"),
                     'only a service with egress = "public" has clients; remove the key',
+                )
+            if "egress_fleet" in svc:
+                yield Violation(
+                    _join(base, "egress_fleet"),
+                    'only a service with egress = "public" may reach the fleet\'s web '
+                    "ports; a service without egress reaches them already. Remove the key",
                 )
             continue
         if "port" not in svc:

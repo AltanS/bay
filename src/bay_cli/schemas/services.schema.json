@@ -435,6 +435,11 @@
               "uniqueItems": true,
               "items": { "type": "string" },
               "description": "Container names that join the egress network (the main container of the project environment first)."
+            },
+            "fleet": {
+              "type": "string",
+              "enum": ["web"],
+              "description": "bay.toml egress_fleet: the container may also open new tcp connections to ports 80 and 443 of the public address of every inventory box (ansible_host, netplan_address), its own box too. Absent means the fleet stays closed."
             }
           }
         },

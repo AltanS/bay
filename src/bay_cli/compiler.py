@@ -665,6 +665,10 @@ class _Compiler:
                     if c in unit.containers
                 ]
                 entry["egress"] = {"mode": level["egress"], "port": port, "clients": clients}
+                if "egress_fleet" in level:
+                    # Also tcp 80 and 443 on the fleet's public box addresses.
+                    # Absent when unset, so no existing services.yml changes.
+                    entry["egress"]["fleet"] = level["egress_fleet"]
             self.accessories[name] = entry
             return
 

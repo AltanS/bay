@@ -174,6 +174,37 @@ def test_egress_is_not_a_key_of_the_main_container_or_a_deploy_env():
     assert "deploy.production.egress" in _paths(doc)
 
 
+def test_egress_fleet_web_on_an_egress_service_is_valid():
+    assert bay_toml.validate(_doc({"egress_fleet": "web"})) == []
+
+
+def _fleet_refusals() -> list[tuple[dict[str, Any], str, str]]:
+    no_egress = _doc()
+    no_egress["services"]["worker"] = {"image": "x:1", "egress_fleet": "web"}
+    in_env = _doc()
+    in_env["deploy"]["production"]["egress_fleet"] = "web"
+    env_override = _doc()
+    env_override["deploy"]["production"]["services"] = {"steel": {"egress_fleet": "web"}}
+    in_job = _doc(jobs=[{"name": "nightly", "schedule": "0 2 * * *", "command": "x",
+                         "egress_fleet": "web"}])
+    return [
+        (no_egress, "services.worker.egress_fleet", 'only a service with egress = "public"'),
+        (_doc({"egress_fleet": "all"}), "services.steel.egress_fleet", 'must be "web"'),
+        (_doc({"egress_fleet": True}), "services.steel.egress_fleet", ""),
+        (_doc(egress_fleet="web"), "egress_fleet", "unknown key"),
+        (in_env, "deploy.production.egress_fleet", "unknown key"),
+        (env_override, "deploy.production.services.steel.egress_fleet", "only domain"),
+        (in_job, "jobs[0].egress_fleet", ""),
+    ]
+
+
+@pytest.mark.parametrize(("doc", "path", "words"), _fleet_refusals())
+def test_egress_fleet_is_refused_anywhere_but_an_egress_service(doc, path, words):
+    found = _paths(doc)
+    assert path in found, found
+    assert words in found[path], found[path]
+
+
 def test_the_validator_and_the_firewall_block_the_same_ranges():
     for resolver in ("1.1.1.1", "9.9.9.9", "8.8.8.8"):
         assert not en.is_blocked_v4(resolver)
@@ -250,6 +281,38 @@ def test_compile_egress_only_adds_the_egress_block(fleet):
     )
 
 
+def test_compile_egress_fleet_adds_fleet_web(fleet):
+    _append(fleet, _STEEL_TOML + 'egress = "public"\negress_fleet = "web"\n')
+    out = yaml.safe_load(_compile(fleet).body())
+    assert out["accessories"]["shop-steel"]["egress"] == {
+        "mode": "public", "port": 3000, "clients": ["shop"], "fleet": "web",
+    }
+    assert out["accessories"]["shop-staging-steel"]["egress"]["fleet"] == "web"
+
+
+def test_compile_egress_fleet_only_adds_the_fleet_line(fleet):
+    """Control: the same egress service with and without the key differs by one line per env."""
+    _append(fleet, _STEEL_TOML + 'egress = "public"\n')
+    before = _compile(fleet).body().splitlines()
+    _append(fleet, 'egress_fleet = "web"\n')
+    after = _compile(fleet).body().splitlines()
+    added = [ln.strip() for ln in after if ln not in before and "sha256" not in ln]
+    removed = [ln for ln in before if ln not in after and "sha256" not in ln]
+    assert removed == []
+    assert added == ["fleet: web", "fleet: web"]
+
+
+# The sha256 of the compiled body of fleet_min plus the steel service with
+# `egress` and no `egress_fleet`, taken from Bay 2.21.0 (before the key
+# existed). The key is absent when unset, so the body stays byte for byte.
+_GOLDEN_EGRESS_BODY = "75cbcfa61d9d800f9970b1cf"  # the first 24 hex digits
+
+
+def test_compile_without_egress_fleet_is_byte_identical_to_before(fleet):
+    _append(fleet, _STEEL_TOML + 'egress = "public"\n')
+    assert compiler.body_digest(_compile(fleet).body()).startswith(_GOLDEN_EGRESS_BODY)
+
+
 # ── services.yml schema ──────────────────────────────────────────────────
 
 
@@ -264,6 +327,7 @@ def _schema_errors(acc_extra: dict) -> list:
 def test_services_schema_accepts_egress_on_an_accessory():
     egress = {"mode": "public", "port": 3000, "clients": ["shop"]}
     assert _schema_errors({"egress": egress}) == []
+    assert _schema_errors({"egress": {**egress, "fleet": "web"}}) == []
 
 
 @pytest.mark.parametrize(
@@ -273,6 +337,8 @@ def test_services_schema_accepts_egress_on_an_accessory():
         {"mode": "public", "clients": ["a"]},
         {"mode": "public", "port": 3000, "clients": []},
         {"mode": "public", "port": 3000, "clients": ["a"], "extra": 1},
+        {"mode": "public", "port": 3000, "clients": ["a"], "fleet": "all"},
+        {"mode": "public", "port": 3000, "clients": ["a"], "fleet": True},
         "public",
     ],
 )

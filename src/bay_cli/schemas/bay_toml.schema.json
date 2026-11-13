@@ -162,6 +162,13 @@
         "enum": "must be \"public\" (the container may reach the public internet only); remove the key for normal networking"
       }
     },
+    "egress_fleet": {
+      "type": "string",
+      "enum": ["web"],
+      "x-messages": {
+        "enum": "must be \"web\" (the egress container may also open tcp 80 and 443 on the public address of every fleet box); remove the key to keep the fleet closed"
+      }
+    },
     "egress_clients": {
       "type": "array",
       "minItems": 1,
@@ -472,6 +479,7 @@
         "dns": { "$ref": "#/$defs/dns" },
         "egress": { "$ref": "#/$defs/egress" },
         "egress_clients": { "$ref": "#/$defs/egress_clients" },
+        "egress_fleet": { "$ref": "#/$defs/egress_fleet" },
         "replicas": { "$ref": "#/$defs/replicas" },
         "zero_downtime": { "type": "boolean" },
         "update": { "$ref": "#/$defs/update" },
