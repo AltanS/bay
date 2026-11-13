@@ -16,6 +16,19 @@
 # Tailscale's accepts, and an accept here (established traffic, the one
 # allowed client connection) changes nothing for the chains after it.
 #
+{# The egress_fleet lines below render only when a container sets
+   `egress_fleet = "web"`, so a box without it keeps the same file, byte for
+   byte, and `nft -f` does not run again for nothing. #}
+{% set _fleet_on = _egress_rules | selectattr('fleet_web', 'defined') | selectattr('fleet_web') | list | length > 0 %}
+{% if _fleet_on %}
+# The one exception: a container with bay.toml `egress_fleet = "web"` may
+# also open new tcp connections to ports 80 and 443 of the fleet's public box
+# addresses (ansible_host, netplan_address), from its own address only. Other
+# boxes: chain from_egress. This box: chain egress_to_host. No other port, no
+# UDP, no IPv6, no tailnet or private address, and no address in
+# bay_egress_blocked_extra.
+#
+{% endif %}
 # Published ports are DNATed in prerouting, before forward, so a connection
 # from an egress container to a box address and a published port arrives here
 # as a container address (172.16/12) and meets the blocked set.
@@ -38,6 +51,10 @@ table inet bay_egress {
     # IPv4 ranges an egress container may never reach: private, tailnet and
     # MagicDNS (100.64/10), loopback, link-local, multicast and reserved, and
     # the public address of every box in the inventory.
+{% if _fleet_on %}
+    # Exception: the egress_fleet accepts in from_egress run before the drops
+    # of this set and open tcp 80 and 443 of the box addresses only.
+{% endif %}
     set blocked_v4 {
         type ipv4_addr
         flags interval
@@ -59,6 +76,11 @@ table inet bay_egress {
 {% for _e in _egress_rules %}
         # {{ _e.container }}: a client on its network may open {{ _e.address }}:{{ _e.port }}.
         iifname "{{ _e.bridge }}" oifname "{{ _e.bridge }}" ip daddr {{ _e.address }} tcp dport {{ _e.port }} ct state new accept
+{% endfor %}
+{% for _e in _egress_rules if (_e.fleet_web | default(false)) and (_egress_fleet_other | default([])) %}
+        # {{ _e.container }} (egress_fleet = "web"): the web ports of the other fleet boxes,
+        # from its own address only, never into an egress network.
+        iifname "{{ _e.bridge }}" oifname != "bayeg*" ip saddr {{ _e.address }} ip daddr { {{ _egress_fleet_other | join(', ') }} } tcp dport { 80, 443 } ct state new counter accept
 {% endfor %}
         # Any other new connection inside one egress network, or between two
         # (the egress container to its clients, too), is dropped.
@@ -82,6 +104,10 @@ table inet bay_egress {
 
     chain egress_to_host {
         ct state established,related accept
+{% for _e in _egress_rules if (_e.fleet_web | default(false)) and (_egress_fleet_self | default([])) %}
+        # {{ _e.container }} (egress_fleet = "web"): the web ports of this box's public address.
+        iifname "{{ _e.bridge }}" ip saddr {{ _e.address }} ip daddr { {{ _egress_fleet_self | join(', ') }} } tcp dport { 80, 443 } ct state new counter accept
+{% endfor %}
         limit rate 10/minute burst 20 packets log prefix "bay-egress-host: " level info
         counter drop
     }

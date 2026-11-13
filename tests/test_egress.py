@@ -64,6 +64,7 @@ from bay_filters import (  # noqa: E402
     bay_egress_blocked_v4,
     bay_egress_bridge,
     bay_egress_client_networks,
+    bay_egress_fleet_v4,
     bay_egress_network,
     bay_egress_sidecars,
     bay_prefix_volumes,
@@ -382,6 +383,78 @@ def test_blocked_set_merges_box_addresses_and_skips_names_and_ipv6():
     assert not any(a.overlaps(b) for i, a in enumerate(nets) for b in nets[i + 1:])
 
 
+def test_a_box_named_by_its_tailnet_address_adds_nothing_to_the_blocked_set():
+    """The blocked set already covers 100.64/10, so a tailnet entry merges away."""
+    out = bay_egress_blocked_v4(["100.64.0.7", "10.1.2.3"])
+    assert out == bay_egress_blocked_v4()
+    assert "100.64.0.7/32" not in out
+
+
+def test_fleet_addresses_are_single_public_ipv4_only():
+    out = bay_egress_fleet_v4([
+        "203.0.113.12", "203.0.113.11", "203.0.113.12",  # sorted, each once
+        "box.example.com", "2001:db8::1", "", "203.0.113.0/24",  # no name, IPv6, network
+        "100.64.0.7", "100.100.100.100", "10.1.2.3", "172.31.240.2", "192.168.1.5",
+        "127.0.0.1", "169.254.169.254",  # tailnet, private, reserved: never opened
+    ])
+    assert out == ["203.0.113.11", "203.0.113.12"]
+
+
+def test_a_blocked_extra_address_is_never_opened():
+    boxes = ["203.0.113.11", "203.0.113.12", "198.51.100.7"]
+    assert bay_egress_fleet_v4(boxes, ["203.0.113.12"]) == ["198.51.100.7", "203.0.113.11"]
+    assert bay_egress_fleet_v4(boxes, ["203.0.113.0/24"]) == ["198.51.100.7"]
+    assert bay_egress_fleet_v4(boxes, ["box.example.com", "2001:db8::/32"]) == sorted(boxes)
+
+
+def _egress_task_vars() -> dict[str, str]:
+    tasks = yaml.safe_load(_EGRESS.read_text())
+    return next(t for t in tasks if t["name"] == "Install the egress firewall")["vars"]
+
+
+def _render_fleet_lists(hostvars: dict, me: str, extra: list | None = None) -> tuple[list, list]:
+    task_vars = _egress_task_vars()
+    env = Environment()
+    env.filters["bay_egress_fleet_v4"] = bay_egress_fleet_v4
+    ctx: dict[str, Any] = {"hostvars": hostvars, "groups": {"all": list(hostvars)},
+                           "inventory_hostname": me}
+    if extra is not None:
+        ctx["bay_egress_blocked_extra"] = extra
+    own = eval(env.from_string(task_vars["_egress_fleet_self"]).render(**ctx))  # noqa: S307
+    ctx["_egress_fleet_self"] = own
+    other = eval(env.from_string(task_vars["_egress_fleet_other"]).render(**ctx))  # noqa: S307
+    return own, other
+
+
+_INVENTORY = {
+    "na": {"ansible_host": "203.0.113.11"},
+    "eu": {"ansible_host": "100.64.0.7", "netplan_address": "203.0.113.12"},  # tailnet name
+    "203.0.113.13": {},  # the inventory name is the address
+    "infra": {"ansible_host": "infra.example.com"},  # a name: skipped
+    "lab": {"netplan_address": "10.0.0.5"},  # private: never opened
+    "old": {"ansible_host": "198.51.100.7"},  # in bay_egress_blocked_extra below
+}
+
+
+def test_the_task_splits_this_box_from_the_other_boxes():
+    own, other = _render_fleet_lists(_INVENTORY, "na", extra=["198.51.100.7"])
+    assert own == ["203.0.113.11"]
+    assert other == ["203.0.113.12", "203.0.113.13"]
+    own, other = _render_fleet_lists(_INVENTORY, "eu")
+    assert own == ["203.0.113.12"]
+    assert other == ["198.51.100.7", "203.0.113.11", "203.0.113.13"]
+
+
+def test_an_address_listed_for_two_hosts_counts_as_this_box_only():
+    inv = {"a": {"ansible_host": "203.0.113.11"}, "alias": {"netplan_address": "203.0.113.11"}}
+    assert _render_fleet_lists(inv, "a") == (["203.0.113.11"], [])
+
+
+def test_the_task_marks_only_flagged_containers():
+    text = _egress_task_vars()["_egress_rules"]
+    assert "'fleet_web': (active_accessories[s].egress.fleet | default('')) == 'web'" in text
+
+
 # ── build_specs.yml and reconcile.yml ────────────────────────────────────
 
 
@@ -459,6 +532,18 @@ def test_the_egress_accessory_is_alone_pinned_and_hardened():
     assert spec["network_ips"] == {"services-egress-shop-steel": "172.31.244.18"}
     assert spec["cap_drop"] == ["NET_RAW"]
     assert spec["security_opt"] == ["no-new-privileges:true"]
+
+
+def test_egress_fleet_does_not_change_the_container_spec():
+    """The key reaches the firewall only, so the config hash stays: no recreate."""
+    acc = _ACCESSORIES["shop-steel"]
+    flagged = {**acc, "egress": {**acc["egress"], "fleet": "web"}}
+    accs = {**_ACCESSORIES, "shop-steel": flagged}
+    with_key = _render_optional("Build accessory container specs",
+                                **_accessory_ctx("shop-steel", flagged, accs, _NETS))
+    without = _render_optional("Build accessory container specs",
+                               **_accessory_ctx("shop-steel", acc, _ACCESSORIES, _NETS))
+    assert with_key == without
 
 
 def test_a_partial_pass_without_addresses_builds_no_network_ips():
@@ -965,14 +1050,17 @@ _RULES = [
 ]
 
 
-def _render_nft(rules: list[dict[str, Any]] = _RULES) -> str:
+def _render_nft(rules: list[dict[str, Any]] = _RULES, **fleet: Any) -> str:
     from helpers import make_ansible_env
 
     env = make_ansible_env(_TEMPLATE_DIR)
     return env.get_template("bay-egress.conf.j2").render(
         ansible_managed="test",
         _egress_rules=rules,
-        _egress_blocked=bay_egress_blocked_v4(["203.0.113.11", "203.0.113.12"]),
+        _egress_blocked=fleet.pop(
+            "blocked", bay_egress_blocked_v4(["203.0.113.11", "203.0.113.12"])
+        ),
+        **fleet,
     )
 
 
@@ -1018,6 +1106,73 @@ def test_nft_base_chains_jump_only_from_egress_bridges():
             assert body and all("bayeg*" in b and " jump " in f" {b}" for b in body), body
 
 
+# ── egress_fleet = "web" in the nftables file ────────────────────────────
+
+# sha256 of _render_nft() with the template of Bay 2.21.0, before egress_fleet.
+_GOLDEN_NFT = "8e7682d8a2bf60cdac663724"  # the first 24 hex digits
+
+_OTHER = ["198.51.100.7", "203.0.113.12"]
+_SELF = ["203.0.113.11"]
+_FLAGGED = [{**_RULES[0], "fleet_web": True}, {**_RULES[1], "fleet_web": False}]
+
+
+def _sha(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_nft_file_without_egress_fleet_is_byte_identical_to_before():
+    assert _sha(_render_nft()).startswith(_GOLDEN_NFT)
+    # The lists alone change nothing: only a flagged container opens them.
+    unflagged = [{**r, "fleet_web": False} for r in _RULES]
+    assert _sha(_render_nft(unflagged, _egress_fleet_other=_OTHER,
+                            _egress_fleet_self=_SELF)).startswith(_GOLDEN_NFT)
+
+
+def _chain(text: str, name: str) -> str:
+    start = text.index(f"    chain {name} {{")
+    return text[start:text.index("\n    }", start)]
+
+
+def test_nft_fleet_rules_are_on_the_flagged_container_only_and_before_the_drops():
+    text = _render_nft(_FLAGGED, _egress_fleet_other=_OTHER, _egress_fleet_self=_SELF)
+    flagged, plain = _RULES[0], _RULES[1]
+    fwd = (f'iifname "{flagged['bridge']}" oifname != "bayeg*" ip saddr {flagged['address']} '
+           "ip daddr { 198.51.100.7, 203.0.113.12 } tcp dport { 80, 443 } ct state new "
+           "counter accept")
+    inp = (f'iifname "{flagged['bridge']}" ip saddr {flagged['address']} '
+           "ip daddr { 203.0.113.11 } tcp dport { 80, 443 } ct state new counter accept")
+    assert text.count(fwd) == 1 and text.count(inp) == 1
+    # Nothing for the unflagged container on the same box.
+    assert text.count("dport { 80, 443 }") == 2
+    from_egress = _chain(text, "from_egress")
+    assert plain["bridge"] not in from_egress.split(f'ip daddr {plain["address"]}')[1]
+    order = ["ct state established,related accept", "meta nfproto ipv6 counter drop", fwd,
+             'oifname "bayeg*" counter drop', "ip daddr @blocked_v4 limit rate",
+             "ip daddr @blocked_v4 counter drop"]
+    assert [from_egress.index(s) for s in order] == sorted(from_egress.index(s) for s in order)
+    to_host = _chain(text, "egress_to_host")
+    assert plain["bridge"] not in to_host and plain["address"] not in to_host
+    order = ["ct state established,related accept", inp, "limit rate 10/minute", "counter drop"]
+    assert [to_host.index(s) for s in order] == sorted(to_host.index(s) for s in order)
+    assert inp not in from_egress and fwd not in to_host
+    # Nothing in the bridge table, and the header names the exception.
+    assert "80, 443" not in text[text.index("table bridge bay_egress {\n"):]
+    assert 'egress_fleet = "web"' in text.split("table inet bay_egress {}")[0]
+
+
+def test_nft_fleet_rules_need_a_non_empty_list():
+    no_other = _render_nft(_FLAGGED, _egress_fleet_other=[], _egress_fleet_self=_SELF)
+    assert "dport { 80, 443 }" not in _chain(no_other, "from_egress")
+    assert "dport { 80, 443 }" in _chain(no_other, "egress_to_host")
+    no_self = _render_nft(_FLAGGED, _egress_fleet_other=_OTHER, _egress_fleet_self=[])
+    assert "dport { 80, 443 }" in _chain(no_self, "from_egress")
+    assert "dport { 80, 443 }" not in _chain(no_self, "egress_to_host")
+    neither = _render_nft(_FLAGGED)
+    assert "dport { 80, 443 }" not in neither
+
+
 def _userns_nft() -> bool:
     if not shutil.which("nft") or not shutil.which("unshare"):
         return False
@@ -1049,6 +1204,22 @@ def test_nft_file_passes_nft_check_and_loads_twice(tmp_path):
     run = subprocess.run(["unshare", "-rn", "sh", "-c", script], capture_output=True,
                          text=True, check=False, env={"REMOVAL": removal, "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
     assert run.returncode == 0, run.stderr
+
+
+@needs_nft
+def test_nft_file_with_egress_fleet_passes_nft_check_and_loads(tmp_path):
+    path = tmp_path / "bay-egress.conf"
+    path.write_text(_render_nft(_FLAGGED, _egress_fleet_other=_OTHER, _egress_fleet_self=_SELF))
+    check = subprocess.run(["unshare", "-rn", "nft", "-c", "-f", str(path)],
+                           capture_output=True, text=True, check=False)
+    assert check.returncode == 0, check.stderr
+    run = subprocess.run(
+        ["unshare", "-rn", "sh", "-c",
+         f"nft -f {path} && nft -f {path} && nft list chain inet bay_egress egress_to_host"],
+        capture_output=True, text=True, check=False,
+    )
+    assert run.returncode == 0, run.stderr
+    assert "tcp dport { 80, 443 }" in run.stdout
 
 
 # ── tasks wiring ─────────────────────────────────────────────────────────
@@ -1162,7 +1333,7 @@ def test_rebuild_without_egress_is_byte_identical_to_no_accessories():
 
 # ── the rules on real packets (throwaway network namespaces) ─────────────
 
-_NETNS_SCRIPT = r"""
+_NETNS_BASE = r"""
 set -e
 mount -t tmpfs none /run
 mkdir -p /run/netns
@@ -1197,11 +1368,17 @@ for port in 3000 8080; do
   ip netns exec steel python3 -m http.server $port --bind 0.0.0.0 >/dev/null 2>&1 &
 done
 python3 -m http.server 9999 --bind 0.0.0.0 >/dev/null 2>&1 &
+"""
+
+_NETNS_PROBE = r"""
 sleep 1.5
 probe() {
   if ip netns exec $1 timeout 1 bash -c "cat < /dev/null > /dev/tcp/$2/$3" 2>/dev/null
   then echo "open $1 $2:$3"; else echo "blocked $1 $2:$3"; fi
 }
+"""
+
+_NETNS_SCRIPT = _NETNS_BASE + _NETNS_PROBE + r"""
 # Control: before the rules everything is open, so each "blocked" below is the rules' doing.
 for target in "steel 10.9.0.2 8080" "steel 172.31.240.1 9999" "steel 172.31.240.8 8080" \
               "app 172.31.240.2 8080"; do
@@ -1259,3 +1436,157 @@ def test_the_rules_hold_on_real_packets_without_br_netfilter(tmp_path):
         "before open steel 172.31.240.8:8080",
         "before open app 172.31.240.2:8080",
     } <= seen, run.stdout
+
+
+# ── egress_fleet = "web" on real packets ─────────────────────────────────
+#
+# The same box as above, plus:
+#   fleet   another fleet box: 203.0.113.2 (in the fleet list) and 203.0.113.3
+#           (a box that is also in bay_egress_blocked_extra), and 100.64.0.5,
+#           a tailnet address. Listens on tcp 22, 80, 443, 8080 and udp 443.
+#   lo      this box's own public address 203.0.113.100; the box listens on
+#           tcp 22, 80 and 443 (Traefik on the host network).
+#   plain   a second egress container without the key, on its own bridge
+#           $BR2 (172.31.240.16/28) at .18.
+#   app     the client of the flagged container gets a route through the
+#           egress network, so its packets meet the rules on that bridge.
+# A udp probe sends a tag; the listener touches /run/udp-<tag>.
+
+_LISTEN = r"""
+import socket, sys, threading
+def tcp(port):
+    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.bind(("0.0.0.0", port)); s.listen(16)
+    while True:
+        c, _ = s.accept(); c.close()
+def udp(port):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind(("0.0.0.0", port))
+    while True:
+        data, _ = s.recvfrom(64); open("/run/udp-" + data.decode().strip(), "w").close()
+for arg in sys.argv[1:]:
+    target, port = (udp, int(arg[1:])) if arg.startswith("u") else (tcp, int(arg))
+    threading.Thread(target=target, args=(port,), daemon=True).start()
+threading.Event().wait()
+"""
+
+_NETNS_FLEET = r"""
+ip netns add fleet
+ip link add vfleet type veth peer name eth0 netns fleet
+ip addr add 203.0.113.1/25 dev vfleet
+ip link set vfleet up
+ip route add 100.64.0.5/32 dev vfleet
+ip -n fleet addr add 203.0.113.2/25 dev eth0
+ip -n fleet addr add 203.0.113.3/25 dev eth0
+ip -n fleet addr add 100.64.0.5/32 dev eth0
+ip -n fleet link set eth0 up
+ip -n fleet link set lo up
+ip -n fleet route add default via 203.0.113.1
+ip addr add 203.0.113.100/32 dev lo
+ip netns add plain
+ip link add "$BR2" type bridge
+ip addr add 172.31.240.17/28 dev "$BR2"
+ip link set "$BR2" up
+ip link add vplain type veth peer name eth0 netns plain
+ip link set vplain master "$BR2" up
+ip -n plain link set eth0 up
+ip -n plain addr add 172.31.240.18/28 dev eth0
+ip -n plain route add default via 172.31.240.17
+ip -n app route add default via 172.31.240.1
+ip netns exec fleet python3 -c "$LISTEN" 22 80 443 8080 u443 >/dev/null 2>&1 &
+ip netns exec priv python3 -c "$LISTEN" 443 >/dev/null 2>&1 &
+python3 -c "$LISTEN" 22 80 443 >/dev/null 2>&1 &
+"""
+
+_NETNS_FLEET_PROBES = r"""
+uprobe() {
+  ip netns exec $1 bash -c "echo $4 > /dev/udp/$2/$3" 2>/dev/null || true
+  sleep 0.3
+  if [ -e /run/udp-$4 ]; then echo "udp-open $1 $2:$3"; else echo "udp-blocked $1 $2:$3"; fi
+}
+# Control: before the rules every target answers.
+for target in "steel 203.0.113.2 22" "steel 203.0.113.2 8080" "steel 203.0.113.3 443" \
+              "steel 203.0.113.100 22" "steel 100.64.0.5 443" "steel 10.9.0.2 443" \
+              "steel 172.31.240.1 443" "plain 203.0.113.2 443" "plain 203.0.113.100 443" \
+              "app 203.0.113.2 443" "app 203.0.113.100 443"; do
+  probe $target | sed 's/^/before /'
+done
+uprobe steel 203.0.113.2 443 before | sed 's/^/before /'
+nft -f "$FW"
+for target in "steel 203.0.113.2 443" "steel 203.0.113.2 80" "steel 203.0.113.2 22" \
+              "steel 203.0.113.2 8080" "steel 203.0.113.100 443" "steel 203.0.113.100 80" \
+              "steel 203.0.113.100 22" "steel 100.64.0.5 443" "steel 10.9.0.2 443" \
+              "steel 172.31.240.1 443" "steel 203.0.113.3 443" "steel 198.51.100.2 8080" \
+              "plain 203.0.113.2 443" "plain 203.0.113.100 443" "plain 198.51.100.2 8080" \
+              "app 203.0.113.2 443" "app 203.0.113.100 443" "app 172.31.240.2 3000"; do
+  probe $target
+done
+uprobe steel 203.0.113.2 443 after
+kill $(jobs -p) 2>/dev/null || true
+"""
+
+#: What the rules must do, probe by probe. ACCEPT is "open", DROP is "blocked".
+_FLEET_EXPECT = {
+    "open steel 203.0.113.2:443",  # another fleet box, https
+    "open steel 203.0.113.2:80",  # and http
+    "blocked steel 203.0.113.2:22",  # no ssh
+    "blocked steel 203.0.113.2:8080",  # no other port
+    "udp-blocked steel 203.0.113.2:443",  # no udp (QUIC) either
+    "open steel 203.0.113.100:443",  # its own box, https (input hook)
+    "open steel 203.0.113.100:80",  # and http
+    "blocked steel 203.0.113.100:22",  # but not ssh
+    "blocked steel 100.64.0.5:443",  # a tailnet address
+    "blocked steel 10.9.0.2:443",  # a private address
+    "blocked steel 172.31.240.1:443",  # the bridge gateway
+    "blocked steel 203.0.113.3:443",  # a box in bay_egress_blocked_extra: the block wins
+    "open steel 198.51.100.2:8080",  # the public internet, as before
+    "blocked plain 203.0.113.2:443",  # an egress container without the key
+    "blocked plain 203.0.113.100:443",
+    "open plain 198.51.100.2:8080",
+    "blocked app 203.0.113.2:443",  # a client on the flagged network gains nothing
+    "blocked app 203.0.113.100:443",
+    "open app 172.31.240.2:3000",  # and still calls the egress container
+}
+_FLEET_BEFORE = {
+    "before open steel 203.0.113.2:22", "before open steel 203.0.113.2:8080",
+    "before open steel 203.0.113.3:443", "before open steel 203.0.113.100:22",
+    "before open steel 100.64.0.5:443", "before open steel 10.9.0.2:443",
+    "before open steel 172.31.240.1:443", "before open plain 203.0.113.2:443",
+    "before open plain 203.0.113.100:443", "before open app 203.0.113.2:443",
+    "before open app 203.0.113.100:443", "before udp-open steel 203.0.113.2:443",
+}
+
+
+def _fleet_firewall() -> str:
+    """The flagged steel and the unflagged plain, with lists from the real filters."""
+    boxes = ["203.0.113.2", "203.0.113.3", "100.64.0.5", "10.9.0.2"]
+    extra = ["203.0.113.3"]
+    rules = [
+        {"container": "steel", "bridge": "bayegtest0", "address": "172.31.240.2",
+         "port": 3000, "fleet_web": True},
+        {"container": "plain", "bridge": "bayegtest1", "address": "172.31.240.18",
+         "port": 3000, "fleet_web": False},
+    ]
+    return _render_nft(
+        rules,
+        blocked=bay_egress_blocked_v4(boxes + ["203.0.113.100"] + extra),
+        _egress_fleet_other=bay_egress_fleet_v4(boxes, extra),
+        _egress_fleet_self=bay_egress_fleet_v4(["203.0.113.100"], extra),
+    )
+
+
+@pytest.mark.skipif(not _netns_ok(), reason="needs unprivileged user, net and mount namespaces")
+def test_egress_fleet_opens_only_the_web_ports_of_the_fleet_on_real_packets(tmp_path):
+    """Forward hook (another box) and input hook (this box), br_netfilter off."""
+    fw = tmp_path / "fw.nft"
+    fw.write_text(_fleet_firewall())
+    script = _NETNS_BASE + _NETNS_FLEET + _NETNS_PROBE + _NETNS_FLEET_PROBES
+    run = subprocess.run(
+        ["unshare", "-rnm", "--fork", "bash", "-c", script],
+        capture_output=True, text=True, check=False, timeout=120,
+        env={"BR": "bayegtest0", "BR2": "bayegtest1", "FW": str(fw), "LISTEN": _LISTEN,
+             "PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+    )
+    assert run.returncode == 0, run.stderr
+    seen = set(run.stdout.split("\n"))
+    assert _FLEET_BEFORE <= seen, sorted(_FLEET_BEFORE - seen)
+    assert _FLEET_EXPECT <= seen, sorted(_FLEET_EXPECT - seen)

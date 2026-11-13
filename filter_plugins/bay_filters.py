@@ -266,6 +266,7 @@ class FilterModule:
             "bay_egress_sidecars": bay_egress_sidecars,
             "bay_egress_client_networks": bay_egress_client_networks,
             "bay_egress_blocked_v4": bay_egress_blocked_v4,
+            "bay_egress_fleet_v4": bay_egress_fleet_v4,
         }
 
 
@@ -307,6 +308,11 @@ def bay_egress_client_networks(name, accessories):
 def bay_egress_blocked_v4(extra=None):
     """The IPv4 ranges egress containers may not reach, plus ``extra``, merged, as CIDR strings."""
     return _egressnet().blocked_v4(extra or [])
+
+
+def bay_egress_fleet_v4(candidates, blocked_extra=None):
+    """The box addresses ``egress_fleet = "web"`` may open: single public IPv4, never blocked."""
+    return _egressnet().fleet_v4(candidates or [], blocked_extra or [])
 
 
 def bay_config_dirs(paths):

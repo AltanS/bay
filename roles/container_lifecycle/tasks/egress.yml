@@ -106,14 +106,41 @@
         {%- set _ = out.append({'container': s,
                                 'bridge': _egress_nets[s].bridge,
                                 'address': _egress_nets[s].address,
-                                'port': active_accessories[s].egress.port | int}) -%}
+                                'port': active_accessories[s].egress.port | int,
+                                'fleet_web': (active_accessories[s].egress.fleet | default('')) == 'web'}) -%}
       {%- endfor -%}
       {{ out }}
+    # bay.toml `egress_fleet = "web"`: a flagged container may also open tcp
+    # 80 and 443 on the public addresses of the fleet's boxes. Same sources as
+    # the blocked set below, but only single public IPv4 addresses: the filter
+    # drops names, IPv6, networks, every private, tailnet and reserved
+    # address, and every address inside bay_egress_blocked_extra (a block
+    # wins). Other boxes are reached through the forward hook; this box's own
+    # address is local delivery (input hook), so the two lists are apart.
+    _egress_fleet_self: >-
+      {%- set hv = hostvars[inventory_hostname] -%}
+      {%- set out = [] -%}
+      {%- for cand in [hv.ansible_host | default(inventory_hostname), hv.netplan_address | default('')] -%}
+        {%- if cand -%}{%- set _ = out.append(cand | string) -%}{%- endif -%}
+      {%- endfor -%}
+      {{ out | bay_egress_fleet_v4(bay_egress_blocked_extra | default([])) }}
+    _egress_fleet_other: >-
+      {%- set out = [] -%}
+      {%- for h in groups['all'] | default([]) if h != inventory_hostname -%}
+        {%- set hv = hostvars[h] -%}
+        {%- for cand in [hv.ansible_host | default(h), hv.netplan_address | default('')] -%}
+          {%- if cand -%}{%- set _ = out.append(cand | string) -%}{%- endif -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{ out | bay_egress_fleet_v4(bay_egress_blocked_extra | default([]))
+         | reject('in', _egress_fleet_self) | list }}
     # The public address of every box (ansible_host, or the inventory name
     # when it is an address, and netplan_address), the same sources as the
     # CrowdSec inventory allowlist. Names and IPv6 are skipped by the filter.
     # bay_egress_blocked_extra is added; the filter merges it all with the
-    # fixed private, tailnet and reserved ranges.
+    # fixed private, tailnet and reserved ranges. The template opens tcp 80
+    # and 443 of the fleet addresses above for egress_fleet containers only,
+    # before these drops.
     _egress_blocked: >-
       {%- set out = [] -%}
       {%- for h in groups['all'] | default([]) -%}

@@ -83,6 +83,38 @@ def blocked_v4(extra: Iterable[object] = ()) -> list[str]:
     return [str(n) for n in ipaddress.collapse_addresses(nets)]
 
 
+def fleet_v4(candidates: Iterable[object], blocked_extra: Iterable[object] = ()) -> list[str]:
+    """The box addresses that ``egress_fleet = "web"`` may open, sorted, each once.
+
+    ``candidates`` are the same inventory values that feed :func:`blocked_v4`.
+    Only a single IPv4 address counts: a host name, an IPv6 address, a
+    network (``a.b.c.d/24``) and an empty value are skipped. So is an address
+    inside :data:`BLOCKED_V4` (an inventory that names a box by its tailnet or
+    private address must not open it) and an address inside any entry of
+    ``blocked_extra``: a block always wins over the fleet opening.
+    """
+    extra: list[ipaddress.IPv4Network] = []
+    for raw in blocked_extra:
+        try:
+            net = ipaddress.ip_network(str(raw).strip(), strict=False)
+        except ValueError:
+            continue
+        if isinstance(net, ipaddress.IPv4Network):
+            extra.append(net)
+    out: set[ipaddress.IPv4Address] = set()
+    for raw in candidates:
+        try:
+            ip = ipaddress.ip_address(str(raw).strip())
+        except ValueError:
+            continue
+        if not isinstance(ip, ipaddress.IPv4Address) or is_blocked_v4(str(ip)):
+            continue
+        if any(ip in net for net in extra):
+            continue
+        out.add(ip)
+    return [str(ip) for ip in sorted(out)]
+
+
 def is_blocked_v4(address: str) -> bool:
     """True when ``address`` is IPv4 and inside :data:`BLOCKED_V4`."""
     try:
