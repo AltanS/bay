@@ -647,8 +647,9 @@ service may use that name. Container names are in rule 8.
 - The service inherits `update` and `logs` from the project. `replicas` defaults to `1`
   and `zero_downtime` to `false`.
 - The service may set its own: `command`, `port`, `health`, `memory`, `dns`, `egress`,
-  `egress_clients`, `replicas`, `zero_downtime`, `update`, `logs`, `log_rotation`,
-  `access`, `mounts`, `env`, `secrets`, `fleet_secrets`, `needs`, `image` or `build`.
+  `egress_clients`, `egress_fleet`, `replicas`, `zero_downtime`, `update`, `logs`,
+  `log_rotation`, `access`, `mounts`, `env`, `secrets`, `fleet_secrets`, `needs`, `image` or
+  `build`.
 - Routing: `path = "/api"` routes a prefix of the main domain, on a segment boundary
   (`/api` and `/api/x`, not `/apiary`). The prefix is not stripped: the app sees the full
   path. The router of the service outranks the main container's router. A trailing slash
@@ -671,7 +672,8 @@ service may use that name. Container names are in rule 8.
 - Siblings reach each other at `http://<service>:<port>`. Every service with a `port`
   gets `<SERVICE>_URL` in every other service of the same environment, and the main
   container is `WEB_URL`. A service with `inherit = false` receives none.
-- `dns` is never inherited. It sets the resolvers of that one container and no other.
+- `dns`, `egress`, `egress_clients` and `egress_fleet` are never inherited. They exist only on a
+  service. `dns` sets the resolvers of that one container and no other.
   A scraper browser that must not use the box's tailnet split DNS looks like this:
 
   ```toml
@@ -695,7 +697,8 @@ and nothing else:
 - no private or reserved range (`10/8`, `172.16/12`, `192.168/16`, `127/8`,
   `169.254/16`, `0/8`, `192.0.0/24`, `198.18/15`, `224/3`), so no other container;
 - not the box itself (its gateway, Traefik on the box network, published box ports);
-- not the public address of any box of the fleet;
+- not the public address of any box of the fleet (only `egress_fleet = "web"` opens tcp 80
+  and 443 there, see [below](#egress_fleet-the-fleets-own-websites));
 - no IPv6 at all.
 
 The project's main container can still call it at `http://<container>:<port>`, for
@@ -727,6 +730,7 @@ The rules, checked by `bay toml validate` and `bay plan`:
 | `dns` is required, and every resolver is a public IPv4 address. | Docker sends the container's lookups from inside the container. Without `dns` they go to the box resolver, often the tailnet's `100.100.100.100`, which egress blocks. An IPv6 resolver is unreachable too. |
 | `update = "auto"` is refused, also when inherited from the top level or a `[deploy.<env>]`. | Watchtower would recreate the container outside Bay. Set `update = "notify"` or `"off"` on the service. |
 | Each `egress_clients` entry is another service of the file, not an egress service. | A client joins the service's network. |
+| `egress_fleet` only on a service with `egress = "public"`, and only the value `"web"`. | A service without egress reaches the fleet already. The key is unknown at the top level and in `[deploy.<env>]`. |
 
 What Bay does on the box, on every `bay up`
 (`roles/container_lifecycle/tasks/egress.yml`):
@@ -777,11 +781,79 @@ services-egress-<container> --dns 1.1.1.1 nicolaka/netshoot`): a public HTTPS si
 answers; a tailnet address, a private address, the gateway (`.1`) and a box address
 time out; `curl -6` fails; the counters in `nft list table inet bay_egress` rise.
 
+With `egress_fleet = "web"`, test with the egress container's own address (`.2`), because the
+rules match that address, not the network. A container started with `--network
+services-egress-<container>` gets another address and no opening. Share the egress
+container's network instead:
+
+```bash
+docker run --rm -it --network container:<container> nicolaka/netshoot
+curl -sS -o /dev/null -w '%{http_code}\n' https://<a fleet site>/     # answers (another box, and this box)
+curl -sS -m 5 telnet://<public address of a box>:22                   # times out
+curl -sS -m 5 https://<tailnet address of a box>/                     # times out
+```
+
+On the box, `sudo nft list chain inet bay_egress from_egress` (other boxes) and
+`sudo nft list chain inet bay_egress egress_to_host` (this box) show the two accepts and
+their counters.
+
 **Emergency rollback**: `sudo nft delete table inet bay_egress && sudo nft delete table
 bridge bay_egress` reopens everything at once. The next `bay up` loads the rules again.
 The normal rollback is to remove `egress` (and `egress_clients`) from `bay.toml` and run
 `bay up`: the containers are recreated without the network, then Bay removes the network,
 the tables and the file.
+
+#### `egress_fleet`: the fleet's own websites
+
+`egress_fleet = "web"` is for an egress container that must load the fleet's own public
+websites like any internet visitor, for example a crawler that checks the sites of the
+projects of this fleet.
+
+```toml
+[services.steel]
+# ... the egress example above ...
+egress = "public"
+egress_fleet = "web"
+```
+
+What it opens: new tcp connections from the egress container to ports 80 and 443 of the
+public address of every box of the fleet, its own box too. The addresses are the
+`ansible_host` (or the box name when it is an address) and the `netplan_address` of every
+box, the same list that feeds the blocked set.
+
+What stays closed:
+
+- every other port of a box, so SSH (22) too;
+- UDP, so HTTP/3 (QUIC on udp 443) too. A client falls back to tcp;
+- IPv6;
+- a box address that is not a single public IPv4 address: a domain name, a network, and
+  any tailnet, private or reserved address (a fleet that names a box by its tailnet
+  address opens nothing for that box);
+- every address in `bay_egress_blocked_extra`. The block wins, also for a box address;
+- the gateway (`.1`), the other addresses of the box (tailnet, Docker networks), the other
+  egress networks and every other container;
+- the clients on the same egress network. The rules match the egress container's own
+  address, not the network.
+
+It changes only the box firewall. The container keeps its spec and is not recreated.
+`bay plan` shows the change as its own step (see the risk table in
+[plan.md](plan.md#risk)): adding the key is `shared` and needs `bay approve`; removing it
+is `safe`. `bay up` writes the rules. A webhook push does not touch them. The address list
+is read on each `bay up`, so a new box opens after the next `bay up` on this box.
+
+Two side effects. Check both before you set the key:
+
+1. **Another box sees this box's public address.** Docker masquerades the request, so
+   another box receives it from the public address of the egress container's box. The
+   CrowdSec allowlist of the fleet's own box addresses never bans that address, so a crawler
+   that runs too fast is not banned there. Any allowlist that holds a box address (`vpn_allowed_ips`, an app's own
+   list) lets the crawler in, also on a `vpn` route. Keep box addresses out of such lists.
+2. **On its own box, the reverse proxy sees a private client address.** A request to the
+   box's own public address is delivered on the box, not routed out, so Traefik sees the
+   container's own address in the egress /28 (`172.31.240.0/20` by default) as the client.
+   `vpn` routes stay 403: that address is in no allowlist. But an app that treats a private
+   client address as internal (no login for `10/8` or `172.16/12`, an admin page for
+   "local" requests) would serve that to the crawler. Check every app on the box first.
 
 ### `[deploy.<env>]`
 

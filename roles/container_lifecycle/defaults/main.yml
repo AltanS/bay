@@ -59,4 +59,6 @@ bay_egress_subnet_pool: 172.31.240.0/20
 # Extra IPv4 addresses or networks an egress container may never reach, on
 # top of the private, tailnet, loopback, link-local and multicast ranges and
 # the public address of every box in the inventory (tasks/egress.yml).
+# The block always wins: a box address that is also listed here stays closed
+# for a container with bay.toml `egress_fleet = "web"`, on every port.
 bay_egress_blocked_extra: []

@@ -341,6 +341,7 @@ accessories:
       mode: public                   #   Runs alone on services-egress-<name>, at .2, behind
       port: 3000                     #   /etc/nftables.d/bay-egress.conf. The clients join that
       clients: [myapp]               #   network and may open <name>:<port>. Needs dns, no network_mode
+      fleet: web                     #   Optional (bay.toml egress_fleet): tcp 80 and 443 of every box's public address
 
     log_rotation:                    # Per-accessory docker log retention (same shape as services)
       driver: json-file              #   json-file | local | none
@@ -391,6 +392,12 @@ network `services-egress-<name>` at `.2`, drops `NET_RAW`, sets `no-new-privileg
 loads the firewall before the reconciler runs. Each client gets that network as a
 second network, after `services`, also on a webhook push. A hand entry may use it too; it
 must not set `network_mode`, and each client must run on the same box.
+
+`fleet: web` (from `bay.toml` `egress_fleet = "web"`) also lets the accessory open new tcp
+connections to ports 80 and 443 of the public address of every inventory box, its own box
+too (see
+[bay-toml.md](bay-toml.md#egress_fleet-the-fleets-own-websites)). Only the box firewall
+changes; the container spec and its config hash stay. The key is absent when unset.
 
 ### `path`
 

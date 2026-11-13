@@ -452,6 +452,8 @@ Risk is set by the data that a step touches.
 | Tailnet allowlist in `bay.fleet.toml` changed since the last fleet commit (see [the allowlist key](tailnet-ingress.md#the-route-keys)) | shared |
 | Tailnet route added, changed or removed (`kind: route`, see [tailnet-ingress.md](tailnet-ingress.md#routes-in-bayfleettoml-21)) | shared |
 | Deploy webhook changed | shared |
+| `egress_fleet = "web"` added to an egress service, also on a new container (a second `container` step next to `changed: egress` or `new container`; the reason names the container and says that it may open tcp 80 and 443 on the public address of every fleet box). The box firewall changes; the container is not recreated. See [bay-toml.md](bay-toml.md#egress_fleet-the-fleets-own-websites) | shared |
+| `egress_fleet` removed (the same second step; the reason says that `bay up` closes the ports) | safe |
 | Scheduled job added, changed or removed (`kind: job`) | safe |
 | Volume backup added, changed or removed (`kind: backup`, action `update`; `bay up` then also runs the `backup` tag) | safe |
 | Container of another project changed or removed | that project's own risk, by the rows above |
@@ -481,7 +483,10 @@ owns, so a change to them can touch every project:
 - the deploy webhook (the webhook receiver);
 - the tailnet allowlist of `bay.fleet.toml` (what it is: [tailnet-ingress.md](tailnet-ingress.md#the-route-keys));
 - a container in the services file that no project owns;
-- a box move with no data (the project leaves one box for another).
+- a box move with no data (the project leaves one box for another);
+- an added `egress_fleet`. One `bay.toml` owns the step (it carries the
+  project), but the opening lets that container reach the sites of every
+  project on the fleet's boxes, so `bay approve` must name a reason.
 
 The proxy, the gateway, the update watcher and the networks are refreshed by
 every `bay up` but are not steps (see the note below). A step whose
