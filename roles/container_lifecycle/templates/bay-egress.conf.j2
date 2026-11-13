@@ -26,7 +26,8 @@
 # addresses (ansible_host, netplan_address), from its own address only. Other
 # boxes: chain from_egress. This box: chain egress_to_host. No other port, no
 # UDP, no IPv6, no tailnet or private address, and no address in
-# bay_egress_blocked_extra.
+# bay_egress_blocked_extra. The request to another box never leaves through
+# the tailnet interface (tailscale*), where `vpn` routes would trust it.
 #
 {% endif %}
 # Published ports are DNATed in prerouting, before forward, so a connection
@@ -79,8 +80,9 @@ table inet bay_egress {
 {% endfor %}
 {% for _e in _egress_rules if (_e.fleet_web | default(false)) and (_egress_fleet_other | default([])) %}
         # {{ _e.container }} (egress_fleet = "web"): the web ports of the other fleet boxes,
-        # from its own address only, never into an egress network.
-        iifname "{{ _e.bridge }}" oifname != "bayeg*" ip saddr {{ _e.address }} ip daddr { {{ _egress_fleet_other | join(', ') }} } tcp dport { 80, 443 } ct state new counter accept
+        # from its own address only, never into an egress network and never out
+        # through the tailnet (there the request would carry a tailnet address).
+        iifname "{{ _e.bridge }}" oifname != "bayeg*" oifname != "tailscale*" ip saddr {{ _e.address }} ip daddr { {{ _egress_fleet_other | join(', ') }} } tcp dport { 80, 443 } ct state new counter accept
 {% endfor %}
         # Any other new connection inside one egress network, or between two
         # (the egress container to its clients, too), is dropped.

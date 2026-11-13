@@ -835,6 +835,16 @@ What stays closed:
 - the clients on the same egress network. The rules match the egress container's own
   address, not the network.
 
+The request to another box never leaves through the tailnet interface (`tailscale*`). There
+it would arrive from this box's tailnet address, which `vpn` routes trust. Do not set the key
+on a box that routes fleet addresses through another overlay or VPN interface (one not named
+`tailscale*`): the request would arrive from an address that `vpn` routes may trust.
+
+On a box whose public address is not on its own network interface (a cloud 1:1 NAT), a
+request to that address leaves the box instead of being delivered on it. The rules do not
+open it, so it fails closed: the crawler cannot reach its own box there. The other boxes
+still answer.
+
 It changes only the box firewall. The container keeps its spec and is not recreated.
 `bay plan` shows the change as its own step (see the risk table in
 [plan.md](plan.md#risk)): adding the key is `shared` and needs `bay approve`; removing it

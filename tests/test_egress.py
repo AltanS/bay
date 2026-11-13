@@ -1202,7 +1202,8 @@ def _chain(text: str, name: str) -> str:
 def test_nft_fleet_rules_are_on_the_flagged_container_only_and_before_the_drops():
     text = _render_nft(_FLAGGED, _egress_fleet_other=_OTHER, _egress_fleet_self=_SELF)
     flagged, plain = _RULES[0], _RULES[1]
-    fwd = (f'iifname "{flagged['bridge']}" oifname != "bayeg*" ip saddr {flagged['address']} '
+    fwd = (f'iifname "{flagged['bridge']}" oifname != "bayeg*" oifname != "tailscale*" '
+           f"ip saddr {flagged['address']} "
            "ip daddr { 198.51.100.7, 203.0.113.12 } tcp dport { 80, 443 } ct state new "
            "counter accept")
     inp = (f'iifname "{flagged['bridge']}" ip saddr {flagged['address']} '
@@ -1514,6 +1515,9 @@ def test_the_rules_hold_on_real_packets_without_br_netfilter(tmp_path):
 #           $BR2 (172.31.240.16/28) at .18.
 #   app     the client of the flagged container gets a route through the
 #           egress network, so its packets meet the rules on that bridge.
+#   tsbox   a fleet box at 203.0.113.130 that this box routes through an
+#           interface named tailscale0 (an exit node or accepted subnet
+#           routes): the opening must not leave that way.
 # A udp probe sends a tag; the listener touches /run/udp-<tag>.
 
 _LISTEN = r"""
@@ -1556,6 +1560,16 @@ ip -n plain link set eth0 up
 ip -n plain addr add 172.31.240.18/28 dev eth0
 ip -n plain route add default via 172.31.240.17
 ip -n app route add default via 172.31.240.1
+ip netns add tsbox
+ip link add tailscale0 type veth peer name eth0 netns tsbox
+ip addr add 100.64.1.1/24 dev tailscale0
+ip link set tailscale0 up
+ip route add 203.0.113.130/32 dev tailscale0
+ip -n tsbox addr add 100.64.1.2/24 dev eth0
+ip -n tsbox addr add 203.0.113.130/32 dev eth0
+ip -n tsbox link set eth0 up
+ip -n tsbox route add default via 100.64.1.1
+ip netns exec tsbox python3 -c "$LISTEN" 443 >/dev/null 2>&1 &
 ip netns exec fleet python3 -c "$LISTEN" 22 80 443 8080 u443 >/dev/null 2>&1 &
 ip netns exec priv python3 -c "$LISTEN" 443 >/dev/null 2>&1 &
 python3 -c "$LISTEN" 22 80 443 >/dev/null 2>&1 &
@@ -1571,7 +1585,7 @@ uprobe() {
 for target in "steel 203.0.113.2 22" "steel 203.0.113.2 8080" "steel 203.0.113.3 443" \
               "steel 203.0.113.100 22" "steel 100.64.0.5 443" "steel 10.9.0.2 443" \
               "steel 172.31.240.1 443" "plain 203.0.113.2 443" "plain 203.0.113.100 443" \
-              "app 203.0.113.2 443" "app 203.0.113.100 443"; do
+              "app 203.0.113.2 443" "app 203.0.113.100 443" "steel 203.0.113.130 443"; do
   probe $target | sed 's/^/before /'
 done
 uprobe steel 203.0.113.2 443 before | sed 's/^/before /'
@@ -1581,7 +1595,8 @@ for target in "steel 203.0.113.2 443" "steel 203.0.113.2 80" "steel 203.0.113.2 
               "steel 203.0.113.100 22" "steel 100.64.0.5 443" "steel 10.9.0.2 443" \
               "steel 172.31.240.1 443" "steel 203.0.113.3 443" "steel 198.51.100.2 8080" \
               "plain 203.0.113.2 443" "plain 203.0.113.100 443" "plain 198.51.100.2 8080" \
-              "app 203.0.113.2 443" "app 203.0.113.100 443" "app 172.31.240.2 3000"; do
+              "app 203.0.113.2 443" "app 203.0.113.100 443" "app 172.31.240.2 3000" \
+              "steel 203.0.113.130 443"; do
   probe $target
 done
 uprobe steel 203.0.113.2 443 after
@@ -1609,6 +1624,7 @@ _FLEET_EXPECT = {
     "blocked app 203.0.113.2:443",  # a client on the flagged network gains nothing
     "blocked app 203.0.113.100:443",
     "open app 172.31.240.2:3000",  # and still calls the egress container
+    "blocked steel 203.0.113.130:443",  # a fleet box routed through tailscale0
 }
 _FLEET_BEFORE = {
     "before open steel 203.0.113.2:22", "before open steel 203.0.113.2:8080",
@@ -1617,12 +1633,13 @@ _FLEET_BEFORE = {
     "before open steel 172.31.240.1:443", "before open plain 203.0.113.2:443",
     "before open plain 203.0.113.100:443", "before open app 203.0.113.2:443",
     "before open app 203.0.113.100:443", "before udp-open steel 203.0.113.2:443",
+    "before open steel 203.0.113.130:443",
 }
 
 
 def _fleet_firewall() -> str:
     """The flagged steel and the unflagged plain, with lists from the real filters."""
-    boxes = ["203.0.113.2", "203.0.113.3", "100.64.0.5", "10.9.0.2"]
+    boxes = ["203.0.113.2", "203.0.113.3", "203.0.113.130", "100.64.0.5", "10.9.0.2"]
     extra = ["203.0.113.3"]
     rules = [
         {"container": "steel", "bridge": "bayegtest0", "address": "172.31.240.2",
