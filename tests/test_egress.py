@@ -314,6 +314,70 @@ def test_compile_without_egress_fleet_is_byte_identical_to_before(fleet):
     assert compiler.body_digest(_compile(fleet).body()).startswith(_GOLDEN_EGRESS_BODY)
 
 
+# ── bay plan ─────────────────────────────────────────────────────────────
+
+_ACC = {"image": "s:1", "dns": ["1.1.1.1"],
+        "egress": {"mode": "public", "port": 3000, "clients": ["shop"]}}
+_ACC_FLEET = {**_ACC, "egress": {**_ACC["egress"], "fleet": "web"}}
+
+
+def _plan_steps(old: dict | None, new: dict | None) -> list[dict[str, Any]]:
+    from bay_cli import plan as planmod
+
+    def services(acc: dict | None) -> dict:
+        return {"accessories": {"shop-steel": acc} if acc is not None else {}}
+
+    return planmod.diff_steps(services(old), services(new), project="shop",
+                              mine={"shop-steel"}, resources=set(), running={"shop-steel"})
+
+
+def _fleet_steps(steps: list[dict[str, Any]]) -> list[tuple[str, str, str]]:
+    return [(s["action"], s["risk"], s["reason"]) for s in steps if "egress_fleet" in s["reason"]]
+
+
+def test_plan_names_an_added_egress_fleet_as_a_shared_step():
+    steps = _plan_steps(_ACC, _ACC_FLEET)
+    assert [(s["kind"], s["risk"]) for s in steps] == [("container", "safe"),
+                                                         ("container", "shared")]
+    [(action, risk, reason)] = _fleet_steps(steps)
+    assert (action, risk) == ("update", "shared")
+    assert reason.startswith('egress_fleet = "web" added: shop-steel may open tcp 80 and 443')
+    assert "without a recreate" in reason
+    assert steps[1]["container"] == "shop-steel" and steps[1]["project"] == "shop"
+
+
+def test_plan_names_a_removed_egress_fleet_as_a_safe_step():
+    [(action, risk, reason)] = _fleet_steps(_plan_steps(_ACC_FLEET, _ACC))
+    assert (action, risk) == ("update", "safe")
+    assert reason.startswith("egress_fleet removed: shop-steel may no longer open")
+
+
+def test_plan_has_no_fleet_step_when_the_key_does_not_change():
+    assert _plan_steps(_ACC_FLEET, _ACC_FLEET) == []
+    other_change = {**_ACC_FLEET, "dns": ["9.9.9.9"]}
+    steps = _plan_steps(_ACC_FLEET, other_change)
+    assert _fleet_steps(steps) == [] and len(steps) == 1
+
+
+def test_plan_names_egress_fleet_on_a_new_container_too():
+    steps = _plan_steps(None, _ACC_FLEET)
+    assert [(s["action"], s["risk"]) for s in steps] == [("create", "safe"),
+                                                          ("update", "shared")]
+    assert _plan_steps(None, _ACC)[0]["reason"] == "new container"
+    assert len(_plan_steps(None, _ACC)) == 1
+
+
+def test_plan_fleet_steps_match_the_plan_schema():
+    import json
+
+    schema = json.loads((_REPO_ROOT / "src" / "bay_cli" / "schemas" /
+                         "plan.schema.json").read_text())
+    step_schema = {**schema["$defs"]["step"], "$defs": schema["$defs"]}
+    for steps in (_plan_steps(_ACC, _ACC_FLEET), _plan_steps(_ACC_FLEET, _ACC)):
+        for step in steps:
+            assert list(Draft202012Validator(step_schema).iter_errors(step)) == []
+
+
 # ── services.yml schema ──────────────────────────────────────────────────
 
 

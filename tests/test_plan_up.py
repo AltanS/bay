@@ -804,6 +804,43 @@ def test_tailnet_allowlist_change_is_shared(world: dict[str, Path], box: FakeBox
     assert plan["verdict"] == "approve"
 
 
+_STEEL = """
+[services.steel]
+inherit = false
+image = "ghcr.io/steel-dev/steel-browser:latest"
+port = 3000
+dns = ["1.1.1.1", "9.9.9.9"]
+egress = "public"
+"""
+
+
+def test_egress_fleet_shows_in_the_plan_and_needs_an_approval(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """A firewall opening is never silent: added is a shared step, removed a safe one."""
+    edit_app(world, 'domain = "webapp.example.com"\n',
+             'domain = "webapp.example.com"\n' + _STEEL)
+    assert do_up(world)["result"] == "ok"
+    unchanged = make(world)
+    assert not [s for s in unchanged["steps"] if "egress_fleet" in s["reason"]]
+
+    edit_app(world, 'egress = "public"\n', 'egress = "public"\negress_fleet = "web"\n')
+    added = make(world)
+    fleet = [s for s in added["steps"] if "egress_fleet" in s["reason"]]
+    assert [(s["container"], s["action"], s["risk"]) for s in fleet] == [
+        ("webapp-steel", "update", "shared")]
+    assert added["verdict"] == "approve" and added["exit_code"] == 10
+    text = planmod.render(added)
+    assert 'egress_fleet = "web" added: webapp-steel may open tcp 80 and 443' in text
+    assert do_up(world, force=True, reason="crawler reads the fleet sites")["result"] == "ok"
+
+    edit_app(world, 'egress_fleet = "web"\n', "")
+    removed = make(world)
+    fleet = [s for s in removed["steps"] if "egress_fleet" in s["reason"]]
+    assert [(s["action"], s["risk"]) for s in fleet] == [("update", "safe")]
+    assert removed["verdict"] == "auto"
+
+
 # ── blockers ────────────────────────────────────────────────────────────────
 
 

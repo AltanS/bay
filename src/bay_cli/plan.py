@@ -1175,6 +1175,48 @@ def _hold_only(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
     return strip(old) == strip(new)
 
 
+def _egress_fleet(entry: Mapping[str, Any]) -> bool:
+    egress = entry.get("egress")
+    return isinstance(egress, Mapping) and egress.get("fleet") == "web"
+
+
+def _egress_fleet_step(
+    name: str, old: Mapping[str, Any], new: Mapping[str, Any], *, project: str | None
+) -> dict[str, Any] | None:
+    """A step of its own when bay.toml ``egress_fleet`` is added or removed.
+
+    The key changes the box firewall, not the container: its spec and config
+    hash stay, so the reconciler recreates nothing and the box check predicts
+    no step. Without this step the plan would only say ``changed: egress``.
+    An opening is ``shared``, like a tailnet allowlist change: it lets one
+    project's container reach the sites of every project on the fleet's
+    boxes, so ``bay approve`` must name a reason. A closing is ``safe``.
+    """
+    before, after = _egress_fleet(old), _egress_fleet(new)
+    if before == after:
+        return None
+    if after:
+        return _step(
+            "container",
+            "update",
+            "shared",
+            f'egress_fleet = "web" added: {name} may open tcp 80 and 443 on the public '
+            "address of every fleet box, its own box too; bay up opens the box firewall "
+            "for it, without a recreate",
+            container=name,
+            project=project,
+        )
+    return _step(
+        "container",
+        "update",
+        "safe",
+        f"egress_fleet removed: {name} may no longer open the fleet's public web ports; "
+        "bay up closes them in the box firewall, without a recreate",
+        container=name,
+        project=project,
+    )
+
+
 def _container_steps(
     name: str,
     old: dict[str, Any] | None,
@@ -1184,9 +1226,11 @@ def _container_steps(
     running: set[str] | None,
 ) -> list[dict[str, Any]]:
     if old is None and new is not None:
-        return [
+        created = [
             _step("container", "create", "safe", "new container", container=name, project=project)
         ]
+        opened = _egress_fleet_step(name, {}, new, project=project)
+        return created + ([opened] if opened is not None else [])
     if new is None:
         return [
             _step(
@@ -1209,6 +1253,10 @@ def _container_steps(
             project=project,
         )
     ]
+
+    fleet_step = _egress_fleet_step(name, old, new, project=project)
+    if fleet_step is not None:
+        steps.append(fleet_step)
 
     old_vols, new_vols = _named_volumes(old), _named_volumes(new)
     gone = sorted(set(old_vols) - set(new_vols))
@@ -1430,6 +1478,9 @@ def diff_steps(
                         container=name,
                     )
                 )
+                opened = _egress_fleet_step(name, old or {}, new, project=None)
+                if opened is not None:
+                    steps.append(opened)
     if current.get("webhook") != wanted.get("webhook"):
         steps.append(
             _step("fleet", "update", "shared", "the deploy webhook changes", resource="webhook")
