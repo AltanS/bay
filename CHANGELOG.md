@@ -8,6 +8,25 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.22.0] - 2026-11-13
+
+This release lets an egress container load the fleet's own public websites.
+
+### Added
+- bay.toml: new key `egress_fleet = "web"` on a `[services.<name>]` with `egress = "public"`. The egress container may then also open new tcp connections to ports 80 and 443 of the public address of every fleet box, its own box too. The addresses are the `ansible_host` (or the inventory name when it is an address) and the `netplan_address` of every inventory host, the same list that feeds the blocked set. Every other port (SSH too), UDP, IPv6, the tailnet, the private ranges, the gateway and the other containers stay closed. The validator refuses the key on a service without `egress`, any value but `"web"`, and the key at the top level or in `[deploy.<env>]`. It is never inherited.
+- Compile: the egress entry in `services.yml` gets `fleet: web`. The key is absent when unset, so every compiled `services.yml` stays the same, byte for byte.
+- Firewall (`roles/container_lifecycle`): `/etc/nftables.d/bay-egress.conf` gets two accept rules for each flagged container. Chain `from_egress` opens the other boxes (forward hook). Chain `egress_to_host` opens this box's own address (input hook). Both match the container's bridge and its own address, so a client on the same egress network gains nothing. Both run before every drop. The rule for other boxes never sends the request out through the tailnet interface (`tailscale*`), where it would carry a tailnet address that `vpn` routes trust. Only a single public IPv4 address opens. A host name, a network, and a tailnet, private or reserved address are skipped. An address in `bay_egress_blocked_extra` stays closed: the block wins. Without the key the file is the same, byte for byte.
+- `bay plan`: adding `egress_fleet` gives a second `container` step with risk `shared`. Its reason names the container and says that it may open tcp 80 and 443 on the public address of every fleet box. So the plan needs `bay approve`. Removing the key gives the same step with risk `safe`. `docs/plan.md` has both rows in the risk table.
+- Docs: `docs/bay-toml.md` has a new section "`egress_fleet`: the fleet's own websites": what opens, what stays closed, two side effects to check first, and the verify commands. `docs/services.md` describes `fleet: web`.
+
+### Upgrade notes
+- **Nothing changes until a service sets the key.** The compiled `services.yml` and the egress firewall file stay the same, so the upgrade reloads no firewall and recreates no container.
+- **To turn it on**, add `egress_fleet = "web"` to the egress service and run `bay plan`, then `bay approve <plan-id> --reason "<why>"`, then `bay up`. The plan shows `changed: egress` and the step `egress_fleet = "web" added: <container> may open tcp 80 and 443 on the public address of every fleet box, its own box too; bay up opens the box firewall for it, without a recreate`. `bay up` loads the new rules. The container is not recreated.
+- **Check two side effects first.** Another box sees the requests from this box's public address, and the CrowdSec allowlist of the fleet's own addresses never bans it. Keep box addresses out of `vpn_allowed_ips` and every app allowlist. On its own box, Traefik sees the container's private address (in `bay_egress_subnet_pool`) as the client. `vpn` routes stay 403, but an app that trusts private client addresses would serve the crawler as an internal user.
+- **Do not set the key on a box that routes fleet addresses through another overlay or VPN interface** (one not named `tailscale*`). The request would then arrive from an address that `vpn` routes may trust.
+- **Behind a cloud 1:1 NAT** (the public address is not on the box's own interface), the crawler cannot reach its own box. The rules fail closed there. The other boxes still answer.
+- **A new box opens at the next `bay up`** on the egress container's box, like the blocked set.
+
 ## [2.21.0] - 2026-11-13
 
 This release gives the Zot registry longer request time limits and adds pull-only registry accounts. It also stops a verbose run from printing the registry admin password.
