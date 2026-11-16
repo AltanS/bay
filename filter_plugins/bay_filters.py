@@ -224,6 +224,10 @@ class FilterModule:
             "parse_env_file": parse_env_file,
             "to_docker_networks": to_docker_networks,
             "bay_traefik_labels": bay_traefik_labels,
+            "bay_split_dns_domains": bay_split_dns_domains,
+            "bay_host_tailnet_services": bay_host_tailnet_services,
+            "bay_tailnet_port_clashes": bay_tailnet_port_clashes,
+            "bay_tailnet_guard_live": bay_tailnet_guard_live,
             "bay_traefik_global_labels": bay_traefik_global_labels,
             "bay_watchtower_labels": bay_watchtower_labels,
             "bay_healthcheck": bay_healthcheck,
@@ -254,6 +258,7 @@ class FilterModule:
             "bay_recipient_target": bay_recipient_target,
             "bay_transform_body": bay_transform_body,
             "bay_gateway_bind_ip": bay_gateway_bind_ip,
+            "bay_gateway_interface": bay_gateway_interface,
             "bay_env_name": bay_env_name,
             "bay_env_value": bay_env_value,
             "bay_alert_env_value": bay_alert_env_value,
@@ -471,6 +476,7 @@ def bay_traefik_labels(svc, name, config):
     public_mw, vpn_mw = _compute_middleware_chains(labels, name, mw, config)
     _add_middleware_labels(labels, name, mw, config)
     _add_router_labels(labels, name, svc, public_mw, vpn_mw, config)
+    _add_tailnet_router_labels(labels, svc, name, vpn_mw, config)
 
     return labels
 
@@ -596,6 +602,13 @@ def _add_router_labels(labels, name, svc, public_mw, vpn_mw, config=None):
     config = config or {}
     vpn_ep = config.get("vpn_entrypoints", "websecure")
     public_ep = config.get("public_entrypoints", "websecure")
+    # On a split host, split DNS may send this service's domains to the box's
+    # tailnet address (bay_split_dns_domains). Tailnet clients then arrive on
+    # websecure_tailnet, so every router of those domains binds it too, or
+    # they get Traefik's 404. Off a split host nothing changes.
+    if _tailnet_entrypoint_on(config) and _main_domains_split(svc):
+        vpn_ep = _with_entrypoint(vpn_ep, TAILNET_ENTRYPOINT)
+        public_ep = _with_entrypoint(public_ep, TAILNET_ENTRYPOINT)
 
     if access == "public":
         vpn_routes = svc.get("vpn_routes", [])
@@ -670,6 +683,174 @@ def _add_router_labels(labels, name, svc, public_mw, vpn_mw, config=None):
         public_entrypoints=public_ep,
         vpn_entrypoints=vpn_ep,
     )
+
+
+# ── Tailnet-only hosts and split DNS ─────────────────────────────────────
+#
+# One predicate decides which names split DNS sends to a box's tailnet
+# address. The Headscale templates (extra-records.json.j2, config.yaml.j2)
+# render their records from it, and bay_traefik_labels binds websecure_tailnet
+# from it, so the two can never disagree. This function is defined, word for
+# word, in filter_plugins/bay_filters.py too (tests pin the copies together).
+
+TAILNET_ENTRYPOINT = "websecure_tailnet"
+
+
+def bay_split_dns_domains(svc):
+    """The names split DNS sends to the tailnet address of the service's box.
+
+    The service's own `domains` when part of it is tailnet-only (`access:
+    vpn`, or `vpn_routes` = bay.toml `locked`), then every `tailnet_domains`
+    entry (bay.toml `tailnet_hosts`). Order kept, duplicates dropped.
+    """
+    svc = svc or {}
+    names = []
+    if svc.get("access", "public") == "vpn" or svc.get("vpn_routes"):
+        names.extend(svc.get("domains") or [])
+    names.extend(svc.get("tailnet_domains") or [])
+    out = []
+    for name in names:
+        name = str(name)
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def bay_host_tailnet_services(services, group_names):
+    """Names of the services of this host that have `tailnet_domains`.
+
+    A service is on this host when it has no `regions`, or one of its regions
+    is one of the host's groups (the rule deploy.yml uses for active_services).
+    The nftables role reads it: it must never drop the guard of such a host.
+    """
+    groups = set(group_names or [])
+    out = []
+    for name, svc in (services or {}).items():
+        svc = svc or {}
+        if not svc.get("tailnet_domains"):
+            continue
+        regions = svc.get("regions") or []
+        if not regions or groups.intersection(regions):
+            out.append(str(name))
+    return sorted(out)
+
+
+# Host ports Traefik binds on the tailnet address in split mode: web_tailnet
+# (80) and websecure_tailnet (443).
+_TAILNET_LISTENER_PORTS = (80, 443)
+
+
+def _host_port(value):
+    """The host half of a port binding (`8080`, `8080:80`, `1.2.3.4:8080:80`)."""
+    parts = str(value).split(":")
+    host = parts[-2] if len(parts) >= 2 else parts[0]
+    try:
+        return int(host)
+    except ValueError:
+        return None
+
+
+def bay_tailnet_port_clashes(services, accessories=None):
+    """`<name>:<port>` for every container that publishes port 80 or 443 on
+    the tailnet address (`expose: gateway` or its synonym `tailnet`).
+
+    In split mode Traefik binds those two ports of the tailnet address
+    (web_tailnet and websecure_tailnet), so such a container and Traefik
+    cannot both start. The deploy refuses it (deploy_stack/tasks/validate.yml).
+    """
+    out = []
+    for name, svc in (services or {}).items():
+        ports = (svc or {}).get("ports") or {}
+        if ports.get("expose") in ("gateway", "tailnet"):
+            port = _host_port(ports.get("internal", ""))
+            if port in _TAILNET_LISTENER_PORTS:
+                out.append(f"{name}:{port}")
+    for name, acc in (accessories or {}).items():
+        acc = acc or {}
+        if acc.get("expose") in ("gateway", "tailnet") and acc.get("port"):
+            port = _host_port(acc["port"])
+            if port in _TAILNET_LISTENER_PORTS:
+                out.append(f"{name}:{port}")
+    return sorted(out)
+
+
+def bay_tailnet_guard_live(nft_table, address):
+    """True when the text of `nft list table inet bay_prerouting` holds the
+    tailnet address guard for exactly `address`.
+
+    Two things must be there: in chain prerouting the rule
+    `ip daddr <address> jump tailnet_dst`, and a chain tailnet_dst that ends
+    in a drop. A guard for another address does not count. rebuild.sh makes
+    the same check in bash (_tailnet_guard_ok).
+    """
+    text = str(nft_table or "")
+    address = str(address or "").strip()
+    if not address:
+        return False
+    prerouting = re.search(r"chain prerouting \{(.*?)\n\s*\}", text, re.DOTALL)
+    guard = re.search(r"chain tailnet_dst \{(.*?)\n\s*\}", text, re.DOTALL)
+    if not prerouting or not guard:
+        return False
+    jump = re.compile(r"^\s*ip daddr " + re.escape(address) + r" jump tailnet_dst\s*$", re.MULTILINE)
+    if not jump.search(prerouting.group(1)):
+        return False
+    return re.search(r"\bdrop\s*$", guard.group(1).rstrip(), re.MULTILINE) is not None
+
+
+def _main_domains_split(svc):
+    split = set(bay_split_dns_domains(svc))
+    return any(str(d) in split for d in (svc.get("domains") or []))
+
+
+def _tailnet_entrypoint_on(config):
+    """True when this host's Traefik has a websecure_tailnet listener."""
+    return _bool(config.get("traefik_split_entrypoints", False)) and _bool(
+        config.get("tailnet_entrypoint_enabled", False)
+    )
+
+
+def _with_entrypoint(entrypoints, extra):
+    """`entrypoints` (comma list) plus `extra`, order kept, no duplicate."""
+    names = [e for e in str(entrypoints).split(",") if e]
+    if extra not in names:
+        names.append(extra)
+    return ",".join(names)
+
+
+def _add_tailnet_router_labels(labels, svc, name, vpn_mw, config):
+    """The router for `tailnet_domains`: websecure_tailnet ONLY.
+
+    It never falls back to `websecure`: on a host without the tailnet
+    listener, or without the tailnet address guard, it refuses to build.
+    That fallback is the only way a tailnet-only host could go public.
+    """
+    hosts = svc.get("tailnet_domains") or []
+    if not hosts:
+        return
+    if not _tailnet_entrypoint_on(config):
+        raise ValueError(
+            f"service {name} has tailnet_domains {list(hosts)}, but this host has no "
+            "websecure_tailnet listener (traefik_split_entrypoints with a tailnet "
+            "address). Refusing to build a router that could only bind the public "
+            "listener."
+        )
+    if not _bool(config.get("nftables_tailnet_ip_guard", False)):
+        raise ValueError(
+            f"service {name} has tailnet_domains {list(hosts)}, but "
+            "nftables_tailnet_ip_guard is off on this host. Turn it on (and run "
+            "`bay deploy <env> --tags nftables`) before serving a tailnet-only host."
+        )
+    access = svc.get("access", "public")
+    if access == "vpn" and not svc.get("public_routes"):
+        service_ref = f"{name}-vpn"
+    else:
+        service_ref = name
+    router = f"{name}-tailnet"
+    labels[f"traefik.http.routers.{router}.rule"] = _host_rule(list(hosts))
+    labels[f"traefik.http.routers.{router}.service"] = service_ref
+    labels[f"traefik.http.routers.{router}.entrypoints"] = TAILNET_ENTRYPOINT
+    labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
+    labels[f"traefik.http.routers.{router}.middlewares"] = ",".join(vpn_mw)
 
 
 # Characters the services schema lets into a route that mean something in a
@@ -1765,6 +1946,24 @@ def bay_gateway_bind_ip(hostvars_entry):
             return value.strip()
     return ""
 
+
+
+def bay_gateway_interface(hostvars_entry):
+    """Resolve one host's overlay interface name from its hostvars.
+
+    The adapter value `gateway_interface` wins when it is set. Otherwise:
+    `tailscale0` for the headscale backend, and "" for every other backend.
+    Bay does not manage the WireGuard interface, so it does not know its name;
+    the nftables tailnet guard refuses an empty name. Like
+    `bay_gateway_bind_ip`, this exists because role defaults of another role
+    are not in hostvars.
+    """
+    hv = hostvars_entry or {}
+    value = hv.get("gateway_interface")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    backend = str(hv.get("access_gateway") or "wireguard").strip()
+    return "tailscale0" if backend == "headscale" else ""
 
 # ── Database role passwords (deploy_stack/database_provision.yml) ─────────
 #

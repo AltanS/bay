@@ -163,6 +163,7 @@ def parse_state(
         ),
         memory=_int_or_none(host_config.get("Memory")),
         memory_swap=_int_or_none(host_config.get("MemorySwap")),
+        nano_cpus=_int_or_none(host_config.get("NanoCpus")),
         dns=_dns_tuple(host_config),
         networks=_networks(attrs.get("NetworkSettings")),
     )

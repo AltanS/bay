@@ -54,6 +54,9 @@ OLD_FILE = Path("group_vars") / "all" / "tailnet_proxies.yml"
 #: The tags ``bay up`` runs when the plan has a route step. Headscale renders
 #: the split-DNS records, Traefik the route file.
 ROUTE_TAGS = ("headscale", "traefik")
+# Plan step kinds that change Headscale's split-DNS records, so bay up adds
+# ROUTE_TAGS and the ingress box (scope rule 3) for them.
+ROUTE_KINDS = ("route", "tailnet_host")
 HOST_CLIENT = "client"
 HOST_UPSTREAM = "upstream"
 
@@ -459,10 +462,10 @@ BACKUP_TAG = "backup"
 
 def deploy_tags(steps: Sequence[Mapping[str, Any]], base: str) -> str:
     """The tags ``bay up`` runs: ``base``, plus headscale and traefik on a route
-    step, plus backup on a backup step (the backup role installs the volume
+    or tailnet_host step (both change Headscale's DNS records), plus backup on a backup step (the backup role installs the volume
     backup scripts and timers)."""
     tags = [t for t in base.split(",") if t]
-    if any(s.get("kind") == "route" for s in steps):
+    if any(s.get("kind") in ROUTE_KINDS for s in steps):
         tags += [t for t in ROUTE_TAGS if t not in tags]
     if any(s.get("kind") == "backup" for s in steps) and BACKUP_TAG not in tags:
         tags.append(BACKUP_TAG)

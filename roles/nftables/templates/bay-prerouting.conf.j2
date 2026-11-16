@@ -15,9 +15,33 @@
 table inet bay_prerouting {}
 delete table inet bay_prerouting
 
+{% set _tailnet_guard_ip = (nftables_tailnet_guard_ip | default('', true) | string | trim)
+     or (hostvars[inventory_hostname] | bay_gateway_bind_ip if nftables_tailnet_ip_guard | default(false) | bool else '') %}
 table inet bay_prerouting {
+{% if nftables_tailnet_ip_guard | default(false) | bool and _tailnet_guard_ip %}
+    # The tailnet address answers only on the tailnet (nftables_tailnet_ip_guard).
+    # Without this, a host on the same network segment can send a packet to
+    # {{ _tailnet_guard_ip }} through the public interface and reach the
+    # tailnet-only listeners (Traefik websecure_tailnet). Allowed: the overlay
+    # interface ({{ nftables_tailnet_guard_iifname }}), the box itself (lo) and its
+    # containers. Everything else is dropped.
+    chain tailnet_dst {
+        iifname "{{ nftables_tailnet_guard_iifname }}" return
+        iifname "lo" return
+        iifname "docker*" return
+        iifname "br-*" return
+        iifname "veth*" return
+        counter drop
+    }
+
+{% endif %}
     chain prerouting {
         type filter hook prerouting priority -350; policy accept;
+{% if nftables_tailnet_ip_guard | default(false) | bool and _tailnet_guard_ip %}
+
+        # Packets to the tailnet address: see chain tailnet_dst.
+        ip daddr {{ _tailnet_guard_ip }} jump tailnet_dst
+{% endif %}
 {% if nftables_drop_ipv4_options | default(true) | bool %}
 
         # Drop IPv4 TCP that carries IP options (header longer than 20 bytes).

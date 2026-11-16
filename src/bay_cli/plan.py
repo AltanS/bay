@@ -603,8 +603,10 @@ def _materialize(
       moved beside the toml after the pin is found); else ``files/<target>`` at HEAD.
 
     Every path the compiler and ``fleet.load_inputs`` read from the fleet root
-    is copied here: ``bay.fleet.toml``, ``group_vars/all/*.y*ml``,
-    ``projects/`` (``bay.toml``, its files and ``bay.lock``) and ``files/``.
+    is copied here: ``bay.fleet.toml``, ``group_vars/all/*.y*ml``, the plain
+    (not vault) ``group_vars`` of the other groups (``bay_cli.boxvars`` reads a
+    box's flags there), ``projects/`` (``bay.toml``, its files and
+    ``bay.lock``) and ``files/``.
     """
     root = tmp / "fleet"
     root.mkdir(parents=True)
@@ -625,6 +627,7 @@ def _materialize(
         if path.resolve() == generated or path.name.startswith(("secrets", "vault")):
             continue
         shutil.copy2(path, all_dst / path.name)
+    _copy_box_group_vars(src, root)
 
     locks: dict[str, dict[str, Any]] = {}
     for stem, lock in lock_files(src):
@@ -755,6 +758,39 @@ def _map_files(
                 shutil.copytree(source, dest, symlinks=True)
             else:
                 shutil.copy2(source, dest)
+
+
+def _copy_box_group_vars(src: Path, root: Path) -> None:
+    """Copy the plain group_vars of every group but ``all`` into the scratch fleet.
+
+    The compile reads box flags there (``bay_cli.boxvars``). A vault file and a
+    ``secrets*``/``vault*`` file are left out: nothing in the compile reads them.
+    """
+    base = src / "group_vars"
+    if not base.is_dir():
+        return
+    for entry in sorted(base.iterdir()):
+        if entry.name == "all":
+            continue
+        if entry.is_dir():
+            paths = sorted([*entry.glob("*.yml"), *entry.glob("*.yaml")])
+            dest_dir = root / "group_vars" / entry.name
+        elif entry.suffix in (".yml", ".yaml"):
+            paths = [entry]
+            dest_dir = root / "group_vars"
+        else:
+            continue
+        for path in paths:
+            if path.name.startswith(("secrets", "vault")) or not path.is_file():
+                continue
+            try:
+                head = path.read_bytes()[:64]
+            except OSError:
+                continue
+            if head.lstrip().startswith(b"$ANSIBLE_VAULT"):
+                continue
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, dest_dir / path.name)
 
 
 def _copy_files_tree(src: Path, fleet_head: str | None, out: _Copy) -> None:
@@ -1217,6 +1253,55 @@ def _egress_fleet_step(
     )
 
 
+def _tailnet_host_steps(
+    name: str, old: Mapping[str, Any], new: Mapping[str, Any], *, project: str | None
+) -> list[dict[str, Any]]:
+    """One ``tailnet_host`` step per bay.toml ``tailnet_hosts`` name added or removed.
+
+    Risk ``shared``, so ``bay approve`` must name a reason, both ways: the
+    step restarts Headscale, which changes DNS for every tailnet device, and
+    an added name needs a public A record that Bay cannot check (a first
+    HTTP-01 try without it burns the Let's Encrypt limit). ``bay up`` adds
+    the ingress box to its scope and the headscale tag, like a route step.
+    """
+    before = [str(h) for h in old.get("tailnet_domains") or []]
+    after = [str(h) for h in new.get("tailnet_domains") or []]
+    steps: list[dict[str, Any]] = []
+    for host in after:
+        if host in before:
+            continue
+        steps.append(
+            _step(
+                "tailnet_host",
+                "tailnet_host_added",
+                "shared",
+                f"tailnet host {host} added to {name}: served only on the tailnet "
+                "listener (websecure_tailnet) of its box; Headscale restarts (new DNS "
+                "record to the box's tailnet address); the public A record must point "
+                "at the box's public address first, for the HTTP-01 certificate",
+                container=name,
+                resource=host,
+                project=project,
+            )
+        )
+    for host in before:
+        if host in after:
+            continue
+        steps.append(
+            _step(
+                "tailnet_host",
+                "tailnet_host_removed",
+                "shared",
+                f"tailnet host {host} removed from {name}: its router goes; Headscale "
+                "restarts (DNS record removed); delete the public A record by hand",
+                container=name,
+                resource=host,
+                project=project,
+            )
+        )
+    return steps
+
+
 def _container_steps(
     name: str,
     old: dict[str, Any] | None,
@@ -1230,7 +1315,11 @@ def _container_steps(
             _step("container", "create", "safe", "new container", container=name, project=project)
         ]
         opened = _egress_fleet_step(name, {}, new, project=project)
-        return created + ([opened] if opened is not None else [])
+        return (
+            created
+            + ([opened] if opened is not None else [])
+            + _tailnet_host_steps(name, {}, new, project=project)
+        )
     if new is None:
         return [
             _step(
@@ -1241,7 +1330,7 @@ def _container_steps(
                 container=name,
                 project=project,
             )
-        ]
+        ] + _tailnet_host_steps(name, old or {}, {}, project=project)
     assert old is not None
     steps = [
         _step(
@@ -1257,6 +1346,7 @@ def _container_steps(
     fleet_step = _egress_fleet_step(name, old, new, project=project)
     if fleet_step is not None:
         steps.append(fleet_step)
+    steps.extend(_tailnet_host_steps(name, old, new, project=project))
 
     old_vols, new_vols = _named_volumes(old), _named_volumes(new)
     gone = sorted(set(old_vols) - set(new_vols))
@@ -1467,6 +1557,7 @@ def diff_steps(
                         container=name,
                     )
                 )
+                steps.extend(_tailnet_host_steps(name, old or {}, {}, project=None))
             else:
                 action = "create" if old is None else "update"
                 steps.append(
@@ -1481,6 +1572,7 @@ def diff_steps(
                 opened = _egress_fleet_step(name, old or {}, new, project=None)
                 if opened is not None:
                     steps.append(opened)
+                steps.extend(_tailnet_host_steps(name, old or {}, new, project=None))
     if current.get("webhook") != wanted.get("webhook"):
         steps.append(
             _step("fleet", "update", "shared", "the deploy webhook changes", resource="webhook")

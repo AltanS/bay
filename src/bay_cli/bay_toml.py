@@ -33,7 +33,7 @@ SCHEMA_PATH = Path(__file__).parent / "schemas" / "bay_toml.schema.json"
 #: as unknown inside a table is almost always the scalar-after-table trap.
 TOP_LEVEL_KEYS = (
     "name", "fleet", "publish", "image", "port", "command", "release", "health",
-    "replicas", "memory", "dns", "update", "zero_downtime", "logs", "secrets",
+    "replicas", "memory", "cpus", "dns", "update", "zero_downtime", "logs", "secrets",
 )
 
 #: Matches the start of a template expression in any string value.
@@ -978,6 +978,15 @@ def _domain_rules(
         aliases = d.get("aliases")
         for i, alias in enumerate(aliases if isinstance(aliases, list) else []):
             yield from claim(alias, f"{base}.aliases[{i}]", env)
+        hosts = d.get("tailnet_hosts")
+        for i, host in enumerate(hosts if isinstance(hosts, list) else []):
+            yield from claim(host, f"{base}.tailnet_hosts[{i}]", env)
+        if isinstance(hosts, list) and hosts and mode == "internal":
+            yield Violation(
+                f"{base}.tailnet_hosts",
+                "access.mode internal gives the main container no route, so a tailnet "
+                "host has nothing to serve; remove tailnet_hosts or choose another mode",
+            )
         overrides = _dict(d.get("services"))
         for svc_name, svc in services.items():
             if not isinstance(svc, dict):

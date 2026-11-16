@@ -782,3 +782,24 @@ def test_show_prints_framework_drift_with_the_fleet_drift(
         f"{drift['fleet_commit'][:12]}; 1 fleet file(s) changed since then "
         "(group_vars/all/main.yml); run bay up production"
     ]
+
+
+def test_a_tailnet_host_step_takes_the_ingress_box() -> None:
+    step = {"kind": "tailnet_host", "action": "tailnet_host_added", "project": "app",
+            "container": "app", "resource": "admin.example.com"}
+    res = _compute(steps=[step])
+    assert res.scope["reasons"] == {"eu2": "project box", "infra": "ingress box"}
+    assert res.scope["limits"] == {"production": sorted([HOST["eu2"], HOST["infra"]])}
+
+
+def test_a_tailnet_host_step_without_an_ingress_box_deploys_the_whole_env() -> None:
+    step = {"kind": "tailnet_host", "action": "tailnet_host_added", "project": "app",
+            "container": "app", "resource": "admin.example.com"}
+    cx = Context.for_fleet_root(Path("/nonexistent-fleet"))
+    fleet = {k: v for k, v in FOUR.items() if k != "tailnet"}
+    res = scopemod.compute(
+        cx, fleet, project="app", box="eu2", box_env="production", moves=[], steps=[step],
+        current=BASE, wanted=json.loads(json.dumps(BASE)), read_map=_maps,
+    )
+    assert res.scope["all_boxes"] is True
+    assert res.scope["why"] == scopemod.WHY_NO_INGRESS

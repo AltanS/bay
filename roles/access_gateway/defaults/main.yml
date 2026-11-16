@@ -104,6 +104,13 @@ gateway_bind_ip: >-
      if (access_gateway | default('wireguard')) in ['headscale', 'wireguard']
      else '' }}
 
+# The interface overlay traffic comes in on. The nftables tailnet address
+# guard lets it through. Empty when Bay does not know it: Bay does not manage
+# the WireGuard interface. A role outside this one reads it through the
+# `bay_gateway_interface` resolver (role defaults are not in hostvars).
+gateway_interface: >-
+  {{ 'tailscale0' if (access_gateway | default('wireguard')) == 'headscale' else '' }}
+
 # Overlay CIDR(s) to feed into allowlists. WireGuard supplies its ranges
 # through `vpn_allowed_ips` directly, as it always has.
 gateway_cidrs: >-

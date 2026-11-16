@@ -22,6 +22,16 @@ entryPoints:
         readTimeout: "{{ traefik_public_read_timeout | string | trim }}"
 {%   endif %}
 {%   if gateway_bind_ip | default('', true) | trim | length > 0 %}
+{#   web_tailnet: plain http:// on the tailnet address only redirects to https
+     on the tailnet listener. No router binds it, so it serves nothing else.
+     HTTP-01 challenges never come here: they use `web` on the public IP. #}
+  web_tailnet:
+    address: "{{ gateway_bind_ip }}:80"
+    http:
+      redirections:
+        entryPoint:
+          to: websecure_tailnet
+          scheme: https
   websecure_tailnet:
     address: "{{ gateway_bind_ip }}:443"
 {%     if traefik_tailnet_read_timeout | default('', true) | string | trim | length > 0 %}

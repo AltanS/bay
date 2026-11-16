@@ -45,14 +45,14 @@ derp:
 {%   for svc_name, svc in (h['services'] | default({})).items() %}
 {%     set svc_regions = svc.regions | default([]) %}
 {%     if svc_regions | length == 0 or host_region in svc_regions %}
-{%       if svc.access | default('public') == 'vpn' or svc.vpn_routes | default([]) | length > 0 %}
-{%         for domain in svc.domains | default([]) %}
-{%           if domain not in seen_domains %}
-{%             set _ = vpn_records.append({'domain': domain, 'ip': h['headscale_server_tailnet_ip'] | default('100.64.0.1')}) %}
-{%             set _ = seen_domains.update({domain: true}) %}
-{%           endif %}
-{%         endfor %}
-{%       endif %}
+{#       bay_split_dns_domains is the one predicate: the same names make the
+         service's routers bind websecure_tailnet (bay_traefik_labels). #}
+{%       for domain in svc | bay_split_dns_domains %}
+{%         if domain not in seen_domains %}
+{%           set _ = vpn_records.append({'domain': domain, 'ip': h['headscale_server_tailnet_ip'] | default('100.64.0.1')}) %}
+{%           set _ = seen_domains.update({domain: true}) %}
+{%         endif %}
+{%       endfor %}
 {%     endif %}
 {%   endfor %}
 {% endfor %}

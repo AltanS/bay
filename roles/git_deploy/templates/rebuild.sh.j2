@@ -909,6 +909,60 @@ _release_or_fail() {
   exit 1
 }
 
+# ── Host checks before the running container is removed ──
+# The deploy makes the same checks (roles/deploy_stack/tasks/host_preflight.yml),
+# but a webhook rebuild recreates from the copy of the spec in this script, and
+# the box can change after it was rendered. So check again here, before the
+# release and before `docker rm`:
+#  - a service with tailnet hosts starts only when the live firewall has the
+#    tailnet address guard for this box's tailnet address (Host spoofing on
+#    the public address would reach its tailnet routers without it);
+#  - a CPU limit above the box's CPU count makes Docker refuse the create
+#    after the old container is gone.
+# A refusal is a failed build: the circuit breaker counts it, build.failed
+# alerts, and the old container keeps running.
+#   NEEDS_TAILNET_GUARD, TAILNET_GUARD_IP, CPUS come from the per-service block.
+
+# Exit 0 when the nft table text ($1) has `ip daddr $2 jump tailnet_dst` in
+# chain prerouting and a drop in chain tailnet_dst. Same rule as the filter
+# bay_tailnet_guard_live (tests/test_rebuild_preflight.py checks both agree).
+_tailnet_guard_live() {
+  local table="$1" ip="$2"
+  [[ -n "${ip}" ]] || return 1
+  printf '%s\n' "${table}" | awk -v want="ip daddr ${ip} jump tailnet_dst" '
+    /^[[:space:]]*chain[[:space:]]+/ { chain = $2; next }
+    /^[[:space:]]*}[[:space:]]*$/ { chain = ""; next }
+    {
+      line = $0
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+      if (chain == "prerouting" && line == want) j = 1
+      if (chain == "tailnet_dst" && line ~ /(^|[[:space:]])drop$/) d = 1
+    }
+    END { exit !(j && d) }'
+}
+
+_preflight_recreate() {
+  local table cores
+  if [[ -n "${NEEDS_TAILNET_GUARD}" ]]; then
+    table=$(sudo -n {{ nftables_nft_path | default('/usr/sbin/nft') }} list table inet bay_prerouting 2>/dev/null || true)
+    if ! _tailnet_guard_live "${table}" "${TAILNET_GUARD_IP}"; then
+      _log "Tailnet guard missing for ${SERVICE}: no live 'ip daddr ${TAILNET_GUARD_IP:-<none>} jump tailnet_dst' in table inet bay_prerouting; old container kept"
+      _record_failure "${SHA}" "Tailnet guard" "${SERVICE} serves tailnet hosts, but the live firewall has no tailnet address guard for ${TAILNET_GUARD_IP:-<no tailnet address>}. Run bay deploy <env> --tags nftables, then bay up."
+      trap - ERR
+      exit 1
+    fi
+  fi
+  if [[ -n "${CPUS}" ]]; then
+    cores=$(nproc)
+    if awk -v c="${CPUS}" -v n="${cores}" 'BEGIN { exit !(c + 0 > n + 0) }'; then
+      _log "CPU limit too high for ${SERVICE}: cpus ${CPUS} > ${cores} CPUs on this box; old container kept"
+      _record_failure "${SHA}" "CPU limit" "${SERVICE} sets cpus ${CPUS}, but this box has ${cores} CPUs. Docker would refuse to create it. Lower cpus in its bay.toml, then bay up."
+      trap - ERR
+      exit 1
+    fi
+  fi
+}
+
 # ── Failed builds (docs/build-pipeline.md, "Health check and rollback") ──
 # A build whose health check failed must never run again by its commit tag:
 # `bay up` and `bay rollback --to` find code by `<image>:<commit12>`. Untag it
@@ -1291,6 +1345,10 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
   DOCKERFILE="{{ dq(dockerfile) }}"
   CONTEXT="{{ dq(context) }}"
   IMAGE_NAME="{{ dq(image_name) }}"
+{% set _tailnet_guard_ip = gateway_bind_ip | default('', true) | string | trim %}
+  NEEDS_TAILNET_GUARD="{{ '1' if svc.tailnet_domains | default([]) else '' }}"
+  TAILNET_GUARD_IP="{{ dq(_tailnet_guard_ip) if svc.tailnet_domains | default([]) else '' }}"
+  CPUS="{{ dq(svc.cpus) if svc.cpus is defined else '' }}"
 {% if strategy == 'remote' and svc.image is defined %}
   IMAGE_REF="{{ dq(svc.image) }}"
   IMAGE_REPO="{{ dq(svc.image | regex_replace(':.*$', '')) }}"
@@ -1406,6 +1464,10 @@ _log "Starting rebuild for ${SERVICE} at $(date -Iseconds)"
 {% set svc = services[svc_name] %}
 {% if not _is_first.val %}el{% endif %}if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
   # Pull-only service (no build: block, shares a remote-built image)
+{% set _tailnet_guard_ip = gateway_bind_ip | default('', true) | string | trim %}
+  NEEDS_TAILNET_GUARD="{{ '1' if svc.tailnet_domains | default([]) else '' }}"
+  TAILNET_GUARD_IP="{{ dq(_tailnet_guard_ip) if svc.tailnet_domains | default([]) else '' }}"
+  CPUS="{{ dq(svc.cpus) if svc.cpus is defined else '' }}"
   IMAGE_REF="{{ svc.image }}"
   IMAGE_REPO="{{ svc.image | regex_replace(':.*$', '') }}"
   IMAGE_NAME=""
@@ -1583,6 +1645,7 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
 
   # Release with the pulled image while the old container still serves. On a
   # failure the local moving tag goes back to the running image.
+  _preflight_recreate
   _release_or_fail "${IMAGE_REF}" "${IMAGE_REF}" "${_PREV_DIGEST}"
 
   # Carry the deploy's config-hash label over to the recreated container.
@@ -1605,6 +1668,9 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
 {% endif %}
 {% set _is_pull_eligible = (_is_remote and svc.image is defined) or (not _has_build and svc.image is defined) %}
 {% if _is_pull_eligible %}
+{# _tc holds the same keys as _traefik_config in container_lifecycle/tasks/build_specs.yml
+   (tests/test_tailnet_hosts.py checks it). A key missing here gives a webhook rebuild
+   other labels than the deploy: a split host lost websecure_tailnet that way. #}
 {% set _tc = {
   'traefik_docker_network': traefik_docker_network | default('services'),
   'traefik_security_headers_enabled': traefik_security_headers_enabled | default(true),
@@ -1617,8 +1683,22 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
   'traefik_circuit_breaker_expression': traefik_circuit_breaker_expression | default('NetworkErrorRatio() > 0.5'),
   'traefik_retry_attempts': traefik_retry_attempts | default(4),
   'stack_name': stack_name | default('bay'),
+  'vpn_entrypoints': vpn_entrypoints | default('websecure'),
+  'public_entrypoints': public_entrypoints | default('websecure'),
+  'traefik_split_entrypoints': traefik_split_entrypoints | default(false),
+  'tailnet_entrypoint_enabled': (gateway_bind_ip | default('', true) | string | trim | length) > 0,
+  'nftables_tailnet_ip_guard': nftables_tailnet_ip_guard | default(false),
 } %}
 {% if not _pull_ns.first %}el{% endif %}if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
+{% if svc.tailnet_domains | default([]) and svc_name not in (services | bay_host_tailnet_services(group_names)) %}
+{# A build server renders blocks for services that run on other boxes. A
+   service with tailnet hosts never starts here: this box is not where its
+   tailnet address guard is checked, and its labels need this box's guard. #}
+  _run_container() {
+    _log "{{ svc_name }} serves tailnet hosts and does not run on this box: not started here"
+    return 1
+  }
+{% else %}
 {% set _egress_nets = svc_name | bay_egress_client_networks(accessories | default({})) %}
   _run_container() {
     docker {{ 'create' if _egress_nets else 'run -d' }} \
@@ -1643,6 +1723,9 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
 {% if svc.memswap_limit is defined %}
       --memory-swap "{{ svc.memswap_limit }}" \
 {% endif %}
+{% if svc.cpus is defined %}
+      --cpus "{{ svc.cpus }}" \
+{% endif %}
 {% for resolver in svc.dns | default([]) %}
       --dns "{{ resolver }}" \
 {% endfor %}
@@ -1666,6 +1749,7 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
     docker start "{{ svc_name }}" >/dev/null
 {% endif %}
   }
+{% endif %}
 {% set _pull_ns.first = false %}
 {% endif %}
 {% endfor %}
@@ -2208,6 +2292,7 @@ if [[ -n "${HOLD_REASON}" ]]; then
 fi
 
 # ── Release, with the new commit's image, before :latest moves ──
+_preflight_recreate
 _release_or_fail "${IMAGE_NAME}:${SHA}"
 
 # ── The push may deploy: move :latest to this commit ──
@@ -2228,6 +2313,9 @@ docker rm "${SERVICE}"   2>/dev/null || true
 
 {% for svc_name in git_deploy_services %}
 {% set svc = services[svc_name] %}
+{# _tc holds the same keys as _traefik_config in container_lifecycle/tasks/build_specs.yml
+   (tests/test_tailnet_hosts.py checks it). A key missing here gives a webhook rebuild
+   other labels than the deploy: a split host lost websecure_tailnet that way. #}
 {% set _tc = {
   'traefik_docker_network': traefik_docker_network | default('services'),
   'traefik_security_headers_enabled': traefik_security_headers_enabled | default(true),
@@ -2240,8 +2328,22 @@ docker rm "${SERVICE}"   2>/dev/null || true
   'traefik_circuit_breaker_expression': traefik_circuit_breaker_expression | default('NetworkErrorRatio() > 0.5'),
   'traefik_retry_attempts': traefik_retry_attempts | default(4),
   'stack_name': stack_name | default('bay'),
+  'vpn_entrypoints': vpn_entrypoints | default('websecure'),
+  'public_entrypoints': public_entrypoints | default('websecure'),
+  'traefik_split_entrypoints': traefik_split_entrypoints | default(false),
+  'tailnet_entrypoint_enabled': (gateway_bind_ip | default('', true) | string | trim | length) > 0,
+  'nftables_tailnet_ip_guard': nftables_tailnet_ip_guard | default(false),
 } %}
 {% if not loop.first %}el{% endif %}if [[ "${SERVICE}" == '{{ svc_name }}' ]]; then
+{% if svc.tailnet_domains | default([]) and svc_name not in (services | bay_host_tailnet_services(group_names)) %}
+{# A build server renders blocks for services that run on other boxes. A
+   service with tailnet hosts never starts here: this box is not where its
+   tailnet address guard is checked, and its labels need this box's guard. #}
+  _run_container() {
+    _log "{{ svc_name }} serves tailnet hosts and does not run on this box: not started here"
+    return 1
+  }
+{% else %}
 {% set _egress_nets = svc_name | bay_egress_client_networks(accessories | default({})) %}
   _run_container() {
     docker {{ 'create' if _egress_nets else 'run -d' }} \
@@ -2266,6 +2368,9 @@ docker rm "${SERVICE}"   2>/dev/null || true
 {% if svc.memswap_limit is defined %}
       --memory-swap "{{ svc.memswap_limit }}" \
 {% endif %}
+{% if svc.cpus is defined %}
+      --cpus "{{ svc.cpus }}" \
+{% endif %}
 {% for resolver in svc.dns | default([]) %}
       --dns "{{ resolver }}" \
 {% endfor %}
@@ -2289,6 +2394,7 @@ docker rm "${SERVICE}"   2>/dev/null || true
     docker start "{{ svc_name }}" >/dev/null
 {% endif %}
   }
+{% endif %}
 {% endfor %}
 {% if git_deploy_services | length > 0 %}
 fi

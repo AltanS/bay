@@ -8,7 +8,8 @@ these holds (``docs/plan.md``, "Which boxes a run touches"):
 
 1. It is the box of the project.
 2. It is the old box of a move.
-3. The plan has a route step and the box is ``[tailnet] ingress_box``.
+3. The plan has a route or tailnet_host step and the box is ``[tailnet] ingress_box``
+   (without one, a tailnet_host step deploys the whole env).
 4. The build surface changed (:func:`changed_builds`): every box that renders
    something a push build depends on (:func:`receiver_boxes`).
 5. The plan has a compile step for a container of another project (or of no
@@ -51,6 +52,10 @@ WHY_FLAG = "--all-boxes"
 WHY_NO_PROJECT = "no project: the run covers the whole environment"
 WHY_EVERY_HOST = "the scope holds every host of the box environment"
 WHY_TAILNET = "the plan changes the tailnet allowlist of every box"
+WHY_NO_INGRESS = (
+    "the plan changes a tailnet host and bay.fleet.toml names no [tailnet] ingress_box "
+    "(the Headscale box that renders the DNS record)"
+)
 WHY_UNPLACED = "a planned step cannot be placed on one box"
 WHY_NO_MAP = "no host map"
 WHY_BUILD_SERVER = "the build server cannot be read from group_vars"
@@ -275,12 +280,19 @@ def compute(
     add(box, PROJECT_BOX)
     for old, _ in moves:
         add(old, OLD_BOX)
-    if any(s.get("kind") == "route" for s in steps):
-        ingress = (fleet_doc.get("tailnet") or {}).get("ingress_box")
+    ingress = (fleet_doc.get("tailnet") or {}).get("ingress_box")
+    if any(s.get("kind") in ("route", "tailnet_host") for s in steps):
         add(ingress if isinstance(ingress, str) else None, INGRESS_BOX)
 
     if all_boxes:
         return Result(whole(WHY_FLAG, everything, reasons))
+    if not isinstance(ingress, str) and any(s.get("kind") == "tailnet_host" for s in steps):
+        # The Headscale box must render the new DNS record, and without an
+        # ingress box Bay cannot name it: deploy every box of the env.
+        return Result(
+            whole(WHY_NO_INGRESS, everything, reasons),
+            [f"this run deploys every box of {', '.join(envs)}: {WHY_NO_INGRESS}"],
+        )
     if any(s.get("kind") == "tailnet" for s in steps):
         return Result(
             whole(WHY_TAILNET, everything, reasons),

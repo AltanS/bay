@@ -28,6 +28,14 @@
       # VPN routers also bind the tailnet listener (websecure_tailnet).
       vpn_entrypoints: "{{ vpn_entrypoints | default('websecure') }}"
       public_entrypoints: "{{ public_entrypoints | default('websecure') }}"
+      # Does this host's Traefik have a websecure_tailnet listener? Then the
+      # routers of every name split DNS sends to the tailnet address bind it
+      # (bay_split_dns_domains), and a bay.toml `tailnet_hosts` router may be
+      # built at all. The guard flag must be on for such a router too. These
+      # three change no label of a service that has neither.
+      traefik_split_entrypoints: "{{ traefik_split_entrypoints | default(false) | bool }}"
+      tailnet_entrypoint_enabled: "{{ (gateway_bind_ip | default('', true) | string | trim | length) > 0 }}"
+      nftables_tailnet_ip_guard: "{{ nftables_tailnet_ip_guard | default(false) | bool }}"
 
 # ── Service specs ────────────────────────────────────────────────────────
 
@@ -95,6 +103,9 @@
                    else {})
          | combine({'memswap_limit': _svc.memswap_limit}
                    if _svc.memswap_limit is defined
+                   else {})
+         | combine({'cpus': _svc.cpus}
+                   if _svc.cpus is defined
                    else {})
          | combine({'dns': _svc.dns}
                    if _svc.dns is defined
@@ -190,6 +201,9 @@
                    else {})
          | combine({'memswap_limit': _acc.memswap_limit}
                    if _acc.memswap_limit is defined
+                   else {})
+         | combine({'cpus': _acc.cpus}
+                   if _acc.cpus is defined
                    else {})
          | combine({'dns': _acc.dns}
                    if _acc.dns is defined

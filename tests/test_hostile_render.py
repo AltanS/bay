@@ -572,6 +572,20 @@ def _reboot_alert(payload: str) -> str:
     )
 
 
+def _cert_alert(payload: str) -> str:
+    return _render(
+        "roles/outbound_monitor/templates/bay-cert-alert.sh.j2",
+        ansible_managed="test",
+        outbound_check_state_dir=payload,
+        cert_alert_acme_files=[payload],
+        cert_alert_warn_days=21,
+        cert_alert_page_days=7,
+        cert_alert_expired_days=7,
+        inventory_hostname="host1",
+        region="",
+    )
+
+
 def _rebuild_sh(payload: str) -> str:
     from test_rebuild_config import _render_rebuild_sh
 
@@ -758,6 +772,7 @@ _CASES: list[Case] = [
     ),
     Case("roles/outbound_monitor/templates/bay-disk-alert.sh.j2", _disk_alert),
     Case("roles/outbound_monitor/templates/bay-reboot-alert.sh.j2", _reboot_alert),
+    Case("roles/outbound_monitor/templates/bay-cert-alert.sh.j2", _cert_alert),
     Case(
         "roles/git_deploy/templates/rebuild.sh.j2",
         _rebuild_sh,

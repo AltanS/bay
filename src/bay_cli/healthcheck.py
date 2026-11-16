@@ -411,6 +411,9 @@ def expand_domain(
     return expanded or [domain]
 
 
+TAILNET_HOST_REASON = "tailnet-only host; not probed from the public side"
+
+
 def _collect_targets(
     services: dict[str, Any],
     include_vpn: bool,
@@ -457,6 +460,11 @@ def _collect_targets(
                     targets.append((name, candidate, path, True, _UNRESOLVED_REASON))
                     continue
                 targets.append((name, candidate, path, skip, reason))
+        # A tailnet-only host (bay.toml tailnet_hosts) has no router on the
+        # public listener: probed from here it is Traefik's 404 by design. It
+        # is listed as skipped, never probed, with or without --include-vpn.
+        for host in svc.get("tailnet_domains") or []:
+            targets.append((name, str(host), path, True, TAILNET_HOST_REASON))
     return targets
 
 

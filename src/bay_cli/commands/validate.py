@@ -1291,6 +1291,9 @@ def _check_domain_uniqueness(
         path = (path.rstrip("/") or "/") if path else ""
         for domain in domains:
             domain_map.setdefault((str(domain), path), []).append((svc_name, regions))
+        # A tailnet-only host is a name of its own: no other router may claim it.
+        for domain in svc.get("tailnet_domains") or []:
+            domain_map.setdefault((str(domain), ""), []).append((svc_name, regions))
 
     has_dups = False
     for (domain, path), owners in domain_map.items():

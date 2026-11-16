@@ -142,6 +142,7 @@ def _ansible_env():
     from bay_filters import (
         bay_build_dedup_map,
         bay_egress_client_networks,
+        bay_host_tailnet_services,
         bay_image_consumers,
         bay_image_region_map,
         bay_prefix_volumes,
@@ -162,6 +163,7 @@ def _ansible_env():
     env.filters["bay_traefik_labels"] = bay_traefik_labels
     env.filters["bay_watchtower_labels"] = bay_watchtower_labels
     env.filters["bay_egress_client_networks"] = bay_egress_client_networks
+    env.filters["bay_host_tailnet_services"] = bay_host_tailnet_services
     return env
 
 
@@ -401,7 +403,7 @@ def test_exit_path_map_rows_all_carry_an_alert_id_cell():
     # plus M117/06's config-only exit (row 20), plus M118/04's release exit (row 21),
     # plus the config-only tag failure exit (row 22), plus M121/01's
     # no-input-change exits (rows 23 and 24), plus 2.17.1's repo exit (row 25).
-    assert len(rows) == 25, f"Expected 25 exit-path rows, found {len(rows)}"
+    assert len(rows) == 27, f"Expected 27 exit-path rows, found {len(rows)}"
 
     malformed: list[str] = []
     for row in rows:

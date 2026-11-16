@@ -72,6 +72,54 @@
   loop_control:
     loop_var: _nft_pr_rule
 
+- name: Check the tailnet address guard has an address
+  ansible.builtin.assert:
+    that:
+      - (nftables_tailnet_guard_ip | default('', true) | string | trim | length > 0)
+        or (hostvars[inventory_hostname] | bay_gateway_bind_ip | length > 0)
+    fail_msg: >-
+      nftables_tailnet_ip_guard is true, but this host has no tailnet address
+      (gateway_bind_ip is empty). Set one, set
+      nftables_tailnet_guard_ip, or turn the guard off.
+    quiet: true
+  when: nftables_tailnet_ip_guard | default(false) | bool
+
+- name: Check the tailnet address guard knows the overlay interface
+  ansible.builtin.assert:
+    that:
+      - nftables_tailnet_guard_iifname | default('', true) | string is match('^[A-Za-z0-9_.-]{1,15}$')
+    fail_msg: >-
+      nftables_tailnet_ip_guard is true, but the guard does not know the
+      interface the overlay traffic comes in on. Bay knows it only for
+      access_gateway headscale (tailscale0); this box has access_gateway
+      {{ access_gateway | default('wireguard') }}. Set
+      nftables_tailnet_guard_iifname (for example "wg0"), or turn the guard off.
+    quiet: true
+  when: nftables_tailnet_ip_guard | default(false) | bool
+
+# A service of this box with tailnet_domains (bay.toml tailnet_hosts) is
+# served on websecure_tailnet, which binds gateway_bind_ip. Without the guard
+# for exactly that address, a host on the same network segment reaches it.
+- name: Refuse to drop or move the guard of a box that serves tailnet hosts
+  ansible.builtin.assert:
+    that:
+      - nftables_tailnet_ip_guard | default(false) | bool
+      - _nft_guard_ip == (hostvars[inventory_hostname] | bay_gateway_bind_ip)
+    fail_msg: >-
+      This box serves tailnet hosts ({{ _nft_tailnet_services | join(', ') }}),
+      so the tailnet address guard must stay on and guard gateway_bind_ip
+      ({{ hostvars[inventory_hostname] | bay_gateway_bind_ip or 'empty' }}).
+      Now: nftables_tailnet_ip_guard={{ nftables_tailnet_ip_guard | default(false) }},
+      guard address {{ _nft_guard_ip or 'none' }}. Remove tailnet_hosts from
+      those projects and run bay up first, or fix the group_vars.
+    quiet: true
+  vars:
+    _nft_tailnet_services: "{{ services | default({}) | bay_host_tailnet_services(group_names) }}"
+    _nft_guard_ip: >-
+      {{ (nftables_tailnet_guard_ip | default('', true) | string | trim)
+         or (hostvars[inventory_hostname] | bay_gateway_bind_ip) }}
+  when: (services | default({}) | bay_host_tailnet_services(group_names) | length) > 0
+
 - name: Deploy nftables pre-routing rules
   ansible.builtin.template:
     src: bay-prerouting.conf.j2
@@ -95,16 +143,54 @@
   become_user: root
 
 # Replaces only the bay_prerouting table. Docker's chains are untouched, so
-# no Docker restart. Skipped in check mode (command module).
+# no Docker restart. Skipped in check mode (command module). It also runs when
+# the guard is on but the live table does not hold it for the guard address
+# (a hand edit, or a reload from another file): the deploy and rebuild.sh
+# refuse tailnet hosts until it does, and their message sends the operator here.
 - name: Apply nftables pre-routing rules
   ansible.builtin.command:
     cmd: nft -f /etc/nftables.d/bay-prerouting.conf
   changed_when: true
+  vars:
+    _nft_live_guard_address: >-
+      {{ (nftables_tailnet_guard_ip | default('', true) | string | trim)
+         or (hostvars[inventory_hostname] | bay_gateway_bind_ip) }}
   when: >-
     _nftables_prerouting_file is changed
     or _nftables_prerouting_live.rc != 0
+    or ((nftables_tailnet_ip_guard | default(false) | bool)
+        and not (_nftables_prerouting_live.stdout | default('')
+                 | bay_tailnet_guard_live(_nft_live_guard_address | trim)))
   become: true
   become_user: root
+
+# rebuild.sh runs as the app user and checks the live guard before it
+# recreates a container with a tailnet host. This rule allows exactly one
+# read-only command; nothing else.
+- name: Let the app user read the pre-routing table
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/bay-nft-guard-read
+    # No {{ ansible_managed }} here: it is defined for templates only, and a
+    # copy task fails on it (caught on a live test box).
+    content: |
+      # Managed by Bay (nftables role). Do not edit by hand.
+      # rebuild.sh checks the tailnet address guard with this one command.
+      {{ app_user }} ALL=(root) NOPASSWD: {{ nftables_nft_path }} list table inet bay_prerouting
+    owner: root
+    group: root
+    mode: "0440"
+    validate: visudo -cf %s
+  become: true
+  become_user: root
+  when: nftables_tailnet_ip_guard | default(false) | bool
+
+- name: Remove the pre-routing read rule when the guard is off
+  ansible.builtin.file:
+    path: /etc/sudoers.d/bay-nft-guard-read
+    state: absent
+  become: true
+  become_user: root
+  when: not (nftables_tailnet_ip_guard | default(false) | bool)
 
 - name: Find files in /etc/nftables.d that Bay does not manage
   ansible.builtin.find:

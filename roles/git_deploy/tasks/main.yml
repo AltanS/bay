@@ -8,6 +8,19 @@
 #                webhook + systemd also deployed on build server for auto-builds
 #   registry  -> skip entirely (handled by build_image role pulling image:)
 
+# ── Host checks before anything is rendered ──────────────────────────
+# rebuild.sh holds a frozen copy of each container's labels and limits, and a
+# webhook rebuild recreates containers from it. So the live tailnet address
+# guard and the CPU limits are checked before it is rendered, not only in
+# deploy_stack (which runs after this role): a run that fails there must not
+# leave a rebuild.sh that serves a tailnet host with no guard.
+- name: Check the live tailnet address guard and the CPU limits
+  ansible.builtin.include_tasks:
+    file: ../../deploy_stack/tasks/host_preflight.yml
+    apply:
+      tags: [deploy_stack, build, git_deploy]
+  tags: [deploy_stack, build, git_deploy]
+
 # ── issue #13 — image-map.json re-render on deploy_stack ──────────────
 # image-map.json drives the webhook receiver's post-build pull-signal
 # fan-out. Without this include, the file is only refreshed under

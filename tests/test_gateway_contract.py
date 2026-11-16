@@ -117,4 +117,10 @@ def test_traefik_public_entrypoints_unchanged_by_gateway_state():
     removed = [
         line for line in with_gw.splitlines() if line not in without_gw.splitlines()
     ]
-    assert removed == ["  websecure_tailnet:", '    address: "100.64.0.1:443"']
+    assert removed == [
+        "  web_tailnet:",
+        '    address: "100.64.0.1:80"',
+        "          to: websecure_tailnet",
+        "  websecure_tailnet:",
+        '    address: "100.64.0.1:443"',
+    ]

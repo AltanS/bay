@@ -57,6 +57,9 @@
 {% if cfg.memswap_limit is defined %}
     memswap_limit: {{ cfg.memswap_limit }}
 {% endif %}
+{% if cfg.cpus is defined %}
+    cpus: {{ cfg.cpus }}
+{% endif %}
 {% if cfg.dns is defined %}
     dns:
 {% for resolver in cfg.dns %}

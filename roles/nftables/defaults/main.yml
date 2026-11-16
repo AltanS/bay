@@ -65,6 +65,40 @@ nftables_drop_ipv4_options: true
 #       rule: "ip saddr 192.0.2.0/24 counter drop"
 nftables_prerouting_rules: []
 
+# ── Tailnet address guard ───────────────────────────────────────────────────
+# Drop every packet addressed to this box's tailnet address that did not come
+# in on tailscale0, the loopback or a container interface (docker*, br-*,
+# veth*). Linux accepts a packet for any local address on any interface, and
+# Tailscale's own rules check only the SOURCE address. So without this guard
+# a host on the same network segment can reach the tailnet-only listeners
+# (Traefik websecure_tailnet) through the public interface.
+#
+# Opt-in. Turn it on for a box with traefik_split_entrypoints that serves a
+# bay.toml `tailnet_hosts` name: the compile and the deploy refuse
+# `tailnet_hosts` on a box where this is off. It lives in the bay_prerouting
+# table above, so a change reloads that table alone, with no Docker restart.
+# Apply with `bay deploy <env> --tags nftables` (bay up does not run this role).
+#
+# The address is the box's gateway_bind_ip (the access-gateway overlay IP),
+# read through the bay_gateway_bind_ip resolver. nftables_tailnet_guard_ip
+# overrides it, but on a box that serves a tailnet host it must equal
+# gateway_bind_ip (the address Traefik's websecure_tailnet binds): the role
+# refuses anything else, and it refuses to turn the guard off there. IPv4 only.
+#
+# The interface the overlay traffic comes in on, from the access-gateway
+# adapter (`gateway_interface`). Bay knows it only for the headscale backend
+# (tailscale0). For any other backend it is empty and the role refuses the
+# guard: set it by hand (for example "wg0" for WireGuard).
+nftables_tailnet_ip_guard: false
+nftables_tailnet_guard_ip: ""
+nftables_tailnet_guard_iifname: "{{ hostvars[inventory_hostname] | bay_gateway_interface }}"
+
+# A box with the guard on lets the app user read the bay_prerouting table with
+# sudo, for exactly one command. rebuild.sh needs it: a webhook rebuild of a
+# container with a tailnet host checks the live guard before it recreates the
+# container. The rule is removed when the guard is off.
+nftables_nft_path: /usr/sbin/nft
+
 # ── Ownership of /etc/nftables.d/ ───────────────────────────────────────────
 # nftables.conf ends with `include "/etc/nftables.d/*.conf"`. Bay writes three
 # files there:

@@ -108,6 +108,54 @@ class TestSplitOnWithIp:
         assert eps["websecure_tailnet"]["address"] == "100.64.0.5:443"
         assert eps["websecure"]["address"] != eps["websecure_tailnet"]["address"]
 
+    def test_tailnet_port_80_redirects_to_the_tailnet_https_listener(self):
+        eps = _render(
+            traefik_split_entrypoints=True,
+            traefik_public_bind_ip="203.0.113.10",
+            gateway_bind_ip="100.64.0.5",
+        )["entryPoints"]
+        assert eps["web_tailnet"]["address"] == "100.64.0.5:80"
+        redirect = eps["web_tailnet"]["http"]["redirections"]["entryPoint"]
+        assert redirect == {"to": "websecure_tailnet", "scheme": "https"}
+
+    def test_http01_stays_on_the_public_web_entrypoint(self):
+        conf = _render(
+            traefik_split_entrypoints=True,
+            traefik_public_bind_ip="203.0.113.10",
+            gateway_bind_ip="100.64.0.5",
+        )
+        challenge = conf["certificatesResolvers"]["letsencrypt"]["acme"]["httpChallenge"]
+        assert challenge["entryPoint"] == "web"
+
+
+class TestNoForwardedHeaderTrust:
+    """Traefik must treat every client as untrusted on every entrypoint, so it
+    drops a spoofed X-Forwarded-For / X-Real-Ip / X-Forwarded-Host and sets
+    its own. A `forwardedHeaders` block (trustedIPs or insecure) would let a
+    client choose the address that `vpn` routes and the apps see."""
+
+    @pytest.mark.parametrize("split", [False, True])
+    def test_no_entrypoint_trusts_forwarded_headers(self, split):
+        eps = _render(
+            traefik_split_entrypoints=split,
+            traefik_public_bind_ip="203.0.113.10",
+            gateway_bind_ip="100.64.0.5",
+        )["entryPoints"]
+        for name, ep in eps.items():
+            assert "forwardedHeaders" not in ep, name
+            assert "proxyProtocol" not in ep, name
+
+
+class TestSplitOnWithoutTailnetIp:
+    def test_no_tailnet_entrypoints_without_a_tailnet_ip(self):
+        eps = _render(
+            traefik_split_entrypoints=True,
+            traefik_public_bind_ip="203.0.113.10",
+            gateway_bind_ip="",
+        )["entryPoints"]
+        assert "web_tailnet" not in eps
+        assert "websecure_tailnet" not in eps
+
 
 class TestTailnetReadTimeout:
     """Registry blob PUTs arrive on websecure_tailnet; Traefik's 60s default

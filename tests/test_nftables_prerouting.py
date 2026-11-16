@@ -18,7 +18,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from helpers import make_ansible_env
+from helpers import make_ansible_env, run_role_tasks
+
+import sys  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "filter_plugins"))
+from bay_filters import bay_gateway_interface  # noqa: E402
 
 _ROOT = Path(__file__).parent.parent
 _ROLE = _ROOT / "roles" / "nftables"
@@ -37,9 +42,19 @@ _IPV4_OPTS_RULE = "ip protocol tcp ip hdrlength != 5 counter drop"
 
 def _render(**variables) -> str:
     env = make_ansible_env(_ROLE / "templates")
-    env.filters["bool"] = lambda v: v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+    env.filters["bool"] = lambda v: (
+        v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+    )
+    env.filters["bay_gateway_interface"] = bay_gateway_interface
     defaults = yaml.safe_load(_DEFAULTS.read_text())
-    ctx = {**defaults, "ansible_managed": "Ansible managed", **variables}
+    ctx = {**defaults, "ansible_managed": "Ansible managed", **variables,
+           "inventory_hostname": "box"}
+    ctx["hostvars"] = {"box": dict(ctx)}
+    # A default that is a template (nftables_tailnet_guard_iifname) renders
+    # against the other values, as Ansible would.
+    for key, value in list(ctx.items()):
+        if key not in variables and isinstance(value, str) and "{{" in value:
+            ctx[key] = env.from_string(value).render(**ctx)
     return env.get_template("bay-prerouting.conf.j2").render(**ctx)
 
 
@@ -194,3 +209,292 @@ def test_unmanaged_file_scan_excludes_exactly_the_bay_owned_files() -> None:
         "every file a Bay role writes into /etc/nftables.d must be excluded "
         "from the unmanaged-file warning, and nothing else"
     )
+
+
+# ── Tailnet address guard (nftables_tailnet_ip_guard) ───────────────────────
+
+_GUARD_JUMP = "ip daddr 100.64.0.6 jump tailnet_dst"
+
+
+def _guard_chain(text: str) -> list[str]:
+    body = text.split("chain tailnet_dst {", 1)[1].split("}", 1)[0]
+    return [ln.strip() for ln in body.splitlines() if ln.strip() and not ln.strip().startswith("#")]
+
+
+def test_guard_is_off_by_default_and_renders_nothing() -> None:
+    defaults = yaml.safe_load(_DEFAULTS.read_text())
+    assert defaults["nftables_tailnet_ip_guard"] is False
+    text = _render(nftables_tailnet_guard_ip="100.64.0.6")
+    assert "tailnet_dst" not in text
+
+
+def test_guard_drops_the_tailnet_address_off_the_tailnet() -> None:
+    text = _render(
+        nftables_tailnet_ip_guard=True, nftables_tailnet_guard_ip="100.64.0.6",
+        access_gateway="headscale",
+    )
+    assert _GUARD_JUMP in _rule_lines(text)
+    assert _guard_chain(text) == [
+        'iifname "tailscale0" return',
+        'iifname "lo" return',
+        'iifname "docker*" return',
+        'iifname "br-*" return',
+        'iifname "veth*" return',
+        "counter drop",
+    ]
+
+
+def test_guard_reads_the_gateway_bind_ip_through_the_resolver() -> None:
+    env = make_ansible_env(_ROLE / "templates")
+    env.filters["bool"] = lambda v: (
+        v if isinstance(v, bool) else str(v).lower() in ("1", "true", "yes", "on")
+    )
+    env.filters["bay_gateway_bind_ip"] = lambda hv: (hv or {}).get("gateway_bind_ip", "")
+    defaults = yaml.safe_load(_DEFAULTS.read_text())
+    ctx = {
+        **defaults,
+        "ansible_managed": "x",
+        "nftables_tailnet_ip_guard": True,
+        "inventory_hostname": "box",
+        "hostvars": {"box": {"gateway_bind_ip": "100.64.0.6"}},
+    }
+    text = env.get_template("bay-prerouting.conf.j2").render(**ctx)
+    assert _GUARD_JUMP in text
+
+
+def test_guard_without_an_address_fails_the_play_first() -> None:
+    task = _task("Check the tailnet address guard has an address")
+    assert task["when"] == "nftables_tailnet_ip_guard | default(false) | bool"
+    names = [t.get("name") for t in _tasks()]
+    assert names.index("Check the tailnet address guard has an address") < names.index(_DEPLOY)
+
+
+@pytest.mark.skipif(not _nft_check_available(), reason="needs nft and an unprivileged netns")
+def test_guard_loads_in_a_scratch_netns(tmp_path: Path) -> None:
+    conf = tmp_path / "bay-prerouting.conf"
+    conf.write_text(_render(
+        nftables_tailnet_ip_guard=True, nftables_tailnet_guard_ip="100.64.0.6",
+        access_gateway="headscale",
+    ))
+    result = subprocess.run(
+        [
+            "unshare", "-rn", "sh", "-c",
+            f"nft -c -f {conf} && nft -f {conf} && nft -f {conf}"
+            " && nft list table inet bay_prerouting",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "jump tailnet_dst" in result.stdout
+
+
+# The assert runs under ansible-core's strict conditionals: `a or b` on two
+# strings is a string, and core >= 2.19 refuses that ("Conditionals must have
+# a boolean result"). A live test-box run caught it; these run the real task.
+@pytest.mark.parametrize(
+    ("variables", "passes"),
+    [
+        ({"nftables_tailnet_ip_guard": True, "gateway_bind_ip": "100.64.0.6"}, True),
+        ({"nftables_tailnet_ip_guard": True, "nftables_tailnet_guard_ip": "100.64.0.6"}, True),
+        ({"nftables_tailnet_ip_guard": True, "headscale_server_tailnet_ip": "100.64.0.6"}, True),
+        ({"nftables_tailnet_ip_guard": True}, False),
+        ({"nftables_tailnet_ip_guard": True, "gateway_bind_ip": ""}, False),
+    ],
+)
+def test_guard_address_assert_runs_under_strict_conditionals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variables: dict, passes: bool
+) -> None:
+    monkeypatch.setenv("ANSIBLE_FILTER_PLUGINS", str(_ROOT / "filter_plugins"))
+    result = run_role_tasks(
+        tmp_path, _TASKS,
+        ["Check the tailnet address guard has an address"], variables,
+    )
+    out = result.stdout + result.stderr
+    assert "Conditionals must have a boolean result" not in out
+    if passes:
+        assert result.returncode == 0, out
+    else:
+        assert result.returncode != 0
+        assert "this host has no tailnet address" in out
+
+
+_IIF_TASK = "Check the tailnet address guard knows the overlay interface"
+_KEEP_TASK = "Refuse to drop or move the guard of a box that serves tailnet hosts"
+
+
+def _iif_default() -> str:
+    return yaml.safe_load(_DEFAULTS.read_text())["nftables_tailnet_guard_iifname"]
+
+
+@pytest.mark.parametrize(
+    ("variables", "passes"),
+    [
+        ({"access_gateway": "headscale"}, True),
+        ({"access_gateway": "wireguard"}, False),
+        ({}, False),  # the access_gateway role default is wireguard
+        ({"access_gateway": "wireguard", "nftables_tailnet_guard_iifname": "wg0"}, True),
+        ({"access_gateway": "headscale", "nftables_tailnet_guard_iifname": "eth0 accept"}, False),
+    ],
+)
+def test_guard_needs_a_known_overlay_interface(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variables: dict, passes: bool
+) -> None:
+    monkeypatch.setenv("ANSIBLE_FILTER_PLUGINS",
+                       str(Path(__file__).resolve().parent.parent / "filter_plugins"))
+    result = run_role_tasks(
+        tmp_path, _TASKS, [_IIF_TASK],
+        {"nftables_tailnet_ip_guard": True,
+         "nftables_tailnet_guard_iifname": _iif_default(), **variables},
+    )
+    out = result.stdout + result.stderr
+    assert "Conditionals must have a boolean result" not in out
+    assert (result.returncode == 0) is passes, out
+    if not passes:
+        assert "does not know the" in out
+
+
+_TAILNET_SVC = {"app": {"tailnet_domains": ["admin.example.com"]}}
+
+
+@pytest.mark.parametrize(
+    ("variables", "passes"),
+    [
+        # Serves a tailnet host: the guard stays on, for gateway_bind_ip.
+        ({"services": _TAILNET_SVC, "nftables_tailnet_ip_guard": True,
+          "gateway_bind_ip": "100.64.0.6"}, True),
+        ({"services": _TAILNET_SVC, "nftables_tailnet_ip_guard": False,
+          "gateway_bind_ip": "100.64.0.6"}, False),
+        ({"services": _TAILNET_SVC, "nftables_tailnet_ip_guard": True,
+          "gateway_bind_ip": "100.64.0.6", "nftables_tailnet_guard_ip": "100.64.0.9"}, False),
+        ({"services": _TAILNET_SVC, "nftables_tailnet_ip_guard": True,
+          "gateway_bind_ip": "100.64.0.6", "nftables_tailnet_guard_ip": "100.64.0.6"}, True),
+        # A tailnet host of another box does not hold this one.
+        ({"services": {"app": {"tailnet_domains": ["a.example.com"], "regions": ["eu2"]}},
+          "nftables_tailnet_ip_guard": False}, True),
+        ({"services": {}, "nftables_tailnet_ip_guard": False}, True),
+    ],
+)
+def test_guard_cannot_be_dropped_under_a_tailnet_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, variables: dict, passes: bool
+) -> None:
+    monkeypatch.setenv("ANSIBLE_FILTER_PLUGINS", str(_ROOT / "filter_plugins"))
+    result = run_role_tasks(tmp_path, _TASKS, [_KEEP_TASK], variables)
+    out = result.stdout + result.stderr
+    assert "Conditionals must have a boolean result" not in out
+    assert (result.returncode == 0) is passes, out
+    if not passes:
+        assert "so the tailnet address guard must stay on" in out
+
+
+def test_guard_sudoers_rule_allows_one_read_command() -> None:
+    task = _task("Let the app user read the pre-routing table")
+    content = task["ansible.builtin.copy"]["content"]
+    rule = [line for line in content.splitlines() if not line.startswith("#")]
+    assert rule == [
+        "{{ app_user }} ALL=(root) NOPASSWD: {{ nftables_nft_path }} list table inet bay_prerouting"
+    ]
+    assert task["ansible.builtin.copy"]["validate"] == "visudo -cf %s"
+    assert task["when"] == "nftables_tailnet_ip_guard | default(false) | bool"
+    off = _task("Remove the pre-routing read rule when the guard is off")
+    assert off["ansible.builtin.file"]["state"] == "absent"
+
+
+
+def test_guard_sudoers_rule_renders_under_ansible(tmp_path: Path) -> None:
+    """Run the real copy task (ansible_managed is undefined in a copy task, which
+    a live test-box run caught). visudo checks the file when it is installed."""
+    out_file = tmp_path / "bay-nft-guard-read"
+
+    def transform(task: dict) -> dict:
+        task = {k: v for k, v in task.items() if k not in ("become", "become_user")}
+        copy = dict(task["ansible.builtin.copy"])
+        copy["dest"] = str(out_file)
+        copy.pop("owner")
+        copy.pop("group")
+        if not shutil.which("visudo"):
+            copy.pop("validate")
+        task["ansible.builtin.copy"] = copy
+        return task
+
+    result = run_role_tasks(
+        tmp_path, _TASKS, ["Let the app user read the pre-routing table"],
+        {"nftables_tailnet_ip_guard": True, "app_user": "deploy",
+         "nftables_nft_path": "/usr/sbin/nft"},
+        transform=transform,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert out_file.read_text().splitlines()[-1] == (
+        "deploy ALL=(root) NOPASSWD: /usr/sbin/nft list table inet bay_prerouting"
+    )
+
+
+@pytest.mark.parametrize(
+    ("hostvars", "want"),
+    [
+        ({"access_gateway": "headscale"}, "tailscale0"),
+        ({"access_gateway": "wireguard"}, ""),
+        ({}, ""),
+        ({"access_gateway": "none"}, ""),
+        ({"access_gateway": "wireguard", "gateway_interface": "wg0"}, "wg0"),
+        (None, ""),
+    ],
+)
+def test_guard_interface_follows_the_gateway_adapter(hostvars, want) -> None:
+    """The guard lets through tailscale0 for headscale only; any other backend
+    has no known interface, and the role then refuses the guard."""
+    assert bay_gateway_interface(hostvars) == want
+
+
+_LIVE_TABLE = """table inet bay_prerouting {
+	chain tailnet_dst {
+		iifname "tailscale0" return
+		counter packets 0 bytes 0 drop
+	}
+
+	chain prerouting {
+		type filter hook prerouting priority -350; policy accept;
+		ip daddr ADDR jump tailnet_dst
+	}
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("guard", "live_rc", "live_addr", "applies"),
+    [
+        (True, 0, "100.64.0.6", False),   # live table holds the guard: nothing to do
+        (True, 0, "100.64.0.7", True),    # drift (a hand edit): reload the file
+        (True, 1, "", True),              # table missing
+        (False, 0, "100.64.0.7", False),  # guard off: the live guard is not checked
+    ],
+)
+def test_apply_repairs_a_live_guard_that_drifted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, guard: bool, live_rc: int,
+    live_addr: str, applies: bool,
+) -> None:
+    """A live test-box run showed `--tags nftables` did not repair a hand-edited
+    guard (the file had not changed), while the deploy's refusal told the
+    operator to run exactly that."""
+    monkeypatch.setenv("ANSIBLE_FILTER_PLUGINS",
+                       str(Path(__file__).resolve().parent.parent / "filter_plugins"))
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    marker = tmp_path / "nft-ran"
+    (fake / "nft").write_text(f"#!/bin/sh\necho \"$*\" > {marker}\n")
+    (fake / "nft").chmod(0o755)
+
+    def transform(task: dict) -> dict:
+        return {k: v for k, v in task.items() if k not in ("become", "become_user")}
+
+    stdout = _LIVE_TABLE.replace("ADDR", live_addr) if live_rc == 0 else ""
+    result = run_role_tasks(
+        tmp_path, _TASKS, [_APPLY],
+        {"nftables_tailnet_ip_guard": guard, "gateway_bind_ip": "100.64.0.6",
+         "_nftables_prerouting_file": {"changed": False},
+         "_nftables_prerouting_live": {"rc": live_rc, "stdout": stdout}},
+        path_dir=fake, transform=transform,
+    )
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert marker.exists() is applies, out

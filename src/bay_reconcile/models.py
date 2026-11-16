@@ -148,6 +148,11 @@ class ContainerSpec:
     restart_policy: str = "unless-stopped"
     mem_limit: str | None = None
     memswap_limit: str | None = None
+    #: CPU limit in billionths of a core (docker ``NanoCpus``), from bay.toml
+    #: ``cpus`` times 1e9. None means no limit. The hash covers it because
+    #: ``bay_spec_hash`` reads the raw spec, where the key exists only when
+    #: ``cpus`` is set.
+    nano_cpus: int | None = None
     #: Resolver addresses for this container only (docker ``--dns``,
     #: HostConfig.Dns), in order. Empty means docker's default. The hash covers
     #: it because ``bay_spec_hash`` reads the raw spec, where the key exists
@@ -241,6 +246,9 @@ class ContainerState:
     # on swap is "unlimited swap". None means docker did not report the field.
     memory: int | None = field(default=None, compare=False, hash=False)
     memory_swap: int | None = field(default=None, compare=False, hash=False)
+    # The CPU cap in billionths of a core, from docker's ``HostConfig.NanoCpus``.
+    # 0 is "no cap". None means docker did not report the field.
+    nano_cpus: int | None = field(default=None, compare=False, hash=False)
     # The resolvers the running container was created with, from docker's
     # ``HostConfig.Dns``, in order. () is "none set". None means docker did not
     # report the field.

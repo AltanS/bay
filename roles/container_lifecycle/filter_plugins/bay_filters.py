@@ -253,6 +253,13 @@ def bay_traefik_labels(svc, name, config):
     # so a VPN router stays reachable on the tailnet listener.
     vpn_ep = config.get("vpn_entrypoints", "websecure")
     public_ep = config.get("public_entrypoints", "websecure")
+    # On a split host, split DNS may send this service's domains to the box's
+    # tailnet address (bay_split_dns_domains). Tailnet clients then arrive on
+    # websecure_tailnet, so every router of those domains binds it too, or
+    # they get Traefik's 404. Off a split host nothing changes.
+    if _tailnet_entrypoint_on(config) and _main_domains_split(svc):
+        vpn_ep = _with_entrypoint(vpn_ep, TAILNET_ENTRYPOINT)
+        public_ep = _with_entrypoint(public_ep, TAILNET_ENTRYPOINT)
 
     if access == "public":
         vpn_routes = svc.get("vpn_routes", [])
@@ -328,7 +335,96 @@ def bay_traefik_labels(svc, name, config):
         vpn_entrypoints=vpn_ep,
     )
 
+    _add_tailnet_router_labels(labels, svc, name, vpn_mw, config)
+
     return labels
+
+
+# ── Tailnet-only hosts and split DNS ─────────────────────────────────────
+#
+# One predicate decides which names split DNS sends to a box's tailnet
+# address. The Headscale templates (extra-records.json.j2, config.yaml.j2)
+# render their records from it, and bay_traefik_labels binds websecure_tailnet
+# from it, so the two can never disagree. This function is defined, word for
+# word, in filter_plugins/bay_filters.py too (tests pin the copies together).
+
+TAILNET_ENTRYPOINT = "websecure_tailnet"
+
+
+def bay_split_dns_domains(svc):
+    """The names split DNS sends to the tailnet address of the service's box.
+
+    The service's own `domains` when part of it is tailnet-only (`access:
+    vpn`, or `vpn_routes` = bay.toml `locked`), then every `tailnet_domains`
+    entry (bay.toml `tailnet_hosts`). Order kept, duplicates dropped.
+    """
+    svc = svc or {}
+    names = []
+    if svc.get("access", "public") == "vpn" or svc.get("vpn_routes"):
+        names.extend(svc.get("domains") or [])
+    names.extend(svc.get("tailnet_domains") or [])
+    out = []
+    for name in names:
+        name = str(name)
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def _main_domains_split(svc):
+    split = set(bay_split_dns_domains(svc))
+    return any(str(d) in split for d in (svc.get("domains") or []))
+
+
+def _tailnet_entrypoint_on(config):
+    """True when this host's Traefik has a websecure_tailnet listener."""
+    return _bool(config.get("traefik_split_entrypoints", False)) and _bool(
+        config.get("tailnet_entrypoint_enabled", False)
+    )
+
+
+def _with_entrypoint(entrypoints, extra):
+    """`entrypoints` (comma list) plus `extra`, order kept, no duplicate."""
+    names = [e for e in str(entrypoints).split(",") if e]
+    if extra not in names:
+        names.append(extra)
+    return ",".join(names)
+
+
+def _add_tailnet_router_labels(labels, svc, name, vpn_mw, config):
+    """The router for `tailnet_domains`: websecure_tailnet ONLY.
+
+    It never falls back to `websecure`: on a host without the tailnet
+    listener, or without the tailnet address guard, it refuses to build.
+    That fallback is the only way a tailnet-only host could go public.
+    """
+    hosts = svc.get("tailnet_domains") or []
+    if not hosts:
+        return
+    if not _tailnet_entrypoint_on(config):
+        raise ValueError(
+            f"service {name} has tailnet_domains {list(hosts)}, but this host has no "
+            "websecure_tailnet listener (traefik_split_entrypoints with a tailnet "
+            "address). Refusing to build a router that could only bind the public "
+            "listener."
+        )
+    if not _bool(config.get("nftables_tailnet_ip_guard", False)):
+        raise ValueError(
+            f"service {name} has tailnet_domains {list(hosts)}, but "
+            "nftables_tailnet_ip_guard is off on this host. Turn it on (and run "
+            "`bay deploy <env> --tags nftables`) before serving a tailnet-only host."
+        )
+    access = svc.get("access", "public")
+    if access == "vpn" and not svc.get("public_routes"):
+        service_ref = f"{name}-vpn"
+    else:
+        service_ref = name
+    router = f"{name}-tailnet"
+    labels[f"traefik.http.routers.{router}.rule"] = _host_rule(list(hosts))
+    labels[f"traefik.http.routers.{router}.service"] = service_ref
+    labels[f"traefik.http.routers.{router}.entrypoints"] = TAILNET_ENTRYPOINT
+    labels[f"traefik.http.routers.{router}.tls.certresolver"] = "letsencrypt"
+    labels[f"traefik.http.routers.{router}.middlewares"] = ",".join(vpn_mw)
 
 
 def _rule_literal(value):

@@ -101,6 +101,7 @@ REASON_CODES = (
     "ports",
     "volumes",
     "memory",
+    "cpus",
     "dns",
     "networks",
     "stopped",
@@ -199,6 +200,9 @@ def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
     memory = _memory_reason(spec, state)
     if memory:
         detail.append(memory)
+    cpus = _cpus_reason(spec, state)
+    if cpus:
+        detail.append(cpus)
     dns = _dns_reason(spec, state)
     if dns:
         detail.append(dns)
@@ -214,7 +218,7 @@ def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
         text = f"config_hash: changed ({state.config_hash[:12]} -> {spec.config_hash[:12]})"
         if not detail:
             text += (
-                "; image, env, labels, ports, volumes and memory match, and the cause "
+                "; image, env, labels, ports, volumes, memory and cpus match, and the cause "
                 "(the env file bytes, command, healthcheck or another hashed setting) "
                 "is not readable from docker inspect"
             )
@@ -306,6 +310,24 @@ def _memory_reason(spec: ContainerSpec, state: ContainerState) -> str | None:
     if not parts:
         return None
     return "memory: " + ", ".join(parts)
+
+
+def _fmt_cpus(nano: int) -> str:
+    return f"{nano / 1e9:g}"
+
+
+def _cpus_reason(spec: ContainerSpec, state: ContainerState) -> str | None:
+    """Name a difference in the CPU cap (``cpus: 0 -> 2``, ``cpus: 2 -> 1.5``).
+
+    The running container reports ``HostConfig.NanoCpus``; 0 is "no cap". A spec
+    with no ``cpus`` wants 0, so a container with no cap is no difference.
+    """
+    if state.nano_cpus is None:
+        return None
+    want = spec.nano_cpus or 0
+    if state.nano_cpus == want:
+        return None
+    return f"cpus: {_fmt_cpus(state.nano_cpus)} -> {_fmt_cpus(want)}"
 
 
 def _dns_reason(spec: ContainerSpec, state: ContainerState) -> str | None:

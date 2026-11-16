@@ -484,3 +484,76 @@
   when:
     - traefik_split_entrypoints | default(false)
     - not (traefik_public_bind_ip | default('', true) | trim)
+
+# In split mode Traefik binds ports 80 (web_tailnet) and 443
+# (websecure_tailnet) of the tailnet address. A container that publishes one
+# of them there (`expose = "gateway"` or `"tailnet"`) and Traefik cannot both
+# start: whichever comes second fails to bind.
+- name: Validate no container publishes port 80 or 443 on the tailnet address
+  ansible.builtin.fail:
+    msg: >-
+      In split mode Traefik listens on {{ gateway_bind_ip | trim }}:80 and
+      {{ gateway_bind_ip | trim }}:443 (web_tailnet and websecure_tailnet), but
+      {{ _tailnet_port_clashes | join(', ') }} publish(es) that port on the
+      tailnet address (expose gateway or tailnet). Use another port, or
+      expose it on loopback and route it through Traefik.
+  vars:
+    _tailnet_port_clashes: "{{ active_services | default({}) | bay_tailnet_port_clashes(active_accessories | default({})) }}"
+  when:
+    - traefik_split_entrypoints | default(false) | bool
+    - gateway_bind_ip | default('', true) | string | trim | length > 0
+    - _tailnet_port_clashes | length > 0
+
+# Split mode binds the public entrypoints to one IPv4 address
+# (traefik_public_bind_ip), so the box stops answering on its IPv6 address.
+# That is a choice, not an error: warn, do not fail.
+- name: Read the global IPv6 addresses of this host
+  ansible.builtin.command:
+    cmd: ip -6 -o addr show scope global
+  register: _split_ipv6
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: traefik_split_entrypoints | default(false) | bool
+
+- name: Warn that split entrypoints do not serve IPv6
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: this host has a global IPv6 address, but traefik_split_entrypoints
+      binds web and websecure to the IPv4 address
+      {{ traefik_public_bind_ip | default('', true) | trim }} only. Clients that
+      reach the box over IPv6 (an AAAA record) get no answer. Remove the AAAA
+      records of its domains, or turn the split off.
+  when:
+    - _split_ipv6 is not skipped
+    - (_split_ipv6.stdout | default('') | trim | length) > 0
+
+# ── Tailnet-only hosts (bay.toml tailnet_hosts → tailnet_domains) ────────
+# The compile already refuses these on a box without split entrypoints or the
+# tailnet address guard, reading plain group_vars. This is the same gate with
+# the real resolved vars, plus a read of the live firewall: a host name meant
+# for the tailnet only is never served unless the guard is in place.
+
+- name: Validate tailnet hosts have the tailnet listener and the address guard
+  ansible.builtin.fail:
+    msg: >-
+      Service '{{ item.key }}' has tailnet_domains
+      {{ item.value.tailnet_domains | join(', ') }}, but this host
+      {{ 'does not run traefik_split_entrypoints' if not (traefik_split_entrypoints | default(false) | bool)
+         else ('has no tailnet address (gateway_bind_ip), so Traefik has no websecure_tailnet listener'
+               if not (gateway_bind_ip | default('', true) | trim)
+               else 'has nftables_tailnet_ip_guard off') }}.
+      A tailnet-only host needs all three. Fix the group_vars of this box, or
+      remove tailnet_hosts from the project's bay.toml.
+  loop: "{{ active_services | dict2items | selectattr('value.tailnet_domains', 'defined') | list }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when: >-
+    not (traefik_split_entrypoints | default(false) | bool)
+    or not (gateway_bind_ip | default('', true) | trim)
+    or not (nftables_tailnet_ip_guard | default(false) | bool)
+
+# The live guard (for exactly gateway_bind_ip) and the CPU limits. The same
+# file runs first in git_deploy, before rebuild.sh is rendered.
+- name: Check the live tailnet address guard and the CPU limits
+  ansible.builtin.include_tasks: host_preflight.yml

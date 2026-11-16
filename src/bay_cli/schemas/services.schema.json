@@ -157,6 +157,16 @@
           "minItems": 1,
           "description": "Domain names for Traefik routing."
         },
+        "tailnet_domains": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^([a-z0-9]([a-z0-9-]*[a-z0-9])?\\.)+[a-z]{2,}$"
+          },
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Host names served only on the tailnet listener (websecure_tailnet) of a split-entrypoint box, by their own <name>-tailnet router (bay.toml tailnet_hosts). Never in the public routers. Split DNS sends them to the box's tailnet address."
+        },
         "path": {
           "type": "string",
           "pattern": "^/[A-Za-z0-9._~%+/*-]*$",
@@ -273,6 +283,12 @@
         "mem_limit": {
           "type": "string",
           "description": "Container runtime memory limit (e.g., '512m', '1g')."
+        },
+        "cpus": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 64,
+          "description": "CPU limit in cores, from 0.01 (e.g., 2 or 1.5). Absent means no limit. Docker NanoCpus is this value times 1e9."
         },
         "memswap_limit": {
           "type": "string",
@@ -408,6 +424,12 @@
         "mem_limit": {
           "type": "string",
           "description": "Container runtime memory limit (e.g., '512m', '1g')."
+        },
+        "cpus": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 64,
+          "description": "CPU limit in cores, from 0.01 (e.g., 2 or 1.5). Absent means no limit. Docker NanoCpus is this value times 1e9."
         },
         "memswap_limit": {
           "type": "string",

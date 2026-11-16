@@ -145,6 +145,18 @@
       "pattern": "^[1-9][0-9]*[kmg]$",
       "x-messages": { "pattern": "must be a size such as 512m or 2g (units k, m, g)" }
     },
+    "cpus": {
+      "oneOf": [
+        { "type": "number", "minimum": 0.01, "maximum": 64 },
+        {
+          "type": "string",
+          "pattern": "^(([1-9]|[1-5][0-9]|6[0-3])(\\.[0-9]+)?|64(\\.0+)?|0\\.(0[1-9]|[1-9])[0-9]*)$"
+        }
+      ],
+      "x-messages": {
+        "oneOf": "must be a number of CPUs from 0.01 up to 64, such as 2, 0.5 or \"1.5\" (a plain decimal; no unit, no exponent)"
+      }
+    },
     "rate": {
       "type": "string",
       "pattern": "^[1-9][0-9]*/[sm]$",
@@ -233,6 +245,7 @@
           ]
         },
         "memory": { "$ref": "#/$defs/size" },
+        "cpus": { "$ref": "#/$defs/cpus" },
         "update": { "type": "string", "enum": ["notify", "auto", "off"] },
         "network_mode": { "type": "string", "enum": ["host"] },
         "volumes": {

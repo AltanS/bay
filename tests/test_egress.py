@@ -64,6 +64,7 @@ from bay_filters import (  # noqa: E402
     bay_egress_blocked_v4,
     bay_egress_bridge,
     bay_egress_client_networks,
+    bay_host_tailnet_services,
     bay_egress_fleet_v4,
     bay_egress_network,
     bay_egress_sidecars,
@@ -539,6 +540,7 @@ def _render_optional(task_name: str, **context) -> dict:
     env.filters["bay_healthcheck"] = lambda hc, port: dict(hc)
     env.filters["bay_log_rotation_spec"] = lambda v, d: {}
     env.filters["bay_egress_client_networks"] = bay_egress_client_networks
+    env.filters["bay_host_tailnet_services"] = bay_host_tailnet_services
     env.filters["bay_egress_network"] = bay_egress_network
     ctx = dict(context)
     for key in ("_egress_client_nets", "_egress_net", "_egress_addr"):

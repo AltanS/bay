@@ -719,6 +719,18 @@ def _with(**changes: Any) -> dict[str, Any]:
             {("container", "update", "safe")},
         ),
         (
+            "cpus limit added",
+            {"services": {"webapp": _WEB}},
+            {"services": {"webapp": _with(cpus=2)}},
+            {("container", "update", "safe")},
+        ),
+        (
+            "cpus limit changed",
+            {"services": {"webapp": _with(cpus=2)}},
+            {"services": {"webapp": _with(cpus=1.5)}},
+            {("container", "update", "safe")},
+        ),
+        (
             "container removed",
             {"services": {"webapp": _WEB}},
             {"services": {}},
@@ -780,6 +792,20 @@ def test_risk_classification(label: str, old: dict, new: dict, expect: set) -> N
         old, new, project="webapp", mine={"webapp"}, resources={"postgres"}, running={"webapp"}
     )
     assert {(s["kind"], s["action"], s["risk"]) for s in steps} == expect, label
+
+
+def test_cpus_change_is_named_in_the_container_step() -> None:
+    steps = planmod.diff_steps(
+        {"services": {"webapp": _with(cpus=2)}},
+        {"services": {"webapp": _with(cpus=1.5)}},
+        project="webapp",
+        mine={"webapp"},
+        resources=set(),
+        running={"webapp"},
+    )
+    assert [(s["kind"], s["risk"], s["reason"]) for s in steps] == [
+        ("container", "safe", "changed: cpus")
+    ]
 
 
 def test_secret_removed_from_a_stopped_container_is_safe() -> None:
@@ -3332,6 +3358,22 @@ def test_cross_project_step_keeps_own_risk_and_verdict_auto(
     assert (by_container["alpha"]["risk"], by_container["alpha"]["project"]) == ("safe", "alpha")
     assert (by_container["beta"]["risk"], by_container["beta"]["project"]) == ("safe", "beta")
     assert "mem_limit" in by_container["beta"]["reason"]
+    assert (plan["verdict"], result.exit_code) == ("auto", 0)
+
+
+def test_cpus_change_plans_as_a_safe_container_update(
+    world: dict[str, Path], tmp_path: Path, box: FakeBox
+) -> None:
+    _two_in_fleet(world)
+    _edit_both(world, 'health = "none"\n', 'health = "none"\ncpus = 1.5\n')
+    anywhere = tmp_path / "anywhere"
+    anywhere.mkdir()
+    result = cli(world, "plan", "--project", "alpha", "--json", cwd=anywhere)
+    plan = json.loads(result.stdout)
+    by_container = {s["container"]: s for s in plan["steps"] if s["kind"] == "container"}
+    for name in ("alpha", "beta"):
+        assert by_container[name]["risk"] == "safe"
+    assert "cpus" in by_container["beta"]["reason"]
     assert (plan["verdict"], result.exit_code) == ("auto", 0)
 
 

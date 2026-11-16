@@ -63,6 +63,7 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         restart_policy=d.get("restart_policy") or "unless-stopped",
         mem_limit=d.get("mem_limit"),
         memswap_limit=d.get("memswap_limit"),
+        nano_cpus=_nano_cpus(d),
         dns=_dns(d),
         network_ips=_network_ips(d),
         cap_drop=_str_tuple(d, "cap_drop"),
@@ -79,6 +80,21 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         release=_release(d),
         env_file_change=_env_file_change(d),
     )
+
+
+def _nano_cpus(d: Mapping[str, Any]) -> int | None:
+    """The spec's ``cpus`` as docker NanoCpus (``round(cpus * 1e9)``), or None when unset.
+
+    Only a real number from 0.01 is accepted (a bool is not one; docker's own
+    minimum is 0.01), so a wrong shape fails at load time and never reaches
+    docker as "no limit".
+    """
+    raw = d.get("cpus")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int | float) or raw < 0.01:
+        raise ValueError(f"{d.get('name')!r}: cpus must be a number from 0.01")
+    return round(raw * 1e9)
 
 
 def _dns(d: Mapping[str, Any]) -> tuple[str, ...]:

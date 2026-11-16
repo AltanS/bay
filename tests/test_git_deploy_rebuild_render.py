@@ -56,6 +56,8 @@ def _include_file(task: dict[str, Any]) -> str | None:
 def test_only_the_render_includes_carry_deploy_stack() -> None:
     tagged = [t for t in _walk(_load("main.yml")) if "deploy_stack" in _tags(t)]
     assert [_include_file(t) for t in tagged] == [
+        # Host checks first: nothing is rendered on a box that fails them.
+        "../../deploy_stack/tasks/host_preflight.yml",
         "render_image_map.yml",
         "render_rebuild_script.yml",
         "render_webhook.yml",

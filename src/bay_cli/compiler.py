@@ -40,7 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from bay_cli import routes
+from bay_cli import boxvars, routes
 from bay_cli.bay_toml import sibling_var
 from bay_cli.fleet import FILES_DIR, FLEET_PREFIX, PROJECTS_DIR, FleetInputs, LockEnv, Project
 
@@ -54,9 +54,21 @@ HEADER_RE = re.compile(
 
 #: Keys a [deploy.<env>] table may override with a plain replace.
 _RUNTIME_KEYS = (
-    "image", "port", "command", "release", "health", "replicas", "memory", "update",
+    "image", "port", "command", "release", "health", "replicas", "memory", "cpus", "update",
     "zero_downtime", "logs", "secrets", "log_rotation", "dns",
 )
+
+
+def _cpus_number(value: int | float | str) -> int | float:
+    """The ``cpus`` of bay.toml (a number or a plain decimal string) as a YAML number.
+
+    An integral value is an int (``"2"`` and ``2.0`` give ``2``). The schema has
+    already checked the range, so this only converts.
+    """
+    number = float(value)
+    return int(number) if number.is_integer() else number
+
+
 #: bay.toml update -> services.yml update. None means: leave the key out (monitor).
 _UPDATE = {"notify": None, "auto": "auto", "off": False}
 #: Variables env.j2 writes for a `database:` binding.
@@ -422,6 +434,8 @@ class _Compiler:
             # Swap is never allowed: memswap_limit equals the memory limit.
             entry["mem_limit"] = res["memory"]
             entry["memswap_limit"] = res["memory"]
+        if "cpus" in res:
+            entry["cpus"] = _cpus_number(res["cpus"])
         update = _UPDATE[res.get("update", "notify")]
         if update is not None:
             entry["update"] = update
@@ -608,6 +622,8 @@ class _Compiler:
             # so its first deploy from a compiled file recreates it once.
             entry["mem_limit"] = level["memory"]
             entry["memswap_limit"] = level["memory"]
+        if "cpus" in level:
+            entry["cpus"] = _cpus_number(level["cpus"])
         if "dns" in level:
             # Resolvers for this one container (docker --dns). Order is kept.
             entry["dns"] = list(level["dns"])
@@ -698,6 +714,10 @@ class _Compiler:
             entry["domains"] = self._main_domains(unit)
         else:
             entry["domains"] = self._domains(unit, service, level, base, name)
+        if is_web:
+            tailnet_domains = self._tailnet_domains(unit)
+            if tailnet_domains:
+                entry["tailnet_domains"] = tailnet_domains
         self._routes(unit, access, base, mode, entry)
         middleware = self._middleware(unit, access, base)
         if middleware:
@@ -1196,6 +1216,53 @@ class _Compiler:
                 self._err(f"domain {d} is used by both {first} and {unit.label} "
                           f"{_svc_label(service)}")
         return domains
+
+    def _tailnet_domains(self, unit: _Unit) -> list[str]:
+        """``[deploy.<env>] tailnet_hosts``: host names served only on the tailnet.
+
+        Fail closed: every host is claimed fleet-wide like a domain, and the
+        unit's box must have a tailnet address in bay.fleet.toml, run split
+        entrypoints and have the tailnet address guard on (both read from the
+        box's plain group_vars). Anything else is an error, never a public
+        router (bay_traefik_labels refuses too, and so does the deploy).
+        """
+        hosts = [str(h) for h in unit.deploy.get("tailnet_hosts", [])]
+        if not hosts:
+            return []
+        where = f"{unit.label} deploy.{unit.env}.tailnet_hosts"
+        owner = f"{unit.label} tailnet_hosts"
+        for host in hosts:
+            first = self.domains.setdefault(host, owner)
+            if first != owner:
+                self._err(f"{where}: {host} is already used by {first}")
+        box = self.boxes.get(unit.box, {})
+        if not box.get("tailnet_ip"):
+            self._err(
+                f"{where}: box {unit.box} has no tailnet_ip in bay.fleet.toml; a tailnet "
+                "host needs the box's tailnet address"
+            )
+        for key, why in (
+            (
+                "traefik_split_entrypoints",
+                "a tailnet host needs the websecure_tailnet listener",
+            ),
+            (
+                "nftables_tailnet_ip_guard",
+                "a tailnet host needs the tailnet address guard; apply it with "
+                "`bay deploy <env> --tags nftables`",
+            ),
+        ):
+            state, source = boxvars.box_flag(self.inputs.root, unit.box, box, key)
+            if state is True:
+                continue
+            if state is None:
+                detail = f"{key} is not set in {source}"
+            elif state is False:
+                detail = f"{key} is false in {source}"
+            else:
+                detail = f"{key} in {source} is not a literal true ({state})"
+            self._err(f"{where}: box {unit.box}: {detail}; {why}")
+        return hosts
 
     def _routes(
         self, unit: _Unit, access: dict[str, Any], base: str, mode: str, entry: dict[str, Any]

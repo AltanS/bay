@@ -1,0 +1,71 @@
+---
+# Host checks that must pass before anything on the box changes for a
+# service: before git_deploy renders rebuild.sh (which holds a frozen copy of
+# each container's labels and limits) and before deploy_stack replaces a
+# container. Included twice: first task of roles/git_deploy/tasks/main.yml,
+# and roles/deploy_stack/tasks/validate.yml. Both run under the deploy_stack
+# tag, so `bay plan --remote` (check mode) runs them too and its box check
+# fails, which blocks the plan. Cheap: one nft read and one nproc, each only
+# when a service needs it.
+
+# ── Tailnet address guard, live, for exactly gateway_bind_ip ─────────────
+- name: Find the services of this host with tailnet hosts
+  ansible.builtin.set_fact:
+    _preflight_tailnet_services: "{{ active_services | default({}) | bay_host_tailnet_services(group_names) }}"
+
+- name: Read the live pre-routing table for the tailnet address guard
+  ansible.builtin.command:
+    cmd: nft list table inet bay_prerouting
+  register: _preflight_guard
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  become: true
+  become_user: root
+  when: _preflight_tailnet_services | length > 0
+
+- name: Refuse tailnet hosts without the live guard for the tailnet address
+  ansible.builtin.fail:
+    msg: >-
+      This host serves tailnet hosts ({{ _preflight_tailnet_services | join(', ') }}),
+      but the live firewall has no tailnet address guard for
+      {{ gateway_bind_ip | default('', true) | string | trim or 'an empty gateway_bind_ip' }}
+      (needed: `ip daddr <tailnet address> jump tailnet_dst` in chain
+      prerouting of table inet bay_prerouting, and a chain tailnet_dst that
+      drops). Apply it first with `bay deploy <env> --tags nftables`, then
+      deploy again.
+  when:
+    - _preflight_guard is not skipped
+    - not (_preflight_guard.stdout | default('') | bay_tailnet_guard_live(gateway_bind_ip | default('', true) | string | trim))
+
+# ── CPU limits fit the host ───────────────────────────────────────────────
+# Docker refuses NanoCpus above the host's CPU count at create time, after the
+# old container is already gone. So refuse the deploy here, before any
+# container is removed. rebuild.sh makes the same check with nproc.
+- name: Find the CPU limits of this host's containers
+  ansible.builtin.set_fact:
+    _preflight_cpus: >-
+      {{ ((active_services | default({})) | combine(active_accessories | default({})))
+         | dict2items | selectattr('value.cpus', 'defined') | list }}
+
+- name: Count this host's CPUs
+  ansible.builtin.command:
+    cmd: nproc
+  register: _preflight_nproc
+  changed_when: false
+  check_mode: false
+  when: _preflight_cpus | length > 0
+
+- name: Refuse a CPU limit above the host's CPU count
+  ansible.builtin.fail:
+    msg: >-
+      Container '{{ item.key }}' sets cpus {{ item.value.cpus }}, but this host
+      has {{ _preflight_nproc.stdout | trim }} CPUs. Docker would refuse to
+      create it after the old container is removed. Lower `cpus` in its
+      bay.toml (or the fleet resource), then bay up.
+  loop: "{{ _preflight_cpus }}"
+  loop_control:
+    label: "{{ item.key }}"
+  when:
+    - _preflight_nproc is not skipped
+    - (item.value.cpus | float) > (_preflight_nproc.stdout | trim | int)
