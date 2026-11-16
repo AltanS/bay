@@ -46,3 +46,32 @@ disk_alert_interval: "15min"
 reboot_alert_enabled: true
 reboot_alert_threshold_days: 7
 reboot_alert_repeat_days: 7
+
+# Certificate expiry alert. Traefik renews its ACME certificates itself, so a
+# failing renewal goes unseen until a browser shows an error. A daily timer
+# (bay-cert-alert) reads the certificates in Traefik's ACME stores (domain
+# names and chain only, never the private key) and alerts per certificate:
+# host.cert_expiry_warn (level warn) under cert_alert_warn_days days left,
+# host.cert_expiry_page (level critical) under cert_alert_page_days days left.
+# At most one alert per certificate per day. A certificate more than
+# cert_alert_expired_days days past its end date is muted for good (it is
+# usually an orphan: remove its entry from the store, then restart traefik).
+# State: <outbound_check_state_dir>/cert-alert/<sha256 fingerprint>.state, with
+# last_alert_day=YYYY-MM-DD and optionally muted=1. A store that exists but
+# cannot be parsed fails the unit (exit 1) and sends no alert.
+# Like the disk and reboot alerts, this role runs from provision.yml: install
+# on existing hosts with `bay provision <env> --tags outbound_monitor`.
+cert_alert_enabled: true
+# The two paths repeat the traefik role's traefik_acme_path and
+# traefik_acme_dns_path. Role defaults are not visible across roles, so keep
+# them in step by hand. A store that does not exist is skipped.
+cert_alert_acme_files:
+  - "{{ stack_dir }}/acme.json"
+  - "{{ stack_dir }}/acme-dns.json"
+# Traefik's dynamic dir (the traefik role's {{ stack_dir }}/dynamic). Its
+# Host(...) rules count as served names, next to the docker labels: a due
+# certificate that no router serves is logged, not alerted.
+cert_alert_dynamic_dir: "{{ stack_dir }}/dynamic"
+cert_alert_warn_days: 21
+cert_alert_page_days: 7
+cert_alert_expired_days: 7

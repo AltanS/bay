@@ -1,0 +1,419 @@
+#!/usr/bin/env bash
+# bay-cert-alert, Certificate expiry probe
+# Managed by Ansible (outbound_monitor role). Do not edit manually.
+#
+# Traefik renews its ACME certificates by itself. When a renewal fails for
+# weeks (a broken DNS record, a closed port, a rate limit), nobody hears about
+# it until a browser shows a red page. This probe reads the certificates that
+# Traefik holds and tells the operator when one gets close to its end date.
+#
+# What it reads: the ACME stores in the list below (Traefik's acme.json and
+# acme-dns.json). A store that does not exist is skipped, an empty store holds
+# no certificate. From each certificate entry it reads only the domain names
+# and the certificate chain. It never reads, prints, logs or writes the
+# private key field.
+#
+# Levels, counted in whole days left (negative when expired):
+#   page   fewer than {{ cert_alert_page_days | int }} days left  (host.cert_expiry_page, critical)
+#   warn   fewer than {{ cert_alert_warn_days | int }} days left (host.cert_expiry_warn, warn)
+#
+# Only served certificates alert. Traefik keeps a certificate in its store
+# after the last router that used it is gone, and never renews it. So a due
+# certificate alerts only when a live router serves one of its names: a Host(...)
+# rule or a tls.domains label of a running container (docker labels), or a
+# Host(...) rule in a Traefik dynamic file. A wildcard name *.x counts for a
+# host one label below x. A due certificate that no router serves prints one
+# line to stdout (the journal) and sends nothing. The routers are read only
+# when a certificate is due. When docker cannot be read, every due certificate
+# counts as served (alert rather than miss one), and one line says so.
+# HostRegexp rules are not read: a certificate used only through one prints the
+# orphan line.
+#
+# Dedup rule: one alert per certificate per day (UTC). A run sends at most one
+# warn message and at most one page message, each one listing every due
+# certificate. A recovered (renewed) certificate sends nothing.
+#
+# Stop rule: when a certificate is more than {{ cert_alert_expired_days | int }} days past its end date,
+# the probe writes muted=1 for it and never alerts for it again. An expired
+# certificate that Traefik did not renew is usually an orphan: no router uses
+# it any more. The alert text says how to remove it.
+#
+# State: one file per certificate, named after its SHA-256 fingerprint, in
+# <state dir>/cert-alert/. Strict key=value lines, parsed with a regex and
+# never sourced:
+#   last_alert_day=YYYY-MM-DD   UTC day of the last alert
+#   muted=1                     set by the stop rule
+# Garbage counts as no state. A state file whose fingerprint is in no store
+# any more (the certificate was renewed or removed) is deleted.
+#
+# A store that exists but cannot be parsed prints one line to stderr (the
+# journal) and makes the run exit 1, so systemd marks the unit failed. No
+# alert is sent for that case, and no state is pruned in that run.
+#
+# Cost of one run: reads at most {{ cert_alert_acme_files | length }} local files, runs one openssl per
+# certificate, and when a certificate is due, one `docker ps` and one
+# `docker inspect` plus the files of the dynamic dir. It makes no network call
+# except the alert POST when one is due, and makes no paid call.
+#
+# BAY_CERT_ALERT_NOW (epoch seconds) replaces the clock. It exists for the
+# tests only. The systemd unit never sets it.
+
+set -uo pipefail
+umask 077
+
+STATE_DIR={{ outbound_check_state_dir | quote }}/cert-alert
+ACME_FILES=({% for acme_file in cert_alert_acme_files %}{{ acme_file | quote }} {% endfor %})
+WARN_DAYS={{ cert_alert_warn_days | int }}
+PAGE_DAYS={{ cert_alert_page_days | int }}
+EXPIRED_DAYS={{ cert_alert_expired_days | int }}
+MAX_SANS=5
+DYNAMIC_DIR={{ cert_alert_dynamic_dir | quote }}
+
+{% include '_notify.sh.j2' %}
+
+now="${BAY_CERT_ALERT_NOW:-$(date +%s)}"
+if [[ ! "${now}" =~ ^[0-9]{1,12}$ ]]; then
+  echo "bay-cert-alert: BAY_CERT_ALERT_NOW is not an epoch" >&2
+  exit 1
+fi
+today=$(date -u -d "@${now}" +%F)
+
+# Reads one store and prints one tab separated line per certificate:
+#   <fingerprint>  <notAfter epoch>  <main name>  <SANs, comma separated>
+# Only .certificate and .domain are read from the store.
+read -r -d '' EXTRACT <<'PYEOF'
+import base64, json, re, subprocess, sys
+
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+def clean(value):
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", str(value)).strip()
+
+def epoch(end_line):
+    m = re.match(r"^notAfter=([A-Z][a-z]{2}) +(\d{1,2}) (\d\d):(\d\d):(\d\d) (\d{4}) GMT$", end_line)
+    if not m:
+        raise ValueError("unreadable end date")
+    import calendar
+    month = MONTHS.index(m.group(1)) + 1
+    return calendar.timegm((int(m.group(6)), month, int(m.group(2)),
+                            int(m.group(3)), int(m.group(4)), int(m.group(5))))
+
+def inspect(pem):
+    proc = subprocess.run(
+        ["openssl", "x509", "-noout", "-enddate", "-fingerprint", "-sha256"],
+        input=pem, capture_output=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise ValueError("openssl could not read the certificate")
+    end_line, fp = None, None
+    for line in proc.stdout.decode("ascii", "replace").splitlines():
+        if line.startswith("notAfter="):
+            end_line = line.strip()
+        elif "Fingerprint=" in line:
+            fp = line.split("=", 1)[1].replace(":", "").strip().lower()
+    if end_line is None or fp is None or not re.fullmatch(r"[0-9a-f]{64}", fp):
+        raise ValueError("unreadable openssl output")
+    return fp, epoch(end_line)
+
+failed = False
+try:
+    raw = open(sys.argv[1], "rb").read()
+    data = json.loads(raw) if raw.strip() else {}
+    if not isinstance(data, dict):
+        raise ValueError("top level is not an object")
+except (OSError, ValueError) as err:
+    print("bay-cert-alert: cannot parse %s: %s" % (sys.argv[1], err), file=sys.stderr)
+    sys.exit(1)
+
+for resolver in data.values():
+    if not isinstance(resolver, dict):
+        continue
+    for entry in resolver.get("Certificates") or []:
+        try:
+            pem = base64.b64decode(entry["certificate"], validate=True)
+            # The first certificate of the chain is the leaf.
+            first = pem.split(b"-----END CERTIFICATE-----", 1)[0] + b"-----END CERTIFICATE-----\n"
+            fp, end = inspect(first)
+            domain = entry.get("domain") or {}
+            sans = [clean(s) for s in (domain.get("sans") or [])]
+            print("\t".join([fp, str(end), clean(domain.get("main") or "(no name)"), ",".join(sans)]))
+        except (KeyError, TypeError, ValueError, AttributeError) as err:
+            print("bay-cert-alert: skipped a certificate entry in %s: %s" % (sys.argv[1], err), file=sys.stderr)
+            failed = True
+
+sys.exit(1 if failed else 0)
+PYEOF
+
+# Prints the names that live routers serve, one "HOST<TAB><name>" line each, or
+# one "UNKNOWN<TAB><why>" line when docker cannot be read. Reads the labels of
+# the running containers and the Host(...) rules of the dynamic files ($1).
+read -r -d '' SERVED <<'PYEOF'
+import glob, json, os, re, subprocess, sys
+
+HOST = re.compile(r"(?<![A-Za-z])Host\(([^)]*)\)")
+NAME = re.compile(r"`([^`]+)`")
+TLS_DOMAIN = re.compile(r"\.tls\.domains\[\d+\]\.(main|sans)$")
+names = set()
+
+def add(name):
+    name = re.sub(r"[\x00-\x20\x7f]+", "", str(name)).lower().rstrip(".")
+    if name:
+        names.add(name)
+
+def add_rules(text):
+    for match in HOST.finditer(text):
+        for name in NAME.findall(match.group(1)):
+            add(name)
+
+try:
+    ids = subprocess.run(["docker", "ps", "-q"], capture_output=True, text=True,
+                         timeout=60, check=True).stdout.split()
+    if ids:
+        out = subprocess.run(
+            ["docker", "inspect", "--format", "{% raw %}{{json .Config.Labels}}{% endraw %}", *ids],
+            capture_output=True, text=True, timeout=60, check=True,
+        ).stdout
+        for line in out.splitlines():
+            labels = json.loads(line) if line.strip() else None
+            for key, value in (labels or {}).items():
+                if not key.startswith("traefik.http.routers."):
+                    continue
+                if key.endswith(".rule"):
+                    add_rules(str(value))
+                elif TLS_DOMAIN.search(key):
+                    for name in str(value).split(","):
+                        add(name)
+except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as err:
+    print("UNKNOWN\t%s" % re.sub(r"[\x00-\x1f\x7f]+", " ", str(err))[:200])
+    sys.exit(0)
+
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "*"))):
+    if path.endswith((".yml", ".yaml", ".toml")):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                add_rules(handle.read())
+        except OSError:
+            pass
+
+for name in sorted(names):
+    print("HOST\t" + name)
+PYEOF
+
+declare -A seen_store=() seen_end=() seen_main=() seen_sans=()
+parse_failed=0
+seen_count=0
+for store in "${ACME_FILES[@]}"; do
+  [[ -f "${store}" ]] || continue
+  lines=$(python3 -I -c "${EXTRACT}" "${store}")
+  if [[ $? -ne 0 ]]; then
+    parse_failed=1
+  fi
+  while IFS=$'\t' read -r fp end main sans; do
+    [[ "${fp}" =~ ^[0-9a-f]{64}$ && "${end}" =~ ^[0-9]{1,12}$ ]] || continue
+    # The same certificate in two stores counts once.
+    [[ -n "${seen_store[${fp}]:-}" ]] && continue
+    seen_store["${fp}"]="${store}"
+    seen_count=$(( seen_count + 1 ))
+    seen_end["${fp}"]="${end}"
+    seen_main["${fp}"]="${main}"
+    seen_sans["${fp}"]="${sans}"
+  done <<< "${lines}"
+done
+
+if [[ "${seen_count}" -eq 0 && "${parse_failed}" -eq 0 && ! -d "${STATE_DIR}" ]]; then
+  exit 0
+fi
+
+# State: only exact key=value lines count.
+state_last_day=""
+state_muted=""
+read_state() {
+  state_last_day=""
+  state_muted=""
+  local file="${STATE_DIR}/${1}.state" line
+  [[ -f "${file}" ]] || return 0
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ^last_alert_day=([0-9]{4}-[0-9]{2}-[0-9]{2})$ ]]; then
+      state_last_day="${BASH_REMATCH[1]}"
+    elif [[ "${line}" == "muted=1" ]]; then
+      state_muted=1
+    fi
+  done < "${file}"
+}
+
+write_state() {
+  mkdir -p -m 0750 "${STATE_DIR}"
+  {
+    if [[ -n "${state_last_day}" ]]; then echo "last_alert_day=${state_last_day}"; fi
+    if [[ -n "${state_muted}" ]]; then echo "muted=1"; fi
+  } > "${STATE_DIR}/${1}.state"
+}
+
+# Served names, read once and only when a certificate is due.
+declare -A served_host=()
+served_loaded=0
+served_unknown=""
+load_served() {
+  [[ "${served_loaded}" -eq 1 ]] && return 0
+  served_loaded=1
+  local kind value
+  while IFS=$'\t' read -r kind value; do
+    case "${kind}" in
+      HOST) [[ -n "${value}" ]] && served_host["${value}"]=1 ;;
+      UNKNOWN) served_unknown="${value:-unknown error}" ;;
+    esac
+  done < <(python3 -I -c "${SERVED}" "${DYNAMIC_DIR}")
+  if [[ -n "${served_unknown}" ]]; then
+    echo "bay-cert-alert: cannot read the routers (${served_unknown}); every due certificate counts as served"
+  fi
+}
+
+# Exit 0 when a live router serves a name of the certificate ($1 main, $2 SANs).
+cert_served() {
+  load_served
+  [[ -n "${served_unknown}" ]] && return 0
+  local name parent host
+  local -a cert_names=()
+  IFS=',' read -r -a cert_names <<< "${1},${2}"
+  for name in "${cert_names[@]}"; do
+    name="${name,,}"
+    [[ -n "${name}" ]] || continue
+    [[ -n "${served_host[${name}]:-}" ]] && return 0
+    if [[ "${name}" == '*.'?* ]]; then
+      parent="${name#\*.}"
+      for host in "${!served_host[@]}"; do
+        if [[ "${host}" == *".${parent}" && "${host%".${parent}"}" != *.* ]]; then
+          return 0
+        fi
+      done
+    fi
+  done
+  return 1
+}
+
+warn_lines=""
+page_lines=""
+warn_fps=()
+page_fps=()
+warn_count=0
+page_count=0
+
+for fp in "${!seen_store[@]}"; do
+  end="${seen_end[${fp}]}"
+  read_state "${fp}"
+  if [[ -n "${state_muted}" ]]; then
+    continue
+  fi
+
+  # Stop rule: far past the end date, never alert again.
+  if [[ "${now}" -gt $(( end + EXPIRED_DAYS * 86400 )) ]]; then
+    state_muted=1
+    write_state "${fp}"
+    continue
+  fi
+
+  secs_left=$(( end - now ))
+  if [[ "${secs_left}" -ge 0 ]]; then
+    days_left=$(( secs_left / 86400 ))
+  else
+    days_left=$(( -( ( -secs_left + 86399 ) / 86400 ) ))
+  fi
+
+  level=""
+  if [[ "${days_left}" -lt "${PAGE_DAYS}" ]]; then
+    level="page"
+  elif [[ "${days_left}" -lt "${WARN_DAYS}" ]]; then
+    level="warn"
+  else
+    continue
+  fi
+
+  if [[ "${state_last_day}" == "${today}" ]]; then
+    continue
+  fi
+
+  # An orphan: no live router serves it, so Traefik will never renew it.
+  if ! cert_served "${seen_main[${fp}]}" "${seen_sans[${fp}]}"; then
+    echo "bay-cert-alert: ${seen_main[${fp}]} (${fp:0:12}, ${days_left} days left, store ${seen_store[${fp}]}) is served by no router: no alert. Remove its entry from the store, then restart traefik."
+    continue
+  fi
+
+  # SANs, cut to a few names.
+  sans_text=""
+  if [[ -n "${seen_sans[${fp}]}" ]]; then
+    IFS=',' read -r -a san_list <<< "${seen_sans[${fp}]}"
+    shown=$(printf '%s, ' "${san_list[@]:0:${MAX_SANS}}")
+    sans_text=", SANs <code>$(bay_html_escape "${shown%, }")</code>"
+    san_total=0
+    for _ in "${san_list[@]}"; do san_total=$(( san_total + 1 )); done
+    if [[ "${san_total}" -gt "${MAX_SANS}" ]]; then
+      sans_text="${sans_text} (+$(( san_total - MAX_SANS )) more)"
+    fi
+  fi
+
+  end_text=$(date -u -d "@${end}" '+%Y-%m-%d %H:%M UTC')
+  if [[ "${days_left}" -lt 0 ]]; then
+    left_text="expired ${days_left#-} days ago"
+  else
+    left_text="${days_left} days left"
+  fi
+  line="• <code>$(bay_html_escape "${seen_main[${fp}]}")</code>${sans_text}: ${left_text}, ends ${end_text}, store <code>$(bay_html_escape "${seen_store[${fp}]}")</code>"
+  if [[ "${days_left}" -lt 0 ]]; then
+    line="${line}
+  Expired and not renewed. If no router uses it, it is an orphan: remove its entry from the store file, then restart traefik."
+  fi
+
+  if [[ "${level}" == "page" ]]; then
+    page_lines="${page_lines}${line}
+"
+    page_fps+=("${fp}")
+    page_count=$(( page_count + 1 ))
+  else
+    warn_lines="${warn_lines}${line}
+"
+    warn_fps+=("${fp}")
+    warn_count=$(( warn_count + 1 ))
+  fi
+done
+
+# One run, at most one message per level. Each call site passes a literal ID.
+if [[ "${warn_count}" -gt 0 ]]; then
+  message="⚠️ <b>[CERT EXPIRING]</b>
+Host: <code>${BAY_HOST}</code>
+${warn_count} certificate(s) held by Traefik expire in under ${WARN_DAYS} days. Traefik renews on its own, so a renewal is failing.
+${warn_lines%$'\n'}"
+  bay_notify host.cert_expiry_warn "${message}"
+  for fp in "${warn_fps[@]}"; do
+    read_state "${fp}"
+    state_last_day="${today}"
+    write_state "${fp}"
+  done
+fi
+
+if [[ "${page_count}" -gt 0 ]]; then
+  message="🚨 <b>[CERT EXPIRY CRITICAL]</b>
+Host: <code>${BAY_HOST}</code>
+${page_count} certificate(s) held by Traefik expire in under ${PAGE_DAYS} days.
+${page_lines%$'\n'}"
+  bay_notify host.cert_expiry_page "${message}"
+  for fp in "${page_fps[@]}"; do
+    read_state "${fp}"
+    state_last_day="${today}"
+    write_state "${fp}"
+  done
+fi
+
+# Prune: a state file whose certificate is in no store any more (renewed or
+# removed) goes away. If a store could not be read, its fingerprints are
+# unknown, so nothing is pruned in that run.
+if [[ "${parse_failed}" -eq 0 && -d "${STATE_DIR}" ]]; then
+  for state_file in "${STATE_DIR}"/*.state; do
+    [[ -e "${state_file}" ]] || continue
+    name=$(basename "${state_file}" .state)
+    if [[ "${name}" =~ ^[0-9a-f]{64}$ && -z "${seen_store[${name}]:-}" ]]; then
+      rm -f "${state_file}"
+    fi
+  done
+fi
+
+exit "${parse_failed}"

@@ -197,3 +197,91 @@
   when:
     - not (reboot_alert_enabled | bool)
     - not (ansible_check_mode and _reboot_alert_timer_unit is changed)
+
+# ── Certificate expiry alert ──────────────────────────────────────────────────
+# Same state directory as the disk alert (a cert-alert/ folder inside it).
+# Daily timer, root service unit. When disabled, the units and the script are
+# stopped and removed (the state files stay, so a later enable does not repeat
+# an alert already sent today).
+
+- name: Deploy cert alert probe script
+  ansible.builtin.template:
+    src: bay-cert-alert.sh.j2
+    dest: /usr/local/bin/bay-cert-alert
+    owner: root
+    group: root
+    mode: "0750"
+  become: true
+  when: cert_alert_enabled | bool
+
+- name: Deploy cert alert systemd service unit
+  ansible.builtin.template:
+    src: bay-cert-alert.service.j2
+    dest: /etc/systemd/system/bay-cert-alert.service
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: cert_alert_enabled | bool
+
+- name: Deploy cert alert systemd timer unit
+  ansible.builtin.template:
+    src: bay-cert-alert.timer.j2
+    dest: /etc/systemd/system/bay-cert-alert.timer
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  when: cert_alert_enabled | bool
+  register: _cert_alert_timer_unit
+
+- name: Enable and start cert alert timer
+  ansible.builtin.systemd:
+    name: bay-cert-alert.timer
+    enabled: true
+    state: started
+    masked: false
+    daemon_reload: true
+  become: true
+  when:
+    - cert_alert_enabled | bool
+    - not (ansible_check_mode and _cert_alert_timer_unit is changed)
+
+- name: Check whether the cert alert timer unit exists
+  ansible.builtin.stat:
+    path: /etc/systemd/system/bay-cert-alert.timer
+  become: true
+  register: _cert_alert_timer_stat
+  when: not (cert_alert_enabled | bool)
+
+- name: Stop and disable cert alert timer
+  ansible.builtin.systemd:
+    name: bay-cert-alert.timer
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  become: true
+  when:
+    - not (cert_alert_enabled | bool)
+    - _cert_alert_timer_stat.stat.exists
+
+- name: Remove cert alert units and script
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  become: true
+  loop:
+    - /etc/systemd/system/bay-cert-alert.timer
+    - /etc/systemd/system/bay-cert-alert.service
+    - /usr/local/bin/bay-cert-alert
+  when: not (cert_alert_enabled | bool)
+  register: _cert_alert_removed
+
+- name: Reload systemd after the cert alert units are removed
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+  when:
+    - not (cert_alert_enabled | bool)
+    - _cert_alert_removed is changed
+    - not ansible_check_mode

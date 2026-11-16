@@ -271,6 +271,20 @@ host.reboot_pending:
   enabled_by_default: true
   rate_limited: true   # state file: first alert at the threshold, then one per repeat interval
 
+host.cert_expiry_warn:
+  level: warn
+  source: outbound_monitor/bay-cert-alert.sh.j2
+  summary: A certificate Traefik holds expires in under cert_alert_warn_days (21) days.
+  enabled_by_default: true
+  rate_limited: true   # one alert per cert per day; muted 7 days after expiry
+
+host.cert_expiry_page:
+  level: critical
+  source: outbound_monitor/bay-cert-alert.sh.j2
+  summary: A certificate Traefik holds expires in under cert_alert_page_days (7) days.
+  enabled_by_default: true
+  rate_limited: true   # one alert per cert per day; muted 7 days after expiry
+
 # ── log archival ─────────────────────────────────────────────────────────────
 log.retention_prune:
   level: info

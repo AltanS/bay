@@ -28,6 +28,7 @@ so criticals can page an on-call sink while chat keeps taking everything.
   - [The delivery log](#the-delivery-log)
   - [Secret hygiene, honestly](#secret-hygiene-honestly)
 - [Pending reboot alert](#pending-reboot-alert)
+- [Certificate expiry alert](#certificate-expiry-alert)
 - [Not covered](#not-covered)
 - [Troubleshooting](#troubleshooting)
 <!-- /toc -->
@@ -246,7 +247,7 @@ bay provision production --tags alert_policy   # provision-only emitters (e.g. d
 ```
 
 Both commands are needed because `alert_policy` runs in `provision.yml` as
-well as `deploy.yml` — some emitters (disk pressure, outbound checks, pending reboot) only
+well as `deploy.yml` — some emitters (disk pressure, outbound checks, pending reboot, certificate expiry) only
 run from provisioning, so a deploy-only apply leaves their overrides stale.
 
 **Every mute should have an expiry.** Alerts are the only observability there
@@ -414,6 +415,8 @@ A held build (`build.held`) waits for `bay up`. A one-project `bay up` deploys o
 | `deploy.failed` | `critical` | on | `deploy_stack/main.yml` | A deploy failed. |
 | `deploy.pull_complete` | `info` | **off** | `git_deploy/rebuild.sh.j2` | A pull-only or remote-pull deploy finished successfully. |
 | `deploy.webhook_complete` | `info` | **off** | `git_deploy/rebuild.sh.j2` | A webhook-triggered build and deploy finished successfully. |
+| `host.cert_expiry_page` | `critical` | on | `outbound_monitor/bay-cert-alert.sh.j2` | A certificate Traefik holds expires in under cert_alert_page_days (7) days. |
+| `host.cert_expiry_warn` | `warn` | on | `outbound_monitor/bay-cert-alert.sh.j2` | A certificate Traefik holds expires in under cert_alert_warn_days (21) days. |
 | `host.disk_page` | `critical` | on | `outbound_monitor/bay-disk-alert.sh.j2` | Disk usage crossed the page threshold. |
 | `host.disk_recovered` | `info` | **off** | `outbound_monitor/bay-disk-alert.sh.j2` | Disk usage fell back below the warn threshold. |
 | `host.disk_warn` | `warn` | on | `outbound_monitor/bay-disk-alert.sh.j2` | Disk usage crossed the warn threshold. |
@@ -712,6 +715,63 @@ The state lives in `/var/lib/bay-outbound-check/reboot-alert.state` (the state
 directory of the disk alert). It has two lines, `first_seen=<epoch>` and
 `last_alert=<epoch>`. Bay never reboots a host for you.
 Pick a quiet time and run `sudo reboot` yourself.
+
+The probe belongs to the `outbound_monitor` role, which is in `provision.yml`
+only. A deploy does not install it:
+
+```bash
+bay provision production --tags outbound_monitor
+```
+
+## Certificate expiry alert
+
+Traefik renews its ACME certificates by itself. When a renewal fails, nobody
+hears about it until a browser shows an error. Bay checks the certificates once
+a day (`bay-cert-alert.timer`, 08:00 host time plus up to 30 minutes of random
+delay). It reads Traefik's ACME stores, `acme.json` and `acme-dns.json` in the
+stack directory. It reads only the domain names and the certificate chain. It
+never reads the private key. A store that does not exist is skipped.
+
+- Under 21 days left: `host.cert_expiry_warn` (level `warn`).
+- Under 7 days left: `host.cert_expiry_page` (level `critical`).
+- One run sends at most one message per level. The message lists every due
+  certificate with its names, days left, end date and store file.
+- One alert per certificate per day.
+- Only a certificate that a live router serves alerts. Traefik keeps a
+  certificate after the last router that used it is gone, and never renews it.
+  The probe reads the `Host(...)` rules and `tls.domains` labels of the running
+  containers, and the `Host(...)` rules of the files in the Traefik dynamic dir
+  (`cert_alert_dynamic_dir`). A certificate counts as served when one of its
+  names is such a host. A wildcard `*.x` counts for a host one label below `x`.
+  For a due certificate that no router serves, the probe writes one line to the
+  journal and sends nothing. It reads the routers only when a certificate is
+  due. When it cannot read docker, every due certificate alerts, and the
+  journal says why. `HostRegexp` rules are not read.
+- A certificate more than 7 days past its end date is muted for good. It is
+  usually an orphan that no router uses. The last alert says how to remove it:
+  delete its entry from the store file, then restart traefik.
+- A renewed or removed certificate sends nothing. Its state file is deleted.
+- A store that exists but cannot be parsed sends no alert. The unit
+  `bay-cert-alert.service` fails instead, and the reason is in the journal.
+
+```yaml
+# group_vars/all/main.yml  (or per host)
+cert_alert_enabled: true            # false stops the timer and removes the units
+cert_alert_warn_days: 21
+cert_alert_page_days: 7
+cert_alert_expired_days: 7          # mute a certificate this long after its end date
+cert_alert_acme_files:              # the default repeats the traefik role's two paths
+  - "{{ stack_dir }}/acme.json"
+  - "{{ stack_dir }}/acme-dns.json"
+cert_alert_dynamic_dir: "{{ stack_dir }}/dynamic"   # Traefik's dynamic files
+```
+
+The state lives in `/var/lib/bay-outbound-check/cert-alert/`, one file per
+certificate, named after its SHA-256 fingerprint. It holds
+`last_alert_day=YYYY-MM-DD` and, after muting, `muted=1`. One run reads at most
+two local files and starts one `openssl` per certificate. When a certificate is
+due, it also runs one `docker ps` and one `docker inspect` and reads the dynamic
+files. It makes no network call except the alert itself.
 
 The probe belongs to the `outbound_monitor` role, which is in `provision.yml`
 only. A deploy does not install it:
