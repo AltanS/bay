@@ -42,6 +42,7 @@ Path-level access control works in both directions:
 
 - **`open`** on a `tailnet` app (compiled: `public_routes`) -- specific paths that remain publicly accessible (useful for webhook endpoints or health checks)
 - **`locked`** on a `public` app (compiled: `vpn_routes`) -- specific paths restricted to VPN users only (useful for admin panels or sensitive endpoints)
+- **`tailnet_hosts`** in `[deploy.<env>]` (compiled: `tailnet_domains`, v2.23.0) -- extra host names of the app served only on the box's tailnet listener, for example `admin.example.com` beside the public `example.com`
 
 ### Automatic split-DNS
 
@@ -96,7 +97,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 - **Traefik v3.6 with host networking** -- `network_mode: host` preserves real client IPs through the entire request chain (no Docker NAT)
 - **CrowdSec IDS/IPS** -- reads Traefik access logs and SSH auth logs, shares ban decisions with the nftables bouncer
 - **nftables firewall** -- kernel-level packet filtering with CrowdSec blocklist integration and VPN IP whitelisting
-- **nftables pre-routing table** -- `nftables_prerouting_rules` for rules that must run before conntrack and Docker DNAT (emergency CVE mitigations), applied without a Docker restart; drops IPv4 TCP with IP options by default (`nftables_drop_ipv4_options`). See `roles/nftables/defaults/main.yml`, which also lists the files Bay owns in `/etc/nftables.d/`
+- **nftables pre-routing table** -- `nftables_prerouting_rules` for rules that must run before conntrack and Docker DNAT (emergency CVE mitigations), applied without a Docker restart; drops IPv4 TCP with IP options by default (`nftables_drop_ipv4_options`). Opt-in tailnet address guard (`nftables_tailnet_ip_guard`, v2.23.0): drops a packet to the box's tailnet address that does not come in on the tailnet interface, `lo` or a Docker bridge; required for `tailnet_hosts`. See `roles/nftables/defaults/main.yml`, which also lists the files Bay owns in `/etc/nftables.d/`
 - **Multipath TCP off** -- `common_mptcp_enabled` (default `false`) sets `net.mptcp.enabled` to 0 in the host network namespace. This narrows the attack surface of CVE-2026-98432 until a patched kernel fixes it. Apply it alone with `bay --fleet <path> provision <env> --tags mptcp`. See `roles/common/defaults/main.yml`.
 - **Automated SSL** -- Let's Encrypt HTTP-01 challenge, per-domain certificates issued on first request (the optional tailnet ingress uses a DNS-01 wildcard cert, see [tailnet-ingress.md](tailnet-ingress.md))
 - **Ansible Vault** -- encrypted secrets in `group_vars/<env>/secrets.yml`, resolved at deploy time into per-service `.env` files

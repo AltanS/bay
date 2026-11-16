@@ -482,7 +482,7 @@ headscale_server_tailnet_ip: "100.64.0.2"
 
 ### No configuration needed
 
-Split-DNS is fully automatic for Headscale deployments. Any service with `access: vpn` (or with `vpn_routes`) in `services.yml` gets a split-DNS override generated at deploy time. Adding or removing VPN services triggers a file watcher reload — no Headscale restart required.
+Split-DNS is fully automatic for Headscale deployments. Any service with `access: vpn` (or with `vpn_routes`) in `services.yml` gets a split-DNS override generated at deploy time, for all its domains. A service with `tailnet_domains` (`tailnet_hosts` in `bay.toml`, v2.23.0) gets one for each of those names. One filter, `bay_split_dns_domains`, picks the names, and the Traefik labels use the same filter (see [tailnet-ingress.md](tailnet-ingress.md#which-routers-bind-the-tailnet-listener)). Adding or removing VPN services triggers a file watcher reload — no Headscale restart required.
 
 ### Manual DNS records (`headscale_extra_dns_records`)
 

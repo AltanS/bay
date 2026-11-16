@@ -12,6 +12,8 @@ split-DNS routes a tailnet hostname to the server; this issues a trusted cert fo
 - [Why it exists](#why-it-exists)
 - [Why it needs a Cloudflare token (when nothing else does)](#why-it-needs-a-cloudflare-token-when-nothing-else-does)
 - [Architecture](#architecture)
+  - [Which routers bind the tailnet listener](#which-routers-bind-the-tailnet-listener)
+  - [Tailnet-only names (`tailnet_hosts`)](#tailnet-only-names-tailnet_hosts)
 - [Routes in bay.fleet.toml (2.1)](#routes-in-bayfleettoml-21)
   - [Before the first route: the ingress box prerequisites](#before-the-first-route-the-ingress-box-prerequisites)
   - [The route keys](#the-route-keys)
@@ -137,6 +139,113 @@ its address. The `traefik` role fixes this. With `traefik_split_entrypoints: tru
 tailnet address, so nothing listens on another interface. Check it on the host with
 `sysctl net.ipv4.ip_nonlocal_bind` (expect `1`) and `docker ps` (Traefik is `Up` and not
 restarting). IPv4 only: the template cannot bind an IPv6 address.
+So a split host does not answer on its IPv6 address: remove the AAAA records of its
+domains. The deploy prints a warning (not a failure) when the host has a global IPv6
+address.
+
+### Which routers bind the tailnet listener
+
+On a split host, a tailnet device that resolves a name through split DNS connects to
+the box's tailnet address, so it reaches `websecure_tailnet`, never `websecure`. Every
+router of such a name must bind `websecure_tailnet`, or the device gets 404. Since 2.23.0
+one predicate decides it, the filter `bay_split_dns_domains` in
+`filter_plugins/bay_filters.py`. A service's names go to the tailnet address when:
+
+- `access` is `vpn`, or the service has `vpn_routes` (a `locked` path in `bay.toml`):
+  all its `domains`;
+- it has `tailnet_domains` (`tailnet_hosts` in `bay.toml`): those names.
+
+The Headscale templates (`extra-records.json.j2`, `config.yaml.j2`) render their records
+from the same filter, and `bay_traefik_labels` adds `websecure_tailnet` to the routers of
+exactly those names. A test checks that the two agree. A service that split DNS does not
+touch keeps `websecure` only. On a host that is not split nothing changes.
+
+On a split host Traefik also listens on port 80 of the tailnet address
+(`web_tailnet`). It only redirects `http://` to `https://` on `websecure_tailnet`, like
+`web` does on the public address. HTTP-01 challenges never come there: Let's Encrypt
+connects to the public address, so they use `web`.
+
+### Tailnet-only names (`tailnet_hosts`)
+
+`[deploy.<env>] tailnet_hosts` in `bay.toml` (see
+[bay-toml.md](bay-toml.md#tailnet_hosts-names-that-only-the-tailnet-reaches)) gives the
+main container more host names that only the tailnet reaches. The compile writes them to
+`tailnet_domains` in `services.yml`. The deploy builds one more router,
+`<service>-tailnet`: rule `Host(...)` for those names, entrypoint `websecure_tailnet`
+only, the vpn allowlist, certificate resolver `letsencrypt` (HTTP-01 on the public
+port 80, so each name needs a public A record to the box).
+
+It fails closed at three points. The router is never built on `websecure`:
+
+1. **Compile.** `bay compile` and `bay plan` read the box's plain group_vars
+   (`group_vars/<box group>`, then `<box env>`, then `all`; vault files are skipped).
+   `traefik_split_entrypoints` and `nftables_tailnet_ip_guard` must be a literal true
+   there, and the box needs a `tailnet_ip` in `bay.fleet.toml`. A Jinja value counts as
+   not set.
+2. **Labels.** `bay_traefik_labels` refuses (the deploy and the webhook rebuild stop)
+   when the host has no `websecure_tailnet` listener or the guard flag is off.
+3. **Deploy.** `roles/deploy_stack/tasks/validate.yml` checks the resolved variables.
+   `roles/deploy_stack/tasks/host_preflight.yml` reads the live firewall
+   (`nft list table inet bay_prerouting`). It needs the rule
+   `ip daddr <gateway_bind_ip> jump tailnet_dst` in chain `prerouting` and a drop in
+   chain `tailnet_dst`. A guard that is not loaded, or that protects another address,
+   stops the deploy: run `bay deploy <env> --tags nftables`. This check runs first in
+   `git_deploy`, before `rebuild.sh` is rendered, and again in `deploy_stack`. So a
+   failed run never leaves a webhook script that serves a tailnet host with no guard.
+   `bay plan --remote` runs it too (check mode), and its box check then fails.
+4. **Webhook rebuild.** `rebuild.sh` makes the same live check before the release and
+   before `docker rm` (`sudo -n nft list table inet bay_prerouting`, the one command a
+   sudoers rule of the nftables role allows). A missing guard is a failed build
+   (`build.failed`, the circuit breaker counts it), and the old container keeps running.
+   A build server that renders the block of a tailnet service of another box never
+   starts it.
+
+The nftables role refuses to turn the guard off, or to move it to another address,
+while a service of the host has `tailnet_domains`.
+
+In split mode Traefik binds ports 80 and 443 of the tailnet address. The deploy refuses
+a container that publishes one of them there (`expose = "tailnet"`, or `gateway` in a
+hand-written file).
+
+**The tailnet address guard** (`nftables_tailnet_ip_guard`, default `false`). The
+`websecure_tailnet` socket binds the tailnet address, but Linux accepts a packet for any
+local address on any interface. A host on the same network segment as the box could send
+a packet to the tailnet address over the public interface and reach the socket. The guard
+adds the chain `tailnet_dst` to the `inet bay_prerouting` table: a packet to the tailnet
+address is dropped unless it comes in on the tailnet interface, `lo`, or a Docker
+bridge (`docker*`, `br-*`, `veth*`). The tailnet interface is `tailscale0` when
+`access_gateway` is `headscale`. With another gateway Bay does not know the interface
+name: set `nftables_tailnet_guard_iifname` (for example `wg0`), or the nftables role
+refuses the guard. A Docker network with another bridge name (the Bay egress
+networks, `bayeg…`) cannot reach the tailnet address, which matches what the egress
+firewall already allows. The address is the box's `gateway_bind_ip`
+(`nftables_tailnet_guard_ip` overrides it). The table reloads on its own, with no
+Docker restart. Check it with `sudo nft list table inet bay_prerouting`: chain
+`prerouting` holds `ip daddr <tailnet address> jump tailnet_dst`.
+
+**What the app receives.** Measured on a test box (2.23.0), on both listeners, with a client
+that sent fake values:
+
+| Header | Client sent | App received |
+|--------|-------------|--------------|
+| `X-Forwarded-For` | `203.0.113.66` | the real client address (Traefik overwrites it) |
+| `X-Real-Ip` | `203.0.113.66` | the real client address |
+| `X-Forwarded-Host` | `evil.example` | the requested host name |
+| `X-Forwarded-Proto` | `http` | `https` |
+| `Forwarded` | `for=203.0.113.66;host=evil.example;proto=http` | **the same, unchanged** |
+
+No entrypoint trusts forwarded headers, so a client cannot set the `X-Forwarded-*`
+headers. Traefik does not touch `Forwarded` (RFC 7239). An app must never read it.
+
+**Order of a rollout.** A label that names `websecure_tailnet` on a Traefik that does not
+have it yet is harmless: Traefik logs `EntryPoint doesn't exist` and keeps the router on
+the entrypoints that exist; a router with no valid entrypoint (the `-tailnet` router) is
+not served anywhere. A `bay up` or `bay deploy --tags deploy_stack` renders the new
+Traefik config first, recreates the containers with the new labels, and restarts Traefik
+last (a handler), so the routers bind `websecure_tailnet` before it exists. Do **not**
+turn on `traefik_split_entrypoints` on a box that serves split names with
+`--tags traefik` alone: Traefik would then listen on the tailnet address before the
+routers bind it, and tailnet devices get 404 until the next deploy.
 
 ## Routes in bay.fleet.toml (2.1)
 
@@ -178,8 +287,12 @@ instead of repeating them.
 
    # Fail-closed listener (recommended on the ingress host; needs netplan_address):
    traefik_split_entrypoints: true
-   vpn_entrypoints: "websecure,websecure_tailnet"     # VPN services: public(allowlisted)+tailnet
    ```
+
+   Since 2.23.0 `vpn_entrypoints` is not needed: on a split host every router of a
+   service whose names split DNS sends to the tailnet address binds `websecure_tailnet`
+   too (see [Which routers bind the tailnet listener](#which-routers-bind-the-tailnet-listener)).
+   A fleet that still sets it renders the same labels.
 
    The token goes into the vault of the same box env, `group_vars/<box env>/secrets.yml`, under
    the key `cloudflare_dns_api_token` (`bay vault edit <box env>`). The Traefik role reads only
@@ -573,7 +686,10 @@ and exists only on the machine that made it.
 | `tailnet_ingress_cert_domain` | (per-proxy host) | Wildcard SAN for the cert |
 | `traefik_split_entrypoints` | `false` | Fail-closed: bind public IP + add `websecure_tailnet` |
 | `traefik_public_bind_ip` | `netplan_address` | Public IP for `web`/`websecure` in split mode |
-| `vpn_entrypoints` / `public_entrypoints` | `websecure` | Per-router entrypoints (router labels) |
+| `vpn_entrypoints` / `public_entrypoints` | `websecure` | Per-router entrypoints (router labels). Since 2.23.0 a split host adds `websecure_tailnet` to the routers of every split-DNS name without them |
+| `nftables_tailnet_ip_guard` | `false` | Drop a packet to the tailnet address that does not come in on the tailnet interface, `lo` or a Docker bridge. Required for `tailnet_hosts` (2.23.0) |
+| `nftables_tailnet_guard_iifname` | `tailscale0` with `access_gateway: headscale`, else `""` | The tailnet interface the guard lets through. Empty = the role refuses the guard |
+| `nftables_tailnet_guard_ip` | `""` | The address the guard protects. Empty = the box's `gateway_bind_ip` |
 | `tailnet_proxies` | (undefined) | Map of remote tailnet routes. Since 2.1 it is compiled from `[tailnet.routes]`; never write it by hand |
 | `headscale_acl_policy` | (undefined) | HuJSON ACL (file mode). Undefined = allow-all; defining it = default-deny |
 | `headscale_oidc_allowed_domains` | `[]` | Email domain suffixes allowed to enrol via OIDC |

@@ -423,6 +423,7 @@ These keys sit at the top level. Every key in this table may also be set in a
 | `health` | string | `"/"` when there is a port, else `"none"` | Health check path, or `"none"`. Bay probes it on the container, not through the route. A failed check removes the new container and starts the previous one again. A path other than `/` on an internal container (no `domain`, no `path`) is (validated, not deployed yet). |
 | `replicas` | integer >= 1 | `1` | Number of containers. More than 1 on an internal container is (validated, not deployed yet). |
 | `memory` | size | none | Memory limit. Bay sets `mem_limit` and `memswap_limit` to this one value, so the container gets no swap (a `docker run --memory-swap` equal to `--memory`). A container that ran with `mem_limit` alone is recreated once by the first deploy of the compiled file, and the box prediction names it as `memory: memswap_limit <now> -> <memory>` (see [plan.md](plan.md#the-box-prediction---remote)). |
+| `cpus` | number or string | none | CPU limit in cores, for example `2`, `0.5` or `"1.5"`. It must be at least 0.01 (the Docker minimum) and at most 64. The deploy and a webhook rebuild refuse a value above the CPU count of the box, before the old container is removed. A string holds a plain decimal: no unit, no exponent. Bay compiles it to a number (`cpus: 2`, `cpus: 1.5`) and the container gets that many cores at most (a Docker `--cpus`). Without it, the compiled file has no `cpus` key and the container has no CPU limit. A change recreates the container, and the box prediction names it as `cpus: <now> -> <cpus>`. |
 | `dns` | list of 1 to 3 IP addresses | none | Resolvers for this one container (Docker `--dns`). Each entry is an IPv4 or IPv6 address, never a domain name, and no entry repeats. The order is kept. The limit is 3 because Docker and glibc use at most 3 nameservers. Use it for a container that must not see the box's tailnet split DNS. Without `dns` the container gets the box resolver as before. Adding, changing or removing `dns` recreates that container once, and the box prediction names it as `dns: <now> -> <wanted>`. |
 | `update` | `notify`, `auto`, `off` | `notify` | What happens when a newer image appears. |
 | `zero_downtime` | bool | `false` | `true`: the previous container keeps running until the new one is healthy. `false`: there is a gap. `true` on an internal container is (validated, not deployed yet). |
@@ -646,7 +647,7 @@ service may use that name. Container names are in rule 8.
   the same image. An internal service that does this is (validated, not deployed yet).
 - The service inherits `update` and `logs` from the project. `replicas` defaults to `1`
   and `zero_downtime` to `false`.
-- The service may set its own: `command`, `port`, `health`, `memory`, `dns`, `egress`,
+- The service may set its own: `command`, `port`, `health`, `memory`, `cpus`, `dns`, `egress`,
   `egress_clients`, `egress_fleet`, `replicas`, `zero_downtime`, `update`, `logs`,
   `log_rotation`, `access`, `mounts`, `env`, `secrets`, `fleet_secrets`, `needs`, `image` or
   `build`.
@@ -881,6 +882,51 @@ deploy envs on one box env share them (see
 | `redirect` | bool | `true` | `false` serves the aliases instead of redirecting them. |
 | `branch` | git branch | `main` | Webhook builds follow this branch. |
 | `track` | `"branch"` or `"pin"` | `"branch"` | What a push does. `branch`: a push builds and deploys new code under the pinned config. `pin`: a push only builds; `bay up` deploys. Every push that builds is held with a `build.held` alert until `bay up` deploys it (see [build-pipeline.md](build-pipeline.md#track-hold-and-freeze)). |
+| `tailnet_hosts` | list of domains | none | Extra names of the main container that only the tailnet reaches (v2.23.0). See below. |
+
+#### `tailnet_hosts`: names that only the tailnet reaches
+
+```toml
+[deploy.production]
+box = "eu2"
+domain = "example.com"
+tailnet_hosts = ["admin.example.com"]
+```
+
+The main container answers these names too, but only on the box's tailnet listener
+(`websecure_tailnet`). The public listener has no router for them and answers 404.
+Headscale split DNS sends each name to the box's tailnet address, so a tailnet device
+reaches it and a public client does not. The router also has the vpn allowlist, as a
+`locked` path has.
+
+What a tailnet name needs:
+
+- **The box.** Three plain values in the box's settings (`group_vars/<box group>/`, the
+  box env or `all`): `traefik_split_entrypoints: true`,
+  `traefik_public_bind_ip: "<public IP>"` and `nftables_tailnet_ip_guard: true`, and a
+  `tailnet_ip` for the box in `bay.fleet.toml`. The compile reads them and refuses the key
+  when one is missing or not a literal true. The deploy checks them again, and also reads
+  the live firewall: the guard must be loaded (`bay deploy <env> --tags nftables`) before
+  the first `bay up`. See
+  [tailnet-ingress.md](tailnet-ingress.md#tailnet-only-names-tailnet_hosts).
+- **A public A record** for each name, to the box's public address. Traefik gets the
+  certificate with the HTTP-01 challenge on the public port 80. Create the record before
+  `bay up`. The name itself is public (DNS and the certificate logs show it); only what the
+  container serves on it is not.
+- **A routed main container.** `mode = "internal"` refuses the key.
+
+Rules:
+
+- A name may appear once in the fleet: not as a `domain`, an alias or another tailnet name.
+- `bay plan` shows one `tailnet_host` step per name added or removed, with risk `shared`,
+  so the verdict is `approve`. `bay up` then also deploys the `headscale` and `traefik`
+  tags, and its scope holds the Headscale box.
+- `bay up`'s health check lists each name as skipped: it never probes a tailnet name from
+  the public side.
+- Your app sees the tailnet name in `Host` and `X-Forwarded-Host`. Traefik overwrites
+  `X-Forwarded-For`, `X-Real-Ip`, `X-Forwarded-Host` and `X-Forwarded-Proto`, so a client
+  cannot fake them. It passes `Forwarded` (RFC 7239) through as the client sent it. Never
+  trust `Forwarded` in the app.
 
 #### `track`: what a push deploys
 
@@ -917,7 +963,7 @@ to its app repo never changes its config.
 Overrides. A `[deploy.<env>]` table may also set:
 
 - any image and runtime key: `image`, `port`, `command`, `release`, `health`,
-  `replicas`, `memory`, `dns`, `update`, `zero_downtime`, `logs`, `secrets`;
+  `replicas`, `memory`, `cpus`, `dns`, `update`, `zero_downtime`, `logs`, `secrets`;
 - any `access` key, for example `access.mode = "tailnet"`;
 - `build.args`, and nothing else under `build`;
 - `env`, for example `[deploy.staging.env]`;

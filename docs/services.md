@@ -136,6 +136,10 @@ services:
       - /admin
       - /endpoints/secret
 
+    tailnet_domains:                 # v2.23.0, compiled from bay.toml tailnet_hosts.
+      - admin.example.com            #   Served only on websecure_tailnet; needs a split
+                                     #   host with nftables_tailnet_ip_guard (docs/tailnet-ingress.md)
+
     regions:                         # Region filter (multi-region only)
       - eu                           #   Absent or empty = deploy everywhere
       - na                           #   List of region/group names
@@ -146,6 +150,7 @@ services:
 
     mem_limit: 512m                  # Docker memory limit (e.g., 256m, 1g)
     memswap_limit: 512m              # Memory plus swap. Equal to mem_limit = no swap. Needs mem_limit, never smaller
+    cpus: 1.5                        # CPU limit in cores (0.01 to 64). Absent = no limit. Docker NanoCpus
     dns:                             # Resolvers for this one container (docker --dns). 1 to 3 IPs, order kept
       - 1.1.1.1                      #   Absent = the box resolver. Never a host name
 
@@ -334,6 +339,7 @@ accessories:
 
     mem_limit: 512m                  # Docker memory limit (e.g., 256m, 1g)
     memswap_limit: 512m              # Memory plus swap. Equal to mem_limit = no swap. Needs mem_limit, never smaller
+    cpus: 1.5                        # CPU limit in cores (0.01 to 64). Absent = no limit. Docker NanoCpus
     dns:                             # Resolvers for this one container (docker --dns). 1 to 3 IPs, order kept
       - 1.1.1.1                      #   Absent = the box resolver. Never a host name
 
@@ -1371,6 +1377,12 @@ The compose templates automatically generate Traefik labels from the service def
 - **VPN service with `public_routes`** → two routers:
   - High-priority router for `public_routes` paths with `public-chain`
   - Low-priority catch-all with `vpn-chain`
+- **Service with `tailnet_domains`** → one more router, `<name>-tailnet`: Host rule for
+  those names, entrypoint `websecure_tailnet` only, `vpn-chain`. It is never built on
+  `websecure` (see [tailnet-ingress.md](tailnet-ingress.md#tailnet-only-names-tailnet_hosts)).
+- **On a split host** (`traefik_split_entrypoints`) every router of a service whose names
+  split DNS sends to the tailnet address (`access: vpn`, `vpn_routes`, `tailnet_domains`)
+  binds `websecure` and `websecure_tailnet` (v2.23.0).
 
 Both lists are **prefixes**: `/admin` also covers `/admin/users` and
 `/administrator`. They differ in letter case:

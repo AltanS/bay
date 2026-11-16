@@ -322,6 +322,7 @@ Each reason is `<code>: <detail>`:
 | `env_file` | The env file that the deploy would write differs from the one on the box. The detail names added, removed and changed keys, never a value. When only the line order moved, the detail is "same variables, different order". |
 | `labels`, `ports`, `volumes` | That part of the settings differs. |
 | `memory` | `mem_limit` or `memswap_limit` differs. Bay sets both to the `memory` value, so swap is never allowed. |
+| `cpus` | The CPU limit (`cpus` in `bay.toml`) differs from the one the container was created with. The detail reads `cpus: 0 -> 2`. A container with no limit and a spec with no `cpus` match. |
 | `dns` | The resolver list (`dns` in `bay.toml`) differs from the one the container was created with. Order counts. The detail reads `dns: <now> -> <wanted>`. |
 | `networks` | The container is not attached to the networks its spec names, or a fixed address differs. The detail names the network: `networks: not attached to services-egress-<x>`, `also attached to ...`, or `address on <net> <now> -> <wanted>`. It is a reason to recreate even when the config hash matches, but only for an egress container and its clients (`egress` in `bay.toml`), for example after a hand `docker network disconnect`. For every other container it is only named, when the hash changed anyway. |
 | `stopped` | The container does not run. The deploy leaves it as it is. |
@@ -451,6 +452,7 @@ Risk is set by the data that a step touches.
 | Shared resource removed | destructive |
 | Tailnet allowlist in `bay.fleet.toml` changed since the last fleet commit (see [the allowlist key](tailnet-ingress.md#the-route-keys)) | shared |
 | Tailnet route added, changed or removed (`kind: route`, see [tailnet-ingress.md](tailnet-ingress.md#routes-in-bayfleettoml-21)) | shared |
+| Tailnet host added or removed (`kind: tailnet_host`, one step per name in `[deploy.<env>] tailnet_hosts`; see [bay-toml.md](bay-toml.md#tailnet_hosts-names-that-only-the-tailnet-reaches)). The container step next to it says `changed: tailnet_domains` | shared |
 | Deploy webhook changed | shared |
 | `egress_fleet = "web"` added to an egress service, also on a new container (a second `container` step next to `changed: egress` or `new container`; the reason names the container and says that it may open tcp 80 and 443 on the public address of every fleet box). The box firewall changes; the container is not recreated. See [bay-toml.md](bay-toml.md#egress_fleet-the-fleets-own-websites) | shared |
 | `egress_fleet` removed (the same second step; the reason says that `bay up` closes the ports) | safe |
@@ -486,7 +488,10 @@ owns, so a change to them can touch every project:
 - a box move with no data (the project leaves one box for another);
 - an added `egress_fleet`. One `bay.toml` owns the step (it carries the
   project), but the opening lets that container reach the sites of every
-  project on the fleet's boxes, so `bay approve` must name a reason.
+  project on the fleet's boxes, so `bay approve` must name a reason;
+- an added or removed tailnet host. One `bay.toml` owns it, but it changes the
+  Headscale DNS records of the whole tailnet (Headscale restarts) and needs a
+  public A record and the box's tailnet listener.
 
 The proxy, the gateway, the update watcher and the networks are refreshed by
 every `bay up` but are not steps (see the note below). A step whose
@@ -565,7 +570,9 @@ A box is in the scope when one of these holds:
 1. It is the box of the project.
 2. It is the old box of a [box move](#box-move). When the old box is in
    another box environment, the second deploy runs on the old box only.
-3. The plan has a `route` step, and the box is `[tailnet] ingress_box`.
+3. The plan has a `route` or `tailnet_host` step, and the box is `[tailnet] ingress_box`
+   (the Headscale box that renders the DNS records). A `tailnet_host` step in a fleet
+   with no `ingress_box` deploys every box of the environment, and `why` says so.
 4. The build surface changed. The compiled entry of a container with a
    `build` differs between the services file before the run and the one the
    run writes: added, removed, or any key changed. Then the scope also takes
@@ -1952,13 +1959,14 @@ know.
   The image is the reference the deploy asked for (`image_ref`), so a webhook
   build that stamps a new commit into the receipt is not drift either.
 - `kind` is one of `container`, `volume`, `database`, `database_user`,
-  `secret`, `resource`, `tailnet`, `route`, `fleet`, `job`, `backup`, `image`
+  `secret`, `resource`, `tailnet`, `route`, `tailnet_host`, `fleet`, `job`, `backup`, `image`
   (the code moves, see "Code and config"). A `job` step names the job
   container in `container`. A `backup` step names the container that mounts
   the volume; its reason names the volume. `action` is one of `create`,
   `update`, `remove`, `rename`, `move`, and for a box step also `recreate`
   and `start`. A `route` step has `route_added`, `route_changed` or
-  `route_removed`, and names the route in `resource`.
+  `route_removed`, and names the route in `resource`. A `tailnet_host` step has
+  `tailnet_host_added` or `tailnet_host_removed`, and names the host in `resource`.
 - `source` is `compile` for a step from the compiled diff, `box` for a step
   from the box prediction.
 - `box_prediction` is empty without `--remote`.
