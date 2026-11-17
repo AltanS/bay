@@ -264,6 +264,15 @@
         name: container_lifecycle
       tags: [deploy_stack]
 
+    # Traefik loads a new static config only now, after the container pass
+    # gave the containers their new labels (2.23.1). See the end of
+    # roles/traefik/tasks/main.yml.
+    - name: Restart traefik after the container pass
+      ansible.builtin.import_role:
+        name: traefik
+        tasks_from: restart
+      tags: [deploy_stack]
+
     # ── log_retention boundary (post) ─────────────────────────────────
     # Compare post-recreate IDs against pre. Write a sentinel line to
     # live.log where the container was recreated so operators grepping

@@ -64,7 +64,7 @@
     owner: "{{ app_user }}"
     group: docker
     mode: "0644"
-  notify: Restart traefik
+  register: _traefik_static_config
 
 # ── Dynamic Configuration (file provider) ──────────────────────────────
 # The file provider is always enabled in the static config, because
@@ -117,7 +117,7 @@
     group: docker
     mode: "0600"
   no_log: true
-  notify: Restart traefik
+  register: _traefik_env_file
   when: traefik_dns_challenge_enabled | default(false)
 
 - name: Ensure DNS-01 ACME storage file exists (root-owned, like acme.json)
@@ -154,3 +154,32 @@
     path: "{{ stack_dir }}/dynamic/tailnet-proxies.yml"
     state: absent
   when: tailnet_proxies | default({}, true) | length == 0
+
+# ── Restart after a static change (deferred) ───────────────────────────
+# A change to traefik.yml or traefik.env needs a container restart. This is
+# not a handler: the log_archive role flushes handlers before deploy_stack,
+# so a handler restarted Traefik before the reconciler gave the containers
+# their new labels (2.23.1). On a switch to traefik_split_entrypoints that
+# meant ~20 s of 404 for tailnet clients: Traefik listened on the tailnet
+# address and no router had websecure_tailnet yet. The role marks the
+# restart as pending here. deploy_stack runs tasks/restart.yml right after
+# the container pass; a run without deploy_stack (`--tags traefik`) runs it
+# in the post_tasks of deploy.yml. tests/test_traefik_restart_order.py.
+#
+# On a fresh box the container does not exist yet. deploy_stack creates it
+# with the new config, so no restart is marked. The start time is kept: when
+# the container pass recreates Traefik (its own labels changed), the new
+# container read the new config already and restart.yml skips the restart.
+- name: Look up the traefik container (static config changed)
+  community.docker.docker_container_info:
+    name: "{{ traefik_container_name | default('traefik') }}"
+  register: _traefik_container
+  when: (_traefik_static_config is changed) or (_traefik_env_file is changed)
+
+- name: Mark the traefik restart as pending
+  ansible.builtin.set_fact:
+    traefik_restart_pending: true
+    traefik_restart_started_at: "{{ _traefik_container.container.State.StartedAt }}"
+  when:
+    - (_traefik_static_config is changed) or (_traefik_env_file is changed)
+    - _traefik_container.exists | default(false)

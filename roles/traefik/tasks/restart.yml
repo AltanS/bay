@@ -1,0 +1,29 @@
+---
+# Restart Traefik when the traefik role marked a static change
+# (traefik_restart_pending, tasks/main.yml). Called by deploy_stack right
+# after the container pass, and by the post_tasks of deploy.yml for a run
+# without deploy_stack. So Traefik loads a new static config (for example
+# the websecure_tailnet listener) only after the containers carry the
+# labels that bind it. The fact is cleared, so the second caller is a no-op.
+- name: Restart traefik after the container pass
+  when: traefik_restart_pending | default(false) | bool
+  block:
+    - name: Look up the traefik container before the restart
+      community.docker.docker_container_info:
+        name: "{{ traefik_container_name | default('traefik') }}"
+      register: _traefik_container_now
+
+    # Skipped when the container pass recreated or restarted Traefik since
+    # the mark: that container started with the new config.
+    - name: Restart traefik for its new static config
+      community.docker.docker_container:
+        name: "{{ traefik_container_name | default('traefik') }}"
+        state: started
+        restart: true
+      when:
+        - _traefik_container_now.exists
+        - _traefik_container_now.container.State.StartedAt == traefik_restart_started_at | default('')
+
+    - name: Clear the pending traefik restart
+      ansible.builtin.set_fact:
+        traefik_restart_pending: false

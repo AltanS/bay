@@ -331,6 +331,15 @@
     - { role: backup, tags: [backup], when: _rig_mode | default(true) | bool }
 
   post_tasks:
+    # A run without deploy_stack (`--tags traefik`) restarts Traefik here. In
+    # every other run deploy_stack restarted it already, right after the
+    # container pass, and cleared the fact. See roles/traefik/tasks/main.yml.
+    - name: Restart traefik when deploy_stack did not
+      ansible.builtin.import_role:
+        name: traefik
+        tasks_from: restart
+      tags: [traefik]
+
     - name: Write rig state file
       ansible.builtin.copy:
         dest: "{{ stack_dir }}/.rig-state"
