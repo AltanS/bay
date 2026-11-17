@@ -242,7 +242,10 @@ have it yet is harmless: Traefik logs `EntryPoint doesn't exist` and keeps the r
 the entrypoints that exist; a router with no valid entrypoint (the `-tailnet` router) is
 not served anywhere. A `bay up` or `bay deploy --tags deploy_stack` renders the new
 Traefik config first, recreates the containers with the new labels, and restarts Traefik
-last (a handler), so the routers bind `websecure_tailnet` before it exists. Do **not**
+right after that container pass, so the routers bind `websecure_tailnet` before it exists.
+The restart is a task, not a handler: before 2.23.1 it was a handler, and the handler
+flush in the `log_archive` role restarted Traefik before the container pass, so tailnet
+clients got 404 for about 20 seconds after the switch. Do **not**
 turn on `traefik_split_entrypoints` on a box that serves split names with
 `--tags traefik` alone: Traefik would then listen on the tailnet address before the
 routers bind it, and tailnet devices get 404 until the next deploy.

@@ -8,6 +8,17 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.23.1] - 2026-11-17
+
+Traefik now restarts for a new static config after the containers get their new labels, as the 2.23.0 upgrade notes said it did.
+
+### Fixed
+- The 2.23.0 upgrade notes and `docs/tailnet-ingress.md` said that `--tags deploy_stack`, `bay up` and a full deploy restart Traefik after the labels change. That was false. The Traefik restart was a handler, and the `log_archive` role runs `meta: flush_handlers` before `deploy_stack` (it needs `daemon-reload` before it starts its timers). A flush runs every pending handler of the play, so Traefik restarted with the new config before the reconciler recreated the containers. Who was hit: a deploy that turned on `traefik_split_entrypoints`. Traefik listened on the tailnet address at once, but no router had `websecure_tailnet` yet, so tailnet clients got 404 for about 20 seconds, until the containers with the new labels came up. Public traffic was not hit. Other static changes (for example `traefik_public_read_timeout`) also restarted early, but with no effect on routing.
+- The `traefik` role now marks the restart as pending (`traefik_restart_pending`) instead of notifying a handler. `deploy_stack` restarts Traefik right after the container pass. A run without `deploy_stack` (`--tags traefik`) restarts it at the end of the "Deploy services" play. When the container pass recreated Traefik in the same run (its own labels changed), the new container already has the new config and the restart is skipped, so Traefik restarts once, not twice. A fresh box still gets no restart: `deploy_stack` creates Traefik with the new config. The `log_archive` flush stays, so its systemd units load as before. A test runs `ansible-playbook --list-tasks` for a full run, `--tags deploy_stack` and `--tags traefik` and checks the order, and a play-order check fails when a handler that restarts Traefik can fire at an early flush.
+
+### Upgrade notes
+- Nothing to do. The next deploy that changes the Traefik static config restarts Traefik after the container pass.
+
 ## [2.23.0] - 2026-11-16
 
 This release adds host names that only the tailnet reaches (`tailnet_hosts`), a firewall guard for the tailnet address, a CPU limit per container (`cpus`) and a certificate expiry alert. It also fixes webhook rebuilds on split hosts, which built other Traefik labels than the deploy.
