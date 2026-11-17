@@ -2077,11 +2077,13 @@ def test_up_deploy_reports_go_to_a_temp_dir_never_cwd(
 def test_up_and_plan_run_the_same_deploy_tag(
     world: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Plan must equal up: both run ``deploy_stack`` only.
+    """Plan and up do the same container work: both run ``deploy_stack``.
 
 rebuild.sh is rendered under that tag by the git_deploy role (see
 tests/test_git_deploy_rebuild_render.py), so up needs no ``git_deploy`` tag,
-which would also clone, build and pull.
+which would also clone, build and pull. Up adds ``backup`` (2.23.2): the
+backup role installs scripts and timers and predicts no container, so the
+plan's check-mode run leaves it out.
 """
     from types import SimpleNamespace
 
@@ -2102,7 +2104,7 @@ which would also clone, build and pull.
     _REAL_DEFAULT_DEPLOY(cx_of(world), "production")
 
     assert seen["playbook"] == "deploy"
-    assert seen["tags"] == "deploy_stack" == applymod.UP_DEPLOY_TAGS
+    assert seen["tags"] == "deploy_stack,backup" == applymod.UP_DEPLOY_TAGS
 
     plan_tags: list[Any] = []
 
@@ -2111,7 +2113,8 @@ which would also clone, build and pull.
 
     monkeypatch.setattr(ops, "_run_playbook", fake_plan_run)
     planmod.default_box_check(cx_of(world), "production", world["fleet"] / "x.yml")
-    assert plan_tags == [seen["tags"]]
+    assert plan_tags == ["deploy_stack"]
+    assert seen["tags"].split(",") == [*plan_tags, "backup"]
 
 
 def test_the_report_hand_off_honours_the_report_dir_var() -> None:
@@ -5217,7 +5220,10 @@ def test_rollback_code_target_from_lock(
 def test_up_runs_backup_tag_on_backup_change(
     world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A volume backup change is a safe ``backup`` step, and ``bay up`` adds the backup tag.
+    """A volume backup change is a safe ``backup`` step; ``bay up`` runs the backup tag anyway.
+
+    Since 2.23.2 the backup tag is in the default tags (``UP_DEPLOY_TAGS``), so
+    the deployer gets no ``tags`` argument, with or without the step.
 
     With ``backup_enabled`` unset or false in the box env's group_vars, the
     plan says that no backup runs.
@@ -5250,7 +5256,8 @@ def test_up_runs_backup_tag_on_backup_change(
     jsonschema.validate(plan, schema)
 
     result = do_up(world)
-    assert tags[-1] == "deploy_stack,backup"
+    assert tags[-1] is None
+    assert result["deploy_tags"] == "deploy_stack,backup"
     assert [s["kind"] for s in result["steps"] if s["kind"] == "backup"] == ["backup"]
     data = yaml.safe_load((world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1])
     assert data["volume_backups"] == {"webapp-data": {"container": "webapp", "path": "/data"}}
@@ -5267,9 +5274,9 @@ def test_up_runs_backup_tag_on_backup_change(
     backup = [s for s in plan["steps"] if s["kind"] == "backup"]
     assert len(backup) == 1 and "changed: schedule" in backup[0]["reason"]
     assert planmod.BACKUP_DISABLED_NOTE not in plan["notes"]
-    do_up(world)
-    assert tags[-1] == "deploy_stack,backup"
-    do_up(world)
+    assert do_up(world)["deploy_tags"] == "deploy_stack,backup"
+    # No step any more: the same tags, the backup role still runs.
+    assert do_up(world)["deploy_tags"] == "deploy_stack,backup"
     assert tags[-1] is None
 
 
@@ -5290,18 +5297,20 @@ def test_failed_up_with_extra_tags_names_the_deploy_retry(
     world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """services.yml is committed by then, so a second `bay up` plans no step and skips the tags."""
-    monkeypatch.setattr(applymod, "up", _failed_up({"deploy_tags": "deploy_stack,backup"}))
+    tags = "deploy_stack,backup,headscale,traefik"
+    monkeypatch.setattr(applymod, "up", _failed_up({"deploy_tags": tags}))
     out = cli(world, "up", "--project", "webapp")
     assert out.exit_code == 1
     text = " ".join(out.output.split())
-    assert "bay deploy production --tags deploy_stack,backup" in text
+    assert f"bay deploy production --tags {tags}" in text
     assert "second bay up plans no step" in text
 
 
 def test_failed_up_with_the_plain_tags_gives_no_deploy_retry(
     world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(applymod, "up", _failed_up({"deploy_tags": "deploy_stack"}))
+    """The default tags hold backup since 2.23.2: a second `bay up` is the retry."""
+    monkeypatch.setattr(applymod, "up", _failed_up({"deploy_tags": applymod.UP_DEPLOY_TAGS}))
     out = cli(world, "up", "--project", "webapp")
     assert out.exit_code == 1
     assert "bay deploy" not in out.output and "--tags" not in out.output

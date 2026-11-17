@@ -199,6 +199,15 @@
             group: docker
             mode: "0750"
 
+        # `docker exec -i`: without -i Docker attaches no stdin. restic then
+        # gets a broken pipe (exit 141), or psql reads an empty script, exits 0
+        # and the table check below passes on the untouched database. Before
+        # 2.23.2 this restore restored nothing.
+        # ON_ERROR_STOP with --single-transaction: the first failing statement
+        # (for example CREATE TABLE of a table that is still there) stops psql
+        # with exit 3 and rolls the whole restore back, so a restore never
+        # leaves a half-applied dump. A plain pg_dump has no DROP statements:
+        # restore into a database that does not hold the dumped objects.
         - name: Restore PostgreSQL database
           ansible.builtin.shell:
             cmd: >-
@@ -206,8 +215,9 @@
               {{ _backup_restic_bin }} dump {{ _snap.short_id }}
               /{{ accessory }}{% if database is defined %}-{{ database }}{% endif %}.sql
               --retry-lock 15m |
-              docker exec {{ accessory }}
-              psql -U {{ _pg_user }} -d {{ _pg_database }}
+              docker exec -i {{ accessory }}
+              psql -X -q -v ON_ERROR_STOP=1 --single-transaction
+              -U {{ _pg_user }} -d {{ _pg_database }}
             executable: /bin/bash
           environment: "{{ _restic_env }}"
           become: true

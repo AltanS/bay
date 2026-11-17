@@ -79,7 +79,10 @@ def _run(tmp_path: Path, tasks: list[dict[str, Any]], variables: dict[str, Any],
 
 
 def _role_task(name: str) -> dict[str, Any]:
-    tasks = yaml.safe_load((ROLE / "tasks" / "main.yml").read_text())
+    tasks = [
+        *yaml.safe_load((ROLE / "tasks" / "main.yml").read_text()),
+        *yaml.safe_load((ROLE / "tasks" / "resolve.yml").read_text()),
+    ]
     return next(t for t in tasks if t["name"] == name)
 
 

@@ -342,7 +342,7 @@ def test_up_runs_headscale_and_traefik_tags_on_route_change(
     assert box.tags == [None], "no route step: the default tags, no tags argument"
     assert add_route(world, "notes", **NOTES).exit_code == 0
     result = do_up(world)
-    assert box.tags[-1] == "deploy_stack,headscale,traefik"
+    assert box.tags[-1] == "deploy_stack,backup,headscale,traefik"
     assert [s["action"] for s in result["steps"] if s["kind"] == "route"] == ["route_added"]
     # The compiled file holds the route; the next plan has no route step.
     data = yaml.safe_load((world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1])
@@ -439,7 +439,7 @@ def test_up_route_only_env(gw_world: dict[str, Path], box: FakeBox) -> None:
     result = json.loads(up.stdout)
     assert result["route_only"] is True
     assert result["projects"] == [] and result["pinned"] == []
-    assert box.tags == ["deploy_stack,headscale,traefik"]
+    assert box.tags == ["deploy_stack,backup,headscale,traefik"]
     assert git(fleet, "log", "-1", "--format=%s") == "bay: up infra (routes)"
     assert git(fleet, "status", "--porcelain") == ""
     # The services file holds the route; no lock moved.

@@ -462,8 +462,11 @@ BACKUP_TAG = "backup"
 
 def deploy_tags(steps: Sequence[Mapping[str, Any]], base: str) -> str:
     """The tags ``bay up`` runs: ``base``, plus headscale and traefik on a route
-    or tailnet_host step (both change Headscale's DNS records), plus backup on a backup step (the backup role installs the volume
-    backup scripts and timers)."""
+    or tailnet_host step (both change Headscale's DNS records), plus backup on a
+    backup step (the backup role installs the volume backup scripts and timers).
+
+    Since 2.23.2 ``base`` (:data:`bay_cli.apply.UP_DEPLOY_TAGS`) holds
+    ``backup`` already, so the backup role runs on every ``bay up``."""
     tags = [t for t in base.split(",") if t]
     if any(s.get("kind") in ROUTE_KINDS for s in steps):
         tags += [t for t in ROUTE_TAGS if t not in tags]

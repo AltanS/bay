@@ -130,12 +130,22 @@ class Refused(Exception):
             self.exit_code = _SYNC_REASONS[self.reason]
 
 
-#: The tags ``bay up`` runs. They are the tags ``bay plan``'s box check runs, so
-#: the plan and the apply do the same work. The ``git_deploy`` role tags its
-#: render tasks (rebuild.sh, image-map.json, the receiver config and image, the
-#: build trigger units) with ``deploy_stack``, so a ``bay up`` keeps the webhook
-#: side current without cloning, building an app image or pulling.
-UP_DEPLOY_TAGS = "deploy_stack"
+#: The tags ``bay up`` runs. ``deploy_stack`` is also what ``bay plan``'s box
+#: check runs, so the plan and the apply do the same container work. The
+#: ``git_deploy`` role tags its render tasks (rebuild.sh, image-map.json, the
+#: receiver config and image, the build trigger units) with ``deploy_stack``, so
+#: a ``bay up`` keeps the webhook side current without cloning, building an app
+#: image or pulling.
+#:
+#: ``backup`` runs on every ``bay up`` (2.23.2). Before, it ran only when the
+#: plan had a ``backup`` step. That step appears once, when ``services.yml``
+#: changes, and ``bay up`` commits ``services.yml`` before it touches a box. A
+#: first ``bay up`` that failed left the backup target configured with no script
+#: and no timer, and no later plan had the step again. An accessory backup (a
+#: fleet resource on a new box) never had a step at all. The role is idempotent
+#: and does nothing while ``backup_enabled`` is false. The plan's box check does
+#: not run it: it installs scripts and timers, it predicts no container.
+UP_DEPLOY_TAGS = "deploy_stack,backup"
 
 
 def default_deploy(
@@ -147,7 +157,7 @@ def default_deploy(
     tags: str = UP_DEPLOY_TAGS,
     limit: Mapping[str, Any] | None = None,
 ) -> None:
-    """Today's ``bay deploy <env> --tags deploy_stack``, without the prompts and the banner.
+    """Today's ``bay deploy <env> --tags deploy_stack,backup``, without the prompts and the banner.
 
     ``limit`` (``{"hosts": [...], "boxes": [...]}``) is the plan's scope in
     this box env (:func:`bay_cli.scope.limit_for`): the playbook runs with
@@ -1091,7 +1101,7 @@ def _apply_plan_steps(
 
         tags = routes.deploy_tags(plan["steps"], UP_DEPLOY_TAGS)
         if tags != UP_DEPLOY_TAGS:
-            say(f"deploy tags: {tags} (the plan changes a tailnet route or a volume backup)")
+            say(f"deploy tags: {tags} (the plan changes a tailnet route)")
         deploy_envs = [box_env] + sorted(
             {
                 str(m["from_box_env"])

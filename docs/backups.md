@@ -147,10 +147,26 @@ accessories:
 ### 5. Deploy
 
 ```bash
-bay deploy production
+bay up production
 ```
 
-This installs restic, initializes per-accessory repos, generates backup scripts, and enables systemd timers.
+Every `bay up` runs the backup role (since 2.23.2). It installs restic,
+initializes the repo of each target, writes the backup scripts and enables the
+systemd timers. `bay deploy production --tags backup` does the same without a
+plan. A plain `bay deploy production` runs it when the box needs the rig.
+
+Each deploy then checks every backup target of the box: the script must exist
+and the timer `bay-backup@<target>.timer` must be enabled and active. A target
+that is configured in `services.yml` but not installed fails the run, and the
+error names it. This runs on `bay up`, a plain `bay deploy` and
+`--tags deploy_stack` or `--tags backup`, and only reads (no restic, no S3). In
+`--check` mode it only warns.
+
+Before 2.23.2 `bay up` ran the backup role only when the plan had a `backup`
+step. That step appeared once, when the config changed, and `bay up` commits
+`services.yml` before it touches the box. So a first `bay up` that failed left
+the target with no script and no timer, and no later plan had the step again.
+A fleet resource with `backup` that got a new box never had a step at all.
 
 ## Auto-detection
 
@@ -198,9 +214,9 @@ volume whose container runs on the host:
 - Nothing runs while `backup_enabled` is false. The plan says so: `volume backups are
   compiled, but backup_enabled is false: no backup runs`.
 - A new or changed volume backup is a plan step of kind `backup`.
-  `bay up` deploys the box of that volume (a one-project run deploys only the boxes it needs),
-  and with such a step it also runs the `backup` tag, so the script and the timer are installed
-  in the same deploy.
+  `bay up` deploys the box of that volume (a one-project run deploys only the boxes it needs).
+  It runs the `backup` tag on every run (since 2.23.2), so the script and the timer are
+  installed in the same deploy, and a later `bay up` installs them when an earlier one failed.
 - Like an accessory, a volume that is gone keeps its timer and its repo. Remove them by hand.
 - `backup = false` on the mount leaves the volume out. A volume from `bay import` carries it,
   because the old YAML fleet backed up no volume. Drop it to start the backups.
@@ -350,7 +366,25 @@ Safety features:
 - **Confirmation required** — interactive prompt via CLI, or `-e confirm=yes` for direct ansible-playbook usage
 - **Post-restore validation** — PostgreSQL checks table count > 0, Redis checks PONG response
 
-Skip the pre-restore backup with `--skip-pre-backup` if you're restoring into an empty container.
+A restore runs only on the host that backs up the target: each host has its own
+restic repo, so a snapshot belongs to one host. When several hosts back up the
+target (a shared resource on several boxes), `bay backup restore` stops and
+lists them; name one with `--host <host>`. A name that no host backs up stops
+the command before anything runs.
+
+A PostgreSQL restore streams the plain SQL dump into `psql` with
+`ON_ERROR_STOP` and `--single-transaction`. The first statement that fails stops
+it and rolls the whole restore back. A plain `pg_dump` has no `DROP`
+statements, so restore into a database that does not hold the dumped objects
+(an empty accessory, or after you drop the lost tables). Over a database that
+still has them, the restore stops at `already exists` and changes nothing.
+Before 2.23.2 the dump never reached `psql` (`docker exec` without `-i`): the
+restore failed with exit 141 or reported success, and restored nothing either
+way. Before 2.23.2 `bay backup restore` also started the playbook without the
+fleet's group_vars, so it stopped at its first task.
+
+The pre-restore backup can only be skipped with the playbook variable
+`-e skip_pre_backup=true`; `bay backup restore` always takes it.
 
 ## Monitoring
 

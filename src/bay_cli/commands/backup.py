@@ -322,14 +322,51 @@ def run(
         con.success("All backups complete")
 
 
+def _restore_host(target: str, wanted: str | None, hosts: list[str]) -> str:
+    """The one host a restore of ``target`` runs on.
+
+    ``hosts`` are the hosts that have ``backup-<target>.sh``. Before 2.23.2 the
+    restore listed snapshots and ran restore.yml on every host of the env: a
+    host without the target failed "Verify snapshot exists" and sent the
+    restore.failed alert, and a target on several hosts was restored from one
+    host's snapshot id on all of them.
+    """
+    if not hosts:
+        raise BayError(
+            f"No host has a '{target}' backup configured, so there is nothing to restore. "
+            "Check the name with 'bay backup status'."
+        )
+    if wanted is not None:
+        if wanted not in hosts:
+            raise BayError(
+                f"Host {wanted} has no '{target}' backup. Hosts that have it: {', '.join(hosts)}"
+            )
+        return wanted
+    if len(hosts) > 1:
+        raise BayError(
+            f"More than one host backs up '{target}': {', '.join(hosts)}. "
+            "Each host has its own snapshots. Pick one with --host <host>."
+        )
+    return hosts[0]
+
+
 @app.command()
 def restore(
     ctx: typer.Context,
     env: str = typer.Argument(..., help="Target environment (e.g., production)."),
     accessory: str = typer.Argument(..., help="Accessory name (e.g., postgres)."),
     snapshot: Optional[str] = typer.Option(None, "--snapshot", "-s", help="Snapshot ID (omit to pick interactively from the latest 10)."),
+    host: Optional[str] = typer.Option(
+        None,
+        "--host",
+        help="The host to restore on (an inventory name). Needed when more than one host backs up the target.",
+    ),
 ) -> None:
     """Restore an accessory from a backup snapshot (interactive).
+
+    Runs only on the host that backs up the target. Each host has its own
+    restic repo, so a snapshot belongs to one host: when several hosts back up
+    the target (a shared resource on several boxes), name one with --host.
 
     Streams the snapshot into the container and validates afterwards
     (postgres: table count > 0, redis: PONG). A safety snapshot tagged
@@ -350,13 +387,19 @@ def restore(
 
     con.header(f"Restore {accessory} on {env}")
 
-    # List available snapshots
+    target_host = _restore_host(
+        accessory, host, _hosts_with_target(env, accessory, bay_dir=bay_dir, stack=stack)
+    )
+
+    # List available snapshots, on that host only.
     list_cmd = (
         f'{_restic_env_source(stack)} && '
         f'export RESTIC_REPOSITORY="{_restic_repo(accessory)}" && '
         f'/usr/local/bin/restic snapshots --json --retry-lock 15m'
     )
-    result = _run_on_host(env, list_cmd, bay_dir=bay_dir, message="Fetching snapshots...")
+    result = _run_on_host(
+        env, list_cmd, bay_dir=bay_dir, message="Fetching snapshots...", limit=target_host
+    )
 
     stdout = result.stdout
     json_str = _extract_json_from_ansible(stdout)
@@ -397,6 +440,7 @@ def restore(
     _console.print(f"  Accessory:  {accessory}")
     _console.print(f"  Snapshot:   {selected_id}")
     _console.print(f"  Target:     {env}")
+    _console.print(f"  Host:       {target_host}")
     _console.print()
 
     if not typer.confirm("Proceed?", default=False):
@@ -408,11 +452,16 @@ def restore(
         "-e", f"accessory={accessory}",
         "-e", "confirm=yes",
         "-e", f"snapshot={selected_id}",
+        "-l", target_host,
     ]
+    # fleet_root: the run reads the fleet's hosts and group_vars. Without it
+    # (before 2.23.2) Ansible found no group_vars and stopped at the first task
+    # (`'app_user' is undefined`), so no restore could run.
     ansible.run_playbook(
         "restore",
         env,
         bay_dir=bay_dir,
+        fleet_root=cx.fleet_root,
         extra_args=extra_args,
     )
     con.success(f"Restore complete for {accessory}")

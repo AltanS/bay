@@ -331,6 +331,19 @@
     - { role: backup, tags: [backup], when: _rig_mode | default(true) | bool }
 
   post_tasks:
+    # After the backup role: every backup target of the host has its script and
+    # a running timer, else the run fails and names the target. Tagged
+    # deploy_stack too, so a run that did not install backups checks them.
+    # Reads only. See roles/backup/tasks/verify.yml.
+    - name: Check that every backup target has a script and a running timer
+      ansible.builtin.include_role:
+        name: backup
+        tasks_from: verify
+        apply:
+          tags: [deploy_stack, backup]
+      when: backup_enabled | default(false) | bool
+      tags: [deploy_stack, backup]
+
     # A run without deploy_stack (`--tags traefik`) restarts Traefik here. In
     # every other run deploy_stack restarted it already, right after the
     # container pass, and cleared the fact. See roles/traefik/tasks/main.yml.

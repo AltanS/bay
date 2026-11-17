@@ -457,7 +457,7 @@ Risk is set by the data that a step touches.
 | `egress_fleet = "web"` added to an egress service, also on a new container (a second `container` step next to `changed: egress` or `new container`; the reason names the container and says that it may open tcp 80 and 443 on the public address of every fleet box). The box firewall changes; the container is not recreated. See [bay-toml.md](bay-toml.md#egress_fleet-the-fleets-own-websites) | shared |
 | `egress_fleet` removed (the same second step; the reason says that `bay up` closes the ports) | safe |
 | Scheduled job added, changed or removed (`kind: job`) | safe |
-| Volume backup added, changed or removed (`kind: backup`, action `update`; `bay up` then also runs the `backup` tag) | safe |
+| Volume backup added, changed or removed (`kind: backup`, action `update`; `bay up` runs the `backup` tag on every run since 2.23.2) | safe |
 | Container of another project changed or removed | that project's own risk, by the rows above |
 | Container that no project owns changed | shared |
 | Container that no project owns removed | destructive |
@@ -851,8 +851,11 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
      `reason: "interrupted"`, `box_touched` (true once Ansible started) and
      `next` (the same command). The exit code is 130.
 6. Bay runs today's deploy for the box's environment, limited to
-   `--tags deploy_stack` (the same work as `bay deploy <env> --tags deploy_stack`,
-   and the same tag the box check of `bay plan` runs). A run for one project
+   `--tags deploy_stack,backup` (the same work as `bay deploy <env> --tags deploy_stack,backup`;
+   the box check of `bay plan` runs `deploy_stack` only). Since 2.23.2 the `backup` tag runs
+   on every `bay up`: the backup role installs the backup scripts and timers of the box,
+   and the deploy then fails when a configured backup target has no script or no running
+   timer ([backups.md](backups.md#5-deploy)). A run for one project
    adds `-l <hosts>`: only the hosts of the plan's scope (see
    [Which boxes a run touches](#which-boxes-a-run-touches)). The `git_deploy` role
    runs before the containers, and under that tag it renders the webhook side
@@ -877,13 +880,13 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
    it pulls nothing through Ansible (see [The first image](#the-first-image)).
    The rig roles that carry the same tag run too: Traefik, the access gateway,
    Watchtower, and Zot and the identity sidecar where they are on. The rest of
-   the rig (for example the cron jobs, the container monitor, backups and the
+   the rig (for example the cron jobs, the container monitor and the
    CrowdSec allowlist) comes only from a `bay deploy <env>` with no `--tags`.
    The SSH deploy key of a `local` build app also comes only from that deploy (see
    [layout-scenarios.md](layout-scenarios.md#11-adding-a-box)). Since 2.17.1 the build
    script clones a missing `local` checkout itself, with the key or token the box
    already has ([build-pipeline.md](build-pipeline.md#when-the-repo-url-changes)). When the plan has a `route` step, Bay
-   runs `--tags deploy_stack,headscale,traefik`: Headscale renders the
+   runs `--tags deploy_stack,backup,headscale,traefik`: Headscale renders the
    split-DNS records and Traefik the route file. The `headscale` tag runs every task of the
    Headscale role, the ACL render included (when `headscale_acl_policy` is defined). So this
    `bay up` also deploys a hand-edited ACL, if the Headscale server is a box of the plan's box
@@ -993,11 +996,12 @@ says `HALF` until a deploy succeeds.
 
 **Retry after a failed `bay up` with extra tags.** The failed `bay up` has already
 committed `services.yml`. A second `bay up` therefore plans no step, and it would
-leave out the extra tags that the first one ran for a route (`headscale,traefik`) or
-a volume backup (`backup`). When the deploy ran such tags, the error prints the
+leave out the extra tags that the first one ran for a route (`headscale,traefik`).
+When the deploy ran such tags, the error prints the
 retry: `bay deploy <env> --tags <the tags that up used>`. The JSON result of the
 failed `bay up` lists them as `deploy_tags`. When the deploy used only
-`deploy_stack`, a second `bay up` is the retry.
+`deploy_stack,backup`, a second `bay up` is the retry: since 2.23.2 every `bay up`
+runs the `backup` tag, so a volume backup no longer needs the deploy retry.
 
 #### Every deployed project is pinned
 

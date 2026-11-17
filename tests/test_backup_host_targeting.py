@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 
 from bay_cli.commands import backup
+from bay_cli.errors import BayError
 
 
 MARKER = backup._PRESENT_MARKER
@@ -235,3 +236,88 @@ def test_extract_json_robust_to_ansi() -> None:
     stdout = '\x1b[0;33meu | SUCCESS | rc=0 >>\x1b[0m\n[{"short_id": "aaa"}]\n'
     blocks = backup._extract_host_json_arrays(stdout)
     assert [h for h, _ in blocks] == ["eu"]
+
+
+# ── restore: one host, and the fleet's group_vars (2.23.2) ─────────────────
+
+
+def test_restore_host_picks_the_only_host() -> None:
+    assert backup._restore_host("postgres", None, ["eu-control"]) == "eu-control"
+
+
+def test_restore_host_needs_a_choice_when_several_hosts_have_the_target() -> None:
+    import pytest
+
+    with pytest.raises(BayError, match="More than one host backs up 'postgres'.*--host"):
+        backup._restore_host("postgres", None, ["eu-control", "na-edge"])
+    assert backup._restore_host("postgres", "na-edge", ["eu-control", "na-edge"]) == "na-edge"
+
+
+def test_restore_host_refuses_a_host_without_the_target_and_a_missing_target() -> None:
+    import pytest
+
+    with pytest.raises(BayError, match="Host infra has no 'postgres' backup"):
+        backup._restore_host("postgres", "infra", ["eu-control"])
+    with pytest.raises(BayError, match="No host has a 'postgres' backup"):
+        backup._restore_host("postgres", None, [])
+
+
+def test_restore_runs_on_the_target_host_with_the_fleet(monkeypatch, tmp_path) -> None:
+    """Snapshots are listed and restore.yml runs only on the host with the target,
+    and the playbook gets the fleet (its group_vars), so it can start at all."""
+    from typer.testing import CliRunner
+
+    from bay_cli.context import Context
+
+    fleet = tmp_path / "fleet"
+    (fleet / "group_vars" / "all").mkdir(parents=True)
+    (fleet / "group_vars" / "all" / "main.yml").write_text("---\nstack_name: shop\n")
+    cx = Context(fleet_root=fleet, framework_root=Path("/x/bay"), source="flag")
+
+    listed: dict[str, object] = {}
+    played: dict[str, object] = {}
+
+    monkeypatch.setattr(backup, "_hosts_with_target", lambda env, target, **kw: ["na-edge"])
+
+    def fake_run_on_host(env, cmd, *, bay_dir, check=True, **kwargs):
+        listed["limit"] = kwargs.get("limit")
+        return _fake_completed(
+            'na-edge | CHANGED | rc=0 >>\n[{"short_id": "ab12cd34", "time": "2026-11-17T03:00:00Z"}]\n'
+        )
+
+    def fake_run_playbook(playbook, env, **kwargs):
+        played.update(kwargs, playbook=playbook, env=env)
+
+    monkeypatch.setattr(backup, "_run_on_host", fake_run_on_host)
+    monkeypatch.setattr(backup.ansible, "run_playbook", fake_run_playbook)
+
+    out = CliRunner().invoke(
+        backup.app, ["restore", "production", "postgres", "--snapshot", "ab12cd34"],
+        input="y\n", obj=cx,
+    )
+    assert out.exit_code == 0, out.output
+    assert listed["limit"] == "na-edge"
+    assert played["playbook"] == "restore"
+    assert played["fleet_root"] == fleet
+    extra = played["extra_args"]
+    assert extra[extra.index("-l") + 1] == "na-edge"
+    assert "snapshot=ab12cd34" in extra
+
+
+def test_restore_stops_before_anything_runs_when_no_host_has_the_target(monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    from bay_cli.context import Context
+
+    cx = Context(fleet_root=Path("/nonexistent"), framework_root=Path("/x/bay"), source="flag")
+    monkeypatch.setattr(backup, "_hosts_with_target", lambda env, target, **kw: [])
+
+    def boom(*a, **k):
+        raise AssertionError("nothing may run")
+
+    monkeypatch.setattr(backup, "_run_on_host", boom)
+    monkeypatch.setattr(backup.ansible, "run_playbook", boom)
+    out = CliRunner().invoke(backup.app, ["restore", "production", "postgres"], obj=cx)
+    assert out.exit_code != 0
+    assert isinstance(out.exception, BayError)
+    assert "No host has a 'postgres' backup" in str(out.exception)

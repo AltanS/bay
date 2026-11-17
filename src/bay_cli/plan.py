@@ -1637,10 +1637,9 @@ def _backup_steps(
 ) -> list[dict[str, Any]]:
     """One ``backup`` step per volume backup that is new, changed or gone (update, safe).
 
-    The backup role installs the scripts and timers, and ``bay up`` runs it
-    (tag ``backup``) only when the plan has such a step
-    (:func:`bay_cli.routes.deploy_tags`). A gone entry keeps its timer on the
-    box: the backup role does not prune (docs/backups.md).
+    The backup role installs the scripts and timers. ``bay up`` runs it (tag
+    ``backup``) on every run since 2.23.2, so the step only tells. A gone entry
+    keeps its timer on the box: the backup role does not prune (docs/backups.md).
     """
     raw_old, raw_new = current.get("volume_backups"), wanted.get("volume_backups")
     old_all: Mapping[str, Any] = raw_old if isinstance(raw_old, Mapping) else {}

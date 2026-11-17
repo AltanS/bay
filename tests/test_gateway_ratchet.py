@@ -35,7 +35,7 @@ BACKEND_OWNED = {
     "roles/tailscale_register/",
     "roles/tailnet_identity/",
     # Backs up headscale's own state; gated on the backend being active.
-    "roles/backup/tasks/main.yml",
+    "roles/backup/tasks/resolve.yml",
     # Builds the headscale container spec; gated on the backend being active.
     "roles/container_lifecycle/tasks/build_specs.yml",
     "roles/deploy_stack/templates/_headscale.j2",

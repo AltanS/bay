@@ -440,7 +440,7 @@ def test_sqlite_identity_source_is_refused():
 
 
 def test_backup_entry_asks_for_the_snapshot():
-    task = _task(_yaml(BACKUP / "tasks" / "main.yml"),
+    task = _task(_yaml(BACKUP / "tasks" / "resolve.yml"),
                  "Register Headscale control-plane state as a backup target (control region only)")
     entry = task["vars"]["_headscale_backup_entry"]
     assert entry["method"] == "file"

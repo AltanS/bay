@@ -1,0 +1,88 @@
+---
+# Every backup target of this host must have its script and a running timer.
+#
+# deploy.yml runs this after the roles, under the tags deploy_stack and backup,
+# so every `bay up` and every plain `bay deploy` checks it, also a run that did
+# not install backups. A target that is configured (services.yml) but has no
+# script or no enabled, active timer fails the run and is named. Before 2.23.2
+# such a target stayed silent: a first `bay up` that failed left the
+# `volume_backups` entries committed with no timer on the box, and no later run
+# installed them.
+#
+# Reads only: `stat` and the systemd unit status. No restic, no S3.
+# In check mode the timers of a new target are not written yet, so the check
+# warns and does not fail.
+
+- name: Resolve the backup targets of this host
+  ansible.builtin.import_tasks: resolve.yml
+
+- name: Read the backup script of each target
+  ansible.builtin.stat:
+    path: "{{ backup_scripts_dir }}/backup-{{ item.name }}.sh"
+    get_checksum: false
+  loop: "{{ _backup_accessories }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _backup_verify_scripts
+  check_mode: false
+  when: backup_enabled | bool
+
+# No `state` and no `enabled`: the module only reads the unit's status. A
+# unit that does not exist fails the module; failed_when false keeps it a read.
+- name: Read the timer state of each target
+  ansible.builtin.systemd:
+    name: "bay-backup@{{ item.name }}.timer"
+  loop: "{{ _backup_accessories }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: _backup_verify_timers
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: backup_enabled | bool
+
+- name: List the backup targets that have no script or no running timer
+  ansible.builtin.set_fact:
+    _backup_verify_missing: >-
+      {%- set out = [] -%}
+      {%- for t in _backup_accessories -%}
+      {%-   set why = [] -%}
+      {%-   if not ((_backup_verify_scripts.results[loop.index0].stat | default({})).exists | default(false)) -%}
+      {%-     set _ = why.append('no script') -%}
+      {%-   endif -%}
+      {%-   set st = _backup_verify_timers.results[loop.index0].status | default({}) -%}
+      {%-   if st.get('UnitFileState', '') != 'enabled' -%}
+      {%-     set _ = why.append('timer not enabled') -%}
+      {%-   elif st.get('ActiveState', '') != 'active' -%}
+      {%-     set _ = why.append('timer not active') -%}
+      {%-   endif -%}
+      {%-   if why -%}
+      {%-     set _ = out.append(t.name ~ ' (' ~ (why | join(', ')) ~ ')') -%}
+      {%-   endif -%}
+      {%- endfor -%}
+      {{ out }}
+  when: backup_enabled | bool
+
+- name: Warn in check mode about backup targets with no script or timer
+  ansible.builtin.debug:
+    msg: >-
+      Check mode: backup targets of {{ inventory_hostname }} with no script or
+      no running timer: {{ _backup_verify_missing | join('; ') }}. A real run
+      of `bay up` or `bay deploy <env> --tags backup` installs them.
+  when:
+    - backup_enabled | bool
+    - ansible_check_mode
+    - _backup_verify_missing | length > 0
+
+- name: Fail when a backup target has no script or no running timer
+  ansible.builtin.fail:
+    msg: >-
+      Backup targets of {{ inventory_hostname }} are configured but not
+      installed: {{ _backup_verify_missing | join('; ') }}. Nothing backs them
+      up. Install them with `bay up` (it runs the backup role since 2.23.2) or
+      `bay deploy <env> --tags backup`, then check with
+      `systemctl list-timers 'bay-backup@*'` on the box.
+  when:
+    - backup_enabled | bool
+    - not ansible_check_mode
+    - _backup_verify_missing | length > 0
