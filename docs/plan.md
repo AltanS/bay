@@ -458,6 +458,7 @@ Risk is set by the data that a step touches.
 | `egress_fleet` removed (the same second step; the reason says that `bay up` closes the ports) | safe |
 | Scheduled job added, changed or removed (`kind: job`) | safe |
 | Volume backup added, changed or removed (`kind: backup`, action `update`; `bay up` runs the `backup` tag on every run since 2.23.2) | safe |
+| Database backup of an accessory added, changed or removed (`[services.<x>.backup]` or a fleet resource `backup`, `kind: backup`, since 2.24.0). A change of only the `backup` block is no container `update` | safe |
 | Container of another project changed or removed | that project's own risk, by the rows above |
 | Container that no project owns changed | shared |
 | Container that no project owns removed | destructive |
@@ -1966,7 +1967,8 @@ know.
   `secret`, `resource`, `tailnet`, `route`, `tailnet_host`, `fleet`, `job`, `backup`, `image`
   (the code moves, see "Code and config"). A `job` step names the job
   container in `container`. A `backup` step names the container that mounts
-  the volume; its reason names the volume. `action` is one of `create`,
+  the volume (its reason names the volume), or the accessory of a database
+  backup. `action` is one of `create`,
   `update`, `remove`, `rename`, `move`, and for a box step also `recreate`
   and `start`. A `route` step has `route_added`, `route_changed` or
   `route_removed`, and names the route in `resource`. A `tailnet_host` step has

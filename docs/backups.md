@@ -16,12 +16,15 @@ Bay uses [restic](https://restic.net/) for deduplicated, encrypted backups to S3
   - [5. Deploy](#5-deploy)
 - [Auto-detection](#auto-detection)
 - [Volume backups](#volume-backups)
+- [Project databases (pg_dump)](#project-databases-pg_dump)
 - [Rig infrastructure: Headscale](#rig-infrastructure-headscale)
   - [Restoring Headscale (file-method restore)](#restoring-headscale-file-method-restore)
   - [Restore test (Headscale)](#restore-test-headscale)
 - [Retention](#retention)
 - [CLI commands](#cli-commands)
 - [Restore](#restore)
+  - [PostgreSQL: scratch or live](#postgresql-scratch-or-live)
+  - [Restore test (Postgres)](#restore-test-postgres)
 - [Monitoring](#monitoring)
 - [Repository layout](#repository-layout)
 - [Defaults](#defaults)
@@ -217,7 +220,10 @@ volume whose container runs on the host:
   `bay up` deploys the box of that volume (a one-project run deploys only the boxes it needs).
   It runs the `backup` tag on every run (since 2.23.2), so the script and the timer are
   installed in the same deploy, and a later `bay up` installs them when an earlier one failed.
-- Like an accessory, a volume that is gone keeps its timer and its repo. Remove them by hand.
+- A volume that is gone, or set to `backup = false`, loses its timer and its script on the
+  next deploy (since 2.24.0). The role removes only targets that its own manifest of the last
+  run (`targets.json`) recorded, so a script it did not install is never touched. The restic
+  repo stays: remove it by hand when you no longer need its snapshots.
 - `backup = false` on the mount leaves the volume out. A volume from `bay import` carries it,
   because the old YAML fleet backed up no volume. Drop it to start the backups.
 
@@ -229,6 +235,56 @@ starts the same containers again, also after a failure. A container that was sto
 stays stopped. The pre-restore backup runs first, as for an accessory. Hosts that do not run
 the container are skipped. When no targeted host runs the container, the restore fails and
 names it, with nothing restored.
+
+## Project databases (pg_dump)
+
+A project backs up its own database with a `[services.<name>.backup]` table in `bay.toml`
+(since 2.24.0). The service must be internal (no `path`, no `domain`), because only an internal
+service compiles to an accessory, and the backup role backs up accessories.
+
+```toml
+[services.postgres]
+image = "postgres:17"
+memory = "2g"
+
+[services.postgres.backup]
+method = "pg_dump"          # required; the only method of this table
+databases = ["app"]         # default: POSTGRES_DB of the service
+hour = 2                    # UTC; default: the project [backup], then [defaults.backup]
+keep = "30d"                # default: the same chain
+format = "custom"           # custom (default, pg_dump -Fc) or plain (SQL text)
+max_age_hours = 30          # the freshness check alerts after this many hours without a good run
+```
+
+`bay compile` writes it as the accessory's `backup:` block, with `utc: true` when an hour is set
+and `clients`: the other containers of the project in that environment, which a live restore
+stops first. A shared resource in `bay.fleet.toml` takes the same `databases`, `format` and
+`max_age_hours` keys; its default `format` stays `plain`.
+
+- **custom** runs `pg_dump -Fc -Z 0` and stores `<name>-<db>.dump`, also with one database.
+  `-Z 0` leaves compression to restic, so unchanged tables give the same chunks every night
+  and dedup. `pg_restore` can then restore with `--clean --if-exists`, without the production
+  roles (`--no-owner`), or only some tables.
+- **plain** stores SQL text, `<name>.sql` (`<name>-<db>.sql` with several databases), as before
+  2.24.0.
+
+Every pg_dump snapshot since 2.24.0 also carries the restic tag `db:<database>`. A restore goes
+into the database the snapshot holds: its tag, else the `-<db>` of its file name. It never falls
+back to `POSTGRES_DB`: with `databases = ["shop"]` and `POSTGRES_DB=main`, a restore of shop goes
+into shop. A snapshot with neither (a one-database snapshot made before 2.24.0) holds an
+unknown database: the config may have named another one when it was made. `latest` never
+takes such a snapshot. Restore it with `--snapshot <id> --database <name>`; Bay then warns that
+it cannot verify the content.
+
+`max_age_hours` defaults to 1.25 times the longest gap between two runs of the schedule, and at
+least `backup_max_age_hours` (30). A daily backup gets 30 hours, a weekly one 210.
+
+A new, changed or removed database backup is a plan step of kind `backup` (`new database backup
+of <name> (pg_dump)`). A change of only the `backup` table recreates no container: the backup key
+is not in the container spec, so the plan shows no container `update`. `bay up` installs the
+script and the timer in the same run.
+
+Only a backup that restores is a backup. Prove it with `bay backup restore-test` (see Restore).
 
 ## Rig infrastructure: Headscale
 
@@ -353,7 +409,7 @@ Retention runs after each successful backup. If pruning fails, the backup is sti
 
 ## CLI commands
 
-`bay backup --help` is the command reference (list, run, restore, status, check — each subcommand's `--help` carries examples).
+`bay backup --help` is the command reference (list, run, restore, restore-test, status, check — each subcommand's `--help` carries examples).
 
 ## Restore
 
@@ -372,23 +428,115 @@ target (a shared resource on several boxes), `bay backup restore` stops and
 lists them; name one with `--host <host>`. A name that no host backs up stops
 the command before anything runs.
 
-A PostgreSQL restore streams the plain SQL dump into `psql` with
-`ON_ERROR_STOP` and `--single-transaction`. The first statement that fails stops
-it and rolls the whole restore back. A plain `pg_dump` has no `DROP`
-statements, so restore into a database that does not hold the dumped objects
-(an empty accessory, or after you drop the lost tables). Over a database that
-still has them, the restore stops at `already exists` and changes nothing.
-Before 2.23.2 the dump never reached `psql` (`docker exec` without `-i`): the
-restore failed with exit 141 or reported success, and restored nothing either
-way. Before 2.23.2 `bay backup restore` also started the playbook without the
-fleet's group_vars, so it stopped at its first task.
+### PostgreSQL: scratch or live
+
+`bay backup restore <env> <target>` on a pg_dump target restores into a **scratch** container
+by default (since 2.24.0). It never touches the live database:
+
+1. A new Postgres container of the same image starts with no network and no published port
+   (`--network none`), so it trusts local connections and needs no secret. Its name starts with
+   `bay-restore-test-`, and every command of the restore targets that name.
+2. The snapshot is restored into it (`pg_restore --no-owner --no-privileges --exit-on-error`
+   for custom, `psql -v ON_ERROR_STOP=1 --single-transaction` for plain).
+3. Every table is counted exactly and compared with the planner estimates of the live database
+   (one read-only query). A table that is empty in the snapshot but not in the live estimates is
+   named.
+4. `bay backup restore` keeps the container for you to read
+   (`docker exec -it <name> psql -U <user> <db>`). It is removed after `restore_keep_hours`
+   (24); the output says so.
+
+Every scratch container carries the label `bay.restore_test.expires`: `restore_keep_hours` for
+a kept one, `restore_test_max_hours` (6) for a test, which removes its container at once when it
+ends. The 6-hourly freshness run (`bay-backup-freshness`) removes an expired one with its own
+volume (`docker rm -f -v`, only names that start with `bay-restore-test-`), so neither an
+interrupted test nor a reboot leaves one behind. A kept container also gets a transient systemd
+timer (`<name>-rm`) for the exact time; a reboot loses that timer, the label stays.
+
+The scratch container takes the accessory's image, its compiled memory cap (`mem_limit`), its
+`shm_size` and its `command` (so `shared_preload_libraries` and other `-c` settings load).
+For a plain dump, the roles of the live server (one read-only query) are made `NOLOGIN` in the
+scratch container first: a plain dump says `ALTER ... OWNER TO <role>`, and without the role
+psql stops there. A custom dump restores with `--no-owner --no-privileges`.
+
+The box must have the live `pg_database_size` plus a quarter (at least 1 GiB more) free on the
+Docker data root, else the restore stops before it starts anything. When the live database does
+not answer, the restore size of the snapshot from `restic stats`, twice, counts instead. No
+pre-restore backup runs, because nothing live changes.
+
+`--into live` restores into the running database. It always needs `--yes-stop-clients`, also
+when no container would be stopped:
+
+- The clients of the restored database that run on the restore host are stopped first and
+  started again after, also when the restore fails. For a project database these are the other
+  containers of the project; for a shared resource, the services bound to that database by a
+  `database:` block (a service bound to another database of the same server keeps running).
+  The command names them; the prompt names them again.
+- After that, the client sessions still open on the database are listed (`pg_stat_activity`
+  with `backend_type = 'client backend'`, without our own; autovacuum and extension workers do
+  not count). Any left (a client on another box, a cron, a psql) stop the restore with their
+  pid, application, client address and user; the clients start again and the lock goes away.
+  `--terminate-connections` ends them with `pg_terminate_backend` instead.
+- Only then the pre-restore backup runs (tag `pre-restore`): it holds every write up to the
+  restore, and a refused attempt pays for no backup run.
+- The restore runs with `PGOPTIONS=-c lock_timeout=30s` (`restore_lock_timeout`): a lock held by
+  a session that slipped in fails the restore instead of a silent wait.
+- While the clients are stopped, the restore holds `<backup_lock_dir>/restore-<target>.lock`.
+  The nightly `docker system prune -af` skips its run (it removes stopped containers), a deploy
+  stops before it changes a container, and a webhook rebuild refuses the recreate (exit row 28
+  of the observability contract). A lock older than 12 hours is from a restore that died and is
+  ignored. The lock goes away after the clients start, also on failure.
+- The lock covers only a live pg_dump restore. A file, volume or Redis restore holds no lock.
+  `bay provision` and `bay deploy --rig` do not check it either: the nftables handler restarts
+  Docker, and that starts exited containers. Run none of these during a live restore.
+- custom: `pg_restore --clean --if-exists --single-transaction --exit-on-error`. Each object
+  of the dump is dropped before it is created, in one transaction; on an error nothing changes.
+  It does not undo the rest: an object made after the snapshot (a table, a column of a later
+  migration) stays, while a migrations table goes back to the snapshot, so the next migration
+  can fail on an object that is already there. Check the schema after a live restore, or prove
+  the snapshot in a scratch container first. The command says this before its prompt.
+- plain: `psql` with `ON_ERROR_STOP` and `--single-transaction`. A plain `pg_dump` has no `DROP`
+  statements, so restore into a database that does not hold the dumped objects. Over one that
+  still has them, the restore stops at `already exists` and changes nothing.
+- The result is checked (the database has tables).
+
+Every snapshot holds one file and one database. `latest` takes the newest snapshot;
+`--database <name>` takes only the snapshots of that database, and a `--snapshot` that holds
+another database is refused. When the repo holds several databases and you name none, the
+restore stops and names them: the newest snapshot may hold another database. One database
+stored as `.sql` before a switch to the custom format and as `.dump` after is one database: the
+newest snapshot wins.
+
+Every restic call of a restore runs as root with `--no-cache`, so it never writes into the
+cache of the backup unit.
+
+Before 2.23.2 the dump never reached `psql` (`docker exec` without `-i`): the restore failed
+with exit 141 or reported success, and restored nothing either way. Before 2.23.2
+`bay backup restore` also started the playbook without the fleet's group_vars, so it stopped at
+its first task.
+
+### Restore test (Postgres)
+
+`bay backup restore-test <env> <target>` runs the scratch restore with no prompt and removes
+the container after, also on failure. It prints the tables with their exact row counts and the
+live estimates, writes the report to `<backup dir>/status/<target>.restore-test.json` on the
+box, and exits 0 when the restore worked and holds tables, else 1. `--json` prints one
+document. Only counts leave the box. A failed test, and a failed `restore --into scratch`, sends
+`backup.restore_test_failed` (warn): the live database was not touched, so it is not
+`restore.failed`.
+
+One test reads the whole snapshot from S3 once (S3 egress) and costs some minutes of box disk
+and CPU. It is a manual command, never a timer, so it cannot repeat on its own.
 
 The pre-restore backup can only be skipped with the playbook variable
 `-e skip_pre_backup=true`; `bay backup restore` always takes it.
 
 ## Monitoring
 
-- **Telegram alerts** — backup failures, snapshot size warnings, and integrity check failures are sent via Telegram (uses the same `docker_monitor_telegram_bot_token` and `docker_monitor_telegram_chat_id` from the monitoring role)
+- **Alerts** — backup failures, snapshot size warnings, and integrity check failures go to the alert recipients (see [alerting.md](alerting.md))
+- **Freshness check** (since 2.24.0) — the timer `bay-backup-freshness.timer` runs every 6 hours on each box with backups. It reads `targets.json` (the targets the role installed), the status file each good run writes (`<backup dir>/status/<target>.json`) and the timer states. It sends `backup.missing` when a target has no script or no enabled, active timer, and `backup.stale` when a target had no good run for `max_age_hours` (default: 1.25 times the longest gap of the schedule, at least `backup_max_age_hours`, 30). One alert when the problem starts, then at most one per `backup_freshness_repeat_hours` (24) while it stays. It reads only local files, systemd and one `docker ps`: no restic and no S3, and it never starts a backup. The same run removes expired scratch containers (see PostgreSQL: scratch or live). With no status file yet, the clock starts at the later of the timer install and the manifest, so a new target, or a box just upgraded to 2.24.0, is not stale before it could run. A change of the target list rewrites the manifest and so restarts that clock.
+- **`bay backup status`** — which targets each box should have, from the fleet config with the backup role's own rules, and what the box has: script, timer, last good run, next run. A target that was never installed shows as `missing`. Exit codes: `0` all fine, `1` a configured target is missing, `2` a target is stale, `3` a box did not answer (the lowest non-zero code wins). `--json` prints one document. `--deep` also lists the snapshots of every target (one S3 list each). A box whose role predates 2.24.0 writes no status file, so its targets show `no_record` until the next `bay up` (with `--deep`, the newest snapshot counts as the last good run). Before 2.24.0 the command parsed the coloured Ansible output: host lines became rows and every snapshot count read 0.
+- **`bay backup list <target>`** — exits 1 when the target is in the config but no box has it installed.
+- **`bay backup run [<target>]`** — starts `bay-backup@<target>.service` (every target of the env when you name none), the same unit as the timer: the app user, the alert credentials, the same status file. It waits for the run and prints its log. Before 2.24.0 it ran the script as root, and a root-owned restic cache made every later timer run go without a cache.
 - **Journald** — all backup output goes to `journalctl -u bay-backup@<name>`
 - **Systemd timers** — check schedules with `systemctl list-timers 'bay-backup@*'`
 
@@ -419,6 +567,14 @@ This provides independent locking, independent retention, and failure isolation 
 | `backup_retain` | `30` | Default retention (30 days) |
 | `backup_scripts_dir` | `/opt/<stack>/backup` | Backup scripts location |
 | `backup_lock_dir` | `/opt/<stack>/backup/locks` | Lock files location |
+| `backup_status_dir` | `/opt/<stack>/backup/status` | Status file of the last good run per target, alert state, restore test reports |
+| `backup_max_age_hours` | `30` | The least hours without a good run before `backup.stale`; the default limit of a target is 1.25 times its longest schedule gap when that is more (per target: `max_age_hours`) |
+| `restore_keep_hours` | `24` | Hours before a kept scratch container (`bay backup restore --into scratch`) expires |
+| `restore_test_max_hours` | `6` | Hours before the scratch container of an interrupted restore test expires |
+| `restore_lock_timeout` | `30s` | Postgres `lock_timeout` of a live restore |
+| `backup_freshness_enabled` | `true` | Install the 6-hourly freshness check |
+| `backup_freshness_schedule` | `*-*-* 00/6:17:00` | systemd `OnCalendar` of the freshness check |
+| `backup_freshness_repeat_hours` | `24` | Hours between two alerts for the same problem |
 | `backup_headscale_state` | `true` | Back up Headscale state on the control region (set `false` to disable) |
 | `backup_headscale_container` | `headscale` | Container name backed up (also the restic repo/target name) |
 | `backup_headscale_data_dir` | `/opt/headscale/data` | Host folder of the Headscale data (the DB snapshot and the noise/DERP keys come from here) |

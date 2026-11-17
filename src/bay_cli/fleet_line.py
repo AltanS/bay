@@ -70,6 +70,7 @@ MUTATING_VERBS: frozenset[str] = frozenset(
         "alerts test",
         "backup run",
         "backup restore",
+        "backup restore-test",
         "build reset",
         "gateway add-user",
         "gateway apikey",

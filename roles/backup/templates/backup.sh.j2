@@ -100,6 +100,7 @@ backup_from() {
     --tag "${ACCESSORY}" \
     --tag "${METHOD}" \
     ${RESTIC_TAG_EXTRA:+--tag "$RESTIC_TAG_EXTRA"} \
+    ${SNAP_DB:+--tag "db:${SNAP_DB}"} \
     --retry-lock 15m \
     --stdin-from-command -- "$@" > "$RESTIC_OUT" 2> "$RESTIC_ERR" || rc=$?
   cat "$RESTIC_OUT"
@@ -138,11 +139,26 @@ backup_from() {
 {% for db in databases %}
 PG_USER={{ pg_user | quote }}
 PG_DB={{ db | quote }}
+# Each snapshot records its database (tag db:<name>), so a restore goes into
+# the database the dump came from, never into POSTGRES_DB by default.
+SNAP_DB="${PG_DB}"
 echo "[$(date -Iseconds)] Starting pg_dump backup for ${ACCESSORY} (database: ${PG_DB})..."
+{% if (pg_format | default('plain')) == 'custom' %}
+# Custom format (pg_dump -Fc): pg_restore can restore it with --no-owner,
+# --clean or a table list. -Z 0 leaves compression to restic, so unchanged
+# tables give the same chunks every day and dedup.
+# The file is always <target>-<database>.dump (new in 2.24.0, so no old name
+# to keep).
+backup_from "${ACCESSORY}-${PG_DB}.dump" \
+  docker exec "${ACCESSORY}" \
+  pg_dump -Fc -Z 0 -U "${PG_USER}" "${PG_DB}"
+{% else %}
 backup_from "${ACCESSORY}{% if databases | length > 1 %}-${PG_DB}{% endif %}.sql" \
   docker exec "${ACCESSORY}" \
   pg_dump -U "${PG_USER}" "${PG_DB}"
+{% endif %}
 {% endfor %}
+SNAP_DB=""
 {% elif method == 'mysql' %}
 MYSQL_PWD_VALUE={{ accessory_config.env['clear'].MYSQL_ROOT_PASSWORD | default(accessory_config.env['clear'].MYSQL_PASSWORD | default('')) | quote }}
 MYSQL_USER_VALUE={{ accessory_config.env['clear'].MYSQL_USER | default('root') | quote }}
@@ -262,6 +278,21 @@ Warning: <code>$(bay_html_escape "${ERROR_MSG}")</code>"
 done
 
 echo "[$(date -Iseconds)] Backup complete for ${ACCESSORY} ($TOTAL_SIZE bytes)"
+
+# ── Status file ─────────────────────────────────────────────────────────
+#
+# Written only here, after every snapshot of this run passed the checks. The
+# freshness check (bay-backup-freshness) and `bay backup status` read it. A
+# failed run never reaches this line, so the file keeps the last good run.
+STATUS_DIR={{ backup_status_dir | default(backup_scripts_dir ~ '/status') | quote }}
+if mkdir -p "$STATUS_DIR" 2>/dev/null; then
+  STATUS_TMP=$(mktemp "${STATUS_DIR}/.${ACCESSORY}.XXXXXX") && {
+    printf '{"at": %s, "bytes": %s, "snapshots": %s}\n' \
+      "$(date +%s)" "$TOTAL_SIZE" \
+      "$(printf '%s\n' "${SNAP_IDS[@]}" | jq -R . | jq -sc .)" > "$STATUS_TMP" \
+      && mv -f "$STATUS_TMP" "${STATUS_DIR}/${ACCESSORY}.json"
+  } || echo "WARNING: could not write the status file of ${ACCESSORY}" >&2
+fi
 
 # ── Retention ─────────────────────────────────────────────────────────
 

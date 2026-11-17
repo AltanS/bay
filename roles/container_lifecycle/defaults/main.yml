@@ -4,7 +4,7 @@
 # See roles/alert_channel/defaults/main.yml. Duplicated because this role
 # does not depend on alert_channel; the copies are asserted equal in CI.
 bay_host_label: ""
-bay_alert_host: "{% set _n = (bay_host_label | default('', true)) or (ansible_hostname | default('', true)) or inventory_hostname %}{{ _n }}{% if _n != inventory_hostname %} ({{ inventory_hostname }}){% endif %}"
+bay_alert_host: "{% set _n = (bay_host_label | default('', true)) or ((ansible_facts | default({})).hostname | default('', true)) or inventory_hostname %}{{ _n }}{% if _n != inventory_hostname %} ({{ inventory_hostname }}){% endif %}"
 
 # The three values below reach the reconciler through the bundle that
 # tasks/reconcile.yml writes, so a consumer can override them in group_vars.

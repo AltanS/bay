@@ -8,6 +8,7 @@ no container, so the next prune removed its data. `docker_prune_volumes`
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import jinja2
@@ -26,20 +27,23 @@ def _job(**variables) -> str:
     task = next(t for t in tasks if t.get("name") == "Schedule Docker system prune")
     env = jinja2.Environment()
     env.filters["bool"] = lambda v: str(v).lower() in ("true", "1", "yes")
-    ctx = {"docker_prune_volumes": _defaults()["docker_prune_volumes"], **variables}
+    env.filters["quote"] = shlex.quote
+    ctx = {"docker_prune_volumes": _defaults()["docker_prune_volumes"],
+           "stack_dir": "/opt/bay", **variables}
     return " ".join(env.from_string(task["ansible.builtin.cron"]["job"]).render(ctx).split())
 
 
 def test_volumes_are_not_pruned_by_default() -> None:
     assert _defaults()["docker_prune_volumes"] is False
-    assert _job() == "docker system prune -af >> /var/log/docker-prune.log 2>&1"
+    # The prune runs only when no live restore holds clients stopped
+    # (tests/test_restore_lock.py).
+    assert "else docker system prune -af >> /var/log/docker-prune.log 2>&1; fi" in _job()
     assert "--volumes" not in _job()
 
 
 def test_volumes_are_pruned_when_the_operator_asks() -> None:
-    assert _job(docker_prune_volumes=True) == (
-        "docker system prune -af --volumes >> /var/log/docker-prune.log 2>&1"
-    )
+    assert "else docker system prune -af --volumes >> /var/log/docker-prune.log 2>&1; fi" in (
+        _job(docker_prune_volumes=True))
 
 
 def test_the_job_still_logs_and_runs_as_root() -> None:

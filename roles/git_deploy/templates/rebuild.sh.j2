@@ -63,6 +63,9 @@ RECEIPT_ENV={{ (target_host | default(group_names | default([]) | reject('equalt
 # there), so `bay up` never promotes a failed image. Created by the deploy
 # (container_lifecycle reconcile.yml), group docker, group-writable.
 FAILED_COMMITS_DIR="/var/lib/bay/failed-commits"
+# A live restore (bay backup restore --into live) writes restore-<target>.lock
+# here while it holds the clients of its database stopped.
+RESTORE_LOCK_DIR={{ backup_lock_dir | default(stack_dir ~ '/backup/locks') }}
 
 BAY_ALERT_HEADER={{ docker_monitor_alert_header | to_json }}
 
@@ -942,7 +945,7 @@ _tailnet_guard_live() {
 }
 
 _preflight_recreate() {
-  local table cores
+  local table cores lock
   if [[ -n "${NEEDS_TAILNET_GUARD}" ]]; then
     table=$(sudo -n {{ nftables_nft_path | default('/usr/sbin/nft') }} list table inet bay_prerouting 2>/dev/null || true)
     if ! _tailnet_guard_live "${table}" "${TAILNET_GUARD_IP}"; then
@@ -960,6 +963,16 @@ _preflight_recreate() {
       trap - ERR
       exit 1
     fi
+  fi
+  # A live restore holds the clients of its database stopped; a recreate here
+  # would start one in the middle. A lock older than 12 hours is from a
+  # restore that died.
+  lock=$(find "${RESTORE_LOCK_DIR}" -maxdepth 1 -name 'restore-*.lock' -mmin -720 -print -quit 2>/dev/null || true)
+  if [[ -n "${lock}" ]]; then
+    _log "Live restore running on this box (${lock##*/}): ${SERVICE} not recreated; old container kept"
+    _record_failure "${SHA}" "Restore running" "A live database restore runs on this box (${lock}) and holds its clients stopped. Wait for it to end, then push again or run bay up. Remove the file only when no restore runs."
+    trap - ERR
+    exit 1
   fi
 }
 
@@ -1726,6 +1739,9 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
 {% if svc.cpus is defined %}
       --cpus "{{ svc.cpus }}" \
 {% endif %}
+{% if svc.shm_size is defined %}
+      --shm-size "{{ svc.shm_size }}" \
+{% endif %}
 {% for resolver in svc.dns | default([]) %}
       --dns "{{ resolver }}" \
 {% endfor %}
@@ -2370,6 +2386,9 @@ docker rm "${SERVICE}"   2>/dev/null || true
 {% endif %}
 {% if svc.cpus is defined %}
       --cpus "{{ svc.cpus }}" \
+{% endif %}
+{% if svc.shm_size is defined %}
+      --shm-size "{{ svc.shm_size }}" \
 {% endif %}
 {% for resolver in svc.dns | default([]) %}
       --dns "{{ resolver }}" \

@@ -17,6 +17,6 @@
 
   Written with no trailing newline on purpose. It is interpolated inline.
 #}
-{%- set _bay_host_name = (bay_host_label | default("", true)) or (ansible_hostname | default("", true)) or (inventory_hostname | default("unknown")) -%}
+{%- set _bay_host_name = (bay_host_label | default("", true)) or ((ansible_facts | default({})).hostname | default("", true)) or (inventory_hostname | default("unknown")) -%}
 {%- set _bay_host_addr = inventory_hostname | default("unknown") -%}
 {{- _bay_host_name -}}{%- if _bay_host_name != _bay_host_addr %} ({{ _bay_host_addr }}){% endif -%}

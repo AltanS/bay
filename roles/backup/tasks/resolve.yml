@@ -42,6 +42,17 @@
       image: "{{ _image }}"
       repo: "s3:{{ backup_s3_endpoint }}/{{ backup_s3_bucket }}/{{ backup_s3_prefix }}/{{ inventory_hostname }}/{{ item.key }}"
       config: "{{ item.value }}"
+      # A schedule from bay.toml (a service backup with an hour) is UTC; a
+      # fleet resource schedule and backup_schedule are box time.
+      utc: "{{ (_backup_raw.utc | default(false) | bool) if _backup_is_dict else false }}"
+      # pg_dump: custom (pg_dump -Fc, `.dump`) or plain (SQL, `.sql`).
+      format: "{{ _backup_raw['format'] if (_backup_is_dict and 'format' in _backup_raw) else 'plain' }}"
+      # Unset: 1.25 times the longest gap of the schedule, at least
+      # backup_max_age_hours (filter_plugins/bay_filters.py).
+      max_age_hours: >-
+        {{ (_backup_raw.max_age_hours
+            if (_backup_is_dict and _backup_raw.max_age_hours is defined)
+            else (_schedule | bay_backup_max_age(backup_max_age_hours | default(30)))) | int }}
   when: backup_enabled
 
 # Volume mounts with backup true (bay.toml mounts, compiled to the top-level
@@ -69,6 +80,10 @@
       volume: "{{ _volume_name }}"
       # A schedule from bay.toml or bay.fleet.toml is UTC; backup_schedule is box time.
       utc: "{{ item.value.schedule is defined }}"
+      format: ""
+      max_age_hours: >-
+        {{ (item.value.schedule | default(backup_schedule))
+           | bay_backup_max_age(backup_max_age_hours | default(30)) | int }}
       config:
         backup:
           source_path: "{{ item.value.path }}"
@@ -95,6 +110,9 @@
       retain: "{{ backup_headscale_retain }}"
       image: ""
       repo: "s3:{{ backup_s3_endpoint }}/{{ backup_s3_bucket }}/{{ backup_s3_prefix }}/{{ inventory_hostname }}/{{ backup_headscale_container }}"
+      format: ""
+      max_age_hours: >-
+        {{ backup_headscale_schedule | bay_backup_max_age(backup_max_age_hours | default(30)) | int }}
       config:
         backup:
           # backup.sh.j2 reads this flag inside the `file` branch and runs

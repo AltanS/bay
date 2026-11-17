@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# {{ ansible_managed }}
+# bay-backup-freshness: does every backup target of this host still run?
+#
+# Reads only local state: the manifest the backup role writes
+# (<scripts dir>/targets.json), the status file each successful run writes
+# (<status dir>/<target>.json) and the systemd state of
+# bay-backup@<target>.timer. No restic and no S3: one run costs a few file
+# reads, systemctl calls and one docker ps. It never starts a backup, so it
+# can never repeat a paid action.
+#
+# It also removes expired scratch containers of bay backup restore and
+# restore-test: each carries the label bay.restore_test.expires (epoch). An
+# interrupted restore test, or a kept container whose transient timer was lost
+# in a reboot, would else stay (and a later docker prune would leak its volume).
+# Only a name that starts with bay-restore-test- and a numeric expiry in the
+# past is removed, with its own volume (docker rm -f -v).
+#
+# Per target:
+#   backup.missing  the script is gone, or the timer is not enabled and active
+#   backup.stale    no successful run for max_age_hours. With no status file
+#                   the clock starts at the later of the timer unit and the
+#                   manifest, so a new target, or a box just upgraded to
+#                   2.24.0, is not stale before it had a chance to run.
+# Alert rhythm: one alert when a problem starts, then at most one reminder per
+# repeat interval (backup_freshness_repeat_hours) while it stays. The state file
+# <status dir>/.alerted-<target> holds `<reason> <epoch>`, parsed with a
+# strict regex and never sourced. It is removed when the target is fine again.
+
+set -uo pipefail
+
+SCRIPTS_DIR={{ backup_scripts_dir | quote }}
+STATUS_DIR={{ backup_status_dir | quote }}
+MANIFEST="${SCRIPTS_DIR}/targets.json"
+REPEAT_SECS=$(( {{ backup_freshness_repeat_hours | int }} * 3600 ))
+UNIT_DIR={{ backup_freshness_unit_dir | default('/etc/systemd/system') | quote }}
+
+{% include '_notify.sh.j2' %}
+
+now=$(date +%s)
+while IFS=$'\t' read -r scratch expires; do
+  case "${scratch}" in bay-restore-test-*) ;; *) continue ;; esac
+  [[ "${expires}" =~ ^[0-9]{9,11}$ ]] || continue
+  if (( expires < now )); then
+    docker rm -f -v "${scratch}" >/dev/null 2>&1 \
+      && echo "bay-backup-freshness: removed the expired scratch container ${scratch}"
+  fi
+done < <(docker ps -a --filter label=bay.restore_test=1 \
+  --format '{{ '{{' }}.Names{{ '}}' }}\t{{ '{{' }}.Label "bay.restore_test.expires"{{ '}}' }}' 2>/dev/null)
+
+if [[ ! -r "${MANIFEST}" ]]; then
+  # The backup role has not run on this host since 2.24.0. Nothing to check.
+  exit 0
+fi
+
+problems=0
+manifest_mtime=$(stat -c %Y "${MANIFEST}" 2>/dev/null || echo 0)
+
+# alert_due <target> <reason>
+# Returns 0 when an alert is due (new reason, or the repeat time passed).
+alert_due() {
+  local target="$1" reason="$2" state="${STATUS_DIR}/.alerted-$1" line last=""
+  if [[ -f "${state}" ]]; then
+    line=$(head -n 1 "${state}" 2>/dev/null || true)
+    if [[ "${line}" =~ ^(missing|stale)\ ([0-9]{1,12})$ ]] && [[ "${BASH_REMATCH[1]}" == "${reason}" ]]; then
+      last="${BASH_REMATCH[2]}"
+    fi
+  fi
+  if [[ -n "${last}" && $(( now - last )) -lt ${REPEAT_SECS} ]]; then
+    return 1
+  fi
+  return 0
+}
+
+mark_alerted() {
+  mkdir -p "${STATUS_DIR}"
+  printf '%s %s\n' "$2" "${now}" > "${STATUS_DIR}/.alerted-$1"
+}
+
+while IFS=$'\t' read -r target max_age; do
+  [[ -n "${target}" ]] || continue
+  # A name from the manifest becomes a file name and a unit name: only the
+  # characters a Bay target name can have.
+  if [[ ! "${target}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+    continue
+  fi
+  [[ "${max_age}" =~ ^[0-9]{1,4}$ ]] || max_age={{ backup_max_age_hours | int }}
+  unit="bay-backup@${target}.timer"
+
+  why=""
+  if [[ ! -f "${SCRIPTS_DIR}/backup-${target}.sh" ]]; then
+    why="no script"
+  fi
+  enabled=$(systemctl is-enabled "${unit}" 2>/dev/null || true)
+  active=$(systemctl is-active "${unit}" 2>/dev/null || true)
+  if [[ "${enabled}" != "enabled" ]]; then
+    why="${why:+${why}, }timer not enabled"
+  elif [[ "${active}" != "active" ]]; then
+    why="${why:+${why}, }timer not active"
+  fi
+
+  if [[ -n "${why}" ]]; then
+    problems=$(( problems + 1 ))
+    if alert_due "${target}" missing; then
+      bay_notify backup.missing "<b>Backup not installed</b>
+Target: <code>$(bay_html_escape "${target}")</code>
+Host: <code>${BAY_HOST}</code>
+Problem: <code>$(bay_html_escape "${why}")</code>
+Nothing backs this target up. Fix: <code>bay up</code> or <code>bay deploy &lt;env&gt; --tags backup</code>."
+      mark_alerted "${target}" missing
+    fi
+    continue
+  fi
+
+  last_ok=""
+  status_file="${STATUS_DIR}/${target}.json"
+  if [[ -r "${status_file}" ]]; then
+    last_ok=$(jq -r '.at // empty' "${status_file}" 2>/dev/null || true)
+    [[ "${last_ok}" =~ ^[0-9]{1,12}$ ]] || last_ok=""
+  fi
+  # No status file yet: the clock starts at the later of the timer install
+  # and the manifest. A box upgraded to 2.24.0 has old timers and no status
+  # file, and must not alert stale on the first check.
+  installed=$(stat -c %Y "${UNIT_DIR}/${unit}" 2>/dev/null || echo "${now}")
+  if [[ "${manifest_mtime}" -gt "${installed}" ]]; then installed="${manifest_mtime}"; fi
+  since="${last_ok:-${installed}}"
+  age=$(( now - since ))
+  if [[ ${age} -ge $(( max_age * 3600 )) ]]; then
+    problems=$(( problems + 1 ))
+    if alert_due "${target}" stale; then
+      if [[ -n "${last_ok}" ]]; then
+        last_text="$(date -u -d "@${last_ok}" '+%Y-%m-%d %H:%M UTC') ($(( age / 3600 )) hours ago)"
+      else
+        last_text="never (timer installed $(( age / 3600 )) hours ago)"
+      fi
+      bay_notify backup.stale "<b>Backup stale</b>
+Target: <code>$(bay_html_escape "${target}")</code>
+Host: <code>${BAY_HOST}</code>
+Last good backup: <code>${last_text}</code>
+Limit: ${max_age} hours. See <code>journalctl -u bay-backup@$(bay_html_escape "${target}")</code>."
+      mark_alerted "${target}" stale
+    fi
+    continue
+  fi
+
+  rm -f "${STATUS_DIR}/.alerted-${target}"
+done < <(jq -r '.[] | [.name, (.max_age_hours // empty | tostring)] | @tsv' "${MANIFEST}" 2>/dev/null)
+
+echo "bay-backup-freshness: $(jq length "${MANIFEST}" 2>/dev/null || echo 0) target(s), ${problems} problem(s)"
+exit 0

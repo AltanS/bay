@@ -108,7 +108,8 @@ def _run_preflight(script: str, env: dict[str, str], tmp_path: Path) -> subproce
     )
     base = {"PATH": "/usr/bin:/bin", "SERVICE": "app", "SHA": "abc123def456",
             "NEEDS_TAILNET_GUARD": "", "TAILNET_GUARD_IP": "", "CPUS": "",
-            "FAKE_TABLE": "", "FAKE_NPROC": "8", "SUDO_LOG": str(tmp_path / "sudo.log")}
+            "FAKE_TABLE": "", "FAKE_NPROC": "8", "SUDO_LOG": str(tmp_path / "sudo.log"),
+            "RESTORE_LOCK_DIR": str(tmp_path / "locks")}
     base.update(env)
     (tmp_path / "sudo.log").write_text("")
     proc = subprocess.run(["bash", "-c", harness], env=base, capture_output=True,
@@ -175,6 +176,32 @@ def test_cpus_above_the_cpu_count_is_refused(script: str, cpus: str, nproc: str,
     if not passes:
         assert "[rebuild] CPU limit too high for app" in proc.stdout
         assert "RECORD|abc123def456|CPU limit|" in proc.stdout
+
+
+@pytest.mark.parametrize(("age_hours", "refused"), [(0, True), (11, True), (13, False)])
+def test_a_live_restore_lock_refuses_the_recreate(script: str, age_hours: int, refused: bool,
+                                                  tmp_path: Path) -> None:
+    """Review fix (2.24.0): `bay backup restore --into live` holds the clients of
+    the database stopped. A push must not recreate (and so start) one of them
+    in the middle. A lock older than 12 hours is from a restore that died."""
+    import os
+    import time
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    lock = locks / "restore-shop-postgres.lock"
+    lock.write_text("restore of shop-postgres\n")
+    old = time.time() - age_hours * 3600
+    os.utime(lock, (old, old))
+    proc = _run_preflight(script, {}, tmp_path)
+    assert (proc.returncode == 1) is refused, proc.stdout + proc.stderr
+    if refused:
+        assert "[rebuild] Live restore running on this box (restore-shop-postgres.lock)" in proc.stdout
+        assert "RECORD|abc123def456|Restore running|" in proc.stdout
+
+
+def test_the_script_names_the_restore_lock_dir(script: str) -> None:
+    assert re.search(r"^RESTORE_LOCK_DIR=.*/backup/locks$", script, re.MULTILINE), \
+        "rebuild.sh sets no RESTORE_LOCK_DIR"
 
 
 def test_the_per_service_block_sets_the_check_inputs(script: str) -> None:

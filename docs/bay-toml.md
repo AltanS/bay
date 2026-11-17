@@ -423,6 +423,7 @@ These keys sit at the top level. Every key in this table may also be set in a
 | `health` | string | `"/"` when there is a port, else `"none"` | Health check path, or `"none"`. Bay probes it on the container, not through the route. A failed check removes the new container and starts the previous one again. A path other than `/` on an internal container (no `domain`, no `path`) is (validated, not deployed yet). |
 | `replicas` | integer >= 1 | `1` | Number of containers. More than 1 on an internal container is (validated, not deployed yet). |
 | `memory` | size | none | Memory limit. Bay sets `mem_limit` and `memswap_limit` to this one value, so the container gets no swap (a `docker run --memory-swap` equal to `--memory`). A container that ran with `mem_limit` alone is recreated once by the first deploy of the compiled file, and the box prediction names it as `memory: memswap_limit <now> -> <memory>` (see [plan.md](plan.md#the-box-prediction---remote)). |
+| `shm_size` | size | none | Size of the container's `/dev/shm` (a Docker `--shm-size`), for example `"256m"` or `"1g"`. It has the same syntax as `memory` (a whole number with the unit `k`, `m` or `g`). Docker gives a container 64 MiB without it. Raise it for a database that works in shared memory: a Postgres container with the 64 MiB default fails with SQLSTATE 53100 (`could not resize shared memory segment`) on a large parallel query. The value counts toward the memory of the container, so keep it below `memory`. Bay compiles it to `shm_size: 256m`. Without it, the compiled file has no `shm_size` key and nothing changes for a running container. A change recreates the container, the plan shows `changed: shm_size`, and the box prediction names it as `shm_size: <now> -> <shm_size>`. It is also valid in `[deploy.<env>]`, in `[services.<name>]` and in a shared resource of `bay.fleet.toml`. |
 | `cpus` | number or string | none | CPU limit in cores, for example `2`, `0.5` or `"1.5"`. It must be at least 0.01 (the Docker minimum) and at most 64. The deploy and a webhook rebuild refuse a value above the CPU count of the box, before the old container is removed. A string holds a plain decimal: no unit, no exponent. Bay compiles it to a number (`cpus: 2`, `cpus: 1.5`) and the container gets that many cores at most (a Docker `--cpus`). Without it, the compiled file has no `cpus` key and the container has no CPU limit. A change recreates the container, and the box prediction names it as `cpus: <now> -> <cpus>`. |
 | `dns` | list of 1 to 3 IP addresses | none | Resolvers for this one container (Docker `--dns`). Each entry is an IPv4 or IPv6 address, never a domain name, and no entry repeats. The order is kept. The limit is 3 because Docker and glibc use at most 3 nameservers. Use it for a container that must not see the box's tailnet split DNS. Without `dns` the container gets the box resolver as before. Adding, changing or removing `dns` recreates that container once, and the box prediction names it as `dns: <now> -> <wanted>`. |
 | `update` | `notify`, `auto`, `off` | `notify` | What happens when a newer image appears. |
@@ -615,8 +616,9 @@ The schedule of the volume backups of this project (the volume mounts with `back
 | `hour` | integer 0-23 | fleet setting | Hour of the daily backup, UTC. |
 
 The fleet setting is `[defaults.backup]` in `bay.fleet.toml`, per key. Without either, the
-fleet variables `backup_schedule` and `backup_retain` apply (the schedule in box time). Databases
-follow the fleet backup policy.
+fleet variables `backup_schedule` and `backup_retain` apply (the schedule in box time). A
+shared database resource follows the fleet backup policy; a project database with
+`[services.<name>.backup]` follows this table (see below).
 
 ### `[[jobs]]`
 
@@ -647,7 +649,7 @@ service may use that name. Container names are in rule 8.
   the same image. An internal service that does this is (validated, not deployed yet).
 - The service inherits `update` and `logs` from the project. `replicas` defaults to `1`
   and `zero_downtime` to `false`.
-- The service may set its own: `command`, `port`, `health`, `memory`, `cpus`, `dns`, `egress`,
+- The service may set its own: `command`, `port`, `health`, `memory`, `shm_size`, `cpus`, `dns`, `egress`,
   `egress_clients`, `egress_fleet`, `replicas`, `zero_downtime`, `update`, `logs`,
   `log_rotation`, `access`, `mounts`, `env`, `secrets`, `fleet_secrets`, `needs`, `image` or
   `build`.
@@ -687,6 +689,34 @@ service may use that name. Container names are in rule 8.
 
   To also keep it off the tailnet, the private ranges and the other containers, add
   `egress = "public"` (next section).
+
+#### `backup`: a database backup of an internal service
+
+`[services.<name>.backup]` (since 2.24.0) backs up the database of an internal service (no
+`path`, no `domain`) with `pg_dump`. A routed service or an egress service is refused.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `method` | `"pg_dump"` | required | The only method of this table. |
+| `databases` | list of names | `POSTGRES_DB` of the service | The databases to dump, each in its own backup. A restore goes into the database a backup holds, never into `POSTGRES_DB` by default. |
+| `hour` | integer 0-23 | project `[backup]`, then `[defaults.backup]` | Hour of the daily backup, UTC. |
+| `keep` | duration | the same chain | How long backups are kept, in whole days. |
+| `format` | `"custom"` or `"plain"` | `"custom"` | `custom` is `pg_dump -Fc` (`.dump`, restore with `pg_restore`), `plain` is SQL text (`.sql`). |
+| `max_age_hours` | integer 1-744 | 30 for a daily backup (1.25 times the schedule gap, at least `backup_max_age_hours`) | The freshness check alerts `backup.stale` after this many hours with no good run. |
+
+  ```toml
+  [services.postgres]
+  image = "postgres:17"
+
+  [services.postgres.backup]
+  method = "pg_dump"
+  hour = 2
+  keep = "30d"
+  ```
+
+A change of only this table recreates no container. A live restore stops the other containers
+of the project first, and asks for `--yes-stop-clients`. See
+[backups.md](backups.md#project-databases-pg_dump).
 
 #### `egress`: a service that reaches the public internet only
 
@@ -963,7 +993,7 @@ to its app repo never changes its config.
 Overrides. A `[deploy.<env>]` table may also set:
 
 - any image and runtime key: `image`, `port`, `command`, `release`, `health`,
-  `replicas`, `memory`, `cpus`, `dns`, `update`, `zero_downtime`, `logs`, `secrets`;
+  `replicas`, `memory`, `shm_size`, `cpus`, `dns`, `update`, `zero_downtime`, `logs`, `secrets`;
 - any `access` key, for example `access.mode = "tailnet"`;
 - `build.args`, and nothing else under `build`;
 - `env`, for example `[deploy.staging.env]`;

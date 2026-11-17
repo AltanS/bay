@@ -158,6 +158,8 @@ class SdkDockerClient:
             kwargs["memswap_limit"] = spec.memswap_limit
         if spec.nano_cpus:
             kwargs["nano_cpus"] = spec.nano_cpus
+        if spec.shm_size:
+            kwargs["shm_size"] = spec.shm_size
         if spec.dns:
             kwargs["dns"] = list(spec.dns)
         if spec.cap_drop:

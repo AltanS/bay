@@ -164,6 +164,7 @@ def parse_state(
         memory=_int_or_none(host_config.get("Memory")),
         memory_swap=_int_or_none(host_config.get("MemorySwap")),
         nano_cpus=_int_or_none(host_config.get("NanoCpus")),
+        shm_size=_int_or_none(host_config.get("ShmSize")),
         dns=_dns_tuple(host_config),
         networks=_networks(attrs.get("NetworkSettings")),
     )

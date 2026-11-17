@@ -153,6 +153,11 @@ class ContainerSpec:
     #: ``bay_spec_hash`` reads the raw spec, where the key exists only when
     #: ``cpus`` is set.
     nano_cpus: int | None = None
+    #: Size of /dev/shm in bytes (docker ``HostConfig.ShmSize``), from bay.toml
+    #: ``shm_size``. None means docker's default (64 MiB). The hash covers it
+    #: because ``bay_spec_hash`` reads the raw spec, where the key exists only
+    #: when ``shm_size`` is set, so a container without it keeps its hash.
+    shm_size: int | None = None
     #: Resolver addresses for this container only (docker ``--dns``,
     #: HostConfig.Dns), in order. Empty means docker's default. The hash covers
     #: it because ``bay_spec_hash`` reads the raw spec, where the key exists
@@ -249,6 +254,10 @@ class ContainerState:
     # The CPU cap in billionths of a core, from docker's ``HostConfig.NanoCpus``.
     # 0 is "no cap". None means docker did not report the field.
     nano_cpus: int | None = field(default=None, compare=False, hash=False)
+    # The /dev/shm size in bytes, from docker's ``HostConfig.ShmSize``. Docker
+    # reports 67108864 (64 MiB) when none was given. None means docker did not
+    # report the field.
+    shm_size: int | None = field(default=None, compare=False, hash=False)
     # The resolvers the running container was created with, from docker's
     # ``HostConfig.Dns``, in order. () is "none set". None means docker did not
     # report the field.

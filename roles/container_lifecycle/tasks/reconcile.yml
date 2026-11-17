@@ -178,6 +178,7 @@
         'mem_limit': _spec.mem_limit | default(None),
         'memswap_limit': _spec.memswap_limit | default(None),
         'cpus': _spec.cpus | default(None),
+        'shm_size': _spec.shm_size | default(None),
         'dns': _spec.dns | default(None),
         'network_ips': _spec.network_ips | default(None),
         'cap_drop': _spec.cap_drop | default(None),

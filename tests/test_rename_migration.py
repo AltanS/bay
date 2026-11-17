@@ -56,6 +56,8 @@ _POST_RENAME_UNITS = {
     "bay-reboot-alert.timer",
     "bay-cert-alert.service",
     "bay-cert-alert.timer",
+    "bay-backup-freshness.service",  # 2.24.0 backup freshness check
+    "bay-backup-freshness.timer",
 }
 
 
@@ -87,6 +89,7 @@ _POST_RENAME_SCRIPTS = {
     "bay-egress.conf",  # egress containers (bay.toml egress)
     "bay-reboot-alert.sh",  # 2.19.0 pending reboot alert
     "bay-cert-alert.sh",  # certificate expiry alert
+    "bay-backup-freshness.sh",  # 2.24.0 backup freshness check
 }
 
 

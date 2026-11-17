@@ -987,7 +987,7 @@ def test_explicit_label_wins_and_keeps_the_address():
     """The label says WHICH box; the address is how you reach it."""
     assert _label(
         bay_host_label="infra.bay.example.com",
-        ansible_hostname="example-infra",
+        ansible_facts={"hostname": "example-infra"},
         inventory_hostname="203.0.113.42",
     ) == "infra.bay.example.com (203.0.113.42)"
 
@@ -995,9 +995,18 @@ def test_explicit_label_wins_and_keeps_the_address():
 def test_unlabelled_host_falls_back_to_its_own_hostname():
     """Adoption must be safe on a host nobody has labelled yet."""
     assert (
-        _label(ansible_hostname="example-infra", inventory_hostname="203.0.113.42")
+        _label(ansible_facts={"hostname": "example-infra"}, inventory_hostname="203.0.113.42")
         == "example-infra (203.0.113.42)"
     )
+
+
+def test_host_label_reads_the_hostname_from_ansible_facts():
+    """ansible-core 2.20 deprecates the injected `ansible_hostname` variable
+    (INJECT_FACTS_AS_VARS) and printed a warning in every backup script render.
+    The label reads `ansible_facts.hostname`; the old name alone is ignored."""
+    src = _HOST_LABEL.read_text()
+    assert "ansible_hostname" not in src
+    assert _label(ansible_hostname="old", inventory_hostname="10.0.0.1") == "10.0.0.1"
 
 
 def test_last_resort_is_the_inventory_address():
@@ -1010,7 +1019,7 @@ def test_empty_label_is_treated_as_unset():
     assert (
         _label(
             bay_host_label="",
-            ansible_hostname="",
+            ansible_facts={"hostname": ""},
             inventory_hostname="203.0.113.42",
         )
         == "203.0.113.42"
@@ -1019,7 +1028,7 @@ def test_empty_label_is_treated_as_unset():
 
 def test_label_equal_to_address_is_not_printed_twice():
     """A consumer that configures nothing must see no change in its alerts."""
-    assert _label(ansible_hostname="bay-na", inventory_hostname="bay-na") == "bay-na"
+    assert _label(ansible_facts={"hostname": "bay-na"}, inventory_hostname="bay-na") == "bay-na"
 
 
 def test_label_renders_inline_with_no_stray_whitespace():
@@ -1062,12 +1071,12 @@ def test_ansible_var_twin_matches_the_template():
     expr = declared["bay_alert_host"]
     env = make_ansible_env(_HOST_LABEL.parent)
     cases = [
-        {"bay_host_label": "infra.bay.example.com", "ansible_hostname": "x",
+        {"bay_host_label": "infra.bay.example.com", "ansible_facts": {"hostname": "x"},
          "inventory_hostname": "203.0.113.42"},
-        {"bay_host_label": "", "ansible_hostname": "example-infra",
+        {"bay_host_label": "", "ansible_facts": {"hostname": "example-infra"},
          "inventory_hostname": "203.0.113.42"},
-        {"bay_host_label": "", "ansible_hostname": "", "inventory_hostname": "1.2.3.4"},
-        {"bay_host_label": "", "ansible_hostname": "bay-na",
+        {"bay_host_label": "", "ansible_facts": {"hostname": ""}, "inventory_hostname": "1.2.3.4"},
+        {"bay_host_label": "", "ansible_facts": {"hostname": "bay-na"},
          "inventory_hostname": "bay-na"},
     ]
     for ctx in cases:

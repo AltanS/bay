@@ -102,6 +102,7 @@ REASON_CODES = (
     "volumes",
     "memory",
     "cpus",
+    "shm_size",
     "dns",
     "networks",
     "stopped",
@@ -203,6 +204,9 @@ def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
     cpus = _cpus_reason(spec, state)
     if cpus:
         detail.append(cpus)
+    shm = _shm_size_reason(spec, state)
+    if shm:
+        detail.append(shm)
     dns = _dns_reason(spec, state)
     if dns:
         detail.append(dns)
@@ -218,9 +222,9 @@ def _diff_reasons(spec: ContainerSpec, state: ContainerState) -> list[str]:
         text = f"config_hash: changed ({state.config_hash[:12]} -> {spec.config_hash[:12]})"
         if not detail:
             text += (
-                "; image, env, labels, ports, volumes, memory and cpus match, and the cause "
-                "(the env file bytes, command, healthcheck or another hashed setting) "
-                "is not readable from docker inspect"
+                "; image, env, labels, ports, volumes, memory, cpus and shm_size match, "
+                "and the cause (the env file bytes, command, healthcheck or another hashed "
+                "setting) is not readable from docker inspect"
             )
         reasons.append(text)
     reasons.extend(detail)
@@ -328,6 +332,27 @@ def _cpus_reason(spec: ContainerSpec, state: ContainerState) -> str | None:
     if state.nano_cpus == want:
         return None
     return f"cpus: {_fmt_cpus(state.nano_cpus)} -> {_fmt_cpus(want)}"
+
+
+#: What docker gives /dev/shm when no size was asked for.
+_DEFAULT_SHM = 64 * 1024**2
+
+
+def _shm_size_reason(spec: ContainerSpec, state: ContainerState) -> str | None:
+    """Name a difference in the /dev/shm size (``shm_size: 64m -> 256m``).
+
+    The running container reports ``HostConfig.ShmSize`` in bytes: 67108864
+    (64 MiB) when no size was given, 0 on some old containers. A spec with no
+    ``shm_size`` wants docker's default, so both of those are no difference and
+    no existing container is named for this.
+    """
+    if state.shm_size is None:
+        return None
+    want = spec.shm_size or _DEFAULT_SHM
+    now = state.shm_size or _DEFAULT_SHM
+    if now == want:
+        return None
+    return f"shm_size: {_fmt_bytes(now)} -> {_fmt_bytes(want)}"
 
 
 def _dns_reason(spec: ContainerSpec, state: ContainerState) -> str | None:

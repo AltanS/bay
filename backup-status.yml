@@ -1,0 +1,107 @@
+---
+# `bay backup status`: which backup targets each box SHOULD have, and what it has.
+#
+# The expected targets come from the fleet config with the backup role's own
+# resolver (roles/backup/tasks/resolve.yml), so this play and a deploy can
+# never disagree on what a box backs up. Then one read-only shell per box
+# reads, per target: the script, the timer state, the status file of the last
+# good run, and the targets of the manifest (targets.json). No restic call and
+# no S3 call unless backup_status_deep is true (`--deep`: one `restic
+# snapshots` per target, an S3 LIST and a few GETs each).
+#
+# The result is written as one JSON document on the control node, to
+# backup_status_out. Before 2.24.0 `bay backup status` parsed the ad-hoc
+# output of the whole env: the ANSI colour codes and the host lines of
+# Ansible became table rows, every target was asked on every box, and the
+# snapshot count of a box without the repo hid the real one.
+
+- name: Backup status
+  hosts: "{{ target_host }}"
+  become: true
+  gather_facts: false
+  vars_files:
+    - version.yml
+
+  vars:
+    # The resolver keys the Headscale target on headscale_server. In a deploy
+    # it comes from the access_gateway role defaults, which this play does not
+    # load; the same expression (tests/test_backup_status.py keeps them equal).
+    headscale_server: >-
+      {{ headscale_control_region is not defined
+         or (region | default('')) == headscale_control_region }}
+
+  tasks:
+    # The same two filters as deploy.yml: what runs on this host.
+    - name: Compute active services and accessories for this host
+      ansible.builtin.set_fact:
+        active_services: "{{ _active_services }}"
+        active_accessories: "{{ _active_accessories }}"
+      vars:
+        _active_services: |-
+          {%- set out = {} -%}
+          {%- for k, v in (services | default({})).items() -%}
+          {%-   if v.regions is not defined or v.regions | length == 0 or (v.regions | intersect(group_names) | length > 0) -%}
+          {%-     set _ = out.update({k: v}) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ out }}
+        _active_accessories: |-
+          {%- set out = {} -%}
+          {%- for k, v in (accessories | default({})).items() -%}
+          {%-   if v.regions is not defined or v.regions | length == 0 or (v.regions | intersect(group_names) | length > 0) -%}
+          {%-     set _ = out.update({k: v}) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ out }}
+
+    - name: Resolve the backup targets this host should have
+      ansible.builtin.include_role:
+        name: backup
+        tasks_from: resolve
+        # The role defaults (backup_scripts_dir, backup_max_age_hours) are
+        # needed by the tasks below.
+        public: true
+
+    - name: Read the backup state of this host
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: "{{ lookup('ansible.builtin.template', playbook_dir ~ '/roles/backup/templates/backup-status-probe.sh.j2') }}"
+      vars:
+        _probe_names: "{{ (_backup_accessories | default([])) | map(attribute='name') | list }}"
+        _probe_deep: "{{ backup_status_deep | default(false) | bool }}"
+      register: _backup_probe
+      changed_when: false
+      check_mode: false
+
+    - name: Keep the backup state of this host
+      ansible.builtin.set_fact:
+        _backup_status_host:
+          enabled: "{{ backup_enabled | default(false) | bool }}"
+          expected: "{{ (_backup_accessories | default([])) | map(attribute='name') | list }}"
+          targets: |-
+            {%- set out = {} -%}
+            {%- for t in _backup_accessories | default([]) -%}
+            {%-   set _ = out.update({t.name: {'method': t.method,
+                                               'schedule': t.schedule,
+                                               'utc': t.utc | default(false) | bool,
+                                               'max_age_hours': t.max_age_hours | default(30) | int}}) -%}
+            {%- endfor -%}
+            {{ out }}
+          probe: "{{ _backup_probe.stdout | from_json }}"
+
+    - name: Write the backup status of every box
+      ansible.builtin.copy:
+        dest: "{{ backup_status_out }}"
+        mode: "0600"
+        content: |-
+          {%- set out = {'hosts': groups[target_host] | default(ansible_play_hosts_all), 'results': {}} -%}
+          {%- for h in ansible_play_hosts -%}
+          {%-   if hostvars[h]._backup_status_host is defined -%}
+          {%-     set _ = out.results.update({h: hostvars[h]._backup_status_host}) -%}
+          {%-   endif -%}
+          {%- endfor -%}
+          {{ out | to_json }}
+      delegate_to: localhost
+      become: false
+      run_once: true
+      when: backup_status_out is defined

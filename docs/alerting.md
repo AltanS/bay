@@ -391,7 +391,10 @@ A held build (`build.held`) waits for `bay up`. A one-project `bay up` deploys o
 | `alerts.test` | `info` | on | `alert_channel/bay alerts test` | A synthetic alert emitted by `bay alerts test` to prove delivery. |
 | `backup.failed` | `critical` | on | `backup/backup.sh.j2` | A backup run failed — dump, restic, or a pre-flight check. |
 | `backup.integrity_check_failed` | `critical` | on | `backup/maintenance.sh.j2` | A restic integrity check failed — the repository may be damaged. |
+| `backup.missing` | `critical` | on | `backup/bay-backup-freshness.sh.j2` | A backup target of the host has no script or no enabled, active timer, so nothing backs it up. |
 | `backup.prune_warning` | `warn` | on | `backup/backup.sh.j2` | Retention prune failed; it will be retried on the next run. |
+| `backup.restore_test_failed` | `warn` | on | `restore.yml` | A restore test (bay backup restore-test) failed; the live database was not touched. |
+| `backup.stale` | `critical` | on | `backup/bay-backup-freshness.sh.j2` | A backup target had no successful run for its max_age_hours (default 30). |
 | `backup.warning` | `warn` | on | `backup/backup.sh.j2` | A backup completed with a non-fatal problem. |
 | `build.circuit_breaker_open` | `critical` | on | `git_deploy/rebuild.sh.j2` | Consecutive failures tripped the circuit breaker; auto-builds are off. |
 | `build.failed` | `warn` | on | `git_deploy/rebuild.sh.j2` | A build, image pull, or webhook deploy failed; retries remain. |

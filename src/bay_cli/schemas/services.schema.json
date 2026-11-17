@@ -284,6 +284,11 @@
           "type": "string",
           "description": "Container runtime memory limit (e.g., '512m', '1g')."
         },
+        "shm_size": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[kmgKMG]$",
+          "description": "Size of the container's /dev/shm (e.g., '256m', '1g'). Absent means Docker's default of 64m. Docker ShmSize is this value in bytes."
+        },
         "cpus": {
           "type": "number",
           "minimum": 0.01,
@@ -424,6 +429,11 @@
         "mem_limit": {
           "type": "string",
           "description": "Container runtime memory limit (e.g., '512m', '1g')."
+        },
+        "shm_size": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*[kmgKMG]$",
+          "description": "Size of the container's /dev/shm (e.g., '256m', '1g'). Absent means Docker's default of 64m. Docker ShmSize is this value in bytes."
         },
         "cpus": {
           "type": "number",
@@ -684,6 +694,30 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Reserved for future use — not currently read by any backup method. The `file` method takes its in-container path from `source_path`, a separate key."
+        },
+        "databases": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "pg_dump: the databases to dump. Default: POSTGRES_DB of the accessory. The databases bound to it by service database blocks are added."
+        },
+        "format": {
+          "type": "string",
+          "enum": ["custom", "plain"],
+          "description": "pg_dump: custom (pg_dump -Fc, file <name>[-<db>].dump) or plain (SQL text, <name>[-<db>].sql, the default)."
+        },
+        "utc": {
+          "type": "boolean",
+          "description": "The schedule is UTC (from bay.toml or bay.fleet.toml defaults), not box time."
+        },
+        "max_age_hours": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The freshness check sends backup.stale when no backup succeeded for this many hours (default backup_max_age_hours, 30)."
+        },
+        "clients": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "The containers that use this database. A live restore stops them first (bay backup restore --into live --yes-stop-clients)."
         }
       },
       "additionalProperties": false

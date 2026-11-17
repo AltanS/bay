@@ -261,8 +261,9 @@ to reproduce it. The flags that change what a command *means*:
 - `bay backup check <accessory>` — Verify backup repository integrity (restic check).
 - `bay backup list <accessory>` — List backup snapshots for an accessory (newest first).
 - `bay backup restore <env> <accessory>` — Restore an accessory from a backup snapshot (interactive).
+- `bay backup restore-test <env> <accessory>` — Prove a pg_dump backup restores: restore it into a scratch container and count.
 - `bay backup run [accessory]` — Trigger a backup now (one accessory, or all).
-- `bay backup status` — Show the backup status dashboard (last backup, snapshots, repo size).
+- `bay backup status` — Show which backup targets each box should have, and whether they run.
 
 ### Utilities
 

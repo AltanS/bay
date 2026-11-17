@@ -64,6 +64,8 @@ def _run(tmp_path: Path, tasks: list[dict[str, Any]], variables: dict[str, Any],
     env = {
         **os.environ,
         "ANSIBLE_CONFIG": str(tmp_path / "ansible.cfg"),
+        # resolve.yml uses the playbook-level filters (bay_backup_max_age).
+        "ANSIBLE_FILTER_PLUGINS": str(ROOT / "filter_plugins"),
         "ANSIBLE_NOCOLOR": "1",
         "ANSIBLE_LOCALHOST_WARNING": "0",
         "ANSIBLE_INVENTORY_UNPARSED_WARNING": "0",
@@ -114,6 +116,8 @@ def test_backup_role_volume_entries(tmp_path: Path) -> None:
         "container": "shop",
         "volume": "bay_shop_data",
         "utc": True,
+        "format": "",
+        "max_age_hours": 30,
         "config": {"backup": {"source_path": "/app/data"}},
     }]
     # The role defaults fill a volume without a [backup] policy; its time is box time.

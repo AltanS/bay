@@ -9,6 +9,7 @@ persistent store, and never in the config_hash label (that's an opaque hash).
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -64,6 +65,7 @@ def spec_from_dict(d: Mapping[str, Any]) -> ContainerSpec:
         mem_limit=d.get("mem_limit"),
         memswap_limit=d.get("memswap_limit"),
         nano_cpus=_nano_cpus(d),
+        shm_size=_shm_size(d),
         dns=_dns(d),
         network_ips=_network_ips(d),
         cap_drop=_str_tuple(d, "cap_drop"),
@@ -95,6 +97,26 @@ def _nano_cpus(d: Mapping[str, Any]) -> int | None:
     if isinstance(raw, bool) or not isinstance(raw, int | float) or raw < 0.01:
         raise ValueError(f"{d.get('name')!r}: cpus must be a number from 0.01")
     return round(raw * 1e9)
+
+
+_SHM_SIZE = re.compile(r"^([1-9][0-9]*)([bkmg]?)$", re.IGNORECASE)
+_SHM_UNITS = {"": 1, "b": 1, "k": 1024, "m": 1024**2, "g": 1024**3}
+
+
+def _shm_size(d: Mapping[str, Any]) -> int | None:
+    """The spec's ``shm_size`` (``256m``) as bytes for docker ``ShmSize``, or None when unset.
+
+    Same size syntax as ``memory`` (a count with an optional unit b, k, m or g,
+    powers of 1024). A wrong shape fails at load time and never reaches docker
+    as "default size".
+    """
+    raw = d.get("shm_size")
+    if raw is None:
+        return None
+    match = _SHM_SIZE.match(raw.strip()) if isinstance(raw, str) else None
+    if match is None:
+        raise ValueError(f"{d.get('name')!r}: shm_size must be a size such as 256m or 1g")
+    return int(match.group(1)) * _SHM_UNITS[match.group(2).lower()]
 
 
 def _dns(d: Mapping[str, Any]) -> tuple[str, ...]:

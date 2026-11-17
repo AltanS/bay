@@ -104,6 +104,9 @@
          | combine({'memswap_limit': _svc.memswap_limit}
                    if _svc.memswap_limit is defined
                    else {})
+         | combine({'shm_size': _svc.shm_size}
+                   if _svc.shm_size is defined
+                   else {})
          | combine({'cpus': _svc.cpus}
                    if _svc.cpus is defined
                    else {})
@@ -201,6 +204,9 @@
                    else {})
          | combine({'memswap_limit': _acc.memswap_limit}
                    if _acc.memswap_limit is defined
+                   else {})
+         | combine({'shm_size': _acc.shm_size}
+                   if _acc.shm_size is defined
                    else {})
          | combine({'cpus': _acc.cpus}
                    if _acc.cpus is defined

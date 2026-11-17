@@ -15,7 +15,7 @@ docker_monitor_alert_header: ""
 # See roles/alert_channel/defaults/main.yml. Duplicated because deploy_stack
 # does not depend on that role; the two are asserted equal in CI.
 bay_host_label: ""
-bay_alert_host: "{% set _n = (bay_host_label | default('', true)) or (ansible_hostname | default('', true)) or inventory_hostname %}{{ _n }}{% if _n != inventory_hostname %} ({{ inventory_hostname }}){% endif %}"
+bay_alert_host: "{% set _n = (bay_host_label | default('', true)) or ((ansible_facts | default({})).hostname | default('', true)) or inventory_hostname %}{{ _n }}{% if _n != inventory_hostname %} ({{ inventory_hostname }}){% endif %}"
 docker_monitor_alert_footer: ""
 
 # Per-container log rotation defaults (applied to every compose service/accessory/infra

@@ -68,6 +68,30 @@
   loop_control:
     label: "{{ item }}"
 
+- name: Remove the status files of the dropped accessory
+  ansible.builtin.file:
+    path: "{{ backup_status_dir | default(backup_scripts_dir ~ '/status') }}/{{ item }}"
+    state: absent
+  loop: >-
+    {{ (_teardown_accessories | map('regex_replace', '$', '.json') | list)
+       + (_teardown_accessories | map('regex_replace', '$', '.restore-test.json') | list)
+       + (_teardown_accessories | map('regex_replace', '^', '.alerted-') | list) }}
+  loop_control:
+    label: "{{ item }}"
+
+# The backup script keeps its cache here (RESTIC_CACHE_DIR). Root: a cache
+# from a root run before 2.24.0 is root-owned.
+- name: Remove the restic cache of the dropped accessory
+  ansible.builtin.file:
+    path: "{{ backup_scripts_dir }}/cache/{{ item }}"
+    state: absent
+  loop: "{{ _teardown_accessories }}"
+  loop_control:
+    label: "{{ item }}"
+  become: true
+  become_user: root
+
+# The cache path of old releases.
 - name: Remove restic cache dir for dropped accessory
   ansible.builtin.file:
     path: "~{{ app_user }}/.cache/restic/{{ item }}"

@@ -216,11 +216,101 @@ def bay_env_value(value):
     return text.replace("$", "$$")
 
 
+def _cron_field(text, low, high):
+    """The values of one cron field (``*``, ``*/n``, ``a-b``, ``a-b/n``, lists)."""
+    out = set()
+    for part in text.split(","):
+        step = 1
+        if "/" in part:
+            part, step_text = part.split("/", 1)
+            step = int(step_text)
+            if step < 1:
+                raise ValueError(text)
+        if part == "*":
+            start, end = low, high
+        elif "-" in part:
+            start, end = (int(x) for x in part.split("-", 1))
+        else:
+            start = int(part)
+            end = high if step > 1 else start
+        if start < low or end > high or start > end:
+            raise ValueError(text)
+        out.update(range(start, end + 1, step))
+    return out
+
+
+def bay_cron_interval_hours(schedule):
+    """The longest gap between two runs of a 5-field cron schedule, in hours.
+
+    Walks one year of minutes from 2026-01-01 (enough for every month length
+    and weekday). Returns 24 for anything that is not a plain 5-field cron
+    line, the gap of a daily schedule.
+    """
+    import datetime
+
+    fields = str(schedule).split()
+    try:
+        if len(fields) != 5:
+            raise ValueError(schedule)
+        minutes = _cron_field(fields[0], 0, 59)
+        hours = _cron_field(fields[1], 0, 23)
+        doms = _cron_field(fields[2], 1, 31)
+        months = _cron_field(fields[3], 1, 12)
+        dows = {d % 7 for d in _cron_field(fields[4], 0, 7)}
+    except ValueError:
+        return 24
+    dom_any, dow_any = fields[2] == "*", fields[4] == "*"
+    runs = []
+    day = datetime.date(2026, 1, 1)
+    for _ in range(366 + 31):
+        dow = (day.weekday() + 1) % 7  # cron: 0 = Sunday
+        if dom_any and dow_any:
+            match = True
+        elif dom_any:
+            match = dow in dows
+        elif dow_any:
+            match = day.day in doms
+        else:  # both restricted: cron runs when either matches
+            match = day.day in doms or dow in dows
+        if match and day.month in months:
+            base = datetime.datetime(day.year, day.month, day.day)
+            runs.extend(base + datetime.timedelta(hours=h, minutes=m)
+                        for h in sorted(hours) for m in sorted(minutes))
+        day += datetime.timedelta(days=1)
+    if len(runs) < 2:
+        return 24
+    gap = max((b - a).total_seconds() for a, b in zip(runs, runs[1:]))
+    return int(-(-gap // 3600))
+
+
+def bay_backup_max_age(schedule, floor=30):
+    """The default freshness limit of a backup target, in hours.
+
+    1.25 times the longest gap of its schedule, rounded up, and never below
+    ``floor`` (backup_max_age_hours). A weekly backup is then not reported
+    stale every day.
+    """
+    gap = bay_cron_interval_hours(schedule)
+    return max(int(floor), int(-(-gap * 5 // 4)))
+
+
+def bay_shlex_split(value):
+    """A command as docker would run it: a list as is, a string split like a shell."""
+    import shlex
+
+    if isinstance(value, (list, tuple)):
+        return [str(v) for v in value]
+    return shlex.split(str(value))
+
+
 class FilterModule:
     """Bay filter plugins."""
 
     def filters(self):
         return {
+            "bay_cron_interval_hours": bay_cron_interval_hours,
+            "bay_backup_max_age": bay_backup_max_age,
+            "bay_shlex_split": bay_shlex_split,
             "parse_env_file": parse_env_file,
             "to_docker_networks": to_docker_networks,
             "bay_traefik_labels": bay_traefik_labels,

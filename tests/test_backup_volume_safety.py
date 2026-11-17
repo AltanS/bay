@@ -121,8 +121,9 @@ if cmd == "backup":
         sys.exit(2)
     snap = "%06d" % len(snaps)
     open(os.path.join(repo, snap + ".data"), "wb").write(data)
+    tags = [args[i + 1] for i, a in enumerate(args) if a == "--tag" and i + 1 < len(args)]
     with open(os.path.join(repo, snap + ".json"), "w") as fh:
-        json.dump({"short_id": snap, "paths": ["/" + name]}, fh)
+        json.dump({"short_id": snap, "paths": ["/" + name], "tags": tags}, fh)
     print("snapshot %s saved" % snap)
     sys.exit(0)
 if cmd == "snapshots":
@@ -289,6 +290,12 @@ class Box:
                              check=True, capture_output=True, text=True).stdout
         snaps = sorted(json.loads(out) or [], key=lambda s: s.get("time", s.get("short_id")))
         return [p for s in snaps for p in s["paths"]]
+
+    def tags(self) -> dict[str, list[str]]:
+        """The tags of every snapshot, by file path."""
+        out = subprocess.run([str(self.restic), "snapshots", "--json"], env=self._restic_env(),
+                             check=True, capture_output=True, text=True).stdout
+        return {p: sorted(s.get("tags") or []) for s in json.loads(out) or [] for p in s["paths"]}
 
     def dump(self, path: str) -> bytes:
         return subprocess.run([str(self.restic), "dump", "latest", path],
@@ -668,3 +675,58 @@ def test_deploy_wait_names_volume_locks_without_stack_name(tmp_path: Path) -> No
     proc = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
     assert proc.returncode == 0, proc.stdout[-3000:]
     assert json.loads(out.read_text()) == ["bay_shop_data"]
+
+
+# ── 2.24.0: custom pg_dump format and the status file ────────────────────────
+
+
+@pytest.mark.parametrize("which", ["fake", "real"])
+def test_pg_dump_custom_format_stores_a_dump_file(tmp_path: Path, which: str) -> None:
+    """format custom: pg_dump -Fc -Z 0 (restic compresses), stored as <name>.dump."""
+    box = Box(tmp_path, which, "pg_dump", pg_format="custom")
+    ok = box.run()
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    # Always <target>-<database>.dump, also for one database: the file names
+    # the database it holds.
+    assert box.snapshots() == ["/postgres-shop.dump"]
+    assert box.producers() == [["exec", "postgres", "pg_dump", "-Fc", "-Z", "0", "-U", "app", "shop"]]
+
+
+@pytest.mark.parametrize("which", ["fake", "real"])
+@pytest.mark.parametrize("pg_format", ["plain", "custom"])
+def test_every_pg_dump_snapshot_records_its_database(tmp_path: Path, which: str, pg_format: str) -> None:
+    """Review fix: a one-database dump had no database in its name, and restore
+    took POSTGRES_DB, so `databases = ["shop"]` with POSTGRES_DB=main restored
+    shop into main. Every snapshot now carries the tag db:<database>."""
+    cfg = {**METHODS["pg_dump"]["config"],
+           "env": {"clear": {"POSTGRES_USER": "app", "POSTGRES_DB": "main"}},
+           "backup": {"method": "pg_dump", "databases": ["shop"]}}
+    box = Box(tmp_path, which, "pg_dump", pg_format=pg_format, accessory_config=cfg)
+    ok = box.run()
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    tags = box.tags()
+    assert len(tags) == 1
+    [(path, got)] = tags.items()
+    assert "db:shop" in got, tags
+    assert "db:main" not in got
+
+
+@pytest.mark.parametrize("which", ["fake", "real"])
+def test_a_good_run_writes_the_status_file(tmp_path: Path, which: str) -> None:
+    box = Box(tmp_path, which, "pg_dump", backup_status_dir=str(tmp_path / "status"))
+    before = int(time.time())
+    ok = box.run()
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    status = json.loads((tmp_path / "status" / "postgres.json").read_text())
+    assert before <= status["at"] <= int(time.time())
+    assert status["bytes"] > 0
+    assert status["snapshots"] == [box.snapshot_ids()["/postgres.sql"]]
+
+
+def test_a_failed_run_keeps_the_last_good_status(tmp_path: Path) -> None:
+    box = Box(tmp_path, "fake", "pg_dump", backup_status_dir=str(tmp_path / "status"))
+    (tmp_path / "status").mkdir()
+    (tmp_path / "status" / "postgres.json").write_text('{"at": 1, "bytes": 1, "snapshots": []}')
+    failed = box.run(fail_on="pg_dump")
+    assert failed.returncode == 1
+    assert json.loads((tmp_path / "status" / "postgres.json").read_text())["at"] == 1

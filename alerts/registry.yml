@@ -49,6 +49,20 @@ backup.prune_warning:
   enabled_by_default: true
   rate_limited: false
 
+backup.missing:
+  level: critical
+  source: backup/bay-backup-freshness.sh.j2
+  summary: A backup target of the host has no script or no enabled, active timer, so nothing backs it up.
+  enabled_by_default: true
+  rate_limited: true
+
+backup.stale:
+  level: critical
+  source: backup/bay-backup-freshness.sh.j2
+  summary: A backup target had no successful run for its max_age_hours (default 30).
+  enabled_by_default: true
+  rate_limited: true
+
 backup.integrity_check_failed:
   level: critical
   source: backup/maintenance.sh.j2
@@ -196,6 +210,13 @@ restore.failed:
   level: critical
   source: restore.yml
   summary: A restore failed — the pre-restore backup is the way back.
+  enabled_by_default: true
+  rate_limited: false
+
+backup.restore_test_failed:
+  level: warn
+  source: restore.yml
+  summary: A restore test (bay backup restore-test) failed; the live database was not touched.
   enabled_by_default: true
   rate_limited: false
 

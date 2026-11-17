@@ -57,9 +57,16 @@
     # Without `docker_prune_volumes` the job leaves volumes alone: an anonymous
     # volume of a removed container stays on disk (a small leak), but the data
     # volume of a service whose deploy failed is never deleted.
+    # `prune -af` removes stopped containers. A live restore (bay backup
+    # restore --into live) holds the clients of its database stopped and
+    # writes restore-<target>.lock; while one is younger than 12 hours the
+    # prune skips this run (an older one is from a restore that died).
     job: >-
-      docker system prune -af{{ ' --volumes' if docker_prune_volumes | bool else '' }}
-      >> /var/log/docker-prune.log 2>&1
+      if find {{ (backup_lock_dir | default(stack_dir ~ '/backup/locks')) | quote }} -maxdepth 1
+      -name 'restore-*.lock' -mmin -720 2>/dev/null | grep -q .;
+      then echo "$(date -Is) skipped: a live restore runs" >> /var/log/docker-prune.log;
+      else docker system prune -af{{ ' --volumes' if docker_prune_volumes | bool else '' }}
+      >> /var/log/docker-prune.log 2>&1; fi
     user: root
     state: "{{ 'present' if docker_prune_enabled else 'absent' }}"
   become: true

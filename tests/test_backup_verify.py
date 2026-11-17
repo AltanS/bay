@@ -98,6 +98,8 @@ def _run(
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "FAKE_TIMERS": json.dumps(timers or {}),
         "ANSIBLE_CONFIG": str(tmp_path / "ansible.cfg"),
+        # resolve.yml uses the playbook-level filters (bay_backup_max_age).
+        "ANSIBLE_FILTER_PLUGINS": str(ROOT / "filter_plugins"),
         "ANSIBLE_ROLES_PATH": str(ROOT / "roles"),
         "ANSIBLE_NOCOLOR": "1",
         "ANSIBLE_LOCALHOST_WARNING": "0",

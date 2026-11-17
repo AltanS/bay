@@ -86,7 +86,7 @@ bay_host_label: ""
 # exists only because the two control-node alerts (deploy.complete /
 # deploy.failed) are composed in a task var, where {% include %} is not
 # available. tests/test_alert_channel.py asserts the two agree.
-bay_alert_host: "{% set _n = (bay_host_label | default('', true)) or (ansible_hostname | default('', true)) or inventory_hostname %}{{ _n }}{% if _n != inventory_hostname %} ({{ inventory_hostname }}){% endif %}"
+bay_alert_host: "{% set _n = (bay_host_label | default('', true)) or ((ansible_facts | default({})).hostname | default('', true)) or inventory_hostname %}{{ _n }}{% if _n != inventory_hostname %} ({{ inventory_hostname }}){% endif %}"
 
 # ── Recipients ─────────────────────────────────────────────────────────
 #

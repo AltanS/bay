@@ -60,6 +60,9 @@
 {% if cfg.cpus is defined %}
     cpus: {{ cfg.cpus }}
 {% endif %}
+{% if cfg.shm_size is defined %}
+    shm_size: {{ cfg.shm_size }}
+{% endif %}
 {% if cfg.dns is defined %}
     dns:
 {% for resolver in cfg.dns %}

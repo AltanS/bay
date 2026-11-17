@@ -1193,6 +1193,17 @@ _HOLD_KEYS = (
 )
 
 
+def _backup_only(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
+    """True when two entries differ only in their ``backup`` block.
+
+    The backup role reads ``backup``; the container spec does not. So such a
+    change installs or changes a timer and recreates nothing.
+    """
+    return {k: v for k, v in old.items() if k != "backup"} == {
+        k: v for k, v in new.items() if k != "backup"
+    }
+
+
 def _hold_only(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
     """True when two entries differ only in the hold-guard keys of ``build``.
 
@@ -1514,7 +1525,12 @@ def diff_steps(
     steps: list[dict[str, Any]] = []
     for name in sorted(set(old_all) | set(new_all)):
         old, new = old_all.get(name), new_all.get(name)
-        if old == new or (old is not None and new is not None and _hold_only(old, new)):
+        if old == new or (
+            old is not None and new is not None and (_hold_only(old, new) or _backup_only(old, new))
+        ):
+            # A change of only the `backup` key is a backup step
+            # (_backup_steps), not a container update: the reconciler does not
+            # hash it, so no container is recreated.
             continue
         if name in resources:
             if new is None:
@@ -1635,11 +1651,14 @@ def _backup_steps(
     mine: set[str],
     owners: Mapping[str, str],
 ) -> list[dict[str, Any]]:
-    """One ``backup`` step per volume backup that is new, changed or gone (update, safe).
+    """One ``backup`` step per backup target that is new, changed or gone (update, safe).
 
-    The backup role installs the scripts and timers. ``bay up`` runs it (tag
-    ``backup``) on every run since 2.23.2, so the step only tells. A gone entry
-    keeps its timer on the box: the backup role does not prune (docs/backups.md).
+    Two kinds: volume backups (``volume_backups``) and database backups of an
+    accessory (its ``backup`` block, from ``[services.<x>.backup]`` or a fleet
+    resource). The backup role installs the scripts and timers; ``bay up``
+    runs it (tag ``backup``) on every run since 2.23.2, so the step only
+    tells. Since 2.24.0 the role also removes the timer and script of a target
+    it installed that left the config; the restic repo stays.
     """
     raw_old, raw_new = current.get("volume_backups"), wanted.get("volume_backups")
     old_all: Mapping[str, Any] = raw_old if isinstance(raw_old, Mapping) else {}
@@ -1654,12 +1673,47 @@ def _backup_steps(
         if old is None:
             reason = f"new volume backup of {name} ({container})"
         elif new is None:
-            reason = f"volume backup of {name} removed from services.yml; its timer stays"
+            reason = (
+                f"volume backup of {name} removed; the backup role removes its timer, "
+                "the restic repo stays"
+            )
         else:
             reason = f"volume backup of {name} changed: " + ", ".join(_changed_keys(old, new))
         steps.append(
             _step("backup", "update", "safe", reason, container=str(container), project=who)
         )
+
+    def accessory_backups(data: Mapping[str, Any]) -> dict[str, Any]:
+        block = data.get("accessories")
+        if not isinstance(block, Mapping):
+            return {}
+        return {
+            str(k): v["backup"]
+            for k, v in block.items()
+            if isinstance(v, Mapping) and v.get("backup")
+        }
+
+    old_acc, new_acc = accessory_backups(current), accessory_backups(wanted)
+    for name in sorted(set(old_acc) | set(new_acc)):
+        old, new = old_acc.get(name), new_acc.get(name)
+        if old == new:
+            continue
+        who = _owner_of(name, project=project, mine=mine, owners=owners)
+        method = (new if isinstance(new, Mapping) else old if isinstance(old, Mapping) else {}).get(
+            "method", "auto"
+        )
+        if old is None:
+            reason = f"new database backup of {name} ({method})"
+        elif new is None:
+            reason = (
+                f"database backup of {name} removed; the backup role removes its timer, "
+                "the restic repo stays"
+            )
+        elif isinstance(old, Mapping) and isinstance(new, Mapping):
+            reason = f"database backup of {name} changed: " + ", ".join(_changed_keys(old, new))
+        else:
+            reason = f"database backup of {name} changed"
+        steps.append(_step("backup", "update", "safe", reason, container=name, project=who))
     return steps
 
 

@@ -151,6 +151,7 @@ services:
     mem_limit: 512m                  # Docker memory limit (e.g., 256m, 1g)
     memswap_limit: 512m              # Memory plus swap. Equal to mem_limit = no swap. Needs mem_limit, never smaller
     cpus: 1.5                        # CPU limit in cores (0.01 to 64). Absent = no limit. Docker NanoCpus
+    shm_size: 256m                   # Size of /dev/shm (e.g., 256m, 1g). Absent = Docker's 64m. Docker ShmSize
     dns:                             # Resolvers for this one container (docker --dns). 1 to 3 IPs, order kept
       - 1.1.1.1                      #   Absent = the box resolver. Never a host name
 
@@ -340,6 +341,7 @@ accessories:
     mem_limit: 512m                  # Docker memory limit (e.g., 256m, 1g)
     memswap_limit: 512m              # Memory plus swap. Equal to mem_limit = no swap. Needs mem_limit, never smaller
     cpus: 1.5                        # CPU limit in cores (0.01 to 64). Absent = no limit. Docker NanoCpus
+    shm_size: 256m                   # Size of /dev/shm (e.g., 256m, 1g). Absent = Docker's 64m. Docker ShmSize
     dns:                             # Resolvers for this one container (docker --dns). 1 to 3 IPs, order kept
       - 1.1.1.1                      #   Absent = the box resolver. Never a host name
 

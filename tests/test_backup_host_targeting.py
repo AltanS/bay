@@ -15,6 +15,8 @@ echoed into a host's output block, not by the rc/status.
 
 from __future__ import annotations
 
+import json
+
 import subprocess
 from pathlib import Path
 
@@ -296,12 +298,21 @@ def test_restore_runs_on_the_target_host_with_the_fleet(monkeypatch, tmp_path) -
         input="y\n", obj=cx,
     )
     assert out.exit_code == 0, out.output
-    assert listed["limit"] == "na-edge"
+    # --snapshot given: no listing (restore.yml checks the id on the box).
+    assert listed == {}
     assert played["playbook"] == "restore"
     assert played["fleet_root"] == fleet
     extra = played["extra_args"]
     assert extra[extra.index("-l") + 1] == "na-edge"
-    assert "snapshot=ab12cd34" in extra
+    assert json.loads(extra[1])["snapshot"] == "ab12cd34"
+
+    # Without --snapshot the snapshots are listed on that host only.
+    played.clear()
+    out = CliRunner().invoke(backup.app, ["restore", "production", "postgres"],
+                             input="1\ny\n", obj=cx)
+    assert out.exit_code == 0, out.output
+    assert listed["limit"] == "na-edge"
+    assert json.loads(played["extra_args"][1])["snapshot"] == "ab12cd34"
 
 
 def test_restore_stops_before_anything_runs_when_no_host_has_the_target(monkeypatch) -> None:

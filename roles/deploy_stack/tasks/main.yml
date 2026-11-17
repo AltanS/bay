@@ -245,6 +245,27 @@
              | map('join') | list }}
       ignore_errors: true
 
+    # `bay backup restore --into live` holds the clients of a database stopped
+    # and writes restore-<target>.lock. A deploy would start or recreate them
+    # in the middle. A lock older than 12 hours is from a restore that died.
+    - name: Find a running live restore
+      ansible.builtin.find:
+        paths: "{{ backup_lock_dir | default(stack_dir + '/backup/locks') }}"
+        patterns: "restore-*.lock"
+        age: -12h
+      register: _restore_locks
+      become: true
+      become_user: root
+
+    - name: Refuse to deploy while a live restore holds clients stopped
+      ansible.builtin.fail:
+        msg: >-
+          A live restore runs on this box ({{ _restore_locks.files | map(attribute='path')
+          | map('basename') | join(', ') }}): it holds the clients of its database
+          stopped, and a deploy would start them in the middle. Nothing was changed.
+          Wait for the restore to end. Remove the file only when no restore runs.
+      when: _restore_locks.files | default([]) | length > 0
+
     # ── log_retention boundary (pre) ──────────────────────────────────
     # Capture container IDs BEFORE container_lifecycle recreates them so
     # the post task can write a "container recreated" sentinel into

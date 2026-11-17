@@ -1,0 +1,66 @@
+set -uo pipefail
+# backup-status.yml: the backup state of this host as ONE JSON document on
+# stdout. Read-only: file reads and systemctl queries. With deep, one
+# `restic snapshots` per target (an S3 LIST and a few GETs each), never more.
+SCRIPTS_DIR={{ backup_scripts_dir | quote }}
+STATUS_DIR={{ (backup_status_dir | default(backup_scripts_dir ~ '/status')) | quote }}
+DEEP={{ 'true' if (_probe_deep | string | lower) == 'true' else 'false' }}
+NAMES=({% for n in _probe_names %}{{ n | quote }} {% endfor %})
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo '{"error": "jq is not installed on this host"}'
+  exit 0
+fi
+
+if [ "$DEEP" = true ] && [ -r "$SCRIPTS_DIR/restic.env" ]; then
+  set -a; . "$SCRIPTS_DIR/restic.env"; set +a
+fi
+
+# Targets with a script on the box, expected or not.
+present=()
+for f in "$SCRIPTS_DIR"/backup-*.sh; do
+  [ -e "$f" ] || continue
+  n=${f##*/backup-}; present+=("${n%.sh}")
+done
+
+manifest=null
+manifest_mtime=0
+if [ -r "$SCRIPTS_DIR/targets.json" ]; then
+  manifest_mtime=$(stat -c %Y "$SCRIPTS_DIR/targets.json" 2>/dev/null || echo 0)
+  manifest=$(jq -c '[.[].name]' "$SCRIPTS_DIR/targets.json" 2>/dev/null) || manifest=null
+fi
+
+targets='{}'
+for t in "${NAMES[@]}" "${present[@]}"; do
+  if jq -e --arg t "$t" 'has($t)' <<<"$targets" >/dev/null; then continue; fi
+  unit="bay-backup@${t}.timer"
+  script=false; [ -f "$SCRIPTS_DIR/backup-${t}.sh" ] && script=true
+  enabled=$(systemctl is-enabled "$unit" 2>/dev/null); enabled=${enabled:-absent}
+  active=$(systemctl is-active "$unit" 2>/dev/null); active=${active:-absent}
+  next=$(systemctl show "$unit" -p NextElapseUSecRealtime --value 2>/dev/null || true)
+  installed=$(stat -c %Y "/etc/systemd/system/$unit" 2>/dev/null || echo 0)
+  last=null
+  if [ -r "$STATUS_DIR/${t}.json" ]; then
+    last=$(jq -c '{at: .at, bytes: .bytes}' "$STATUS_DIR/${t}.json" 2>/dev/null) || last=null
+  fi
+  deep=null
+  if [ "$DEEP" = true ] && [ "$script" = true ]; then
+    repo="s3:${BACKUP_S3_ENDPOINT:-}/${BACKUP_S3_BUCKET:-}/${BACKUP_S3_PREFIX:-}/${BACKUP_HOSTNAME:-}/${t}"
+    # --no-cache: this runs as root, and a root-owned file in the cache of the
+    # backup user would break its next backup. --no-lock: read-only.
+    if out=$(RESTIC_REPOSITORY="$repo" \
+        /usr/local/bin/restic snapshots --json --no-lock --no-cache 2>/dev/null); then
+      deep=$(jq -c '{snapshots: length, latest: (map(.time) | max // null)}' <<<"$out" 2>/dev/null) || deep='{"error": "unreadable restic output"}'
+    else
+      deep='{"error": "restic snapshots failed"}'
+    fi
+  fi
+  targets=$(jq -c --arg t "$t" --argjson script "$script" --arg enabled "$enabled" \
+    --arg active "$active" --arg next "$next" --argjson installed "$installed" --argjson last "$last" --argjson deep "$deep" \
+    '. + {($t): {script: $script, timer_enabled: $enabled, timer_active: $active,
+                 next: $next, installed: $installed, last_ok: $last, deep: $deep}}' <<<"$targets")
+done
+
+jq -cn --argjson targets "$targets" --argjson manifest "$manifest" \
+  --argjson manifest_mtime "$manifest_mtime" --arg now "$(date +%s)" \
+  '{now: ($now | tonumber), manifest: $manifest, manifest_mtime: $manifest_mtime, targets: $targets}'

@@ -16,6 +16,7 @@ nothing here reads the working directory:
 """
 
 import json
+import subprocess
 import shutil
 import sysconfig
 import tempfile
@@ -288,12 +289,18 @@ def run_playbook(
     tags: list[str] | None = None,
     extra_args: list[str] | None = None,
     profile: bool = False,
-) -> None:
+    capture: bool = False,
+    check: bool = True,
+    message: str = "",
+) -> subprocess.CompletedProcess[str]:
     """Run a framework playbook against a fleet, with live output streaming.
 
     ``fleet_root`` is the fleet: its hosts files, group_vars and vault password
     are used, wherever the command is run from. Without it (tests), the
     framework's own ansible.cfg and inventory apply.
+
+    ``capture`` keeps the Ansible output off the terminal (shown on failure
+    when ``check``), for a command that reports from a result file instead.
     """
     with _fleet_inventory(fleet_root) as inventory:
         cmd = [
@@ -315,16 +322,18 @@ def run_playbook(
         # One line, before the playbook starts: which connection strategy is live.
         # Mitogen prints nothing itself, so a purged venv or BAY_NO_MITOGEN=1
         # silently costs ~3 SSH execs per task with no way to notice.
-        if not console.is_json_mode():
+        if not console.is_json_mode() and not capture:
             strategy = mitogen.get("ANSIBLE_STRATEGY")
             console.info(
                 f"strategy: {strategy}" if strategy
                 else "strategy: linear (mitogen unavailable)"
             )
 
-        runner.run(
+        return runner.run(
             cmd,
-            capture=False,
+            capture=capture,
+            check=check,
+            message=message,
             cwd=fleet_root,
             env={
                 **_collections_env(bay_dir),

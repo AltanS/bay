@@ -224,6 +224,29 @@ def _backup_sh(payload: str) -> str:
     )
 
 
+def _backup_status_probe(payload: str) -> str:
+    # Target names come from the config (validated names), paths from vars.
+    return _render(
+        "roles/backup/templates/backup-status-probe.sh.j2",
+        backup_scripts_dir=f"/opt/{payload}/backup",
+        backup_status_dir=f"/opt/{payload}/status",
+        _probe_deep=True,
+        _probe_names=[payload, "postgres"],
+    )
+
+
+def _backup_freshness(payload: str) -> str:
+    return _render(
+        "roles/backup/templates/bay-backup-freshness.sh.j2",
+        ansible_managed="test",
+        backup_scripts_dir=f"/opt/{payload}/backup",
+        backup_status_dir=f"/opt/{payload}/status",
+        backup_freshness_unit_dir=f"/etc/{payload}",
+        backup_freshness_repeat_hours=24,
+        backup_max_age_hours=30,
+    )
+
+
 def _backup_sh_mysql(payload: str) -> str:
     return _render(
         "roles/backup/templates/backup.sh.j2",
@@ -736,6 +759,8 @@ _CASES: list[Case] = [
     Case("roles/backup/templates/backup.sh.j2", _backup_sh_volume),
     Case("roles/backup/templates/backup.sh.j2", _backup_sh_headscale),
     Case("roles/backup/templates/headscale-db-snapshot.sh.j2", _headscale_snapshot_helper),
+    Case("roles/backup/templates/backup-status-probe.sh.j2", _backup_status_probe),
+    Case("roles/backup/templates/bay-backup-freshness.sh.j2", _backup_freshness),
     Case("roles/deploy_stack/templates/bay-job.sh.j2", _bay_job_sh),
     Case("roles/deploy_stack/templates/bay-job.sh.j2", _bay_job_sh_list_command),
     Case("roles/backup/templates/maintenance.sh.j2", _maintenance_sh),

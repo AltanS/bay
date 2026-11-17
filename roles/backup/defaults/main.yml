@@ -34,6 +34,22 @@ backup_retain: 30
 # Paths
 backup_scripts_dir: "{{ stack_dir }}/backup"
 backup_lock_dir: "{{ stack_dir }}/backup/locks"
+# Each successful run writes <backup_status_dir>/<target>.json; the freshness
+# check reads it. targets.json (the manifest of this host's targets) sits in
+# backup_scripts_dir.
+backup_status_dir: "{{ stack_dir }}/backup/status"
+
+# ── Freshness check (2.24.0) ──────────────────────────────────────────────
+# A timer runs bay-backup-freshness every 6 hours. It reads targets.json, the
+# status files and the timer state, all local: no restic, no S3. It also
+# removes expired bay-restore-test- scratch containers (one docker ps).
+# It sends backup.missing (a target has no script or no running timer) and
+# backup.stale (no successful run for max_age_hours), at most once per target
+# per backup_freshness_repeat_hours while the problem stays.
+backup_max_age_hours: 30
+backup_freshness_enabled: true
+backup_freshness_schedule: "*-*-* 00/6:17:00"
+backup_freshness_repeat_hours: 24
 
 # ── Rig-infrastructure state backups ──────────────────────────────────────
 # The accessory loop only covers things declared in services.yml. Headscale is

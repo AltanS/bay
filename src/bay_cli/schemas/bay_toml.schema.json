@@ -17,6 +17,7 @@
     "health": { "$ref": "#/$defs/health" },
     "replicas": { "$ref": "#/$defs/replicas" },
     "memory": { "$ref": "#/$defs/size" },
+    "shm_size": { "$ref": "#/$defs/size" },
     "cpus": { "$ref": "#/$defs/cpus" },
     "dns": { "$ref": "#/$defs/dns" },
     "update": { "$ref": "#/$defs/update" },
@@ -457,6 +458,37 @@
         "hour": { "type": "integer", "minimum": 0, "maximum": 23 }
       }
     },
+    "service_backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["method"],
+      "description": "A database backup of this internal service (an accessory). Only pg_dump today.",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": ["pg_dump"],
+          "x-messages": { "enum": "must be \"pg_dump\" (the only database method of a service backup)" }
+        },
+        "databases": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z_][a-z0-9_]{0,62}$",
+            "x-messages": { "pattern": "database names use lowercase letters, digits and underscores, and start with a letter or underscore" }
+          }
+        },
+        "hour": { "type": "integer", "minimum": 0, "maximum": 23 },
+        "keep": { "$ref": "#/$defs/duration" },
+        "format": {
+          "type": "string",
+          "enum": ["custom", "plain"],
+          "x-messages": { "enum": "must be \"custom\" (pg_dump -Fc, the default) or \"plain\" (SQL text)" }
+        },
+        "max_age_hours": { "type": "integer", "minimum": 1, "maximum": 744 }
+      }
+    },
     "job": {
       "type": "object",
       "additionalProperties": false,
@@ -489,6 +521,7 @@
         "port": { "$ref": "#/$defs/port" },
         "health": { "$ref": "#/$defs/health" },
         "memory": { "$ref": "#/$defs/size" },
+        "shm_size": { "$ref": "#/$defs/size" },
         "cpus": { "$ref": "#/$defs/cpus" },
         "dns": { "$ref": "#/$defs/dns" },
         "egress": { "$ref": "#/$defs/egress" },
@@ -507,7 +540,8 @@
         "env": { "$ref": "#/$defs/env" },
         "secrets": { "$ref": "#/$defs/secrets" },
         "fleet_secrets": { "$ref": "#/$defs/fleet_secrets" },
-        "needs": { "$ref": "#/$defs/needs" }
+        "needs": { "$ref": "#/$defs/needs" },
+        "backup": { "$ref": "#/$defs/service_backup" }
       },
       "allOf": [
         { "$ref": "#/$defs/image_xor_build" },
@@ -566,6 +600,7 @@
         "health": { "$ref": "#/$defs/health" },
         "replicas": { "$ref": "#/$defs/replicas" },
         "memory": { "$ref": "#/$defs/size" },
+        "shm_size": { "$ref": "#/$defs/size" },
         "cpus": { "$ref": "#/$defs/cpus" },
         "dns": { "$ref": "#/$defs/dns" },
         "update": { "$ref": "#/$defs/update" },

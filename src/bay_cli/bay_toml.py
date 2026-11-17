@@ -33,7 +33,7 @@ SCHEMA_PATH = Path(__file__).parent / "schemas" / "bay_toml.schema.json"
 #: as unknown inside a table is almost always the scalar-after-table trap.
 TOP_LEVEL_KEYS = (
     "name", "fleet", "publish", "image", "port", "command", "release", "health",
-    "replicas", "memory", "cpus", "dns", "update", "zero_downtime", "logs", "secrets",
+    "replicas", "memory", "shm_size", "cpus", "dns", "update", "zero_downtime", "logs", "secrets",
 )
 
 #: Matches the start of a template expression in any string value.
@@ -277,6 +277,7 @@ def _file_rules(doc: dict[str, Any]) -> Iterator[Violation]:
     yield from _release_update_rules(doc, envs)
     yield from _dns_rules(doc, envs, services)
     yield from _egress_rules(doc, envs, services)
+    yield from _service_backup_rules(services)
     yield from _path_rules(services)
     yield from _domain_rules(doc, envs, services)
     yield from _repo_rules(doc, "")
@@ -749,6 +750,32 @@ _EGRESS_DNS_HINT = (
     "the container's lookups from inside it, so without dns they go to the box "
     "resolver, often the tailnet's 100.100.100.100, which egress blocks"
 )
+
+
+def _service_backup_rules(services: dict[str, Any]) -> Iterator[Violation]:
+    """``[services.<name>.backup]``: a database backup of an internal service.
+
+    The backup role backs up accessories, and only an internal service (no
+    ``path``, no ``domain``) compiles to an accessory. A routed service would
+    compile to ``services:`` and silently get no backup, so it is refused. An
+    egress service runs alone behind its own firewall and holds no database.
+    """
+    for name, svc in services.items():
+        if not isinstance(svc, dict) or "backup" not in svc:
+            continue
+        where = _join(f"services.{name}", "backup")
+        for key in ("path", "domain"):
+            if key in svc:
+                yield Violation(
+                    where,
+                    f"a service with {key} is routed, and only an internal service (no path, "
+                    "no domain) is backed up; remove the route or the backup",
+                )
+                break
+        if "egress" in svc:
+            yield Violation(
+                where, "an egress service holds no database to back up; remove the key"
+            )
 
 
 def _egress_rules(

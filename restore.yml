@@ -2,11 +2,19 @@
 # Restore playbook — streams restic snapshot data into containers
 #
 # Usage:
-#   bay backup restore <env> <accessory> [--snapshot ID]
+#   bay backup restore <env> <accessory> [--snapshot ID] [--database NAME] [--into scratch|live]
+#   bay backup restore-test <env> <accessory>
 #
 # Direct ansible-playbook usage:
 #   ansible-playbook restore.yml -e target_host=production -e accessory=postgres -e confirm=yes
 #   Optional: -e snapshot=abc123 -e skip_pre_backup=true -e database=mydb
+#
+# restore_into (2.24.0, pg_dump only for scratch):
+#   live     (default here) restore into the running container; the clients in
+#            restore_stop_clients are stopped first and started after.
+#   scratch  restore into a throwaway container with no network, count the
+#            rows, and remove it (keep it with -e restore_keep=true). Never
+#            touches the live container. roles/backup/tasks/restore_scratch.yml
 
 - name: "Restore {{ accessory }} on {{ target_host | default('unset') }}"
   hosts: "{{ target_host | default('all') }}"
@@ -58,10 +66,37 @@
       RESTIC_PASSWORD: "{{ _backup_restic_password }}"
       AWS_ACCESS_KEY_ID: "{{ _backup_s3_access_key_id }}"
       AWS_SECRET_ACCESS_KEY: "{{ _backup_s3_secret_access_key }}"
-      RESTIC_CACHE_DIR: "{{ _backup_scripts_dir }}/cache/{{ accessory }}"
+      # No RESTIC_CACHE_DIR: every restic call here runs as root with
+      # --no-cache. A cache under the scripts dir became root-owned, and the
+      # backup unit (the app user) then ran without one.
     _pg_user: "{{ _accessory_config.env['clear'].POSTGRES_USER | default('app') }}"
-    _pg_database: "{{ database | default(_accessory_config.env['clear'].POSTGRES_DB | default('app')) }}"
+    _pg_default_db: "{{ _accessory_config.env['clear'].POSTGRES_DB | default('app') }}"
+    # The dump file of the chosen snapshot: `/<target>[-<db>].sql` (plain) or
+    # `/<target>-<db>.dump` (custom, pg_dump -Fc, 2.24.0). One file each.
+    _pg_file: >-
+      {{ ((_snap.paths | default([])) if _snap is defined else [])
+         | first | default('/' ~ accessory ~ (('-' ~ database) if database is defined else '') ~ '.sql') }}
+    _pg_custom: "{{ (_pg_file | trim).endswith('.dump') }}"
+    # The database to restore INTO is the database the snapshot holds (its
+    # `db:` tag or the `-<db>` of its file name). A snapshot with neither (made
+    # before 2.24.0) restores only with --snapshot and --database. Before the
+    # review fix a one-database dump restored into POSTGRES_DB: `databases =
+    # ["shop"]` with POSTGRES_DB=main restored shop into main.
+    _pg_database: >-
+      {{ database if database is defined else (_snap_db | default('') | trim) }}
+    # A live pg_dump restore stops the clients of the restored database that
+    # run on this host first, and starts them again after, also on failure.
+    # `bay backup restore --into live --yes-stop-clients` passes them as
+    # {name, database} ("" = a client of every database of the target).
+    _restore_stop_clients: "{{ restore_stop_clients | default([]) }}"
+    _restore_terminate: "{{ restore_terminate_connections | default(false) | bool }}"
+    # No silent wait on a lock: pg_restore/psql give up after this long.
+    _restore_lock_timeout: "{{ restore_lock_timeout | default('30s') }}"
+    # Held while the clients are stopped. The nightly docker prune skips and a
+    # deploy or a webhook rebuild refuses while it is younger than 12 hours.
+    _restore_lock: "{{ backup_lock_dir | default(stack_dir ~ '/backup/locks') }}/restore-{{ accessory }}.lock"
     _restore_tmp_dir: "{{ stack_dir }}/backup/restore-tmp"
+    _into: "{{ restore_into | default('live') }}"
 
   pre_tasks:
     - name: Validate required variables
@@ -73,6 +108,15 @@
           Required variable 'accessory' must be defined and must reference
           an accessory with backup enabled in services.yml, or a volume backup
           (<stack_name>_<volume>, from volume_backups in services.yml).
+
+    - name: Allow a scratch restore only for a pg_dump target
+      ansible.builtin.assert:
+        that:
+          - _into in ['live', 'scratch']
+          - _into == 'live' or (not (_is_volume | bool) and (_restore_method | trim) == 'pg_dump')
+        fail_msg: >-
+          restore_into must be live or scratch, and scratch needs a pg_dump target;
+          '{{ accessory }}' is {{ 'a volume backup' if _is_volume | bool else 'method ' ~ (_restore_method | trim) }}.
 
     # A volume lives on the one box that runs its container. Every other host
     # of the env has nothing to restore and no backup script for it.
@@ -118,9 +162,13 @@
     # restore path still reaches the operator through the rescue handler.
     - name: "Restore {{ accessory }}"
       block:
+        # All snapshots of the repo, then pick in Ansible: by id, else the
+        # newest; with --database only the snapshots of that database. Several
+        # databases in one repo and no --database: refused below, because the
+        # newest snapshot may hold another database.
         - name: Verify snapshot exists
           ansible.builtin.command:
-            cmd: "{{ _backup_restic_bin }} snapshots {{ _snapshot }} --json --retry-lock 15m"
+            cmd: "{{ _backup_restic_bin }} snapshots --json --no-cache --retry-lock 15m"
           environment: "{{ _restic_env }}"
           register: _snapshot_info
           changed_when: false
@@ -137,10 +185,102 @@
         # dereferences it carries `_snap is defined`. A restore cannot be dry-run
         # in any useful sense — without the snapshot metadata there is nothing to
         # restore FROM — so the correct behaviour is to skip, loudly.
+        # The database of each pg_dump snapshot: its `db:` tag (2.24.0), else
+        # the `-<db>` of its file name, else UNKNOWN (""): an old
+        # one-database snapshot, and today's config may name another database
+        # than the run that made it. `latest` never takes an unknown one; an
+        # explicit --snapshot takes it only with an explicit --database. One
+        # database stored as `.sql` before a switch to the custom format and
+        # as `.dump` after is one database: the newest snapshot wins.
         - name: Parse snapshot details
           ansible.builtin.set_fact:
-            _snap: "{{ (_snapshot_info.stdout | from_json | last) }}"
+            _snap_pick: "{{ _pick }}"
+            _snap: "{{ (_pick.matches | last).s if _pick.matches else {} }}"
+            _snap_db: "{{ (_pick.matches | last).db if _pick.matches else '' }}"
+          vars:
+            _pick: |-
+              {%- set ok = [] -%}
+              {%- set old = [] -%}
+              {%- set pre = '/' ~ accessory ~ '-' -%}
+              {%- for s in _snapshot_info.stdout | from_json | sort(attribute='time') -%}
+              {%-   set p = (s.paths | default(['']) | first) -%}
+              {%-   set dbt = (s.tags | default([]) | select('match', '^db:') | list) -%}
+              {%-   if (_restore_method | trim) != 'pg_dump' -%}
+              {%-     set d = '' -%}
+              {%-   elif dbt -%}
+              {%-     set d = dbt[0][3:] -%}
+              {%-   elif p.startswith(pre) -%}
+              {%-     set d = p[pre | length:].rsplit('.', 1)[0] -%}
+              {%-   else -%}
+              {%-     set d = '' -%}
+              {%-   endif -%}
+              {%-   set unknown = (_restore_method | trim) == 'pg_dump' and d == '' -%}
+              {%-   if _snapshot == 'latest' -%}
+              {%-     if unknown -%}
+              {%-       set _ = old.append(s.short_id) -%}
+              {%-     elif database is not defined or d == database -%}
+              {%-       set _ = ok.append({'s': s, 'db': d}) -%}
+              {%-     endif -%}
+              {%-   elif s.short_id == _snapshot or (s.id | default('')).startswith(_snapshot) -%}
+              {%-     set _ = ok.append({'s': s, 'db': d}) -%}
+              {%-   endif -%}
+              {%- endfor -%}
+              {{ {'matches': ok, 'old': old,
+                  'dbs': ok | map(attribute='db') | reject('equalto', '') | unique | sort | list} }}
           when: _snapshot_info is not skipped
+
+        - name: Fail when no snapshot matches
+          ansible.builtin.fail:
+            msg: >-
+              {% if _snap_pick.old %}No snapshot of {{ accessory }}{{ (' for the database ' ~ database) if database is defined else '' }}
+              records its database. {{ _snap_pick.old | length }} older snapshot(s) were made before
+              2.24.0 and record none ({{ _snap_pick.old[-3:] | join(', ') }}, newest last); Bay will not
+              guess which database they hold. Restore one with --snapshot <id> and --database <name>.
+              {% else %}No snapshot of {{ accessory }} matches {{ _snapshot }}{{ (' and the database ' ~ database) if database is defined else '' }}.{% endif %}
+          when:
+            - _snap_pick is defined
+            - _snap_pick.matches | length == 0
+
+        - name: Refuse a snapshot choice that names no single database
+          ansible.builtin.assert:
+            that:
+              - _snapshot != 'latest' or database is defined or (_snap_pick.dbs | length) <= 1
+              - database is defined or (_restore_method | trim) != 'pg_dump' or (_snap_db | trim) != ''
+            fail_msg: >-
+              {% if (_snap_pick.dbs | length) > 1 %}The repo of {{ accessory }} holds several
+              databases ({{ _snap_pick.dbs | join(', ') }}), so the newest snapshot may hold
+              another one. Name one with --database <name> (or -e database=<name>), or a
+              snapshot with --snapshot <id>.{% else %}Snapshot {{ _snap.short_id | default('?') }} records no
+              database (made before 2.24.0). Today's config of {{ accessory }} may name another
+              database than the run that made it. Name the database it holds with
+              --database <name>.{% endif %}
+          when:
+            - _snap_pick is defined
+            - _snap is defined
+
+        - name: Warn that the database of an old snapshot cannot be checked
+          ansible.builtin.debug:
+            msg: >-
+              WARNING: snapshot {{ _snap.short_id }} records no database (made before
+              2.24.0). Bay cannot verify that it holds {{ database | default('?') }}; it restores
+              it into {{ database | default('?') }} because you named both.
+          when:
+            - _snap_pick is defined
+            - _snap is defined
+            - (_restore_method | trim) == 'pg_dump'
+            - (_snap_db | trim) == ''
+
+        - name: Refuse a database that the snapshot does not hold
+          ansible.builtin.assert:
+            that:
+              - database is not defined or (_snap_db | trim) == '' or (_snap_db | trim) == database
+            fail_msg: >-
+              Snapshot {{ _snap.short_id | default('?') }} holds the database {{ _snap_db | default('?') }},
+              not {{ database | default('?') }}.
+              Nothing was restored.
+          when:
+            - _snap_pick is defined
+            - _snap is defined
 
         # The rescue handler must never dereference `_snap` — it fires on
         # paths where the snapshot lookup itself failed. Flatten the one field
@@ -168,12 +308,16 @@
                 Accessory:  {{ accessory }}
                 Method:     {{ _restore_method }}
                 Snapshot:   {{ _snap.short_id }} ({{ _snap.time | regex_replace('T.*', '') }})
+              {% if (_restore_method | trim) == 'pg_dump' %}
+                Database:   {{ _pg_database | trim }}
+              {% endif %}
                 Host:       {{ inventory_hostname }}
+                Into:       {{ _into }}
               ====================================================
 
         - name: Require confirmation
           ansible.builtin.assert:
-            that: confirm | default('no') | bool
+            that: _into == 'scratch' or (confirm | default('no') | bool)
             fail_msg: >-
               Restore requires explicit confirmation. Re-run with -e confirm=yes
               or use 'bay backup restore' for interactive confirmation.
@@ -185,7 +329,14 @@
             cmd: "{{ _backup_scripts_dir }}/backup-{{ accessory }}.sh"
           environment:
             RESTIC_TAG_EXTRA: pre-restore
-          when: not _skip_pre_backup
+          # A scratch restore changes nothing live, so it needs no safety
+          # snapshot (that would be a paid backup run for nothing). A live
+          # pg_dump restore takes it inside its block, after the clients
+          # stopped and the session check passed.
+          when:
+            - not _skip_pre_backup
+            - _into == 'live'
+            - _restore_method != 'pg_dump'
           register: _pre_backup_result
           failed_when: _pre_backup_result.rc != 0
 
@@ -199,32 +350,200 @@
             group: docker
             mode: "0750"
 
-        # `docker exec -i`: without -i Docker attaches no stdin. restic then
-        # gets a broken pipe (exit 141), or psql reads an empty script, exits 0
-        # and the table check below passes on the untouched database. Before
-        # 2.23.2 this restore restored nothing.
-        # ON_ERROR_STOP with --single-transaction: the first failing statement
-        # (for example CREATE TABLE of a table that is still there) stops psql
-        # with exit 3 and rolls the whole restore back, so a restore never
-        # leaves a half-applied dump. A plain pg_dump has no DROP statements:
-        # restore into a database that does not hold the dumped objects.
-        - name: Restore PostgreSQL database
-          ansible.builtin.shell:
-            cmd: >-
-              set -o pipefail &&
-              {{ _backup_restic_bin }} dump {{ _snap.short_id }}
-              /{{ accessory }}{% if database is defined %}-{{ database }}{% endif %}.sql
-              --retry-lock 15m |
-              docker exec -i {{ accessory }}
-              psql -X -q -v ON_ERROR_STOP=1 --single-transaction
-              -U {{ _pg_user }} -d {{ _pg_database }}
-            executable: /bin/bash
-          environment: "{{ _restic_env }}"
-          become: true
-          become_user: root
+        # A live pg_dump restore runs with the clients of the database
+        # stopped (2.24.0): an app that writes during the restore would make
+        # the single transaction fail, or write into a database that is about
+        # to be replaced. The always: starts every client that ran before.
+        - name: Restore PostgreSQL database into a scratch container
+          ansible.builtin.include_role:
+            name: backup
+            tasks_from: restore_scratch
+          when:
+            - _into == 'scratch'
+            - _snap is defined
+
+        - name: Restore PostgreSQL database with its clients stopped
           when:
             - _restore_method == 'pg_dump'
+            - _into == 'live'
             - _snap is defined
+          vars:
+            # The clients of THIS database: "" is a client of every database
+            # of the target (another container of the project). A plain name
+            # (an old caller) counts as such a client.
+            _pg_clients: >-
+              {{ (_restore_stop_clients | select('string') | list)
+                 + (_restore_stop_clients | reject('string')
+                    | selectattr('database', 'in', ['', _pg_database | trim])
+                    | map(attribute='name') | list) }}
+            # Client backends only: autovacuum and extension workers (pg_cron,
+            # TimescaleDB) are sessions of the database too, come and go, and
+            # end by themselves.
+            _pg_session_sql: >-
+              FROM pg_stat_activity WHERE datname = :'db' AND pid <> pg_backend_pid()
+              AND backend_type = 'client backend'
+          block:
+            # The nightly docker prune (it removes stopped containers), a
+            # deploy and a webhook rebuild check this file while it is
+            # younger than 12 hours (docs/backups.md).
+            - name: Ensure the restore lock dir exists
+              ansible.builtin.file:
+                path: "{{ _restore_lock | dirname }}"
+                state: directory
+                mode: "0750"
+
+            - name: Hold the restore lock
+              ansible.builtin.copy:
+                dest: "{{ _restore_lock }}"
+                content: "live restore of {{ accessory }} (database {{ _pg_database | trim }}) since {{ lookup('ansible.builtin.pipe', 'date -Is') }}\n"
+                mode: "0640"
+
+            - name: List the running clients of the database
+              ansible.builtin.command:
+                cmd: "docker ps --format {{ '{{' }}.Names{{ '}}' }}"
+              register: _pg_running
+              changed_when: false
+              become: true
+              become_user: root
+
+            - name: Stop the clients of the database for restore
+              ansible.builtin.command:
+                argv: "{{ ['docker', 'stop'] + _pg_clients_up }}"
+              vars:
+                # Only those that run on this host: a client on another box is
+                # not this host's container.
+                _pg_clients_up: "{{ _pg_clients | select('in', _pg_running.stdout_lines) | list }}"
+              register: _pg_stopped
+              changed_when: true
+              become: true
+              become_user: root
+              when: _pg_clients_up | length > 0
+
+            # A session that is still open now (a client on another box, a
+            # cron, a psql) would block the restore or write into it. Name it
+            # and stop, unless --terminate-connections ends it.
+            - name: List the other sessions of the database
+              ansible.builtin.command:
+                argv: [docker, exec, -i, "{{ accessory }}", psql, -X, -qAt, -F, "|",
+                       -v, "db={{ _pg_database | trim }}", -U, "{{ _pg_user }}", -d, "{{ _pg_database | trim }}"]
+                stdin: >-
+                  SELECT pid, coalesce(nullif(application_name, ''), '-'),
+                  coalesce(host(client_addr), 'local'), usename {{ _pg_session_sql }};
+              register: _pg_sessions
+              changed_when: false
+              become: true
+              become_user: root
+
+            - name: End the other sessions of the database
+              ansible.builtin.command:
+                argv: [docker, exec, -i, "{{ accessory }}", psql, -X, -qAt,
+                       -v, "db={{ _pg_database | trim }}", -U, "{{ _pg_user }}", -d, "{{ _pg_database | trim }}"]
+                stdin: "SELECT pg_terminate_backend(pid) {{ _pg_session_sql }};"
+              changed_when: true
+              become: true
+              become_user: root
+              when:
+                - _pg_sessions.stdout_lines | length > 0
+                - _restore_terminate | bool
+
+            - name: List the sessions that are left
+              ansible.builtin.command:
+                argv: [docker, exec, -i, "{{ accessory }}", psql, -X, -qAt, -F, "|",
+                       -v, "db={{ _pg_database | trim }}", -U, "{{ _pg_user }}", -d, "{{ _pg_database | trim }}"]
+                stdin: >-
+                  SELECT pid, coalesce(nullif(application_name, ''), '-'),
+                  coalesce(host(client_addr), 'local'), usename {{ _pg_session_sql }};
+              register: _pg_sessions_left
+              changed_when: false
+              become: true
+              become_user: root
+              when:
+                - _pg_sessions.stdout_lines | length > 0
+                - _restore_terminate | bool
+
+            - name: Refuse while other sessions use the database
+              ansible.builtin.fail:
+                msg: >-
+                  {{ _left | length }} other session(s) still use the database
+                  {{ _pg_database | trim }} (pid|application|client|user):
+                  {{ _left | join('; ') }}. Nothing was restored. Stop them, or
+                  re-run with --terminate-connections to end them.
+              vars:
+                _left: >-
+                  {{ (_pg_sessions_left.stdout_lines | default([]))
+                     if (_pg_sessions_left is defined and _pg_sessions_left is not skipped)
+                     else _pg_sessions.stdout_lines }}
+              when: _left | length > 0
+
+            # The safety snapshot after the clients stopped and no session is
+            # left: it holds every write up to the restore, and a refused
+            # attempt pays for no backup run.
+            - name: Create pre-restore backup of the database
+              ansible.builtin.command:
+                cmd: "{{ _backup_scripts_dir }}/backup-{{ accessory }}.sh"
+              environment:
+                RESTIC_TAG_EXTRA: pre-restore
+              register: _pre_backup_result
+              changed_when: true
+              when: not (_skip_pre_backup | bool)
+
+            # `docker exec -i`: without -i Docker attaches no stdin. restic then
+            # gets a broken pipe (exit 141), or psql reads an empty script, exits 0
+            # and the table check below passes on the untouched database. Before
+            # 2.23.2 this restore restored nothing.
+            # Plain (.sql): ON_ERROR_STOP with --single-transaction. The first
+            # failing statement (for example CREATE TABLE of a table that is still
+            # there) stops psql with exit 3 and rolls the whole restore back. A
+            # plain dump has no DROP statements: restore into a database that does
+            # not hold the dumped objects.
+            # Custom (.dump, 2.24.0): pg_restore --clean --if-exists drops each
+            # object of the dump before it creates it, in one transaction, and
+            # stops at the first error. It does not undo the rest: an object
+            # made after the snapshot (a table, a column of a migration that
+            # the dump does not know) stays, while a migrations table goes back
+            # to the snapshot (docs/backups.md).
+            # PGOPTIONS lock_timeout: a lock held by a session that slipped in
+            # fails the restore instead of a silent wait.
+            - name: Restore PostgreSQL database
+              when: _snap is defined
+              ansible.builtin.shell:
+                cmd: >-
+                  set -o pipefail &&
+                  {{ _backup_restic_bin }} dump {{ _snap.short_id }}
+                  {{ _pg_file | trim | quote }}
+                  --no-cache --retry-lock 15m |
+                  docker exec -i
+                  -e {{ ('PGOPTIONS=-c lock_timeout=' ~ _restore_lock_timeout) | quote }}
+                  {{ accessory }}
+                  {% if _pg_custom | bool %}
+                  pg_restore -U {{ _pg_user }} -d {{ _pg_database | trim }}
+                  --clean --if-exists --single-transaction --exit-on-error
+                  {% else %}
+                  psql -X -q -v ON_ERROR_STOP=1 --single-transaction
+                  -U {{ _pg_user }} -d {{ _pg_database | trim }}
+                  {% endif %}
+                executable: /bin/bash
+              environment: "{{ _restic_env }}"
+              become: true
+              become_user: root
+          always:
+            - name: Start the clients and release the restore lock
+              block:
+                - name: Start the clients that ran before the restore
+                  ansible.builtin.command:
+                    argv: "{{ ['docker', 'start'] + (_pg_stopped.cmd[2:] | default([])) }}"
+                  changed_when: true
+                  become: true
+                  become_user: root
+                  when:
+                    - _pg_stopped is defined
+                    - _pg_stopped is not skipped
+                    - (_pg_stopped.cmd | default([]) | length) > 2
+              always:
+                - name: Release the restore lock
+                  ansible.builtin.file:
+                    path: "{{ _restore_lock }}"
+                    state: absent
 
         - name: Restore MySQL database
           ansible.builtin.shell:
@@ -232,7 +551,7 @@
               set -o pipefail &&
               {{ _backup_restic_bin }} dump {{ _snap.short_id }}
               /{{ accessory }}.sql
-              --retry-lock 15m |
+              --no-cache --retry-lock 15m |
               docker exec -i
               -e MYSQL_PWD="{{ _accessory_config.env['clear'].MYSQL_ROOT_PASSWORD | default(_accessory_config.env['clear'].MYSQL_PASSWORD | default('')) }}"
               {{ accessory }}
@@ -268,7 +587,7 @@
                   set -o pipefail &&
                   {{ _backup_restic_bin }} dump {{ _snap.short_id }}
                   /{{ accessory }}.rdb
-                  --retry-lock 15m >
+                  --no-cache --retry-lock 15m >
                   {{ _restore_tmp_dir }}/dump.tar &&
                   docker
                   cp - {{ accessory }}:/data < {{ _restore_tmp_dir }}/dump.tar
@@ -320,7 +639,7 @@
                   set -o pipefail &&
                   {{ _backup_restic_bin }} dump {{ _snap.short_id }}
                   /{{ accessory }}.tar
-                  --retry-lock 15m |
+                  --no-cache --retry-lock 15m |
                   tar -C {{ _volume_mountpoint.stdout | trim | quote }}
                   --strip-components=1 -xpf -
                 executable: /bin/bash
@@ -348,7 +667,7 @@
               set -o pipefail &&
               {{ _backup_restic_bin }} dump {{ _snap.short_id }}
               /{{ accessory }}.tar
-              --retry-lock 15m |
+              --no-cache --retry-lock 15m |
               docker
               cp - {{ accessory }}:{{ _accessory_config.backup.source_path | default('/data') }}
             executable: /bin/bash
@@ -366,11 +685,13 @@
           ansible.builtin.shell:
             cmd: >-
               docker exec {{ accessory }}
-              psql -U {{ _pg_user }} -d {{ _pg_database }}
+              psql -U {{ _pg_user }} -d {{ _pg_database | trim }}
               -t -c "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public';"
           register: _table_count
           failed_when: (_table_count.stdout | trim | int) == 0
-          when: _restore_method == 'pg_dump'
+          when:
+            - _restore_method == 'pg_dump'
+            - _into == 'live'
 
         - name: Verify Redis is responding
           ansible.builtin.shell:
@@ -403,21 +724,36 @@
           ansible.builtin.set_fact:
             _bay_alert_id: restore.completed
             _bay_alert_message: "{{ docker_monitor_alert_header | default('') }}\u2705 <b>Restore complete</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host | default(inventory_hostname) }}</code>\n\u25b8 Accessory:  <code>{{ accessory }}</code>\n\u25b8 Method:     <code>{{ _restore_method }}</code>\n\u25b8 Snapshot:   <code>{{ _snap.short_id }}</code>{{ docker_monitor_alert_footer | default('') }}"
-          when: _snap is defined
+          when:
+            - _snap is defined
+            - _into == 'live'
 
         - name: Deliver restore alert to routed recipients
           ansible.builtin.include_role:
             name: alert_channel
             tasks_from: send_alert
-          when: _snap is defined
+          when:
+            - _snap is defined
+            - _into == 'live'
 
       rescue:
         # A failed restore is the single worst thing this playbook can do
         # quietly: the pre-restore backup exists, but nobody knows to use it.
         - name: Compose restore failed alert
+          when: not ((restore_test | default(false) | bool) or _into == 'scratch')
           ansible.builtin.set_fact:
             _bay_alert_id: restore.failed
             _bay_alert_message: "{{ docker_monitor_alert_header | default('') }}\u274c <b>Restore failed</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host | default(inventory_hostname) }}</code>\n\u25b8 Accessory:  <code>{{ accessory }}</code>\n\u25b8 Method:     <code>{{ _restore_method }}</code>\n\u25b8 Snapshot:   <code>{{ _snap_label | default('unknown') }}</code>\n\u25b8 Failed at:  <code>{{ ansible_failed_task.name | default('unknown') }}</code>{{ docker_monitor_alert_footer | default('') }}"
+          ignore_errors: true
+
+        # `bay backup restore-test` and `restore --into scratch`: the live
+        # database was never touched, so this is a warning about the backup,
+        # not a failed restore.
+        - name: Compose restore test failed alert
+          when: (restore_test | default(false) | bool) or _into == 'scratch'
+          ansible.builtin.set_fact:
+            _bay_alert_id: backup.restore_test_failed
+            _bay_alert_message: "{{ docker_monitor_alert_header | default('') }}\u26a0\ufe0f <b>Restore test failed</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host | default(inventory_hostname) }}</code>\n\u25b8 Target:     <code>{{ accessory }}</code>\n\u25b8 Snapshot:   <code>{{ _snap_label | default('unknown') }}</code>\n\u25b8 Failed at:  <code>{{ ansible_failed_task.name | default('unknown') }}</code>\n\nThe live database was not touched. Check the backup.{{ docker_monitor_alert_footer | default('') }}"
           ignore_errors: true
 
         - name: Deliver restore alert to routed recipients

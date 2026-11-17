@@ -54,7 +54,8 @@ HEADER_RE = re.compile(
 
 #: Keys a [deploy.<env>] table may override with a plain replace.
 _RUNTIME_KEYS = (
-    "image", "port", "command", "release", "health", "replicas", "memory", "cpus", "update",
+    "image", "port", "command", "release", "health", "replicas", "memory", "shm_size", "cpus",
+    "update",
     "zero_downtime", "logs", "secrets", "log_rotation", "dns",
 )
 
@@ -434,6 +435,8 @@ class _Compiler:
             # Swap is never allowed: memswap_limit equals the memory limit.
             entry["mem_limit"] = res["memory"]
             entry["memswap_limit"] = res["memory"]
+        if "shm_size" in res:
+            entry["shm_size"] = res["shm_size"]
         if "cpus" in res:
             entry["cpus"] = _cpus_number(res["cpus"])
         update = _UPDATE[res.get("update", "notify")]
@@ -622,6 +625,8 @@ class _Compiler:
             # so its first deploy from a compiled file recreates it once.
             entry["mem_limit"] = level["memory"]
             entry["memswap_limit"] = level["memory"]
+        if "shm_size" in level:
+            entry["shm_size"] = level["shm_size"]
         if "cpus" in level:
             entry["cpus"] = _cpus_number(level["cpus"])
         if "dns" in level:
@@ -646,6 +651,9 @@ class _Compiler:
         regions = self._regions([unit.box], unit.label)
         if regions:
             entry["regions"] = regions
+        # Only an accessory is backed up; bay_toml refuses a routed service.
+        if not is_web and not routed and "backup" in level:
+            entry["backup"] = self._service_backup(unit, service, level["backup"])
 
         port = unit.ports.get(service)
         health = level.get("health")
@@ -1105,6 +1113,39 @@ class _Compiler:
             if int(mount.get("mode", "0600"), 8) & 0o004:
                 public = True
         return volumes, files, public
+
+    def _service_backup(
+        self, unit: _Unit, service: str, table: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The accessory ``backup:`` block of ``[services.<service>.backup]``.
+
+        ``method`` is ``pg_dump``. ``format`` defaults to ``custom`` (``pg_dump
+        -Fc``; a fleet resource keeps ``plain``). ``hour`` and ``keep`` come from
+        the table, then the project ``[backup]``, then ``[defaults.backup]``;
+        with an hour the schedule is ``0 <hour> * * *`` UTC (``utc: true``),
+        without one the role default applies, as for a volume backup.
+        ``clients`` are the other containers of the project in this env: a live
+        restore stops them first. The backup role reads the rest
+        (``roles/backup/tasks/resolve.yml``).
+        """
+        policy = {
+            **self.defaults.get("backup", {}),
+            **unit.doc.get("backup", {}),
+            **{k: v for k, v in table.items() if k in ("hour", "keep")},
+        }
+        out: dict[str, Any] = {"method": table["method"], "format": table.get("format", "custom")}
+        if "hour" in policy:
+            out["schedule"] = f"0 {int(policy['hour'])} * * *"
+            out["utc"] = True
+        if "keep" in policy:
+            out["retain"] = _keep_days(str(policy["keep"]))
+        if "databases" in table:
+            out["databases"] = list(table["databases"])
+        if "max_age_hours" in table:
+            out["max_age_hours"] = int(table["max_age_hours"])
+        name = unit.containers[service]
+        out["clients"] = sorted(c for c in unit.containers.values() if c != name)
+        return out
 
     def _volume_backup(self, unit: _Unit, volume: str, container: str, path: str) -> None:
         """One ``volume_backups`` entry: ``{container, path, schedule?, retain?}``.

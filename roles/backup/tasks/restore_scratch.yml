@@ -1,0 +1,366 @@
+---
+# Restore a pg_dump snapshot into a throwaway Postgres container (2.24.0).
+#
+# Included by restore.yml with restore_into=scratch (`bay backup restore
+# --into scratch`, `bay backup restore-test`). It never touches the live
+# container: every `docker exec` targets _scratch_name, which the assert below
+# keeps apart from the accessory. The scratch container has no network and no
+# published port, so trust auth needs no secret. Only counts leave the box.
+#
+# Reads restore.yml's play vars: _snap, _pg_file, _pg_custom, _pg_user,
+# _pg_database, _restic_env, _backup_restic_bin, _image, _accessory_config.
+
+- name: Note the start time of the restore test
+  ansible.builtin.set_fact:
+    _scratch_started: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
+
+- name: Name the scratch container
+  ansible.builtin.set_fact:
+    _scratch_name: "bay-restore-test-{{ accessory }}-{{ _scratch_started }}"
+    # The label bay.restore_test.expires: the 6-hourly freshness run removes
+    # the container after it (with its volume), also when this play was
+    # interrupted or a reboot lost the transient timer of a kept one.
+    _scratch_expires: >-
+      {{ (_scratch_started | int)
+         + ((restore_keep_hours | default(24) | int) if (restore_keep | default(false) | bool)
+            else (restore_test_max_hours | default(6) | int)) * 3600 }}
+
+- name: Never let the scratch container be the live one
+  ansible.builtin.assert:
+    that:
+      - _scratch_name.startswith('bay-restore-test-')
+      - _scratch_name != accessory
+      - (_image | trim) | length > 0
+    fail_msg: "The scratch container name or image is unsafe; nothing was started."
+
+# Expired scratch containers (label bay.restore_test.expires, else older than
+# a day) go before a new one starts. The freshness timer does the same every
+# 6 hours.
+- name: Remove expired scratch containers
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: >-
+      set -o pipefail;
+      now=$(date +%s);
+      docker ps -a --filter label=bay.restore_test=1
+      --format '{{ '{{' }}.Names{{ '}}' }} {{ '{{' }}.Label "bay.restore_test.created"{{ '}}' }} {{ '{{' }}.Label "bay.restore_test.expires"{{ '}}' }}' |
+      while read -r name created expires; do
+        case "$name" in bay-restore-test-*) ;; *) continue ;; esac;
+        [[ "$created" =~ ^[0-9]+$ ]] || continue;
+        [[ "$expires" =~ ^[0-9]+$ ]] || expires=$((created + 86400));
+        if [ "$now" -gt "$expires" ]; then docker rm -f -v "$name" >/dev/null && echo "removed $name"; fi;
+      done
+  register: _scratch_stale
+  changed_when: _scratch_stale.stdout | length > 0
+  become: true
+  become_user: root
+
+# The restored database needs about the size of the live one. Read it there
+# (one SELECT); only when that fails, ask restic for the restore size of the
+# snapshot (a dump is smaller than the database it makes, so twice that).
+- name: Read the size of the live database
+  ansible.builtin.command:
+    argv: [docker, exec, "{{ accessory }}", psql, -X, -qAt, -U, "{{ _pg_user }}",
+           -d, "{{ _pg_database | trim }}", -c, "SELECT pg_database_size(current_database())"]
+  register: _scratch_live_size
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: root
+
+- name: Read the restored size of the snapshot
+  ansible.builtin.command:
+    cmd: "{{ _backup_restic_bin }} stats {{ _snap.short_id }} --mode restore-size --json --no-cache --no-lock"
+  environment: "{{ _restic_env }}"
+  register: _scratch_size
+  changed_when: false
+  become: true
+  become_user: root
+  when: _scratch_live_size.rc != 0 or not ((_scratch_live_size.stdout | trim) is match('^[0-9]+$'))
+
+# restic 0.19 can print a line before the JSON document: read the last line
+# that starts with `{`.
+- name: Work out the space the scratch restore needs
+  ansible.builtin.set_fact:
+    _scratch_need: |-
+      {%- set live = _scratch_live_size.stdout | default('') | trim -%}
+      {%- if (_scratch_live_size.rc | default(1)) == 0 and live is match('^[0-9]+$') -%}
+      {%-   set b = live | int -%}
+      {{ {'source': 'live database', 'bytes': b + ([b // 4, 1073741824] | max)} }}
+      {%- else -%}
+      {%-   set lines = (_scratch_size.stdout | default('')).splitlines() | select('match', '^ *[{]') | list -%}
+      {%-   set st = (lines | last | from_json) if lines else {} -%}
+      {{ {'source': 'snapshot', 'bytes': 2 * (st.total_size | default(0) | int)} }}
+      {%- endif -%}
+
+- name: Read the free space of the Docker data root
+  ansible.builtin.shell:
+    executable: /bin/bash
+    cmd: "set -o pipefail; df -B1 --output=avail \"$(docker info -f '{{ '{{' }}.DockerRootDir{{ '}}' }}')\" | tail -n 1"
+  register: _scratch_free
+  changed_when: false
+  become: true
+  become_user: root
+
+- name: Stop when the box has not enough space for the scratch restore
+  ansible.builtin.assert:
+    that:
+      - (_scratch_free.stdout | trim | int) > (_scratch_need.bytes | int)
+    fail_msg: >-
+      The scratch restore needs about {{ ((_scratch_need.bytes | int) / 1073741824) | round(1) }} GiB
+      (from the {{ _scratch_need.source }}) and the Docker data root has
+      {{ ((_scratch_free.stdout | trim | int) / 1073741824) | round(1) }} GiB free.
+      Nothing was started.
+
+# A plain dump says `ALTER ... OWNER TO <role>` and GRANT ... TO <role>. The
+# scratch server has only its superuser, so psql (ON_ERROR_STOP) stopped at
+# the first such line. The roles of the live server are made NOLOGIN in the
+# scratch container first. A custom dump restores with --no-owner instead.
+- name: Read the roles of the live server
+  ansible.builtin.command:
+    argv: [docker, exec, "{{ accessory }}", psql, -X, -qAt, -U, "{{ _pg_user }}",
+           -d, "{{ _pg_database | trim }}", -c, "SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_'"]
+  register: _scratch_roles
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: root
+  when: not (_pg_custom | bool)
+
+- name: Restore into the scratch container and count the rows
+  block:
+    # The memory key of the compiled accessory (mem_limit) and its command
+    # (shared_preload_libraries and other -c settings), so the scratch server
+    # loads what the dump needs.
+    - name: Start the scratch container
+      ansible.builtin.command:
+        argv: "{{ _scratch_run + (_accessory_config.command | bay_shlex_split if _accessory_config.command is defined else []) }}"
+      vars:
+        _scratch_run:
+          - docker
+          - run
+          - -d
+          - --name
+          - "{{ _scratch_name }}"
+          - --label
+          - bay.restore_test=1
+          - --label
+          - "bay.restore_test.created={{ _scratch_started }}"
+          - --label
+          - "bay.restore_test.target={{ accessory }}"
+          - --label
+          - "bay.restore_test.expires={{ _scratch_expires }}"
+          - --network
+          - none
+          - --memory
+          - "{{ _accessory_config.mem_limit | default(_accessory_config.memory | default('2g')) }}"
+          - --shm-size
+          - "{{ _accessory_config.shm_size | default('256m') }}"
+          - -e
+          - POSTGRES_HOST_AUTH_METHOD=trust
+          - -e
+          - "POSTGRES_USER={{ _pg_user }}"
+          - -e
+          - "POSTGRES_DB={{ _pg_database | trim }}"
+          - "{{ _image | trim }}"
+      changed_when: true
+      become: true
+      become_user: root
+
+    # A kept container (bay backup restore --into scratch) goes away on its
+    # own: a transient systemd timer removes it after restore_keep_hours.
+    - name: Remove the kept scratch container after a time
+      ansible.builtin.command:
+        argv:
+          - systemd-run
+          - "--unit={{ _scratch_name }}-rm"
+          - "--on-active={{ restore_keep_hours | default(24) | int }}h"
+          - --timer-property=AccuracySec=1min
+          - /bin/sh
+          - -c
+          - "docker rm -f -v {{ _scratch_name }}"
+      changed_when: true
+      become: true
+      become_user: root
+      when: restore_keep | default(false) | bool
+
+    # The image entrypoint first runs a server on the socket only, then the
+    # real one; pg_isready over TCP answers only from the real one.
+    - name: Wait for the scratch Postgres
+      ansible.builtin.command:
+        argv: [docker, exec, "{{ _scratch_name }}", pg_isready, -h, 127.0.0.1,
+               -U, "{{ _pg_user }}", -d, "{{ _pg_database | trim }}"]
+      register: _scratch_ready
+      until: _scratch_ready.rc == 0
+      retries: 60
+      delay: 2
+      changed_when: false
+      become: true
+      become_user: root
+
+    - name: Create the roles of the live server in the scratch container
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'exec', _scratch_name, 'psql', '-X', '-q', '-v', 'ON_ERROR_STOP=1',
+                   '-U', _pg_user, '-d', _pg_database | trim] + _creates }}"
+      vars:
+        _roles: "{{ (_scratch_roles.stdout_lines | default([])) | reject('equalto', _pg_user) | reject('equalto', '') | list }}"
+        _creates: |-
+          {%- set out = [] -%}
+          {%- for r in _roles -%}
+          {%-   set _ = out.extend(['-c', 'CREATE ROLE "' ~ (r | replace('"', '""')) ~ '" NOLOGIN']) -%}
+          {%- endfor -%}
+          {{ out }}
+      changed_when: true
+      become: true
+      become_user: root
+      when:
+        - not (_pg_custom | bool)
+        - _scratch_roles is not skipped
+        - (_scratch_roles.rc | default(1)) == 0
+        - _roles | length > 0
+
+    - name: Restore the snapshot into the scratch container
+      ansible.builtin.shell:
+        executable: /bin/bash
+        cmd: >-
+          set -o pipefail &&
+          {{ _backup_restic_bin }} dump {{ _snap.short_id }} {{ _pg_file | trim | quote }}
+          --no-cache --retry-lock 15m |
+          docker exec -i {{ _scratch_name | quote }}
+          {% if _pg_custom | bool %}
+          pg_restore -U {{ _pg_user | quote }} -d {{ _pg_database | trim | quote }}
+          --no-owner --no-privileges --exit-on-error
+          {% else %}
+          psql -X -q -v ON_ERROR_STOP=1 --single-transaction
+          -U {{ _pg_user | quote }} -d {{ _pg_database | trim | quote }}
+          {% endif %}
+      environment: "{{ _restic_env }}"
+      register: _scratch_restore
+      changed_when: true
+      become: true
+      become_user: root
+
+    - name: Count the rows of every table in the scratch database
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ _scratch_name }}"
+          - psql
+          - -X
+          - -qAt
+          - -F
+          - "|"
+          - -U
+          - "{{ _pg_user }}"
+          - -d
+          - "{{ _pg_database | trim }}"
+          - -c
+          - >-
+            SELECT table_schema || '.' || table_name,
+            (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I.%I',
+            table_schema, table_name), false, true, '')))[1]::text::bigint
+            FROM information_schema.tables
+            WHERE table_type = 'BASE TABLE'
+            AND table_schema NOT IN ('pg_catalog', 'information_schema')
+            ORDER BY 1
+      register: _scratch_counts
+      changed_when: false
+      become: true
+      become_user: root
+
+    # Read-only, one query: the planner's row estimates of the live database.
+    - name: Read the row estimates of the live database
+      ansible.builtin.command:
+        argv:
+          - docker
+          - exec
+          - "{{ accessory }}"
+          - psql
+          - -X
+          - -qAt
+          - -F
+          - "|"
+          - -U
+          - "{{ _pg_user }}"
+          - -d
+          - "{{ _pg_database | trim }}"
+          - -c
+          - "SELECT schemaname || '.' || relname, n_live_tup FROM pg_stat_user_tables ORDER BY 1"
+      register: _scratch_live
+      changed_when: false
+      failed_when: false
+      become: true
+      become_user: root
+
+    - name: Build the restore test report
+      ansible.builtin.set_fact:
+        _scratch_report: >-
+          {%- set rows = {} -%}
+          {%- for line in _scratch_counts.stdout_lines if '|' in line -%}
+          {%-   set _ = rows.update({line.split('|')[0]: line.split('|')[1] | int}) -%}
+          {%- endfor -%}
+          {%- set live = {} -%}
+          {%- for line in (_scratch_live.stdout_lines | default([])) if '|' in line -%}
+          {%-   set _ = live.update({line.split('|')[0]: line.split('|')[1] | int}) -%}
+          {%- endfor -%}
+          {%- set flagged = [] -%}
+          {%- for t, n in live.items() if n > 0 and rows.get(t, 0) == 0 -%}
+          {%-   set _ = flagged.append(t) -%}
+          {%- endfor -%}
+          {{ {'target': accessory, 'host': inventory_hostname,
+              'snapshot': _snap.short_id, 'snapshot_time': _snap.time,
+              'file': _pg_file | trim, 'database': _pg_database | trim,
+              'at': lookup('ansible.builtin.pipe', 'date +%s') | int,
+              'seconds': (lookup('ansible.builtin.pipe', 'date +%s') | int) - (_scratch_started | int),
+              'tables': rows | length, 'rows': rows.values() | sum,
+              'counts': rows, 'live_estimates': live,
+              'empty_but_live_has_rows': flagged,
+              'kept': restore_keep | default(false) | bool,
+              'container': _scratch_name} }}
+
+    - name: Keep the restore test report on the box
+      ansible.builtin.copy:
+        dest: "{{ _backup_scripts_dir }}/status/{{ accessory }}.restore-test.json"
+        content: "{{ _scratch_report | to_nice_json }}\n"
+        owner: "{{ app_user }}"
+        group: docker
+        mode: "0640"
+      become: true
+      become_user: root
+
+    - name: Hand the restore test report to the CLI
+      ansible.builtin.copy:
+        dest: "{{ restore_test_out }}"
+        content: "{{ _scratch_report | to_json }}"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      when: restore_test_out is defined
+
+    - name: Show the restore test report
+      ansible.builtin.debug:
+        msg: >-
+          Restored {{ _scratch_report.tables }} tables, {{ _scratch_report.rows }} rows from
+          snapshot {{ _snap.short_id }} in {{ _scratch_report.seconds }} s.
+          {% if _scratch_report.empty_but_live_has_rows %}Empty here but not in the live
+          estimates: {{ _scratch_report.empty_but_live_has_rows | join(', ') }}.{% endif %}
+          {% if restore_keep | default(false) | bool %}Kept as {{ _scratch_name }}
+          (no network): docker exec -it {{ _scratch_name }} psql -U {{ _pg_user }}
+          {{ _pg_database | trim }}. It is removed automatically after
+          {{ restore_keep_hours | default(24) | int }} hours (timer {{ _scratch_name }}-rm),
+          or now with docker rm -f -v {{ _scratch_name }}.{% endif %}
+
+    - name: Fail a restore test that restored no table
+      ansible.builtin.assert:
+        that: _scratch_report.tables | int > 0
+        fail_msg: "The snapshot restored with no table in the scratch database."
+  always:
+    - name: Remove the scratch container
+      ansible.builtin.command:
+        argv: [docker, rm, -f, -v, "{{ _scratch_name }}"]
+      changed_when: true
+      failed_when: false
+      become: true
+      become_user: root
+      when: not (restore_keep | default(false) | bool)

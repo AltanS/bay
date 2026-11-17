@@ -72,6 +72,22 @@
   loop:
     - "{{ backup_scripts_dir }}"
     - "{{ backup_lock_dir }}"
+    - "{{ backup_status_dir }}"
+  when: backup_enabled
+
+# Before 2.24.0 `bay backup run` ran the script as root. A first run like that
+# left a root-owned restic cache, and the timer (the app user) then ran every
+# backup without a cache: more S3 reads, and a "permission denied" in each log.
+# Owner only: the files keep their modes.
+- name: Give the restic cache back to the app user
+  become: true
+  become_user: root
+  ansible.builtin.file:
+    path: "{{ backup_scripts_dir }}/cache"
+    state: directory
+    owner: "{{ app_user }}"
+    group: docker
+    recurse: true
   when: backup_enabled
 
 - name: Initialize restic repositories
@@ -100,6 +116,71 @@
     accessory_config: "{{ item.config }}"
     backup_container: "{{ item.container | default(item.name) }}"
     bound_databases: "{{ (_bound_databases | default({}))[item.name] | default([]) }}"
+    pg_format: "{{ item.format | default('plain') }}"
+  when: backup_enabled
+
+# A target that left the config (a mount set to backup = false, a removed
+# [services.<x>.backup]) keeps its timer, and so its nightly run, until
+# something removes it. The role removes only names that its own manifest of
+# the last run recorded: a script that some hand or an older release put
+# there is never touched. The restic repo stays (docs/backups.md).
+- name: Read the manifest of the last backup role run
+  ansible.builtin.slurp:
+    src: "{{ backup_scripts_dir }}/targets.json"
+  register: _backup_old_manifest
+  failed_when: false
+  check_mode: false
+  when: backup_enabled
+
+- name: Find the recorded backup targets that left the config
+  ansible.builtin.set_fact:
+    _backup_dropped: >-
+      {{ (_old_names | difference(_backup_accessories | default([]) | map(attribute='name') | list))
+         | select('match', '^[A-Za-z0-9][A-Za-z0-9_.-]*$') | list }}
+  vars:
+    _old_raw: >-
+      {{ (_backup_old_manifest.content | b64decode)
+         if (_backup_old_manifest.content | default('')) else '[]' }}
+    _old_names: >-
+      {{ (_old_raw | from_json | default([], true))
+         | selectattr('name', 'defined') | map(attribute='name') | list }}
+  when: backup_enabled
+
+- name: Remove the backup units and scripts of targets that left the config
+  ansible.builtin.include_tasks: teardown.yml
+  vars:
+    _teardown_accessories: "{{ _backup_dropped }}"
+  when:
+    - backup_enabled
+    - _backup_dropped | default([]) | length > 0
+    - not ansible_check_mode
+
+- name: Report the backup targets that a deploy would remove
+  ansible.builtin.debug:
+    msg: "Check mode: would remove the backup units and scripts of {{ _backup_dropped | join(', ') }} (the restic repos stay)."
+  when:
+    - backup_enabled
+    - _backup_dropped | default([]) | length > 0
+    - ansible_check_mode
+
+# The targets of this host, for the freshness check (bay-backup-freshness)
+# and `bay backup status`. Only names and schedules, no secret.
+- name: Write the manifest of this host's backup targets
+  ansible.builtin.copy:
+    dest: "{{ backup_scripts_dir }}/targets.json"
+    content: |-
+      {%- set out = [] -%}
+      {%- for t in _backup_accessories | default([]) -%}
+      {%-   set _ = out.append({'name': t.name, 'method': t.method,
+                               'format': t.format | default(''),
+                               'schedule': t.schedule,
+                               'utc': t.utc | default(false) | bool,
+                               'max_age_hours': t.max_age_hours | default(backup_max_age_hours) | int}) -%}
+      {%- endfor -%}
+      {{ out | to_nice_json }}
+    owner: "{{ app_user }}"
+    group: docker
+    mode: "0640"
   when: backup_enabled
 
 - name: Write restic environment file for CLI
@@ -243,3 +324,73 @@
   when:
     - backup_enabled
     - not (ansible_check_mode and (_backup_maintenance_timer_units.results | default([]) | selectattr('item.name', 'equalto', item.name) | selectattr('changed') | list | length > 0))
+
+# ── Freshness check (2.24.0) ─────────────────────────────────────────────
+# Every 6 hours: each target of targets.json must have its script, a running
+# timer and a successful run within max_age_hours, else backup.missing or
+# backup.stale. Local reads only (see the script header).
+
+- name: Install the backup freshness check script
+  ansible.builtin.template:
+    src: bay-backup-freshness.sh.j2
+    dest: /usr/local/bin/bay-backup-freshness
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+  become_user: root
+  when:
+    - backup_enabled
+    - backup_freshness_enabled | bool
+
+- name: Install the backup freshness check units
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - bay-backup-freshness.service
+    - bay-backup-freshness.timer
+  become: true
+  become_user: root
+  register: _backup_freshness_units
+  when:
+    - backup_enabled
+    - backup_freshness_enabled | bool
+
+- name: Reload systemd for the backup freshness check units
+  ansible.builtin.systemd:
+    daemon_reload: true
+  become: true
+  become_user: root
+  when:
+    - backup_enabled
+    - backup_freshness_enabled | bool
+    - _backup_freshness_units is changed
+    - not ansible_check_mode
+
+- name: Enable and start the backup freshness check timer
+  ansible.builtin.systemd:
+    name: bay-backup-freshness.timer
+    enabled: true
+    state: started
+  become: true
+  become_user: root
+  when:
+    - backup_enabled
+    - backup_freshness_enabled | bool
+    - not (ansible_check_mode and _backup_freshness_units is changed)
+
+- name: Stop the backup freshness check timer when it is turned off
+  ansible.builtin.systemd:
+    name: bay-backup-freshness.timer
+    enabled: false
+    state: stopped
+  become: true
+  become_user: root
+  failed_when: false
+  when:
+    - backup_enabled
+    - not (backup_freshness_enabled | bool)
