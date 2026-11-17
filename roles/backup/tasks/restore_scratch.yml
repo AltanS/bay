@@ -33,6 +33,25 @@
       - (_image | trim) | length > 0
     fail_msg: "The scratch container name or image is unsafe; nothing was started."
 
+- name: Read the limits of the restore test
+  ansible.builtin.set_fact:
+    _scratch_max_loss_pct: "{{ restore_test_max_loss_pct | default(1.0) }}"
+    _scratch_max_loss_rows: "{{ restore_test_max_loss_rows | default(1000) }}"
+    _scratch_count_timeout: "{{ restore_test_count_timeout | default(120) }}"
+
+- name: Never start the scratch container with a limit that makes no sense
+  ansible.builtin.assert:
+    that:
+      - _scratch_max_loss_pct | string is match('^[0-9]+(\.[0-9]+)?$')
+      - (_scratch_max_loss_pct | float) <= 100
+      - _scratch_max_loss_rows | string is match('^[0-9]+$')
+      - _scratch_count_timeout | string is match('^[0-9]+$')
+      - (_scratch_count_timeout | int) >= 1
+    fail_msg: >-
+      restore_test_max_loss_pct must be 0 to 100, restore_test_max_loss_rows a whole number
+      of rows (0 or more) and restore_test_count_timeout whole seconds (1 or more).
+      Nothing was started.
+
 # Expired scratch containers (label bay.restore_test.expires, else older than
 # a day) go before a new one starts. The freshness timer does the same every
 # 6 hours.
@@ -240,7 +259,13 @@
       become: true
       become_user: root
 
-    - name: Count the rows of every table in the scratch database
+    # Exact counts of the LEAF tables (regular tables and partitions; never a
+    # partitioned parent, a view or a materialized view), one table at a time.
+    # `ONLY` keeps an inheritance parent from counting its children twice.
+    # Lines: `T<TAB>table<TAB>count`, and `P<TAB>parent<TAB>leaf` for every
+    # leaf below a partitioned parent (the report sums them). Only counts and
+    # table names leave the box.
+    - name: Count the rows of every leaf table in the scratch database
       ansible.builtin.command:
         argv:
           - docker
@@ -249,75 +274,115 @@
           - psql
           - -X
           - -qAt
-          - -F
-          - "|"
           - -U
           - "{{ _pg_user }}"
           - -d
           - "{{ _pg_database | trim }}"
           - -c
           - >-
-            SELECT table_schema || '.' || table_name,
-            (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM %I.%I',
-            table_schema, table_name), false, true, '')))[1]::text::bigint
-            FROM information_schema.tables
-            WHERE table_type = 'BASE TABLE'
-            AND table_schema NOT IN ('pg_catalog', 'information_schema')
+            SELECT 'T' || chr(9) || n.nspname || '.' || c.relname || chr(9) ||
+            (xpath('/row/c/text()', query_to_xml(format('SELECT count(*) AS c FROM ONLY %I.%I',
+            n.nspname, c.relname), false, true, '')))[1]::text
+            FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            AND n.nspname !~ '^pg_toast'
+            UNION ALL
+            SELECT 'P' || chr(9) || pn.nspname || '.' || p.relname || chr(9) || ln.nspname || '.' || l.relname
+            FROM pg_class p JOIN pg_namespace pn ON pn.oid = p.relnamespace
+            JOIN LATERAL (WITH RECURSIVE tree(rel) AS (SELECT p.oid
+            UNION ALL SELECT i.inhrelid FROM tree JOIN pg_inherits i ON i.inhparent = tree.rel)
+            SELECT rel FROM tree) t ON true
+            JOIN pg_class l ON l.oid = t.rel AND l.relkind = 'r'
+            JOIN pg_namespace ln ON ln.oid = l.relnamespace
+            WHERE p.relkind = 'p'
             ORDER BY 1
       register: _scratch_counts
       changed_when: false
       become: true
       become_user: root
 
-    # Read-only, one query: the planner's row estimates of the live database.
-    - name: Read the row estimates of the live database
+    # The live side, read-only and after the restore (so the snapshot time and
+    # the live time are far apart only by the restore itself). One session:
+    # BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ gives every count the
+    # same view and cannot write. SET LOCAL statement_timeout bounds each
+    # count. The counts run one after the other, never in parallel. A count
+    # that times out (or fails) is rolled back to its savepoint and the next
+    # table goes on; that table has no `T` line and the report uses its
+    # estimate. Lines: `L` (every live leaf table), `T` (exact count), `E`
+    # (planner estimate), `P` (partitions of a parent).
+    - name: Note the start time of the live counts
+      ansible.builtin.set_fact:
+        _scratch_live_started: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
+
+    - name: Count the rows of every leaf table of the live database
       ansible.builtin.command:
         argv:
           - docker
           - exec
+          - -i
           - "{{ accessory }}"
           - psql
           - -X
           - -qAt
-          - -F
-          - "|"
           - -U
           - "{{ _pg_user }}"
           - -d
           - "{{ _pg_database | trim }}"
-          - -c
-          - "SELECT schemaname || '.' || relname, n_live_tup FROM pg_stat_user_tables ORDER BY 1"
+          - -f
+          - "-"
+        stdin: |
+          BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ;
+          SET LOCAL statement_timeout = '{{ _scratch_count_timeout | int }}s';
+          SELECT 'L' || chr(9) || n.nspname || '.' || c.relname
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND n.nspname !~ '^pg_toast' ORDER BY 1;
+          SELECT 'E' || chr(9) || n.nspname || '.' || c.relname || chr(9) || greatest(s.n_live_tup, 0)
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_stat_user_tables s ON s.relid = c.oid
+          WHERE c.relkind = 'r' ORDER BY 1;
+          SELECT 'P' || chr(9) || pn.nspname || '.' || p.relname || chr(9) || ln.nspname || '.' || l.relname
+          FROM pg_class p JOIN pg_namespace pn ON pn.oid = p.relnamespace
+          JOIN LATERAL (WITH RECURSIVE tree(rel) AS (SELECT p.oid
+          UNION ALL SELECT i.inhrelid FROM tree JOIN pg_inherits i ON i.inhparent = tree.rel)
+          SELECT rel FROM tree) t ON true
+          JOIN pg_class l ON l.oid = t.rel AND l.relkind = 'r'
+          JOIN pg_namespace ln ON ln.oid = l.relnamespace
+          WHERE p.relkind = 'p' ORDER BY 1;
+          SELECT 'SAVEPOINT bay_count',
+          format('SELECT ''T'' || chr(9) || %L || chr(9) || count(*) FROM ONLY %I.%I',
+          n.nspname || '.' || c.relname, n.nspname, c.relname),
+          'ROLLBACK TO SAVEPOINT bay_count', 'RELEASE SAVEPOINT bay_count'
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND n.nspname !~ '^pg_toast' ORDER BY n.nspname, c.relname
+          \gexec
+          ROLLBACK;
       register: _scratch_live
       changed_when: false
       failed_when: false
       become: true
       become_user: root
 
+    - name: Note the end time of the live counts
+      ansible.builtin.set_fact:
+        _scratch_live_finished: "{{ lookup('ansible.builtin.pipe', 'date +%s') | int }}"
+
     - name: Build the restore test report
       ansible.builtin.set_fact:
         _scratch_report: >-
-          {%- set rows = {} -%}
-          {%- for line in _scratch_counts.stdout_lines if '|' in line -%}
-          {%-   set _ = rows.update({line.split('|')[0]: line.split('|')[1] | int}) -%}
-          {%- endfor -%}
-          {%- set live = {} -%}
-          {%- for line in (_scratch_live.stdout_lines | default([])) if '|' in line -%}
-          {%-   set _ = live.update({line.split('|')[0]: line.split('|')[1] | int}) -%}
-          {%- endfor -%}
-          {%- set flagged = [] -%}
-          {%- for t, n in live.items() if n > 0 and rows.get(t, 0) == 0 -%}
-          {%-   set _ = flagged.append(t) -%}
-          {%- endfor -%}
-          {{ {'target': accessory, 'host': inventory_hostname,
-              'snapshot': _snap.short_id, 'snapshot_time': _snap.time,
-              'file': _pg_file | trim, 'database': _pg_database | trim,
-              'at': lookup('ansible.builtin.pipe', 'date +%s') | int,
-              'seconds': (lookup('ansible.builtin.pipe', 'date +%s') | int) - (_scratch_started | int),
-              'tables': rows | length, 'rows': rows.values() | sum,
-              'counts': rows, 'live_estimates': live,
-              'empty_but_live_has_rows': flagged,
-              'kept': restore_keep | default(false) | bool,
-              'container': _scratch_name} }}
+          {{ (_scratch_counts.stdout_lines | bay_restore_report(
+                (_scratch_live.stdout_lines | default([])) if (_scratch_live.rc | default(1)) == 0 else [],
+                _scratch_max_loss_pct, _scratch_max_loss_rows,
+                _scratch_live_started, _scratch_live_finished))
+             | combine({'target': accessory, 'host': inventory_hostname,
+                        'snapshot': _snap.short_id, 'snapshot_time': _snap.time,
+                        'file': _pg_file | trim, 'database': _pg_database | trim,
+                        'at': lookup('ansible.builtin.pipe', 'date +%s') | int,
+                        'seconds': (lookup('ansible.builtin.pipe', 'date +%s') | int) - (_scratch_started | int),
+                        'kept': restore_keep | default(false) | bool,
+                        'test': restore_test | default(false) | bool,
+                        'container': _scratch_name}) }}
 
     - name: Keep the restore test report on the box
       ansible.builtin.copy:
@@ -341,10 +406,17 @@
     - name: Show the restore test report
       ansible.builtin.debug:
         msg: >-
-          Restored {{ _scratch_report.tables }} tables, {{ _scratch_report.rows }} rows from
-          snapshot {{ _snap.short_id }} in {{ _scratch_report.seconds }} s.
-          {% if _scratch_report.empty_but_live_has_rows %}Empty here but not in the live
-          estimates: {{ _scratch_report.empty_but_live_has_rows | join(', ') }}.{% endif %}
+          Restored {{ _scratch_report.tables }} leaf tables, {{ _scratch_report.rows }} rows from
+          snapshot {{ _snap.short_id }} ({{ _snap.time }}) in {{ _scratch_report.seconds }} s.
+          {% if _scratch_report.compared %}Live counts taken at {{ _scratch_report.live_counted_at }}
+          ({{ _scratch_report.live_count_seconds }} s), {{ _scratch_report.live_rows }} rows;
+          {{ _scratch_report.estimated | length }} table(s) by estimate (count timed out).
+          {% else %}The live database could not be read: nothing was compared.{% endif %}
+          {% for row in _scratch_report.non_ok %}
+          [{{ row.verdict }}] {{ row.table }}: restored {{ row.restored if row.restored is not none else 'missing' }},
+          live {{ row.live if row.live is not none else '-' }} ({{ row.method }})
+          {{ row.reason }}.
+          {% endfor %}
           {% if restore_keep | default(false) | bool %}Kept as {{ _scratch_name }}
           (no network): docker exec -it {{ _scratch_name }} psql -U {{ _pg_user }}
           {{ _pg_database | trim }}. It is removed automatically after
@@ -355,6 +427,19 @@
       ansible.builtin.assert:
         that: _scratch_report.tables | int > 0
         fail_msg: "The snapshot restored with no table in the scratch database."
+
+    # A restore test fails on a table that lost more than both limits, an empty
+    # table that has rows live, or a table missing from the restore. A kept
+    # `bay backup restore --into scratch` of an old snapshot only reports.
+    - name: Fail a restore test with a table that lost rows
+      ansible.builtin.assert:
+        that: _scratch_report.failures | length == 0
+        fail_msg: >-
+          The restore lost rows in {{ _scratch_report.failures | length }} table(s):
+          {{ _scratch_report.failures | join(', ') }}. Limits: more than
+          {{ _scratch_max_loss_pct }}% and {{ _scratch_max_loss_rows }} rows, an empty table
+          that has rows live, or a table missing from the restore.
+      when: restore_test | default(false) | bool
   always:
     - name: Remove the scratch container
       ansible.builtin.command:

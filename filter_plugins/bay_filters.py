@@ -303,11 +303,158 @@ def bay_shlex_split(value):
     return shlex.split(str(value))
 
 
+def _restore_lines(lines):
+    """Tab separated lines of a psql read as (kind, fields); junk is dropped."""
+    for line in lines or []:
+        parts = str(line).rstrip("\r\n").split("\t")
+        kind = parts[0]
+        if kind == "L" and len(parts) == 2 and parts[1]:
+            yield kind, parts[1:]
+        elif kind in ("T", "E") and len(parts) == 3 and parts[1]:
+            try:
+                yield kind, [parts[1], int(parts[2])]
+            except ValueError:
+                continue
+        elif kind == "P" and len(parts) == 3 and parts[1] and parts[2]:
+            yield kind, parts[1:]
+
+
+def bay_restore_report(restored, live, max_loss_pct=1.0, max_loss_rows=1000,
+                       live_started=None, live_finished=None):
+    """The verdict of a restore test: exact counts of the restore against the live database.
+
+    ``restored`` and ``live`` are the tab separated lines that the two psql
+    reads print: ``T table count`` (exact count of a leaf table), ``P parent
+    leaf`` (a partition of a partitioned parent), and on the live side also
+    ``L table`` (every leaf table) and ``E table estimate`` (the planner
+    estimate, used only for a table whose exact count timed out).
+
+    Per leaf table of the live database:
+    - fail when the table is missing from the restore, or restored is 0 and live is not;
+    - fail when restored is less than live by more than BOTH ``max_loss_pct``
+      percent AND ``max_loss_rows`` rows (rows written after the snapshot explain
+      small gaps);
+    - info when restored is more than live (rows deleted since the snapshot);
+    - ok otherwise.
+    A table whose live count is an estimate fails only when it is missing or
+    empty in the restore: an estimate is too coarse for a partial loss.
+    Partitioned parents are the sum of their partitions, carry no verdict and
+    stay out of the totals. Without any live table the comparison did not
+    happen: verdict ``unverified``, never a failure by itself.
+    """
+    got = {}
+    parent_leaves = {}
+    for kind, f in _restore_lines(restored):
+        if kind == "T":
+            got[f[0]] = f[1]
+        elif kind == "P":
+            parent_leaves.setdefault(f[0], set()).add(f[1])
+    live_leaves, live_exact, live_est = [], {}, {}
+    for kind, f in _restore_lines(live):
+        if kind == "L":
+            if f[0] not in live_leaves:
+                live_leaves.append(f[0])
+        elif kind == "T":
+            live_exact[f[0]] = f[1]
+        elif kind == "E":
+            live_est[f[0]] = f[1]
+        elif kind == "P":
+            parent_leaves.setdefault(f[0], set()).add(f[1])
+
+    max_loss_pct = float(max_loss_pct)
+    max_loss_rows = int(max_loss_rows)
+    compared = bool(live_leaves)
+    rows, failures, estimated = [], [], []
+    live_value = {}
+
+    def add(table, restored_n, live_n, method, verdict, reason):
+        delta = None
+        if restored_n is not None and live_n is not None:
+            delta = restored_n - live_n
+        elif restored_n is None and live_n is not None:
+            delta = -live_n
+        if verdict == "fail":
+            failures.append(table)
+        if verdict != "ok" or method == "estimate":
+            rows.append({"table": table, "restored": restored_n, "live": live_n,
+                         "delta": delta, "method": method, "verdict": verdict,
+                         "reason": reason})
+
+    for table in live_leaves:
+        exact = table in live_exact
+        method = "exact" if exact else "estimate"
+        live_n = live_exact[table] if exact else live_est.get(table, 0)
+        live_value[table] = live_n
+        if not exact:
+            estimated.append(table)
+        restored_n = got.get(table)
+        if restored_n is None:
+            add(table, None, live_n, method, "fail", "missing from the restore")
+        elif restored_n == 0 and live_n > 0:
+            add(table, restored_n, live_n, method, "fail", "empty in the restore, live has rows")
+        elif restored_n < live_n:
+            loss = live_n - restored_n
+            big = loss * 100.0 > max_loss_pct * live_n and loss > max_loss_rows
+            if big and exact:
+                add(table, restored_n, live_n, method, "fail",
+                    f"lost {loss} rows ({loss * 100.0 / live_n:.2f}%), more than "
+                    f"{max_loss_pct:g}% and {max_loss_rows} rows")
+            else:
+                add(table, restored_n, live_n, method, "ok", "")
+        elif restored_n > live_n:
+            add(table, restored_n, live_n, method, "info",
+                "more rows than live now (rows deleted since the snapshot)")
+        else:
+            add(table, restored_n, live_n, method, "ok", "")
+    if compared:
+        for table in sorted(set(got) - set(live_leaves)):
+            add(table, got[table], None, "exact", "info", "not in the live database now")
+
+    parents = {}
+    for parent in sorted(parent_leaves):
+        leaves = sorted(parent_leaves[parent])
+        parents[parent] = {
+            "restored": sum(got.get(leaf, 0) for leaf in leaves),
+            "live": sum(live_value.get(leaf, 0) for leaf in leaves),
+            "partitions": leaves,
+        }
+
+    verdict = "fail" if failures else ("ok" if compared else "unverified")
+    seconds = None
+    counted_at = None
+    if live_started is not None:
+        import datetime
+
+        counted_at = datetime.datetime.fromtimestamp(
+            int(live_started), datetime.timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if live_finished is not None:
+            seconds = int(live_finished) - int(live_started)
+    return {
+        "verdict": verdict,
+        "ok": not failures and bool(got),
+        "compared": compared,
+        "failures": failures,
+        "non_ok": rows,
+        "estimated": estimated,
+        "counts": dict(sorted(got.items())),
+        "live_counts": {t: live_value[t] for t in sorted(live_value)},
+        "parents": parents,
+        "tables": len(got),
+        "rows": sum(got.values()),
+        "live_rows": sum(live_value.values()),
+        "thresholds": {"max_loss_pct": max_loss_pct, "max_loss_rows": max_loss_rows},
+        "live_counted_at": counted_at,
+        "live_count_seconds": seconds,
+    }
+
+
 class FilterModule:
     """Bay filter plugins."""
 
     def filters(self):
         return {
+            "bay_restore_report": bay_restore_report,
             "bay_cron_interval_hours": bay_cron_interval_hours,
             "bay_backup_max_age": bay_backup_max_age,
             "bay_shlex_split": bay_shlex_split,

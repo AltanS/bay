@@ -637,6 +637,64 @@ def restore(
     con.success(f"Restore complete for {accessory}")
 
 
+# bay backup restore-test exit codes: 0 passed, 1 failed (the restore, or a table),
+# 3 the restore worked but nothing was compared (the live database was unreadable).
+RESTORE_TEST_UNVERIFIED = 3
+
+
+def _fmt_rows(value: Any) -> str:
+    return "-" if value is None else f"{int(value):,}"
+
+
+def _print_restore_report(report: dict[str, Any]) -> None:
+    """The restore test report: every table that is not a plain exact match."""
+    rows = report.get("non_ok") or []
+    if rows:
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Table", overflow="fold")
+        table.add_column("Restored", justify="right")
+        table.add_column("Live", justify="right")
+        table.add_column("Delta", justify="right")
+        table.add_column("Method")
+        table.add_column("Verdict")
+        style = {"fail": "bold red", "info": "cyan", "ok": "green"}
+        for r in rows:
+            verdict = r.get("verdict", "")
+            table.add_row(
+                r["table"],
+                "missing" if r.get("restored") is None else _fmt_rows(r["restored"]),
+                _fmt_rows(r.get("live")),
+                "-" if r.get("delta") is None else f"{int(r['delta']):+,}",
+                r.get("method", ""),
+                f"[{style.get(verdict, '')}]{verdict}[/] {r.get('reason', '')}".strip(),
+            )
+        _console.print(table)
+    parents = report.get("parents") or {}
+    for name, p in sorted(parents.items()):
+        _console.print(
+            f"[dim]partitioned parent {name}: {_fmt_rows(p.get('restored'))} restored, "
+            f"{_fmt_rows(p.get('live'))} live (sum of {len(p.get('partitions') or [])} partitions, "
+            "not in the total)[/dim]"
+        )
+    _console.print(
+        f"Snapshot {report.get('snapshot')} ({str(report.get('snapshot_time', ''))[:19]}), "
+        f"{report.get('tables')} leaf tables, {_fmt_rows(report.get('rows'))} rows restored, "
+        f"{report.get('seconds')} s."
+    )
+    if report.get("compared"):
+        _console.print(
+            f"Live counted at {report.get('live_counted_at')} ({report.get('live_count_seconds')} s): "
+            f"{_fmt_rows(report.get('live_rows'))} rows, "
+            f"{len(report.get('estimated') or [])} table(s) by estimate. "
+            f"Limits: more than {report.get('thresholds', {}).get('max_loss_pct')}% and "
+            f"{report.get('thresholds', {}).get('max_loss_rows')} rows."
+        )
+    else:
+        con.warning("The live database could not be read: nothing was compared.")
+    if report.get("failures"):
+        con.warning("Failed: " + ", ".join(report["failures"]))
+
+
 @app.command("restore-test")
 def restore_test(
     ctx: typer.Context,
@@ -645,21 +703,47 @@ def restore_test(
     snapshot: Optional[str] = typer.Option(None, "--snapshot", "-s", help="Snapshot ID (default: the newest)."),
     host: Optional[str] = typer.Option(None, "--host", help="The host, when several back up the target."),
     database: Optional[str] = typer.Option(None, "--database", help="The database, when the target dumps several."),
+    max_loss_pct: Optional[float] = typer.Option(
+        None, "--max-loss-pct", min=0, max=100,
+        help="A table fails when the restore lacks more than this percent of the live rows "
+             "AND more than --max-loss-rows rows (default: restore_test_max_loss_pct, 1.0).",
+    ),
+    max_loss_rows: Optional[int] = typer.Option(
+        None, "--max-loss-rows", min=0,
+        help="The row limit that goes with --max-loss-pct (default: restore_test_max_loss_rows, 1000).",
+    ),
+    count_timeout: Optional[int] = typer.Option(
+        None, "--count-timeout", min=1,
+        help="Seconds one exact live count may run; a count that times out uses the planner "
+             "estimate (default: restore_test_count_timeout, 120).",
+    ),
     as_json: bool = typer.Option(False, "--json", help="Print the report as one JSON document."),
 ) -> None:
     """Prove a pg_dump backup restores: restore it into a scratch container and count.
 
     On the box: a new Postgres with no network and no port, the snapshot
-    restored into it, an exact row count per table, compared with the live
-    planner estimates; then the container is removed, also on failure. No
+    restored into it, then an exact row count per leaf table (partitions
+    count, a partitioned parent is their sum) compared with an exact count of
+    the same table in the live database. The live counts run after the
+    restore, read-only, one table at a time. A table whose count times out
+    uses the planner estimate. The container is removed, also on failure. No
     prompt and no pre-restore backup: the live database is never touched.
     Only counts leave the box. It reads the whole snapshot from S3 once.
 
-    Exit 0 when the restore worked and holds tables, else 1.
+    A table fails when it is missing from the restore, empty there while live
+    has rows, or short of live by more than BOTH --max-loss-pct and
+    --max-loss-rows (rows written after the snapshot explain small gaps).
+
+    Exit codes: 0 the restore worked, holds tables and no table failed. 1 the
+    test failed (the restore, or a table). 3 UNVERIFIED: the restore worked,
+    but the live database could not be read, so nothing was compared. That is
+    not a pass: it warns, sends the alert backup.restore_test_failed with
+    "unverified" in the text, and `bay backup status` shows it as not ok.
 
     Examples:
 
         bay backup restore-test production shop-postgres
+        bay backup restore-test production shop-postgres --max-loss-pct 0.5 --max-loss-rows 100
     """
     import tempfile
 
@@ -691,6 +775,13 @@ def restore_test(
         }
         if database:
             variables["database"] = database
+        # Only what was passed: else the fleet variables (and the role defaults) apply.
+        if max_loss_pct is not None:
+            variables["restore_test_max_loss_pct"] = max_loss_pct
+        if max_loss_rows is not None:
+            variables["restore_test_max_loss_rows"] = max_loss_rows
+        if count_timeout is not None:
+            variables["restore_test_count_timeout"] = count_timeout
         result = ansible.run_playbook(
             "restore",
             env,
@@ -701,26 +792,33 @@ def restore_test(
             check=False,
         )
         report = json.loads(out.read_text()) if out.exists() else None
-    ok = result.returncode == 0 and report is not None and int(report.get("tables", 0)) > 0
+    passed = (
+        result.returncode == 0
+        and report is not None
+        and int(report.get("tables", 0)) > 0
+        and not report.get("failures")
+    )
+    # The play went through but compared nothing: never a pass.
+    unverified = passed and report is not None and report.get("verdict") == "unverified"
+    ok = passed and not unverified
+    exit_code = 0 if ok else (RESTORE_TEST_UNVERIFIED if unverified else 1)
     if as_json:
-        print(json.dumps({"ok": ok, "report": report}, indent=2))
-        raise typer.Exit(0 if ok else 1)
+        print(json.dumps({
+            "ok": ok,
+            "verdict": report.get("verdict") if report else None,
+            "exit_code": exit_code,
+            "report": report,
+        }, indent=2))
+        raise typer.Exit(exit_code)
     if report is not None:
-        table = Table(show_header=True, header_style="bold")
-        table.add_column("Table")
-        table.add_column("Rows (scratch)", justify="right")
-        table.add_column("Rows (live estimate)", justify="right")
-        live = report.get("live_estimates") or {}
-        for name, rows in sorted((report.get("counts") or {}).items()):
-            table.add_row(name, str(rows), str(live.get(name, "-")))
-        _console.print(table)
-        _console.print(
-            f"Snapshot {report.get('snapshot')} ({report.get('snapshot_time', '')[:19]}), "
-            f"{report.get('tables')} tables, {report.get('rows')} rows, {report.get('seconds')} s."
+        _print_restore_report(report)
+    if unverified:
+        con.warning(
+            f"Restore test of {accessory} UNVERIFIED (exit {RESTORE_TEST_UNVERIFIED}): the dump restored, "
+            "but the live database could not be read, so nothing was compared. This is not a pass. "
+            "Check the live container and run the test again."
         )
-        if report.get("empty_but_live_has_rows"):
-            con.warning("Empty in the snapshot but not in the live estimates: "
-                        + ", ".join(report["empty_but_live_has_rows"]))
+        raise typer.Exit(RESTORE_TEST_UNVERIFIED)
     if not ok:
         con.error(f"Restore test FAILED for {accessory}")
         raise typer.Exit(1)
@@ -733,6 +831,8 @@ _STATE_STYLE = {
     "no_record": "yellow",
     "missing": "bold red",
     "stale": "bold red",
+    "restore_failed": "bold red",
+    "restore_unverified": "bold yellow",
     "no_answer": "yellow",
     "extra": "dim",
     "disabled": "dim",
@@ -759,7 +859,8 @@ def status(
 
     Exit codes: 0 all fine; 1 a configured target has no script or no
     running timer; 2 a target had no good run within its max_age_hours;
-    3 a box did not answer. When several apply, the lowest non-zero wins.
+    3 a box did not answer; 4 the last restore test of a target failed or
+    compared nothing (unverified). When several apply, the lowest non-zero wins.
 
     Examples:
 
@@ -844,6 +945,9 @@ def status(
         con.error("A target had no good run within its max_age_hours. See journalctl -u bay-backup@<target> on the box.")
     elif code == bs.NO_ANSWER:
         con.warning("A box did not answer, so its targets are unknown.")
+    elif code == bs.RESTORE_TEST:
+        con.warning("The last restore test of a target failed or compared nothing (unverified). "
+                    "Run 'bay backup restore-test <env> <target>'.")
     raise typer.Exit(code)
 
 

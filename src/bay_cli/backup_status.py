@@ -14,6 +14,9 @@ Exit codes (the lowest non-zero one wins, a missing target is the worst news):
   up. This is the state a box is in when the backup role never ran on it.
 * ``2`` a target had no good run within ``max_age_hours``.
 * ``3`` a box did not answer, so its targets are unknown.
+* ``4`` the last restore test of a target failed, or compared nothing
+  (``unverified``: the live database could not be read). Missing, stale and
+  no-answer win over it. A new ``bay backup restore-test`` that passes clears it.
 """
 from __future__ import annotations
 
@@ -21,15 +24,15 @@ import datetime as _dt
 from dataclasses import asdict, dataclass
 from typing import Any
 
-OK, MISSING, STALE, NO_ANSWER = 0, 1, 2, 3
-_PRIORITY = (MISSING, STALE, NO_ANSWER)
+OK, MISSING, STALE, NO_ANSWER, RESTORE_TEST = 0, 1, 2, 3, 4
+_PRIORITY = (MISSING, STALE, NO_ANSWER, RESTORE_TEST)
 
 
 @dataclass
 class Row:
     host: str
     target: str
-    state: str  # ok | new | no_record | missing | stale | extra | disabled | no_answer
+    state: str  # ok | new | no_record | missing | stale | restore_failed | restore_unverified | extra | disabled | no_answer
     detail: str = ""
     method: str = ""
     last_ok: int | None = None
@@ -64,6 +67,30 @@ def _deep(row: Row, seen: dict[str, Any]) -> None:
         row.snapshots = deep["snapshots"]
     if deep.get("latest"):
         row.latest_snapshot = str(deep["latest"])
+
+
+def _restore_test(row: Row, seen: dict[str, Any], codes: set[int]) -> None:
+    """A last restore test that failed or compared nothing makes the row not ok.
+
+    Only a row that is otherwise fine changes (missing and stale say more).
+    The verdict stays until a newer restore test replaces the report.
+    """
+    last = seen.get("restore_test")
+    if not isinstance(last, dict) or row.state not in ("ok", "new"):
+        return
+    verdict = last.get("verdict")
+    at = last.get("at")
+    when_ = when(int(at)) if isinstance(at, (int, float)) else "an unknown time"
+    if verdict == "unverified":
+        row.state = "restore_unverified"
+        row.detail = (f"the restore test of {when_} restored the dump but nothing was compared "
+                      "(the live database was unreadable); run bay backup restore-test")
+    elif verdict == "fail":
+        row.state = "restore_failed"
+        row.detail = f"the restore test of {when_} failed; run bay backup restore-test"
+    else:
+        return
+    codes.add(RESTORE_TEST)
 
 
 def evaluate(doc: dict[str, Any]) -> tuple[list[Row], int]:
@@ -130,6 +157,7 @@ def evaluate(doc: dict[str, Any]) -> tuple[list[Row], int]:
                     codes.add(STALE)
                 elif row.last_ok is None:
                     row.state, row.detail = "new", "installed, no good run yet"
+            _restore_test(row, seen, codes)
             rows.append(row)
         for name in sorted(set(seen_all) - set(expected)):
             row = Row(host, name, "extra", "on the box, not in the config")

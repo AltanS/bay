@@ -62,9 +62,10 @@ def test_every_scratch_container_carries_its_expiry():
 def test_every_exec_and_restore_targets_the_scratch_container():
     for t in _tasks():
         body = yaml.safe_dump(t)
-        if t.get("name") == "Read the row estimates of the live database":
-            # A read of the live container: a SELECT on pg_stat_user_tables.
-            assert "pg_stat_user_tables" in body
+        if t.get("name") == "Count the rows of every leaf table of the live database":
+            # The one read of the live container's tables: read-only, see
+            # tests/test_restore_live_counts.py.
+            assert "BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ" in body
             continue
         if t.get("name") == "Read the size of the live database":
             assert "SELECT pg_database_size(current_database())" in body
@@ -167,7 +168,8 @@ printf '%s\\n' "$*" >> "$SYSTEMD_RUN_LOG"
 
 
 def _play(tmp_path: Path, live: str, dump: bytes, file: str, keep: bool = False,
-          fmt: str = "custom", extra: dict[str, Any] | None = None):
+          fmt: str = "custom", extra: dict[str, Any] | None = None,
+          play_vars: dict[str, Any] | None = None):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "restic").write_text(FAKE_RESTIC)
@@ -193,6 +195,7 @@ def _play(tmp_path: Path, live: str, dump: bytes, file: str, keep: bool = False,
         "restore_keep": keep,
         "restore_test_out": str(tmp_path / "report.json"),
         "skip_pre_backup": True,
+        **(play_vars or {}),
     }))
     (tmp_path / "ansible.cfg").write_text("[defaults]\n")
     env = {**os.environ, "DUMP_PATH": str(tmp_path / "dump.bin"), "DUMP_FILE": file,
@@ -223,6 +226,10 @@ def test_scratch_restore_counts_rows_and_never_touches_the_live_database(tmp_pat
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["counts"] == {"public.notes": 300, "public.tags": 2}
     assert report["tables"] == 2 and report["rows"] == 302
+    # 2.24.1: the live side is counted exactly (10 rows left), not estimated.
+    assert report["live_counts"] == {"public.notes": 10, "public.tags": 2}
+    assert report["estimated"] == [] and report["verdict"] == "ok"
+    assert report["snapshot_time"] == "2026-11-17T03:00:00Z" and report["live_counted_at"]
     assert report["snapshot"] == "ab12cd34"
     assert _psql(live, "SELECT count(*) FROM notes;") == "10"
     assert _scratch_left(live) == []
@@ -291,3 +298,124 @@ def test_a_kept_scratch_container_runs_like_the_live_one_and_goes_away_on_a_time
     finally:
         for name in kept:
             subprocess.run(["docker", "rm", "-f", "-v", name], capture_output=True, timeout=60)
+
+
+# ── exact counts against exact counts (2.24.1) ──────────────────────────────
+
+PARTITIONED = """
+CREATE TABLE events (id integer, day date) PARTITION BY RANGE (day);
+CREATE TABLE events_2026_10 PARTITION OF events FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+CREATE TABLE events_2026_11 PARTITION OF events FOR VALUES FROM ('2026-11-01') TO ('2026-12-01');
+INSERT INTO events SELECT g, '2026-10-15' FROM generate_series(1, 120) g;
+INSERT INTO events SELECT g, '2026-11-15' FROM generate_series(1, 80) g;
+CREATE TABLE notes (id integer PRIMARY KEY);
+INSERT INTO notes SELECT g FROM generate_series(1, 50) g;
+"""
+
+
+def _dump(live: str) -> bytes:
+    return subprocess.run(["docker", "exec", live, "pg_dump", "-Fc", "-Z", "0", "-U", "app", "app"],
+                          capture_output=True, timeout=60, check=True).stdout
+
+
+def test_a_partitioned_parent_is_summed_and_rows_written_after_the_snapshot_pass(tmp_path, live):
+    _psql(live, PARTITIONED)
+    dump = _dump(live)
+    # Written after the snapshot: a small gap, explained.
+    _psql(live, "INSERT INTO events SELECT g, '2026-11-20' FROM generate_series(1, 30) g;"
+                "INSERT INTO notes SELECT g FROM generate_series(51, 60) g;")
+    proc = _play(tmp_path, live, dump, f"/{live}.dump", play_vars={"restore_test": True})
+    assert proc.returncode == 0, proc.stdout[-4000:]
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["counts"] == {"public.events_2026_10": 120, "public.events_2026_11": 80,
+                                "public.notes": 50}
+    assert report["tables"] == 3 and report["rows"] == 250, "the parent is not counted twice"
+    assert report["parents"]["public.events"]["restored"] == 200
+    assert report["parents"]["public.events"]["live"] == 230
+    assert report["live_rows"] == 290 and report["verdict"] == "ok" and report["failures"] == []
+    assert {r["table"] for r in report["non_ok"]} == set(), report["non_ok"]
+    assert _scratch_left(live) == []
+
+
+def test_a_restore_test_fails_on_rows_the_restore_lacks_and_still_cleans_up(tmp_path, live):
+    _psql(live, PARTITIONED)
+    dump = _dump(live)
+    # 5,000 rows exist live that the snapshot does not hold: over both limits.
+    _psql(live, "INSERT INTO notes SELECT g FROM generate_series(100, 5099) g;")
+    proc = _play(tmp_path, live, dump, f"/{live}.dump", play_vars={"restore_test": True})
+    assert proc.returncode != 0
+    assert "public.notes" in proc.stdout and "lost rows" in proc.stdout
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["failures"] == ["public.notes"] and report["verdict"] == "fail"
+    row = report["non_ok"][0]
+    assert (row["restored"], row["live"], row["delta"], row["method"]) == (50, 5050, -5000, "exact")
+    assert _scratch_left(live) == []
+
+
+def test_the_limits_come_from_fleet_variables(tmp_path, live):
+    _psql(live, PARTITIONED)
+    dump = _dump(live)
+    _psql(live, "INSERT INTO notes SELECT g FROM generate_series(100, 5099) g;")
+    proc = _play(tmp_path, live, dump, f"/{live}.dump",
+                 play_vars={"restore_test": True, "restore_test_max_loss_pct": 99.5,
+                            "restore_test_max_loss_rows": 10000})
+    assert proc.returncode == 0, proc.stdout[-4000:]
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    proc = _play(bad, live, dump, f"/{live}.dump",
+                 play_vars={"restore_test": True, "restore_test_max_loss_pct": "lots"})
+    assert proc.returncode != 0 and "Nothing was started" in proc.stdout
+    assert _scratch_left(live) == []
+
+
+def test_a_scratch_restore_that_is_not_a_test_only_reports_a_loss(tmp_path, live):
+    _psql(live, PARTITIONED)
+    dump = _dump(live)
+    _psql(live, "INSERT INTO notes SELECT g FROM generate_series(100, 5099) g;")
+    proc = _play(tmp_path, live, dump, f"/{live}.dump")
+    assert proc.returncode == 0, proc.stdout[-4000:]
+    assert json.loads((tmp_path / "report.json").read_text())["verdict"] == "fail"
+
+
+def test_a_count_that_times_out_falls_back_to_the_estimate(tmp_path, live):
+    _psql(live, PARTITIONED + "ANALYZE;")
+    dump = _dump(live)
+    # Another session holds an exclusive lock on one live table: its count
+    # waits for the lock and hits statement_timeout. The test goes on.
+    holder = subprocess.Popen(
+        ["docker", "exec", "-i", live, "psql", "-X", "-qAt", "-U", "app", "-d", "app"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        holder.stdin.write("BEGIN; LOCK TABLE notes IN ACCESS EXCLUSIVE MODE; SELECT 'locked';"
+                           "SELECT pg_sleep(60);\n")
+        holder.stdin.flush()
+        assert holder.stdout.readline().strip() == "locked"
+        started = time.time()
+        proc = _play(tmp_path, live, dump, f"/{live}.dump",
+                     play_vars={"restore_test": True, "restore_test_count_timeout": 1})
+        assert time.time() - started < 300
+    finally:
+        holder.kill()
+    assert proc.returncode == 0, proc.stdout[-4000:]
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["estimated"] == ["public.notes"]
+    row = next(r for r in report["non_ok"] if r["table"] == "public.notes")
+    assert row["method"] == "estimate" and row["restored"] == 50
+    assert report["live_counts"]["public.events_2026_10"] == 120
+    assert report["verdict"] == "ok" and _scratch_left(live) == []
+
+
+def test_an_unreadable_live_database_gives_an_unverified_report_and_still_cleans_up(tmp_path, live):
+    """2.24.1: the live read fails (container down): nothing is compared. The
+    play does not fail, the report says unverified, the scratch is removed."""
+    _psql(live, PARTITIONED)
+    dump = _dump(live)
+    subprocess.run(["docker", "stop", live], capture_output=True, timeout=120, check=True)
+    proc = _play(tmp_path, live, dump, f"/{live}.dump", play_vars={"restore_test": True})
+    assert proc.returncode == 0, proc.stdout[-4000:]
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["verdict"] == "unverified" and report["compared"] is False
+    assert report["tables"] == 3 and report["failures"] == []
+    assert "nothing was compared" in proc.stdout
+    assert "Compose restore test unverified alert" in proc.stdout
+    assert _scratch_left(live) == []

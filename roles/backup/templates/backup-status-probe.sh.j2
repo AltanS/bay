@@ -43,6 +43,12 @@ for t in "${NAMES[@]}" "${present[@]}"; do
   if [ -r "$STATUS_DIR/${t}.json" ]; then
     last=$(jq -c '{at: .at, bytes: .bytes}' "$STATUS_DIR/${t}.json" 2>/dev/null) || last=null
   fi
+  # The verdict of the last restore TEST (a kept `restore --into scratch` does not
+  # count: it only reports). Only the verdict leaves the report.
+  rtest=null
+  if [ -r "$STATUS_DIR/${t}.restore-test.json" ]; then
+    rtest=$(jq -c 'if .test == true then {verdict: .verdict, at: .at, ok: .ok} else null end' "$STATUS_DIR/${t}.restore-test.json" 2>/dev/null) || rtest=null
+  fi
   deep=null
   if [ "$DEEP" = true ] && [ "$script" = true ]; then
     repo="s3:${BACKUP_S3_ENDPOINT:-}/${BACKUP_S3_BUCKET:-}/${BACKUP_S3_PREFIX:-}/${BACKUP_HOSTNAME:-}/${t}"
@@ -56,9 +62,10 @@ for t in "${NAMES[@]}" "${present[@]}"; do
     fi
   fi
   targets=$(jq -c --arg t "$t" --argjson script "$script" --arg enabled "$enabled" \
-    --arg active "$active" --arg next "$next" --argjson installed "$installed" --argjson last "$last" --argjson deep "$deep" \
+    --arg active "$active" --arg next "$next" --argjson installed "$installed" --argjson last "$last" --argjson rtest "$rtest" --argjson deep "$deep" \
     '. + {($t): {script: $script, timer_enabled: $enabled, timer_active: $active,
-                 next: $next, installed: $installed, last_ok: $last, deep: $deep}}' <<<"$targets")
+                 next: $next, installed: $installed, last_ok: $last,
+                 restore_test: $rtest, deep: $deep}}' <<<"$targets")
 done
 
 jq -cn --argjson targets "$targets" --argjson manifest "$manifest" \

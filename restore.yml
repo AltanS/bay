@@ -362,6 +362,30 @@
             - _into == 'scratch'
             - _snap is defined
 
+        # 2.24.1: a restore test whose live database could not be read compared
+        # nothing. The play does not fail (the restore itself worked), but that
+        # must not look like a pass: the CLI exits 3, `bay backup status` shows
+        # it as not ok, and this warn-level alert says so.
+        - name: Compose restore test unverified alert
+          when:
+            - restore_test | default(false) | bool
+            - _scratch_report is defined
+            - _scratch_report.verdict | default('') == 'unverified'
+          ansible.builtin.set_fact:
+            _bay_alert_id: backup.restore_test_failed
+            _bay_alert_message: "{{ docker_monitor_alert_header | default('') }}\u26a0\ufe0f <b>Restore test unverified</b>\n\n\u25b8 Host:       <code>{{ bay_alert_host | default(inventory_hostname) }}</code>\n\u25b8 Target:     <code>{{ accessory }}</code>\n\u25b8 Snapshot:   <code>{{ _snap_label | default('unknown') }}</code>\n\nThe snapshot restored, but the live database could not be read, so nothing was compared. The restore test is unverified, not passed. The live database was not touched.{{ docker_monitor_alert_footer | default('') }}"
+          ignore_errors: true
+
+        - name: Deliver restore test unverified alert to routed recipients
+          when:
+            - restore_test | default(false) | bool
+            - _scratch_report is defined
+            - _scratch_report.verdict | default('') == 'unverified'
+          ansible.builtin.include_role:
+            name: alert_channel
+            tasks_from: send_alert
+          ignore_errors: true
+
         - name: Restore PostgreSQL database with its clients stopped
           when:
             - _restore_method == 'pg_dump'

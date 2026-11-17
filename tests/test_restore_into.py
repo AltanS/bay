@@ -125,19 +125,114 @@ def test_other_methods_restore_live_and_refuse_scratch(cx, played):
     assert isinstance(out.exception, BayError) and "vars" not in played
 
 
+def _report(restored: list[str], live: list[str]) -> dict[str, Any]:
+    """A report as the playbook builds it: the same filter, real input lines."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "bay_filters_for_restore_into", Path(backup.__file__).resolve().parents[3] / "filter_plugins" / "bay_filters.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return {"snapshot": "ab12cd34", "snapshot_time": "2026-11-17T03:00:00Z", "seconds": 9,
+            **module.bay_restore_report(restored, live, 1.0, 1000, 1_800_000_000, 1_800_000_004)}
+
+
 def test_restore_test_runs_scratch_without_keep_and_reports(cx, played):
-    played["report"] = {"snapshot": "ab12cd34", "tables": 3, "rows": 120, "seconds": 9,
-                        "counts": {"public.notes": 100, "public.tags": 20, "public.x": 0},
-                        "live_estimates": {"public.notes": 98, "public.x": 5},
-                        "empty_but_live_has_rows": ["public.x"]}
+    played["report"] = _report(
+        ["T\tpublic.notes\t100", "T\tpublic.tags\t20", "T\tpublic.x\t0"],
+        ["L\tpublic.notes", "L\tpublic.tags", "L\tpublic.x", "T\tpublic.notes\t100",
+         "T\tpublic.tags\t20", "T\tpublic.x\t5"])
     out = CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres"], obj=cx)
-    assert out.exit_code == 0, out.output
+    # public.x is empty in the restore and live has 5 rows: the test fails.
+    assert out.exit_code == 1, out.output
     v = played["vars"]
     assert v["restore_into"] == "scratch" and v["restore_keep"] is False
     assert "confirm" not in v and v["snapshot"] == "latest"
     # Its own alert on failure (backup.restore_test_failed), not restore.failed.
     assert v["restore_test"] is True
-    assert "public.x" in out.output
+    assert "public.x" in out.output and "fail" in out.output
+    assert "public.notes" not in out.output.replace("Failed:", ""), "an ok table is not listed"
+    assert "2027-01-15T08:00:00Z" in out.output and "2026-11-17T03:00:00" in out.output
+
+
+def test_restore_test_passes_when_every_table_is_ok(cx, played):
+    played["report"] = _report(
+        ["T\tpublic.notes\t100", "T\tpublic.events_a\t4", "P\tpublic.events\tpublic.events_a"],
+        ["L\tpublic.notes", "L\tpublic.events_a", "T\tpublic.notes\t120", "T\tpublic.events_a\t4"])
+    out = CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres"], obj=cx)
+    assert out.exit_code == 0, out.output
+    assert "partitioned parent public.events" in out.output
+    assert "Restore test passed" in out.output
+
+
+def test_restore_test_passes_the_limits_only_when_given(cx, played):
+    played["report"] = _report(["T\tpublic.notes\t1"], ["L\tpublic.notes", "T\tpublic.notes\t1"])
+    out = CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres"], obj=cx)
+    assert out.exit_code == 0, out.output
+    assert not any(k.startswith("restore_test_max") or k == "restore_test_count_timeout"
+                   for k in played["vars"]), "else the fleet variables are overridden by the defaults"
+    played.clear()
+    played["report"] = _report(["T\tpublic.notes\t1"], ["L\tpublic.notes", "T\tpublic.notes\t1"])
+    out = CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres",
+                                          "--max-loss-pct", "0.5", "--max-loss-rows", "100",
+                                          "--count-timeout", "30"], obj=cx)
+    assert out.exit_code == 0, out.output
+    v = played["vars"]
+    assert (v["restore_test_max_loss_pct"], v["restore_test_max_loss_rows"],
+            v["restore_test_count_timeout"]) == (0.5, 100, 30)
+
+
+def test_restore_test_rejects_a_nonsense_limit(cx, played):
+    for bad in (["--max-loss-pct", "101"], ["--max-loss-rows", "-1"], ["--count-timeout", "0"]):
+        out = CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres", *bad], obj=cx)
+        assert out.exit_code != 0 and "vars" not in played
+
+
+def test_restore_test_json_carries_the_failures(cx, played):
+    played["report"] = _report(["T\tpublic.notes\t0"], ["L\tpublic.notes", "T\tpublic.notes\t9"])
+    out = CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres", "--json"], obj=cx)
+    assert out.exit_code == 1
+    doc = json.loads(out.stdout)
+    assert doc["ok"] is False and doc["report"]["failures"] == ["public.notes"]
+
+
+def _unverified() -> dict[str, Any]:
+    return _report(["T\tpublic.notes\t3"], [])
+
+
+def test_an_unverified_restore_test_exits_3_and_warns(cx, played):
+    """2.24.1: nothing was compared, so it must not look like a pass."""
+    played["report"] = _unverified()
+    out = CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres"], obj=cx)
+    assert out.exit_code == backup.RESTORE_TEST_UNVERIFIED == 3, out.output
+    flat = " ".join(out.output.split())
+    assert "UNVERIFIED" in flat and "nothing was compared" in flat
+    assert "Restore test passed" not in flat
+
+
+def test_an_unverified_restore_test_in_json_is_not_ok_and_says_why(cx, played):
+    played["report"] = _unverified()
+    out = CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres", "--json"], obj=cx)
+    assert out.exit_code == 3
+    doc = json.loads(out.stdout)
+    assert doc["ok"] is False and doc["verdict"] == "unverified" and doc["exit_code"] == 3
+
+
+def test_restore_test_exit_codes_are_0_1_3(cx, played):
+    played["report"] = _report(["T\tpublic.notes\t1"], ["L\tpublic.notes", "T\tpublic.notes\t1"])
+    assert CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres"], obj=cx).exit_code == 0
+    played["report"] = _report(["T\tpublic.notes\t0"], ["L\tpublic.notes", "T\tpublic.notes\t9"])
+    assert CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres"], obj=cx).exit_code == 1
+    played["rc"] = 2
+    played["report"] = None
+    assert CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres"], obj=cx).exit_code == 1
+
+
+def test_a_failed_play_is_never_reported_as_unverified(cx, played):
+    played["rc"] = 2
+    played["report"] = _unverified()
+    out = CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres"], obj=cx)
+    assert out.exit_code == 1
 
 
 def test_restore_test_fails_without_a_report(cx, played):
@@ -145,7 +240,7 @@ def test_restore_test_fails_without_a_report(cx, played):
     out = CliRunner().invoke(backup.app, ["restore-test", "production", "shop-postgres", "--json"],
                              obj=cx)
     assert out.exit_code == 1
-    assert json.loads(out.stdout) == {"ok": False, "report": None}
+    assert json.loads(out.stdout) == {"ok": False, "verdict": None, "exit_code": 1, "report": None}
 
 
 def test_restore_test_refuses_a_target_that_is_not_pg_dump(cx, played):

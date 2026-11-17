@@ -70,6 +70,7 @@ def _run_play(
     timers: dict[str, list[str]],
     status: dict[str, int] | None = None,
     manifest: list[str] | None = None,
+    restore_tests: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not shutil.which("jq"):
         pytest.skip("jq is not installed")
@@ -83,6 +84,8 @@ def _run_play(
         (backup_dir / f"backup-{name}.sh").write_text("#!/bin/sh\n")
     for name, at in (status or {}).items():
         (backup_dir / "status" / f"{name}.json").write_text(json.dumps({"at": at, "bytes": 1}))
+    for name, report in (restore_tests or {}).items():
+        (backup_dir / "status" / f"{name}.restore-test.json").write_text(json.dumps(report))
     if manifest is not None:
         (backup_dir / "targets.json").write_text(json.dumps([{"name": n} for n in manifest]))
     (tmp_path / "hosts").write_text("[testing]\nlocalhost ansible_connection=local\n")
@@ -175,6 +178,7 @@ def _doc(targets: dict[str, dict[str, Any]], *, manifest=True, hosts=("box",), d
             "installed": t.get("installed", NOW - 100 * 3600),
             "last_ok": {"at": t["last"]} if "last" in t else None,
             "deep": (deep or {}).get(name),
+            "restore_test": t.get("restore_test"),
         }
     return {
         "hosts": list(hosts),
@@ -331,3 +335,75 @@ def test_list_of_a_configured_target_on_no_box_exits_1(monkeypatch, tmp_path, ta
 
 def test_list_of_an_unknown_target_stays_exit_0(monkeypatch, tmp_path):
     assert _list(monkeypatch, tmp_path, "cache").exit_code == 0
+
+
+# ── the last restore test (2.24.1) ──────────────────────────────────────────
+
+
+def _rt(verdict: str, at: int = NOW - 3600) -> dict[str, Any]:
+    return {"verdict": verdict, "at": at, "ok": verdict != "fail"}
+
+
+def test_a_last_restore_test_that_compared_nothing_is_not_ok():
+    rows, code = bs.evaluate(_doc({"a": {"last": NOW - 3600, "restore_test": _rt("unverified")}}))
+    assert code == bs.RESTORE_TEST == 4
+    assert rows[0].state == "restore_unverified"
+    assert "nothing was compared" in rows[0].detail and "restore-test" in rows[0].detail
+
+
+def test_a_last_restore_test_that_failed_is_not_ok():
+    rows, code = bs.evaluate(_doc({"a": {"last": NOW - 3600, "restore_test": _rt("fail")}}))
+    assert code == bs.RESTORE_TEST and rows[0].state == "restore_failed"
+
+
+def test_a_last_restore_test_that_passed_or_never_ran_is_ok():
+    _, code = bs.evaluate(_doc({"a": {"last": NOW - 3600, "restore_test": _rt("ok")}}))
+    assert code == bs.OK
+    _, code = bs.evaluate(_doc({"a": {"last": NOW - 3600}}))
+    assert code == bs.OK
+
+
+def test_missing_stale_and_no_answer_win_over_a_restore_test():
+    unverified = {"restore_test": _rt("unverified")}
+    assert bs.evaluate(_doc({"a": {"script": False, **unverified}}))[1] == bs.MISSING
+    assert bs.evaluate(_doc({"a": {"last": NOW - 40 * 3600, **unverified}}))[1] == bs.STALE
+    assert bs.evaluate(_doc({"a": {"last": NOW - 3600, **unverified}}, hosts=("box", "gone")))[1] == bs.NO_ANSWER
+    # and the restore test beats a clean exit
+    assert bs.evaluate(_doc({"a": {"last": NOW - 3600, **unverified}, "b": {"last": NOW - 60}}))[1] == 4
+
+
+def test_cli_status_shows_an_unverified_restore_test_and_exits_4(monkeypatch, tmp_path):
+    doc = _doc({"postgres": {"last": NOW - 3600, "restore_test": _rt("unverified")}})
+    out, _ = _cli(monkeypatch, tmp_path, doc, "--env", "production")
+    assert out.exit_code == 4, out.output
+    assert "restore_unverified" in out.output and "restore test" in out.output.lower()
+    out, _ = _cli(monkeypatch, tmp_path, doc, "--env", "production", "--json")
+    body = json.loads(out.stdout)
+    assert body["exit_code"] == 4 and body["rows"][0]["state"] == "restore_unverified"
+
+
+def test_the_probe_reports_the_last_restore_test_of_a_target(tmp_path):
+    now = int(time.time())
+    doc = _run_play(tmp_path, scripts=["postgres", "bay_shop-data"],
+                    timers={"postgres": ENABLED, "bay_shop-data": ENABLED},
+                    status={"postgres": now - 3600, "bay_shop-data": now - 3600},
+                    manifest=["postgres", "bay_shop-data"],
+                    restore_tests={"postgres": {"verdict": "unverified", "at": now - 60, "ok": True,
+                                                "test": True, "counts": {"public.t": 1}}})
+    seen = doc["results"]["localhost"]["probe"]["targets"]["postgres"]
+    assert seen["restore_test"] == {"verdict": "unverified", "at": now - 60, "ok": True}
+    assert "counts" not in seen["restore_test"], "only the verdict leaves the box"
+    rows, code = bs.evaluate(doc)
+    assert code == 4 and {r.target: r.state for r in rows}["postgres"] == "restore_unverified"
+
+
+def test_a_kept_scratch_restore_is_not_a_restore_test_for_the_status(tmp_path):
+    now = int(time.time())
+    doc = _run_play(tmp_path, scripts=["postgres", "bay_shop-data"],
+                    timers={"postgres": ENABLED, "bay_shop-data": ENABLED},
+                    status={"postgres": now - 3600, "bay_shop-data": now - 3600},
+                    manifest=["postgres", "bay_shop-data"],
+                    restore_tests={"postgres": {"verdict": "fail", "at": now - 60, "ok": False,
+                                                "test": False}})
+    assert doc["results"]["localhost"]["probe"]["targets"]["postgres"]["restore_test"] is None
+    assert bs.evaluate(doc)[1] == bs.OK

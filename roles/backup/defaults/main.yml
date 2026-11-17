@@ -51,6 +51,19 @@ backup_freshness_enabled: true
 backup_freshness_schedule: "*-*-* 00/6:17:00"
 backup_freshness_repeat_hours: 24
 
+# ── Restore test limits (2.24.1) ───────────────────────────────────────────
+# `bay backup restore-test` compares exact row counts of the restored copy
+# with exact counts of the live database, per leaf table (a partitioned parent
+# is the sum of its partitions). Rows written after the snapshot explain small
+# gaps, so a table fails only when it lost MORE than BOTH limits: this percent
+# of the live rows AND this many rows. An empty table that has rows live, and
+# a table missing from the restore, always fail.
+restore_test_max_loss_pct: 1.0
+restore_test_max_loss_rows: 1000
+# Seconds one live count may run (SET LOCAL statement_timeout). A table whose
+# count times out is compared by its planner estimate and marked `estimate`.
+restore_test_count_timeout: 120
+
 # ── Rig-infrastructure state backups ──────────────────────────────────────
 # The accessory loop only covers things declared in services.yml. Headscale is
 # rig infrastructure (the tailnet coordination server) whose state is NOT modeled

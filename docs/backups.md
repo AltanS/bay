@@ -438,9 +438,10 @@ by default (since 2.24.0). It never touches the live database:
    `bay-restore-test-`, and every command of the restore targets that name.
 2. The snapshot is restored into it (`pg_restore --no-owner --no-privileges --exit-on-error`
    for custom, `psql -v ON_ERROR_STOP=1 --single-transaction` for plain).
-3. Every table is counted exactly and compared with the planner estimates of the live database
-   (one read-only query). A table that is empty in the snapshot but not in the live estimates is
-   named.
+3. Every leaf table (regular tables and partitions; never a partitioned parent or a view) is
+   counted exactly in the scratch database and compared with an exact count of the same table
+   in the live database (see Restore test below). A partitioned parent is reported as the sum of
+   its partitions and stays out of the total.
 4. `bay backup restore` keeps the container for you to read
    (`docker exec -it <name> psql -U <user> <db>`). It is removed after `restore_keep_hours`
    (24); the output says so.
@@ -517,12 +518,68 @@ its first task.
 ### Restore test (Postgres)
 
 `bay backup restore-test <env> <target>` runs the scratch restore with no prompt and removes
-the container after, also on failure. It prints the tables with their exact row counts and the
-live estimates, writes the report to `<backup dir>/status/<target>.restore-test.json` on the
-box, and exits 0 when the restore worked and holds tables, else 1. `--json` prints one
-document. Only counts leave the box. A failed test, and a failed `restore --into scratch`, sends
+the container after, also on failure. It lists every table that is not a plain exact match, writes
+the report to `<backup dir>/status/<target>.restore-test.json` on the box, and exits 0 when the
+restore worked, holds tables and no table failed, else 1. `--json` prints one document. Only
+counts and table names leave the box. A failed test, and a failed `restore --into scratch`, sends
 `backup.restore_test_failed` (warn): the live database was not touched, so it is not
 `restore.failed`.
+
+**What the test compares (2.24.1).** Before 2.24.1 the exact restored counts were compared with the
+planner estimates of the live database (`pg_class.reltuples`, `n_live_tup`). That caught an
+empty or missing table and nothing else, and it flagged estimate noise (a partition with 4,771,855
+rows restored against an estimate of 4,175,470). Now both sides are exact `count(*)` per leaf
+table:
+
+- The live side runs after the restore, in one read-only session:
+  `BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ; SET LOCAL statement_timeout = ...; ...; ROLLBACK;`.
+  The session cannot write, and every count sees the same live state. The counts run one table at
+  a time, never in parallel.
+- A table whose live count times out (`restore_test_count_timeout`, 120 s) is compared by its
+  planner estimate and marked `estimate`. A timeout is never a failure by itself, and an estimate
+  can fail a table only when the table is missing or empty in the restore (too coarse for a partial
+  loss).
+- Verdict per table: `fail` when the table is missing from the restore, or restored is 0 and live
+  is not, or restored is less than live by more than BOTH `restore_test_max_loss_pct` (1.0) percent
+  AND `restore_test_max_loss_rows` (1000) rows. Rows written after the snapshot explain small gaps,
+  so a table under either limit is `ok`. `info` when restored is more than live (rows deleted since
+  the snapshot) or a table is not in the live database any more. Else `ok`.
+- A partitioned parent is the sum of its partitions, labeled in the report (`parents`), carries no
+  verdict of its own and is left out of the total, so nothing counts twice. The partitions are
+  judged one by one. A table with inheritance children is counted with `ONLY`.
+- The report lists every non-ok table with restored, live, delta and method (`exact` or
+  `estimate`), and holds the snapshot time (`snapshot_time`) and the live count time
+  (`live_counted_at`, `live_count_seconds`). The test fails when any table fails. If the live
+  database cannot be read at all, the verdict is `unverified`: the restore still counts as proven,
+  and nothing was compared.
+
+Set the limits as fleet variables, or for one run with `--max-loss-pct`, `--max-loss-rows` and
+`--count-timeout`:
+
+```bash
+bay backup restore-test production shop-postgres --max-loss-pct 0.5 --max-loss-rows 100
+```
+
+**Cost on the live database.** One extra read per test, never scheduled. Every leaf table gets one
+`count(*)` and a sequential scan, one after the other. A table of 82 million rows takes some
+seconds (more on cold storage); a table that needs longer than the timeout is estimated instead. The
+repeatable-read snapshot stays open for the whole count run, so it holds back vacuum on the live
+database for that time. Run the test off peak when the database is large.
+
+**Exit codes of `bay backup restore-test`.**
+
+| Code | Meaning |
+|------|---------|
+| `0` | The restore worked, holds tables, and no table failed. |
+| `1` | The test failed: the restore failed, it holds no table, or a table failed. |
+| `3` | `unverified`: the restore worked, but the live database could not be read, so nothing was compared. |
+
+`unverified` is never a pass. The command prints a warning, exits `3`, and `--json` says
+`"ok": false, "verdict": "unverified"`. The play still ends well (the restore itself worked), but
+it sends the alert `backup.restore_test_failed` (warn) with "unverified" in the text, and
+`bay backup status` shows the target as `restore_unverified` (exit `4`) until a later test
+compares the tables. A kept `bay backup restore --into scratch` does not count as a test for
+the status.
 
 One test reads the whole snapshot from S3 once (S3 egress) and costs some minutes of box disk
 and CPU. It is a manual command, never a timer, so it cannot repeat on its own.
@@ -534,7 +591,7 @@ The pre-restore backup can only be skipped with the playbook variable
 
 - **Alerts** — backup failures, snapshot size warnings, and integrity check failures go to the alert recipients (see [alerting.md](alerting.md))
 - **Freshness check** (since 2.24.0) — the timer `bay-backup-freshness.timer` runs every 6 hours on each box with backups. It reads `targets.json` (the targets the role installed), the status file each good run writes (`<backup dir>/status/<target>.json`) and the timer states. It sends `backup.missing` when a target has no script or no enabled, active timer, and `backup.stale` when a target had no good run for `max_age_hours` (default: 1.25 times the longest gap of the schedule, at least `backup_max_age_hours`, 30). One alert when the problem starts, then at most one per `backup_freshness_repeat_hours` (24) while it stays. It reads only local files, systemd and one `docker ps`: no restic and no S3, and it never starts a backup. The same run removes expired scratch containers (see PostgreSQL: scratch or live). With no status file yet, the clock starts at the later of the timer install and the manifest, so a new target, or a box just upgraded to 2.24.0, is not stale before it could run. A change of the target list rewrites the manifest and so restarts that clock.
-- **`bay backup status`** — which targets each box should have, from the fleet config with the backup role's own rules, and what the box has: script, timer, last good run, next run. A target that was never installed shows as `missing`. Exit codes: `0` all fine, `1` a configured target is missing, `2` a target is stale, `3` a box did not answer (the lowest non-zero code wins). `--json` prints one document. `--deep` also lists the snapshots of every target (one S3 list each). A box whose role predates 2.24.0 writes no status file, so its targets show `no_record` until the next `bay up` (with `--deep`, the newest snapshot counts as the last good run). Before 2.24.0 the command parsed the coloured Ansible output: host lines became rows and every snapshot count read 0.
+- **`bay backup status`** — which targets each box should have, from the fleet config with the backup role's own rules, and what the box has: script, timer, last good run, next run. A target that was never installed shows as `missing`. Exit codes: `0` all fine, `1` a configured target is missing, `2` a target is stale, `3` a box did not answer, `4` the last restore test of a target failed or was `unverified` (shown as `restore_failed` or `restore_unverified`; the lowest non-zero code wins, so missing, stale and no answer come first). A new passing `bay backup restore-test` clears the `4`. `--json` prints one document. `--deep` also lists the snapshots of every target (one S3 list each). A box whose role predates 2.24.0 writes no status file, so its targets show `no_record` until the next `bay up` (with `--deep`, the newest snapshot counts as the last good run). Before 2.24.0 the command parsed the coloured Ansible output: host lines became rows and every snapshot count read 0.
 - **`bay backup list <target>`** — exits 1 when the target is in the config but no box has it installed.
 - **`bay backup run [<target>]`** — starts `bay-backup@<target>.service` (every target of the env when you name none), the same unit as the timer: the app user, the alert credentials, the same status file. It waits for the run and prints its log. Before 2.24.0 it ran the script as root, and a root-owned restic cache made every later timer run go without a cache.
 - **Journald** — all backup output goes to `journalctl -u bay-backup@<name>`
@@ -571,6 +628,9 @@ This provides independent locking, independent retention, and failure isolation 
 | `backup_max_age_hours` | `30` | The least hours without a good run before `backup.stale`; the default limit of a target is 1.25 times its longest schedule gap when that is more (per target: `max_age_hours`) |
 | `restore_keep_hours` | `24` | Hours before a kept scratch container (`bay backup restore --into scratch`) expires |
 | `restore_test_max_hours` | `6` | Hours before the scratch container of an interrupted restore test expires |
+| `restore_test_max_loss_pct` | `1.0` | A table fails the restore test when it lost more than this percent of the live rows AND more than `restore_test_max_loss_rows` rows |
+| `restore_test_max_loss_rows` | `1000` | The row limit that goes with `restore_test_max_loss_pct` (both must be passed) |
+| `restore_test_count_timeout` | `120` | Seconds one exact live count may run; a count that times out falls back to the planner estimate (marked `estimate`) |
 | `restore_lock_timeout` | `30s` | Postgres `lock_timeout` of a live restore |
 | `backup_freshness_enabled` | `true` | Install the 6-hourly freshness check |
 | `backup_freshness_schedule` | `*-*-* 00/6:17:00` | systemd `OnCalendar` of the freshness check |

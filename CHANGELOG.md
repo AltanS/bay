@@ -8,6 +8,25 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.24.1] - 2026-11-17
+
+`bay backup restore-test` now compares exact row counts with exact row counts, so it catches a partial loss and no longer flags estimate noise.
+
+### Fixed
+- The restore test compared the restored EXACT row counts with the live database's planner ESTIMATES (`pg_class.reltuples`, `n_live_tup`). It caught only an empty or missing table. In production on 2026-11-17, 29 of 137 tables "differed" by estimate noise (a partition with 4,771,855 rows restored against an estimate of 4,175,470), and a partitioned parent showed an estimate of 0 against 82 million restored. The total also counted a partitioned parent and its partitions both. Now each leaf table (regular tables and partitions, not partitioned parents, not views) is counted exactly on both sides. The live side runs after the restore, in one read-only session (`BEGIN READ ONLY ISOLATION LEVEL REPEATABLE READ`, `SET LOCAL statement_timeout`, `ROLLBACK`), one table at a time, never in parallel. A table whose live count times out (`restore_test_count_timeout`, 120 s) falls back to its estimate and is marked `estimate`; a timeout never fails the test by itself.
+- Verdict per table: `fail` when the table is missing from the restore, empty there while live has rows, or short of live by more than BOTH `restore_test_max_loss_pct` (1.0) percent AND `restore_test_max_loss_rows` (1000) rows, because rows written after the snapshot explain small gaps. `info` when restored has more rows than live (rows deleted since) or a table is gone from the live database. The test fails when any table fails. An estimate can fail a table only when it is missing or empty in the restore. A partitioned parent is reported as the sum of its partitions, with no verdict of its own, and stays out of the total.
+- The report (and `--json`) lists every non-ok table with restored, live, delta and method (`exact` or `estimate`), and carries the snapshot time and the live count time (`live_counted_at`, `live_count_seconds`). The keys `live_estimates` and `empty_but_live_has_rows` are replaced by `live_counts`, `failures`, `non_ok`, `estimated` and `parents`. If the live database cannot be read, the verdict is `unverified` (see Added).
+
+### Added
+- A restore test that compared nothing is no longer a pass. When the live database cannot be read, the verdict is `unverified`: `bay backup restore-test` prints a warning and exits `3` (`0` passed, `1` failed, `3` unverified; `--json` has `"ok": false`, `verdict` and `exit_code`). The play still ends well, but it sends the alert `backup.restore_test_failed` (warn) with "unverified" in the text, and `bay backup status` shows the target as `restore_unverified` (or `restore_failed` after a failed test) with the new exit code `4`. Missing, stale and no answer (`1` to `3`) win over it. A new passing test clears it. A kept `bay backup restore --into scratch` does not count.
+- The limits are fleet variables with defaults in the backup role: `restore_test_max_loss_pct`, `restore_test_max_loss_rows` and `restore_test_count_timeout`. `bay backup restore-test` takes `--max-loss-pct`, `--max-loss-rows` and `--count-timeout` for one run.
+
+### Upgrade notes
+- Nothing to deploy: the playbook runs from the framework checkout. The safety rules of the scratch container are unchanged (no network, name guard, removal, `--no-cache`, expiry labels, alert `backup.restore_test_failed`), and only counts and table names leave the box.
+- The test now runs one exact `count(*)` per leaf table on the live database. A table of 82 million rows takes some seconds. The repeatable-read snapshot stays open for the count run and holds back vacuum meanwhile, so run the test off peak on a large database.
+- `bay backup status` can now exit `4`. A script that treats any non-zero exit as one problem is unaffected; one that matches the codes `1` to `3` should handle `4`.
+- A test that passed before can now fail on a real partial loss. Read the listed tables before you change a limit.
+
 ## [2.24.0] - 2026-11-17
 
 A project can back up its own Postgres with `pg_dump`, prove the backup restores in a scratch container, and every box alerts when a backup target stops running. `bay backup status` now says what each box should back up, not only what it has.

@@ -216,7 +216,7 @@ restore.failed:
 backup.restore_test_failed:
   level: warn
   source: restore.yml
-  summary: A restore test (bay backup restore-test) failed; the live database was not touched.
+  summary: A restore test (bay backup restore-test) failed or was unverified (the live database could not be read, nothing compared); the live database was not touched.
   enabled_by_default: true
   rate_limited: false
 
