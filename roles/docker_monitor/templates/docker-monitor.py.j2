@@ -2,7 +2,7 @@
 # {{ ansible_managed }}
 # Docker container monitor
 # Watches Docker events and sends alerts (legacy pair + alert_recipients) for:
-#   - Container crashes (non-zero exit code)
+#   - Container crashes (non-zero exit code, not after a planned stop)
 #   - Container recovery (start after crash)
 #   - Restart loops (too many starts within a time window)
 #   - Health check failures
@@ -40,6 +40,11 @@ RESTART_LOOP_COOLDOWN = {{ docker_monitor_restart_loop_cooldown | default(1800) 
 # Seconds a crash_state row may live before save_crash_state drops it. 0 keeps
 # rows forever. See docker_monitor_crash_state_max_age in the role defaults.
 CRASH_STATE_MAX_AGE = {{ docker_monitor_crash_state_max_age | default(604800) | int }}
+# Seconds after a stop request (a `kill` event with SIGTERM, SIGINT or SIGKILL,
+# or a `stop` event) in which a non-zero `die` of the same container id counts
+# as a planned stop, not a crash. See docker_monitor_planned_stop_grace_seconds
+# in the role defaults.
+PLANNED_STOP_GRACE = {{ docker_monitor_planned_stop_grace_seconds | default(30) | int }}
 
 IGNORE_CONTAINERS = {{ docker_monitor_ignore_containers | to_json }}
 
@@ -98,6 +103,19 @@ HEALTH_COOLDOWN_SECONDS = 300
 # collide with a crash_state entry.
 restart_loop_alerted = {}
 RESTART_LOOP_STATE_KEY = "_restart_loop_alerted"
+# container id -> (time.monotonic(), signal label) of the last stop request.
+# Keyed by id, not name: a deploy stops the OLD container while a new one with
+# the same name is created, and only the id tells them apart.
+stop_requests = {}
+# container id -> time.monotonic() of its last `oom` event.
+oom_events = {}
+# Signals that end a container on purpose. Docker reports the number as a
+# string ("15"); a name is accepted too.
+PLANNED_STOP_SIGNALS = {
+    "15": "SIGTERM", "SIGTERM": "SIGTERM", "TERM": "SIGTERM",
+    "2": "SIGINT", "SIGINT": "SIGINT", "INT": "SIGINT",
+    "9": "SIGKILL", "SIGKILL": "SIGKILL", "KILL": "SIGKILL",
+}
 
 
 def send_alert(alert_id, message):
@@ -292,19 +310,114 @@ def format_duration(seconds):
     return " ".join(parts)
 
 
+def _event_container_id(event):
+    """The container id of an event ("id", else Actor.ID), or ""."""
+    return str(event.get("id") or event.get("Actor", {}).get("ID") or "")
+
+
+def _prune_marks(now):
+    """Drop stop and oom marks older than the grace window (bounded memory)."""
+    for cid in [c for c, (ts, _) in stop_requests.items() if now - ts > PLANNED_STOP_GRACE]:
+        del stop_requests[cid]
+    for cid in [c for c, ts in oom_events.items() if now - ts > PLANNED_STOP_GRACE]:
+        del oom_events[cid]
+
+
+def handle_stop_request(event):
+    """Record a stop request (`kill` with a stop signal, or `stop`) by id.
+
+    `docker stop` (and the Docker API stop a deploy uses) makes the daemon
+    log `kill` with the signal BEFORE it signals the process, so `kill`
+    always comes before the `die` it causes. The `stop` event is logged after
+    the stop call returns, which can be before or after `die`. Both are
+    recorded; a `die` that follows either inside PLANNED_STOP_GRACE is a
+    planned stop.
+    """
+    cid = _event_container_id(event)
+    if not cid:
+        return
+    action = event.get("Action", "")
+    now = time.monotonic()
+    _prune_marks(now)
+    if action == "kill":
+        signal = str(event.get("Actor", {}).get("Attributes", {}).get("signal", "")).upper()
+        label = PLANNED_STOP_SIGNALS.get(signal)
+        if label is None:
+            return  # SIGHUP, SIGUSR1 and the like: a reload, not a stop
+        stop_requests[cid] = (now, label)
+    elif action == "stop":
+        prev = stop_requests.get(cid)
+        # Keep the signal name of an earlier kill for the log line.
+        stop_requests[cid] = (now, prev[1] if prev else "docker stop")
+
+
+def handle_oom(event):
+    """Record an `oom` event by id: the next die is a crash, planned or not."""
+    cid = _event_container_id(event)
+    if cid:
+        now = time.monotonic()
+        _prune_marks(now)
+        oom_events[cid] = now
+
+
+def _inspect_oom_killed(cid):
+    """True when `docker inspect` says State.OOMKilled. False when unknown."""
+    if not cid:
+        return False
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", "--format", "{{ '{{.State.OOMKilled}}' }}", cid],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.returncode == 0 and out.stdout.strip().lower() == "true"
+
+
 def handle_die(event):
     """Handle container die event (crash detection + state tracking)."""
     attrs = event.get("Actor", {}).get("Attributes", {})
     container_name = attrs.get("name", "unknown")
     exit_code = attrs.get("exitCode", "?")
+    cid = _event_container_id(event)
+    now = time.monotonic()
+    _prune_marks(now)
+    stop_request = stop_requests.pop(cid, None) if cid else None
+    oom_mark = oom_events.pop(cid, None) if cid else None
 
     if is_ignored(container_name):
         return
 
-    # Exit 0 = clean shutdown, 143 = SIGTERM (128+15), 137 = SIGKILL (128+9)
-    # Both 143 and 137 are normal during docker stop (SIGTERM then SIGKILL after timeout)
-    if str(exit_code) in ("0", "137", "143"):
+    if str(exit_code) == "0":
         return
+
+    # An OOM kill is a crash even when a stop request came first, and even
+    # with exit 137. The `oom` event is the cheap signal; inspect is the
+    # fallback, asked only for 137 (the exit code of a SIGKILL).
+    oom_killed = oom_mark is not None or (
+        str(exit_code) == "137" and _inspect_oom_killed(cid)
+    )
+
+    if not oom_killed:
+        # 143 = SIGTERM (128+15), 137 = SIGKILL (128+9): normal during a stop.
+        if str(exit_code) in ("137", "143"):
+            return
+        # A non-zero exit right after a stop request is a planned stop (a
+        # deploy, a webhook rebuild, `docker stop`). Many apps exit 1 on
+        # SIGTERM. No alert, and no crash_state row, so the next start sends
+        # no container.recovered either.
+        if (
+            PLANNED_STOP_GRACE > 0
+            and stop_request is not None
+            and 0 <= now - stop_request[0] <= PLANNED_STOP_GRACE
+        ):
+            print(
+                f"[{datetime.now().isoformat()}] Planned stop: {container_name} (exit {exit_code}) after {stop_request[1]}, no alert",
+                flush=True,
+            )
+            return
 
     # Track crash in state file
     now_iso = datetime.now().isoformat()
@@ -476,6 +589,9 @@ def main():
             "docker", "events",
             "--format", "{{ '{{json .}}' }}",
             "--filter", "event=die",
+            "--filter", "event=kill",
+            "--filter", "event=stop",
+            "--filter", "event=oom",
             "--filter", "event=start",
             "--filter", "event=health_status",
         ],
@@ -495,6 +611,10 @@ def main():
 
         if action == "die":
             handle_die(event)
+        elif action in ("kill", "stop"):
+            handle_stop_request(event)
+        elif action == "oom":
+            handle_oom(event)
         elif action == "start":
             handle_start(event)
         elif action.startswith("health_status"):
