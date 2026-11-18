@@ -535,15 +535,18 @@ known. A container that stays down longer than the limit gets no
 `container.crash` is not sent for a planned stop. A deploy, a webhook
 rebuild and `docker stop` stop a container with SIGTERM, and many apps exit 1
 then instead of 0 or 143. The monitor records each stop request by container
-id: a `kill` event with SIGTERM, SIGINT or SIGKILL, or a `stop` event. A
-non-zero exit of the same id within `docker_monitor_planned_stop_grace_seconds`
-(default 30) is logged as `Planned stop: <name> (exit N) after <signal>, no
-alert`. It writes no crash row, so the next start sends no
-`container.recovered` either. An OOM kill always alerts: the `oom` event, or
-`State.OOMKilled` in `docker inspect` for exit 137. A container that exits on
-its own, with no stop request, alerts as before. A custom `STOPSIGNAL` such as
-SIGQUIT is covered only through the `stop` event. Set the variable to `0` to
-turn the check off.
+id: a `kill` event with any signal except a reload signal (SIGHUP, SIGUSR1,
+SIGUSR2, SIGWINCH), or a `stop` event. So a custom `STOPSIGNAL` such as SIGQUIT
+counts too. A non-zero exit of the same id within
+`docker_monitor_planned_stop_grace_seconds` (default 30) is logged as `Planned
+stop: <name> (exit N) after <signal>, no alert`. It writes no crash row, so the
+next start sends no `container.recovered` either. A start clears the request,
+so a restarted container that crashes on boot still alerts. An OOM kill always
+alerts: the `oom` event, or `State.OOMKilled` in `docker inspect` for exit 137.
+A container that exits on its own, with no stop request, alerts as before.
+Keep the grace at least `container_lifecycle_stop_timeout` (30): an app that
+exits 1 later than the grace after SIGTERM still alerts. Set the variable to
+`0` to turn the check off.
 
 There is a **third** emitter, and it is the odd one out.
 `deploy.complete`, `deploy.failed`, `restore.completed` and `restore.failed`

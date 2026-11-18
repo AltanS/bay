@@ -13,13 +13,13 @@ needing manual action is called out under **Upgrade notes**. Entries for
 The container monitor no longer sends `container.crash` when a deploy stops a container.
 
 ### Fixed
-- A deploy stops the old container with SIGTERM. Docker logs `kill signal=15`, `stop` and `die`, and many apps (Node apps often) exit 1 on SIGTERM, so every deploy and every webhook rebuild sent `container.crash` (eu, 2026-11-18). The monitor now also watches the `kill`, `stop` and `oom` events and records each stop request by container id: a `kill` with SIGTERM, SIGINT or SIGKILL, or a `stop`. A non-zero `die` of the same id within `docker_monitor_planned_stop_grace_seconds` (new, default 30) is a planned stop. It sends no alert, writes no crash row (so no `container.recovered` follows) and logs `Planned stop: <name> (exit N) after <signal>, no alert`.
+- A deploy stops the old container with SIGTERM. Docker logs `kill signal=15`, `stop` and `die`, and many apps (Node apps often) exit 1 on SIGTERM, so every deploy and every webhook rebuild sent `container.crash` (eu, 2026-11-18). The monitor now also watches the `kill`, `stop` and `oom` events and records each stop request by container id: a `kill` with any signal except a reload signal (SIGHUP, SIGUSR1, SIGUSR2, SIGWINCH), so a custom `STOPSIGNAL` such as SIGQUIT counts too, or a `stop`. A later start of the same id clears the request, so a restarted container that crashes on boot still alerts. A non-zero `die` of the same id within `docker_monitor_planned_stop_grace_seconds` (new, default 30) is a planned stop. It sends no alert, writes no crash row (so no `container.recovered` follows) and logs `Planned stop: <name> (exit N) after <signal>, no alert`.
 - An OOM kill is a crash even after a stop request: the `oom` event, or `State.OOMKilled` from `docker inspect` for exit 137. Before, exit 137 never alerted, an OOM kill included.
-- A container that exits on its own, with no stop request, alerts as before. Restart-loop detection is unchanged. A container with a custom `STOPSIGNAL` (such as SIGQUIT) counts as stopped only through the `stop` event.
+- A container that exits on its own, with no stop request, alerts as before. Restart-loop detection is unchanged.
 
 ### Upgrade notes
 - The monitor is a host script from `deploy.yml`. Re-render and restart it on each box with `bay --fleet <path> deploy production --tags monitoring`. No app container is recreated.
-- Set `docker_monitor_planned_stop_grace_seconds: 0` to keep the old behaviour.
+- Set `docker_monitor_planned_stop_grace_seconds: 0` to keep the old behaviour. A fleet that raised `container_lifecycle_stop_timeout` above 30 should raise the grace to match.
 
 ## [2.24.1] - 2026-11-17
 

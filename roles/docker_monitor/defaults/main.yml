@@ -42,10 +42,13 @@ docker_monitor_crash_state_max_age: 604800  # seconds (7 days)
 # often) then exit 1 instead of 0 or 143. A non-zero exit within this many
 # seconds after a stop request for the SAME container id is a planned stop: no
 # container.crash alert, and no container.recovered on the next start. A stop
-# request is a `kill` event with SIGTERM, SIGINT or SIGKILL, or a `stop`
+# request is a `kill` event with any signal except a reload signal (SIGHUP,
+# SIGUSR1, SIGUSR2, SIGWINCH), so a custom STOPSIGNAL counts too, or a `stop`
 # event. An OOM kill (the `oom` event, or State.OOMKilled for exit 137) still
 # alerts. A container that exits on its own, with no stop request, still
-# alerts as before. 0 turns the planned-stop check off.
+# alerts as before. Keep this at least container_lifecycle_stop_timeout (30):
+# an app that exits 1 later than the grace after SIGTERM still alerts. 0 turns
+# the planned-stop check off.
 docker_monitor_planned_stop_grace_seconds: 30
 
 # Containers to ignore (list of name patterns)

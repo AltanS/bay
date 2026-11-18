@@ -142,9 +142,47 @@ def test_die_without_a_stop_request_alerts(tmp_path, sent, recipients_only, cloc
     assert monitor.crash_state["web"]["exit_code"] == 1
 
 
-def test_a_reload_signal_is_not_a_stop(tmp_path, sent, recipients_only, clock, no_inspect):
+@pytest.mark.parametrize("signal", ["1", "10", "12", "28", "SIGHUP", "USR1"])
+def test_a_reload_signal_is_not_a_stop(tmp_path, sent, recipients_only, clock, no_inspect, signal):
     monitor = _monitor(tmp_path)
-    _kill(monitor, "1")  # SIGHUP
+    _kill(monitor, signal)
+    _die(monitor, "1")
+    assert len(_crashes(sent)) == 1
+
+
+def test_a_custom_stopsignal_is_a_stop(tmp_path, sent, recipients_only, clock, no_inspect, capsys):
+    """nginx stops on SIGQUIT; docker logs `kill signal=3` before the die."""
+    monitor = _monitor(tmp_path)
+    _kill(monitor, "3")
+    _die(monitor, "1")
+    assert _crashes(sent) == []
+    assert "after SIGQUIT" in capsys.readouterr().out
+
+
+def test_a_late_stop_event_does_not_cover_a_crash_after_restart(tmp_path, sent, recipients_only, clock, no_inspect):
+    """docker restart keeps the id: kill, die, stop, start, then a boot crash."""
+    monitor = _monitor(tmp_path)
+    _kill(monitor, "15")
+    _die(monitor, "143")
+    _stop(monitor)
+    monitor.handle_start(_event("start"))
+    clock[0] += 3
+    _die(monitor, "1")
+    assert len(_crashes(sent)) == 1
+
+
+def test_late_stop_alone_leaves_no_mark(tmp_path, sent, recipients_only, clock, no_inspect):
+    monitor = _monitor(tmp_path)
+    _kill(monitor, "15")
+    _die(monitor, "143")
+    _stop(monitor)
+    assert _CID not in monitor.stop_requests
+
+
+def test_start_clears_an_old_stop_request(tmp_path, sent, recipients_only, clock, no_inspect):
+    monitor = _monitor(tmp_path)
+    _kill(monitor, "15")
+    monitor.handle_start(_event("start"))
     _die(monitor, "1")
     assert len(_crashes(sent)) == 1
 

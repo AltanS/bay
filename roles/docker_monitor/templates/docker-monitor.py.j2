@@ -109,12 +109,23 @@ RESTART_LOOP_STATE_KEY = "_restart_loop_alerted"
 stop_requests = {}
 # container id -> time.monotonic() of its last `oom` event.
 oom_events = {}
-# Signals that end a container on purpose. Docker reports the number as a
-# string ("15"); a name is accepted too.
-PLANNED_STOP_SIGNALS = {
-    "15": "SIGTERM", "SIGTERM": "SIGTERM", "TERM": "SIGTERM",
-    "2": "SIGINT", "SIGINT": "SIGINT", "INT": "SIGINT",
-    "9": "SIGKILL", "SIGKILL": "SIGKILL", "KILL": "SIGKILL",
+# container id -> time.monotonic() of its last `die`. `docker stop` logs
+# `stop` AFTER the container exited, so a `stop` that follows a `die` must not
+# leave a fresh mark: a restarted container keeps its id, and a crash on boot
+# would then read as a planned stop.
+recent_dies = {}
+# Signal names for the log line. Docker reports the number as a string
+# ("15"); a name is accepted too.
+SIGNAL_NAMES = {"15": "SIGTERM", "2": "SIGINT", "9": "SIGKILL", "3": "SIGQUIT"}
+# Signals a `docker kill -s` sends to make an app reload or rotate, not stop.
+# Any other signal counts as a stop request, so a custom STOPSIGNAL (SIGQUIT
+# for nginx, for example) is covered too.
+RELOAD_SIGNALS = {
+    "0",
+    "1", "SIGHUP", "HUP",
+    "10", "SIGUSR1", "USR1",
+    "12", "SIGUSR2", "USR2",
+    "28", "SIGWINCH", "WINCH",
 }
 
 
@@ -319,8 +330,9 @@ def _prune_marks(now):
     """Drop stop and oom marks older than the grace window (bounded memory)."""
     for cid in [c for c, (ts, _) in stop_requests.items() if now - ts > PLANNED_STOP_GRACE]:
         del stop_requests[cid]
-    for cid in [c for c, ts in oom_events.items() if now - ts > PLANNED_STOP_GRACE]:
-        del oom_events[cid]
+    for marks in (oom_events, recent_dies):
+        for cid in [c for c, ts in marks.items() if now - ts > PLANNED_STOP_GRACE]:
+            del marks[cid]
 
 
 def handle_stop_request(event):
@@ -329,9 +341,9 @@ def handle_stop_request(event):
     `docker stop` (and the Docker API stop a deploy uses) makes the daemon
     log `kill` with the signal BEFORE it signals the process, so `kill`
     always comes before the `die` it causes. The `stop` event is logged after
-    the stop call returns, which can be before or after `die`. Both are
-    recorded; a `die` that follows either inside PLANNED_STOP_GRACE is a
-    planned stop.
+    the stop call returns, which is usually after `die`; a `stop` for an id
+    that just died is ignored. A `die` that follows a recorded request inside
+    PLANNED_STOP_GRACE is a planned stop.
     """
     cid = _event_container_id(event)
     if not cid:
@@ -340,12 +352,17 @@ def handle_stop_request(event):
     now = time.monotonic()
     _prune_marks(now)
     if action == "kill":
-        signal = str(event.get("Actor", {}).get("Attributes", {}).get("signal", "")).upper()
-        label = PLANNED_STOP_SIGNALS.get(signal)
-        if label is None:
+        signal = str(event.get("Actor", {}).get("Attributes", {}).get("signal", "")).strip().upper()
+        if not signal or signal in RELOAD_SIGNALS:
             return  # SIGHUP, SIGUSR1 and the like: a reload, not a stop
+        if signal.isdigit():
+            label = SIGNAL_NAMES.get(signal, f"signal {signal}")
+        else:
+            label = signal if signal.startswith("SIG") else f"SIG{signal}"
         stop_requests[cid] = (now, label)
     elif action == "stop":
+        if cid in recent_dies:
+            return  # the `stop` of a die already handled
         prev = stop_requests.get(cid)
         # Keep the signal name of an earlier kill for the log line.
         stop_requests[cid] = (now, prev[1] if prev else "docker stop")
@@ -386,6 +403,8 @@ def handle_die(event):
     _prune_marks(now)
     stop_request = stop_requests.pop(cid, None) if cid else None
     oom_mark = oom_events.pop(cid, None) if cid else None
+    if cid:
+        recent_dies[cid] = now
 
     if is_ignored(container_name):
         return
@@ -451,6 +470,13 @@ def handle_start(event):
     """Handle container start event (recovery detection + restart loop detection)."""
     attrs = event.get("Actor", {}).get("Attributes", {})
     container_name = attrs.get("name", "unknown")
+    # A started container is running again: a stop or oom mark from before
+    # (a restart keeps the id) must not cover its next die.
+    cid = _event_container_id(event)
+    if cid:
+        stop_requests.pop(cid, None)
+        oom_events.pop(cid, None)
+        recent_dies.pop(cid, None)
 
     if is_ignored(container_name):
         return
