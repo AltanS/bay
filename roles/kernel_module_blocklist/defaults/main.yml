@@ -1,0 +1,23 @@
+---
+# Kernel modules that the kernel must never load on a Bay host.
+#
+# The role writes /etc/modprobe.d/bay-blocklist.conf with two lines per module:
+#   install <module> /bin/false   # modprobe runs /bin/false instead, so an
+#                                 # autoload on socket() fails too
+#   blacklist <module>            # no load by device alias
+#
+# sctp: nginx2root (2026-11-18) chains nginx RCEs with an unpatched SCTP
+# use-after-free (since kernel v4.15) to get host root, also from inside a
+# container. A socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP) call autoloads the
+# module. No Bay role needs SCTP.
+#
+# The role never unloads a module. A listed module that is already loaded
+# (/sys/module/<module> exists) stays loaded until a reboot; the run prints a
+# warning for it and does not fail.
+#
+# An empty list removes the file. The modules are not in the initramfs, so the
+# role does not run update-initramfs.
+#
+# Apply it alone: bay --fleet <path> provision <env> --tags kernel_module_blocklist
+kernel_module_blocklist:
+  - sctp

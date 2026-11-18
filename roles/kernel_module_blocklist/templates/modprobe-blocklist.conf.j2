@@ -1,0 +1,6 @@
+# Managed by Bay (kernel_module_blocklist role). Do not edit: the next
+# provision overwrites this file. Change the kernel_module_blocklist variable.
+{% for module in kernel_module_blocklist %}
+install {{ module }} /bin/false
+blacklist {{ module }}
+{% endfor %}

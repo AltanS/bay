@@ -1,0 +1,40 @@
+---
+# Block kernel modules with a modprobe.d file. See defaults/main.yml.
+# become_user is set on each task: a play that runs as app_user keeps that
+# become_user under a task-level `become: true`.
+
+- name: Write the kernel module blocklist
+  ansible.builtin.template:
+    src: modprobe-blocklist.conf.j2
+    dest: /etc/modprobe.d/bay-blocklist.conf
+    owner: root
+    group: root
+    mode: "0644"
+  become: true
+  become_user: root
+  when: kernel_module_blocklist | length > 0
+
+- name: Remove the kernel module blocklist when the list is empty
+  ansible.builtin.file:
+    path: /etc/modprobe.d/bay-blocklist.conf
+    state: absent
+  become: true
+  become_user: root
+  when: kernel_module_blocklist | length == 0
+
+- name: Check whether a blocked module is loaded
+  ansible.builtin.stat:
+    path: "/sys/module/{{ item }}"
+  loop: "{{ kernel_module_blocklist }}"
+  register: _kernel_module_blocklist_loaded
+
+- name: Warn about a blocked module that is loaded
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: kernel module {{ item.item }} is loaded. The blocklist stops the
+      next load only. Bay does not unload it: reboot the box, or run
+      'sudo rmmod {{ item.item }}' if nothing uses it.
+  loop: "{{ _kernel_module_blocklist_loaded.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: item.stat.exists | default(false)

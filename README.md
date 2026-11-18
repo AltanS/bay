@@ -204,6 +204,7 @@ roles/
   swap/                      # Swap file and swappiness
   users/                     # User and SSH key management
   sshd_hardening/            # SSH drop-in hardening (MaxStartups, LoginGraceTime)
+  kernel_module_blocklist/   # modprobe.d blocklist for kernel modules (default: sctp)
   nftables/                  # Firewall rules
   crowdsec/                  # CrowdSec IDS and the nftables bouncer
   traefik/                   # Reverse proxy config, ACME, the `services` Docker network

@@ -8,6 +8,20 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.25.0] - 2026-11-18
+
+Bay now stops the kernel from loading the SCTP module on every box.
+
+### Added
+- New provision role `kernel_module_blocklist`. It writes `/etc/modprobe.d/bay-blocklist.conf` (root, mode 0644) with `install <module> /bin/false` and `blacklist <module>` for each module in `kernel_module_blocklist` (default `[sctp]`). With the `install` line, modprobe runs `/bin/false`, so an autoload on `socket()` fails too, also from inside a container. The nginx2root chain (published 2026-11-18) uses nginx RCEs and an unpatched SCTP use-after-free (since kernel v4.15) to get host root. No Bay role needs SCTP.
+- The role never unloads a module. If a listed module is already loaded (`/sys/module/<module>` exists), the run prints a warning and does not fail. The module stays loaded until a reboot.
+- An empty list removes the file. The role has its own tag, `kernel_module_blocklist`, and also runs with `security`.
+
+### Upgrade notes
+- The role is in `provision.yml`, so `bay deploy` does not run it. Apply it on each fleet with `bay --fleet <path> provision production --tags kernel_module_blocklist`. It restarts no service and no container.
+- Check a box with `sudo modprobe -n -v sctp`: it prints `install /bin/false`. `lsmod | grep sctp` must print nothing.
+- A host that needs SCTP sets `kernel_module_blocklist: []`, or a list without `sctp`.
+
 ## [2.24.2] - 2026-11-18
 
 The container monitor no longer sends `container.crash` when a deploy stops a container.

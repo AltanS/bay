@@ -140,6 +140,7 @@
     # Phase 3: SSH and security hardening
     - { role: geerlingguy.security, tags: [security] }
     - { role: sshd_hardening, tags: [security] }
+    - { role: kernel_module_blocklist, tags: [security, kernel_module_blocklist] }
     - { role: nftables, tags: [security, nftables] }
     - { role: crowdsec, tags: [security, crowdsec] }
     - { role: crowdsec_allowlist, tags: [security, crowdsec, allowlist] }
