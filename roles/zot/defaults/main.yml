@@ -171,6 +171,14 @@ zot_retention_always_keep:
 # weeks of moderate push volume; issue #10).
 zot_storage_driver: filesystem   # filesystem | s3
 
+# Scrub extension. Scrub re-reads every blob of every tag to check it.
+# On the s3 driver each run downloads the whole registry from the
+# bucket, which is paid data-out (one fleet measured 314 GB in 7.4 days,
+# about 90% of its S3 egress cost). So it is on for filesystem and off
+# for s3. Set `zot_scrub_enabled: true` to keep it on s3.
+zot_scrub_enabled: "{{ zot_storage_driver != 's3' }}"
+zot_scrub_interval: "24h"
+
 # S3 driver settings (required when zot_storage_driver == s3)
 zot_s3_bucket: ""
 zot_s3_region: ""

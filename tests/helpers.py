@@ -59,6 +59,13 @@ def _alert_filters() -> dict:
     }
 
 
+def _ansible_bool(value) -> bool:
+    """Ansible's `bool` filter: strings such as "true" and "yes" are true."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1", "on", "y", "t"}
+    return bool(value)
+
+
 def make_ansible_env(
     template_dir: Path | str,
     *,
@@ -76,6 +83,7 @@ def make_ansible_env(
     # time and a test that only asserts "no unsafe payload" passes vacuously.
     env.filters["quote"] = shlex.quote
     env.filters["to_json"] = json.dumps
+    env.filters["bool"] = _ansible_bool
     return env
 
 

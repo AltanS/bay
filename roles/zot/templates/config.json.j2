@@ -96,10 +96,11 @@
   "extensions": {
     "search": {
       "enable": true
-    },
+    }{% if zot_scrub_enabled | bool %},
     "scrub": {
       "enable": true,
-      "interval": "24h"
-    }
+      "interval": {{ zot_scrub_interval | string | to_json }}
+    }{% endif %}
+
   }
 }

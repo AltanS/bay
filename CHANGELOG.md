@@ -8,6 +8,18 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.25.1] - 2026-11-20
+
+The zot scrub is now a switch, and it is off by default on the s3 driver.
+
+### Changed
+- New role variables `zot_scrub_enabled` and `zot_scrub_interval` (default `24h`). The zot config used to hard-code `"scrub": {"enable": true, "interval": "24h"}`, with no way to turn it off. Scrub re-reads every layer of every tag. On the s3 driver each nightly run downloads the whole registry from the bucket, which is paid data-out (one fleet measured 314 GB in 7.4 days, about 90% of its S3 egress cost).
+- `zot_scrub_enabled` defaults to `zot_storage_driver != 's3'`: on for the filesystem driver, off for s3. A filesystem fleet sees no change in `config.json`.
+
+### Upgrade notes
+- A fleet on the s3 driver loses the scrub on its next deploy of the zot role. Run `bay --fleet <path> deploy production --tags zot`. The config changes, so zot restarts and answers 502 for about a minute while it reads its repositories from S3.
+- To keep the scrub on s3, set `zot_scrub_enabled: true` (and `zot_scrub_interval` if you want another interval).
+
 ## [2.25.0] - 2026-11-18
 
 Bay now stops the kernel from loading the SCTP module on every box.

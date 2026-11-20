@@ -70,6 +70,8 @@ def _context(**overrides) -> dict:
         _zot_creds=_ADMIN,
     )
     ctx.update(overrides)
+    # Templated default: scrub is on for filesystem, off for s3.
+    ctx.setdefault("zot_scrub_enabled", ctx["zot_storage_driver"] != "s3")
     return ctx
 
 
