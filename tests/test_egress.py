@@ -1299,10 +1299,11 @@ def _names(path: Path) -> list[str]:
 def test_main_runs_egress_before_specs_and_reconcile_and_prune_after():
     tasks = yaml.safe_load(_MAIN.read_text())
     includes = [t.get("ansible.builtin.include_tasks") for t in tasks]
-    assert includes == ["egress.yml", "build_specs.yml", "reconcile.yml", "egress_prune.yml"]
+    egress = [i for i in includes if i != "volume_owners.yml"]
+    assert egress == ["egress.yml", "build_specs.yml", "reconcile.yml", "egress_prune.yml"]
     full_pass = "container_lifecycle_only | default([]) | length == 0"
     assert tasks[0]["when"] == full_pass
-    prune_when = tasks[3]["when"]
+    prune_when = tasks[includes.index("egress_prune.yml")]["when"]
     assert full_pass in prune_when and "not ansible_check_mode" in prune_when
 
 

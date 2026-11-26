@@ -1,0 +1,83 @@
+---
+# Volume owners (bay.toml `[[mounts]] volume = "x"` with `owner = "uid[:gid]"`).
+#
+# The compiler writes the top-level `volume_owners:` map in services.yml,
+# keyed by the volume name without the stack prefix:
+#
+#   volume_owners:
+#     myapp-files: {container: myapp, owner: "1000:1000"}
+#
+# main.yml includes this file twice on a full pass, with `_volown_pass`:
+#
+#   before  ahead of the reconciler, so a first start finds the volume
+#           writable (the helper creates an absent volume, like Docker would)
+#   after   behind the reconciler: when Docker creates a container on an
+#           EMPTY volume and the mount path exists in the image, it copies
+#           the image directory's owner onto the volume. This pass sets it
+#           again and warns. Skipped in check mode and plan-only mode.
+#
+# src/bay_reconcile/volown.py does the work as root (the play runs as
+# app_user, so the task names root explicitly). It looks only at the top
+# directory of a volume; on a mismatch it walks the tree and sets the top
+# last. A failure stops the deploy before the reconciler (fail closed).
+#
+# Check mode (`bay plan --remote`) and plan-only mode run the helper with
+# --dry-run: it creates and changes nothing and reports `would`.
+
+# Only volumes whose container runs on this host, named like the Docker
+# volume (`<stack_name>_<volume>`, see bay_prefix_volumes).
+- name: Find the volume owners of this host
+  ansible.builtin.set_fact:
+    _volown_spec: >-
+      {%- set out = {} -%}
+      {%- set here = (active_services | default({}) | list)
+                     + (active_accessories | default({}) | list) -%}
+      {%- for name, entry in (volume_owners | default({})).items() if entry.container in here -%}
+        {%- set _ = out.update({(stack_name | default('bay')) ~ '_' ~ name: entry.owner | string}) -%}
+      {%- endfor -%}
+      {{ out }}
+
+- name: Set the volume owners
+  when: _volown_spec | length > 0
+  block:
+    # check_mode: false because the dry run only reads; it reports what a
+    # deploy would do.
+    - name: Set the owner of the named volumes, pass {{ _volown_pass | default('before') }}
+      ansible.builtin.script:
+        # One line on purpose: see "Ensure the egress networks" in egress.yml.
+        cmd: "{{ playbook_dir }}/src/bay_reconcile/volown.py ensure {{ _volown_dry_flag }} --spec {{ _volown_ensure_spec | to_json | quote }}"
+        executable: python3
+      vars:
+        _volown_dry_flag: "{{ '--dry-run' if (ansible_check_mode or (bay_reconciler_plan_only | default(false) | bool)) else '' }}"
+        _volown_ensure_spec:
+          volumes: "{{ _volown_spec }}"
+      become: true
+      become_user: root
+      register: _volown_run
+      check_mode: false
+      # `rc == 0 and` first: a failed run reports its own error instead of
+      # dying on from_json of an error document.
+      changed_when: >-
+        _volown_run.rc == 0 and
+        (((_volown_run.stdout | from_json).volumes | dict2items | map(attribute='value')
+          | selectattr('created', 'equalto', true) | list | length > 0)
+         or ((_volown_run.stdout | from_json).volumes | dict2items | map(attribute='value')
+          | selectattr('changed', 'number') | selectattr('changed', 'gt', 0) | list | length > 0))
+
+    - name: Warn about volumes whose owner Docker reset
+      ansible.builtin.debug:
+        msg: >-
+          WARNING: volume {{ _volown_item.key }}: Docker copied the owner of
+          the image path into the empty volume when it created the container.
+          Bay set the owner {{ _volown_item.value.owner }} again after the
+          container started, so the app may have started without write
+          access. Restart the container if it reports errors. Make the image
+          create that path with the same owner, or not create it at all.
+      loop: >-
+        {{ (_volown_run.stdout | default('{"volumes": {}}') | from_json).volumes
+           | dict2items | selectattr('value.changed', 'number')
+           | selectattr('value.changed', 'gt', 0) | list }}
+      loop_control:
+        loop_var: _volown_item
+        label: "{{ _volown_item.key }}"
+      when: _volown_pass | default('before') == 'after'

@@ -27,6 +27,13 @@
 #        specs pin the address the network got) and before the reconciler,
 #        then removes what no container needs AFTER it. A partial pass never
 #        touches either. See tasks/egress.yml.
+#
+#        Volume owners (bay.toml `[[mounts]] owner`): a full pass sets the
+#        owner of each named volume BEFORE the reconciler, so a first start
+#        finds it writable, and AGAIN AFTER it, because Docker copies the
+#        image path's owner onto an empty volume when it creates a container.
+#        The after pass is skipped in check mode and plan-only mode. A
+#        partial pass never touches either. See tasks/volume_owners.yml.
 
 - name: Prepare the egress networks and firewall
   ansible.builtin.include_tasks: egress.yml
@@ -36,6 +43,12 @@
   ansible.builtin.include_tasks: build_specs.yml
   when: container_specs is not defined or (container_lifecycle_only | default([]) | length > 0)
 
+- name: Set the volume owners before the containers start
+  ansible.builtin.include_tasks: volume_owners.yml
+  vars:
+    _volown_pass: before
+  when: container_lifecycle_only | default([]) | length == 0
+
 - name: Reconcile via server-side reconciler
   ansible.builtin.include_tasks: reconcile.yml
   vars:
@@ -43,6 +56,15 @@
       {{ _container_lifecycle_partial_specs | default([])
          if (container_lifecycle_only | default([]) | length > 0)
          else container_specs }}
+
+- name: Set the volume owners again after the containers started
+  ansible.builtin.include_tasks: volume_owners.yml
+  vars:
+    _volown_pass: after
+  when:
+    - container_lifecycle_only | default([]) | length == 0
+    - not ansible_check_mode
+    - not (bay_reconciler_plan_only | default(false) | bool)
 
 - name: Remove the egress networks and firewall nothing uses
   ansible.builtin.include_tasks: egress_prune.yml
