@@ -8,6 +8,26 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.26.0] - 2026-11-26
+
+Bay now sets the owner of a volume, and `bay init` registers a repo that already has a `bay.toml`.
+
+### Added
+- The mount option `owner = "uid"` or `"uid:gid"` of a volume mount is now deployed. On every `bay up` and `bay deploy`, Bay sets the owner of the volume on the box, before the containers start and once more after. It looks at the top directory of the volume. If that has the owner, Bay changes nothing. If not, Bay changes the owner of every file in the volume. It never follows a symbolic link. No hand `chown` on the box is needed for an image that does not run as root.
+- The compiled `services.yml` has a new top-level key `volume_owners`. A change of an owner recreates no container.
+- `bay plan` shows an owner as a `volume` step. A new volume is `safe`. An owner added or changed on a volume that a container already mounts is `destructive` and needs `bay approve`. A removed owner is `safe`, and Bay leaves the files as they are.
+- `bay init` in an app repo that already has a valid `bay.toml` registers the app and leaves the file as it is. The name and the fleet come from the file. The JSON result has a new key `drafted`.
+
+### Changed
+- `bay plan` no longer lists a volume `owner` as unsupported.
+- Two mounts of one volume with different owners are a compile error. An owner number above 4294967294 is a validation error.
+
+### Upgrade notes
+- Move every machine that deploys to 2.26.0 before a `bay.toml` uses `owner`. An older CLI does not know `volume_owners`.
+- For an existing volume, add `owner` to the mount, run `bay plan`, approve the `destructive` step, then run `bay up`. Bay changes the owner of every file once. `bay rollback` does not change it back.
+- Docker copies the owner of the image path onto an empty volume each time it creates a container. If the image holds the path with another owner, Bay corrects it after the start and prints a warning. Make the image create that path with the same owner, or not at all.
+- Not supported: Docker with user namespace remapping, rootless Docker, and volume drivers other than `local`. The deploy stops with an error there.
+
 ## [2.25.1] - 2026-11-20
 
 The zot scrub is now a switch, and it is off by default on the s3 driver.
