@@ -1009,11 +1009,13 @@ def show(
 ) -> None:
     """Print WANTED, PINNED and RUNNING for a project, and a status per environment.
 
-    Status: ok, ahead (the box runs WANTED, a push deployed it, and the pin
-    is behind), behind (the project is ahead of the pin and the box does not
-    run it yet), drift (the box differs from the pin), unknown (no receipt)
-    or HALF (the last bay up failed). RUNNING names the code each build
-    container runs. With --routes: the same for every tailnet route of the
+    Status: ok, building (a push changed code only and the box builds it;
+    no bay up is needed), ahead (the box runs WANTED, but its bay.toml or a
+    file it mounts differs from the pin: run bay up), behind (the same
+    settings change waits for bay up and the box does not run it yet; or only
+    bay up deploys code here), drift (the box differs from the pin), unknown
+    (no receipt) or HALF (the last bay up failed). RUNNING names the code
+    each build container runs. With --routes: the same for every tailnet route of the
     fleet.
     """
     from bay_cli import apply as applymod

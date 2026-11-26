@@ -3318,6 +3318,12 @@ def make_plan(
         if move is not None:
             moves.append(move)
     steps = _apply_moves(moves, diff.steps, blockers, notes, cx)
+    if not steps and not blockers:
+        from bay_cli import samesettings
+
+        same_note = samesettings.no_change_note(proj, wanted.commit, pinned_commit)
+        if same_note:
+            notes.append(same_note)
 
     plan: dict[str, Any] = {
         "plan_version": PLAN_VERSION,

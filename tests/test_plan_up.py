@@ -5386,24 +5386,27 @@ def test_show_prints_running_commit(
 def test_show_ahead_when_box_runs_wanted(
     world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Gap 16: `ahead` when a push deployed WANTED; `behind` while the box runs the pin."""
+    """Gap 16: a settings push is `behind` while the box runs the pin, `ahead` once it runs WANTED.
+
+    Since 2.27.0 a push of code only is `building`, then `ok` (tests/test_same_settings.py).
+    """
     _code_deploys(monkeypatch, box)
     pin = _build_app(world)
     assert do_up(world)["result"] == "ok"
     _stamp(box, "webapp", pin)
     assert json.loads(cli(world, "show", "--json").stdout)["envs"][0]["status"] == "ok"
 
-    wanted = _push_code(world, "v2")
+    wanted = edit_app(world, 'LOG_LEVEL = "info"', 'LOG_LEVEL = "debug"')
     row = json.loads(cli(world, "show", "--json").stdout)["envs"][0]
     assert row["status"] == "behind"
-    assert row["reason"].endswith("and the box does not run it yet")
+    assert row["reason"].startswith("a settings change waits for bay up")
 
     _stamp(box, "webapp", wanted)
     row = json.loads(cli(world, "show", "--json").stdout)["envs"][0]
     assert row["status"] == "ahead", row["reason"]
     assert row["reason"] == (
-        f"the box runs {wanted[:12]} (a push deployed it); the fleet pins {pin[:12]}: "
-        "run bay up to pin it"
+        f"the box runs {wanted[:12]} (a push deployed it); the settings at {wanted[:12]} "
+        f"differ from the pinned ones ({pin[:12]}): run bay plan"
     )
     assert "ahead" in applymod.STATUS_WORDS
     # bay up pins it: ok again.
@@ -5413,7 +5416,7 @@ def test_show_ahead_when_box_runs_wanted(
 
 
 def test_show_in_fleet_behind_reason(world: dict[str, Path], box: FakeBox) -> None:
-    """An in-fleet project: WANTED is a fleet commit, so `behind` keeps the plain reason."""
+    """An in-fleet project: WANTED is a fleet commit, so the reason names no running code."""
     path = _in_fleet(world)
     up = cli(world, "up", "--project", "status", "--json", cwd=world["fleet"])
     assert up.exit_code == 0, up.output
@@ -5424,7 +5427,10 @@ def test_show_in_fleet_behind_reason(world: dict[str, Path], box: FakeBox) -> No
     wanted = commit_all(world["fleet"], "status two")
     row = json.loads(cli(world, "show", "status", "--json", cwd=world["fleet"]).stdout)["envs"][0]
     assert row["status"] == "behind"
-    assert row["reason"] == f"the project is at {wanted[:12]}, the fleet pins {pin[:12]}"
+    assert row["reason"] == (
+        f"a settings change waits for bay up: bay.toml (or a file it mounts) at {wanted[:12]} "
+        f"differs from the pin {pin[:12]}: run bay plan"
+    )
     assert "does not run it yet" not in row["reason"]
 
 

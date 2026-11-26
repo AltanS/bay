@@ -67,7 +67,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from bay_cli import fleetsync, gitrepo, layout, lockfile
+from bay_cli import fleetsync, gitrepo, layout, lockfile, samesettings
 from bay_cli import plan as planmod
 from bay_cli import scope as scopemod
 from bay_cli.context import Context
@@ -2592,7 +2592,7 @@ def default_image_tags(cx: Context, box_env: str, repo: str) -> dict[str, list[s
 
 # ── show ────────────────────────────────────────────────────────────────────
 
-STATUS_WORDS = ("ok", "ahead", "behind", "drift", "unknown", "HALF", "deploying")
+STATUS_WORDS = ("ok", "building", "ahead", "behind", "drift", "unknown", "HALF", "deploying")
 
 
 def _claim_status(record: Mapping[str, Any], now: datetime | None) -> tuple[str, str] | None:
@@ -2620,18 +2620,37 @@ def env_status(
     *,
     in_fleet: bool = False,
     now: datetime | None = None,
+    same_settings: bool | None = None,
+    track: str = "branch",
 ) -> tuple[str, str]:
-    """``(status word, reason)`` for one env. Order: HALF, unknown, drift, ahead, behind, ok.
+    """``(status word, reason)`` for one env.
+
+    Order: deploying, HALF, unknown, drift, ahead, behind, building, ok.
 
     A ``pending`` record with ``claimed_at`` less than 30 minutes old is
     ``deploying``: a ``bay up`` on another machine (``claimed_by``) runs.
 
     ``commits`` is ``{build container: running commit12 or None}`` of the
-    project in RUNNING. ``ahead``: WANTED is not the pin, and every build
-    container runs WANTED (a push deployed it). ``behind``: WANTED is not the
-    pin, and the box does not run WANTED yet. For a project that lives in the
-    fleet, WANTED is a fleet commit and no container runs it: ``ahead`` never
-    applies, and ``behind`` says only that the fleet moved past the pin.
+    project in RUNNING. When WANTED is not the pin, Bay judges the pin by the
+    settings (since 2.27.0), not by the commit id. ``same_settings`` is
+    :func:`bay_cli.samesettings.same_settings`: True when the ``bay.toml`` and
+    the files its mounts read are the pinned ones, False when they differ,
+    None when Bay could not tell (then the commit ids decide, as before 2.27.0).
+
+    * Same settings, and every build container runs WANTED (or there is none, or
+      the project lives in the fleet): ``ok``. A push deployed it; no ``bay up``
+      is needed.
+    * Same settings, the box does not run WANTED, ``track = "branch"`` and the
+      environment is not frozen: ``building``. The box builds the push itself.
+    * Same settings, the box does not run WANTED, ``track = "pin"`` or frozen:
+      ``behind``. Only ``bay up`` deploys code there.
+    * Different settings, every build container runs WANTED: ``ahead``.
+    * Different settings, the box does not run WANTED: ``behind``. The change
+      waits for ``bay up``.
+
+    So ``behind`` and ``ahead`` mean that something waits for ``bay up``. For a
+    project that lives in the fleet, WANTED is a fleet commit and no container
+    runs it: ``ahead`` never applies.
     """
     claimed = _claim_status(record, now)
     if claimed is not None:
@@ -2657,24 +2676,75 @@ def env_status(
     if record.get("last_receipt_sha256") != running.get("receipt_sha256"):
         return "drift", "the box receipt differs from the one bay up recorded"
     if wanted_commit and lock_commit and wanted_commit != lock_commit:
-        wanted12 = wanted_commit[:12]
-        if in_fleet:
+        wanted12, pin12 = wanted_commit[:12], lock_commit[:12]
+        runs_wanted = bool(commits) and all(c == wanted12 for c in (commits or {}).values())
+        if same_settings is True:
+            return _same_settings_status(
+                record,
+                wanted12,
+                pin12,
+                in_fleet=in_fleet,
+                runs_wanted=runs_wanted,
+                no_build=not commits,
+                track=track,
+            )
+        if same_settings is False:
+            if not in_fleet and runs_wanted:
+                return (
+                    "ahead",
+                    f"the box runs {wanted12} (a push deployed it); the settings at "
+                    f"{wanted12} differ from the pinned ones ({pin12}): run bay plan",
+                )
             return (
                 "behind",
-                f"the project is at {wanted12}, the fleet pins {lock_commit[:12]}",
+                f"a settings change waits for bay up: bay.toml (or a file it mounts) at "
+                f"{wanted12} differs from the pin {pin12}: run bay plan",
             )
-        if commits and all(c == wanted12 for c in commits.values()):
+        # Bay could not read the settings: judge by the commit ids, as before 2.27.0.
+        if in_fleet:
+            return "behind", f"the project is at {wanted12}, the fleet pins {pin12}"
+        if runs_wanted:
             return (
                 "ahead",
                 f"the box runs {wanted12} (a push deployed it); the fleet pins "
-                f"{lock_commit[:12]}: run bay up to pin it",
+                f"{pin12}: run bay up to pin it",
             )
         return (
             "behind",
-            f"the project is at {wanted12}, the fleet pins {lock_commit[:12]}, and the box "
+            f"the project is at {wanted12}, the fleet pins {pin12}, and the box "
             "does not run it yet",
         )
     return "ok", "WANTED, PINNED and RUNNING agree"
+
+
+def _same_settings_status(
+    record: Mapping[str, Any],
+    wanted12: str,
+    pin12: str,
+    *,
+    in_fleet: bool,
+    runs_wanted: bool,
+    no_build: bool,
+    track: str,
+) -> tuple[str, str]:
+    """The word for a pin that is older than WANTED with the same settings."""
+    if in_fleet or no_build:
+        return "ok", (
+            f"the settings at {wanted12} are the pinned ones ({pin12}); no bay up is needed"
+        )
+    if runs_wanted:
+        return "ok", (
+            f"the box runs {wanted12} (a push deployed it); the settings are the pinned "
+            f"ones ({pin12}); no bay up is needed"
+        )
+    if track == "branch" and not record.get("frozen"):
+        return "building", (
+            f"the push {wanted12} is not on the box yet (its build runs or failed: "
+            "bay build status); no bay up is needed"
+        )
+    return "behind", (
+        "only bay up deploys code here (track pin, or frozen after a rollback): run bay plan"
+    )
 
 
 def show(
@@ -2690,6 +2760,10 @@ def show(
     pinned_doc = planmod.doc_at(proj, lock_commit)
     docs = [d for d in (wanted.doc, pinned_doc) if d]
     envs = sorted(set(lock.get("envs") or {}) | {e for d in docs for e in (d.get("deploy") or {})})
+    from bay_cli import bay_toml
+
+    # Does the pin hold the settings of WANTED? Null when WANTED is the pin or Bay cannot tell.
+    same = samesettings.same_settings(proj, wanted.commit, lock_commit)
     reader = read_receipts or planmod.default_receipt_reader
     cache: dict[str, list[dict[str, Any]]] = {}
     maps: dict[str, dict[str, list[str]] | None] = {}
@@ -2743,7 +2817,14 @@ def show(
                 if n in built
             }
         status, why = env_status(
-            record, lock_commit, wanted.commit, running, code, in_fleet=proj.in_fleet
+            record,
+            lock_commit,
+            wanted.commit,
+            running,
+            code,
+            in_fleet=proj.in_fleet,
+            same_settings=same,
+            track=bay_toml.track(pinned_doc or wanted.doc or {}, env),
         )
         # The boxes a HALF record waits for, and the run that covers them (2.18.1).
         half: list[str] = []
@@ -2768,6 +2849,9 @@ def show(
                 "box_env": box_env,
                 "status": status,
                 "reason": why,
+                # True: the bay.toml and the files its mounts read are the pinned ones
+                # (a push changed code only). Null: WANTED is the pin, or Bay cannot tell.
+                "same_settings": same,
                 # HALF only: the boxes that still need a deploy, and the command.
                 "half_boxes": half,
                 "next": next_cmd,
