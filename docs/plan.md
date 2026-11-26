@@ -1202,6 +1202,13 @@ you name. Plain rollback takes the environment's `previous` commit and runs `bay
 it. The two pins swap, so a second rollback undoes the first. Bay refuses when there is no
 `previous`. The output names the old and the new commit and the steps.
 
+Rollback is unchanged since 2.27.0. Plain `bay rollback` goes to the state before the last
+`bay up`: the `previous` pin and the code in `previous.containers`. A push needs no `bay up`
+(`bay show` says `building`, then `ok`), so the last `bay up` is the last settings change. That
+state can be older code than the last good push. To undo only a bad push, run
+`bay rollback --to <last good commit>` or push a revert (see
+[Undo a bad push in branch mode](#undo-a-bad-push-in-branch-mode)).
+
 - Config: the pin moves back to `previous` in the lock, and Bay compiles that commit's
   `bay.toml`. `previous` changes only when a `bay up` changes the pin.
 - Code: the code target is the lock's `previous.containers`. When `bay up` moves a pin, it
@@ -1270,8 +1277,9 @@ service whose deploy failed. Do so only if you accept that.
 In `branch` mode a push to the deploy branch can put bad code on the box after your last
 `bay up`. A push stamps the current receipt (`<env>.json`) for that container. It never
 touches the lock's `previous` or its `previous.containers`. Only `bay up` and `bay rollback`
-move them. So plain `bay rollback` goes to the state before your last `bay up`. That skips the last `bay up`'s
-code too, and it can restore older code than the last good push. To undo only the bad push:
+move them. So plain `bay rollback` goes to the state before your last `bay up`. Since a push needs no `bay up`
+(2.27.0), that is the state before the last settings change. It skips the last `bay up`'s code too,
+and it can restore older code than the last good push. To undo only the bad push:
 
 ```bash
 bay rollback production --project shop --to <last good commit>
@@ -1328,9 +1336,10 @@ What you see in the half rolled-back state:
   (`the box runs code <running>; bay up deploys <wanted> (track = "pin")`) appears when WANTED is
   another commit, for example `--at <the rolled-back commit>`. The plan also prints that the env is
   frozen. It does not check that the image is on the box.
-- `bay show` names the code that each build container runs. It says `behind` while HEAD is ahead
-  of the pin and the box does not run HEAD, `ahead` when the box runs HEAD, and `HALF` after a failed
-  `bay up`.
+- `bay show` names the code that each build container runs. The env is frozen, so a push of code
+  that does not change the settings leaves it `behind` (only `bay up` deploys code here) until the
+  box runs HEAD, and then `ok`. A push that changes the settings says `behind` while the box does
+  not run HEAD and `ahead` when it does. After a failed `bay up` it says `HALF`.
 - The stop for a missing image happens only in `bay up`, before any container changes.
 
 Straight after `bay toml move --to repo` (the old `bay adopt`), `bay rollback` is refused with
@@ -1707,7 +1716,11 @@ the image of every container (see [deploy-receipt.md](deploy-receipt.md)).
   code commit and the config commit can then differ, and that is expected.
   `bay plan` prints one information line, `code at <commit>, config pinned at
   <commit>`. When WANTED is not the code that runs (a held push), the line
-  ends with `, WANTED <commit>`. The line is not a step.
+  ends with `, WANTED <commit>`. The line is not a step. When the pin is older
+  than WANTED, the settings are the same and the plan has no step, it adds one
+  note: `no settings change: bay up is not needed (it would only move the pin)`.
+  The exit code stays 0. `bay show` says `building` or `ok` then (see
+  [bay show](#bay-show)). A `bay up` would only move the pin.
 - `pin`: only `bay up` deploys code. When a container runs another commit than
   the one `bay up` would pin, `bay plan` shows a step of kind `image`, action
   `update`, risk `safe`.
@@ -1813,15 +1826,31 @@ box receipt), and one status word per environment:
 
 | Status | Meaning |
 |---|---|
-| `ok` | WANTED, PINNED and RUNNING agree. |
-| `ahead` | The project's HEAD is ahead of the pin, and every build container of the project in RUNNING runs that commit: a push deployed it. Run `bay up` to pin it. |
-| `behind` | The project's HEAD is ahead of the pin, and the box does not run WANTED yet. Run `bay plan`. |
+| `ok` | WANTED, PINNED and RUNNING agree. Since 2.27.0 also: the pin is older than WANTED, but the settings are the same and the box runs WANTED (a push deployed it). No `bay up` is needed. |
+| `building` | Since 2.27.0. The pin is older than WANTED with the same settings, the box does not run WANTED yet, `track` is `branch` and the environment is not frozen. The box builds the push itself. Its build runs or failed: run `bay build status`. No `bay up` is needed. |
+| `ahead` | The settings at WANTED differ from the pinned ones, and every build container of the project in RUNNING runs WANTED. Run `bay plan`, then `bay up`. |
+| `behind` | Something waits for `bay up`. The settings at WANTED differ from the pinned ones and the box does not run WANTED yet, or the settings are the same but only `bay up` deploys code here (`track = "pin"`, or frozen after a rollback). Run `bay plan`. |
 | `drift` | The box runs something else than the pin: the receipt differs from the one `bay up` recorded, or the fleet pins a commit this environment never got. |
 | `unknown` | The box was not read, has no receipt, or `bay up` never ran here. |
 | `HALF` | The last `bay up` failed or never reported back. A pending record more than 30 minutes old says `an up from machine-a at <time> never reported`. The reason ends with the boxes that still need a deploy and the command that covers them: `box na still needs a deploy: run bay up production --project shop --all-boxes` (see [A HALF record names its boxes](#a-half-record-names-its-boxes)). `bay show --json` has the same in `envs[].half_boxes` and `envs[].next`. |
 | `deploying` | A `bay up` runs now: the record is `pending` and its `claimed_at` is less than 30 minutes old. The reason reads `claimed by machine-a 4 min ago`. |
 
-Bay checks the words in this order: `deploying`, `HALF`, `unknown`, `drift`, `ahead`, `behind`, `ok`.
+Bay checks the words in this order: `deploying`, `HALF`, `unknown`, `drift`, `ahead`, `behind`, `building`, `ok`.
+
+**The settings, not the commit id (since 2.27.0).** A push that changes code only leaves the
+pin where it is: the box builds and deploys it, and `bay up` would change nothing. So when the
+pin is older than WANTED, Bay compares the settings. The settings are the same when the
+`bay.toml` at WANTED and at the pin have the same canonical hash (a comment, a blank line or a
+key order does not count), and every file that the mounts of either one read (`from` mounts,
+not `fleet:` files) is identical at both commits. This is the rule of the hold guard (see
+[build-pipeline.md](build-pipeline.md), "Hold guard"). It works for a project in an app repo
+and for a project in the fleet. When Bay cannot read a commit or a file, it says the settings
+differ and judges by the commit ids, as before 2.27.0. So `behind` and `ahead` now always mean
+that something waits for `bay up`. The lock does not move by itself: only `bay up` and
+`bay rollback` write it.
+
+`bay show --json` has `envs[].same_settings`: `true` when the settings are the same, `false`
+when they differ, and `null` when WANTED is the pin or Bay could not tell.
 `bay show` never pulls the fleet. It reads the lock as it is in this checkout.
 When the box of the project runs an older fleet or another framework, one more
 line under the env row says so (see "Drift" in
@@ -2048,7 +2077,7 @@ receipt says what runs.
 
 | Action | Changes the lock? | What runs on the box |
 |---|---|---|
-| `git push` to the app repo | No | The webhook builds and deploys the new code. `bay show` then says `behind`. |
+| `git push` to the app repo | No | The webhook builds and deploys the new code. `bay show` says `building`, then `ok`. No `bay up` is needed (since 2.27.0). |
 | `git push` that changes `bay.toml` | No | The build is held (`build.held` alert). Nothing deploys until `bay up`. |
 | `bay up` | Yes: the pin moves to the new commit, the old pin goes to `previous` | Bay deploys the pinned commits: the whole box environment for `bay up <env>`, only the boxes it needs for one project. |
 | `bay rollback` | Yes: the pin moves back to `previous`, and `frozen` is set | The previous code and config. Pushes build but do not deploy. |

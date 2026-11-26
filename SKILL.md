@@ -40,8 +40,10 @@ Code, Codex, OpenCode, Pi), and `bay self update` keeps those copies current.
   compiled `group_vars/all/services.yml`. **RUNNING** is the receipt each box
   writes after a deploy.
 - **A push never moves the lock.** A git push to an app repo builds and
-  deploys code (`bay show` then says `behind`). A push that edits `bay.toml`
-  is held until `bay up`. Only `bay up` and `bay rollback` move the pin.
+  deploys code (`bay show` then says `building`, then `ok`; no `bay up` is
+  needed). A push that edits `bay.toml` or a file it mounts is held until
+  `bay up` (`bay show` says `behind`). Only `bay up` and `bay rollback` move
+  the pin.
 - **`services.yml` is generated** by `bay compile` and has a hash header.
   Never hand-edit it. Edit `bay.toml` or `bay.fleet.toml`.
 

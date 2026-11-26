@@ -587,7 +587,8 @@ to that commit finds its image, also with `track = "pin"`. Run `bay up` to deplo
 [build-pipeline.md](build-pipeline.md), "Config-only push".
 
 - **How you know a `bay up` is owed.** `bay show <name>` says `behind` for the environment: the
-  project's HEAD is ahead of the pin. On the box, the build log of the container
+  `bay.toml` (or a file it mounts) at the project's HEAD differs from the pin. A push of code only
+  does not say this: since 2.27.0 `bay show` says `building`, then `ok`, and no `bay up` is needed. On the box, the build log of the container
   (`journalctl -u bay-build@<container>`) has the line `config-only push <commit12>: run bay up`, and
   `docker image ls <image>` lists the new tag (a `remote` build tags it in the registry instead).
 - **`watch` does not drop it.** The webhook receiver knows the path of the `bay.toml` and of
