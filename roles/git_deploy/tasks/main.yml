@@ -73,6 +73,24 @@
       tags: [deploy_stack, build, git_deploy]
   tags: [deploy_stack, build, git_deploy]
 
+# The first image of a new build container, built by `bay up` (2.27.0). It
+# runs ONLY when the run asks for the tag `first_image` and passes a non-empty
+# `bay_first_image` ({container: commit or null}): `never` keeps it out of a
+# full `bay deploy` (whose own tasks below build a missing image) and of every
+# other tag selection, and the `when` keeps it out of a `bay deploy --tags
+# build` that names no container. It touches only the named services. The
+# role runs before deploy_stack in deploy.yml, so the image exists before the
+# codepin step and the container pass.
+- name: Build the first image of new build containers (bay up)
+  ansible.builtin.include_tasks:
+    file: first_image.yml
+    apply:
+      tags: [first_image]
+  tags: [never, first_image]
+  when:
+    - bay_first_image | default({}) | length > 0
+    - not ansible_check_mode
+
 - name: Resolve all build services
   ansible.builtin.set_fact:
     _all_build_services: >-

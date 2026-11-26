@@ -475,6 +475,7 @@ class FilterModule:
             "bay_push_siblings": bay_push_siblings,
             "bay_build_context": bay_build_context,
             "bay_build_dedup_map": bay_build_dedup_map,
+            "bay_first_image_plan": bay_first_image_plan,
             "bay_token_url": bay_token_url,
             "bay_hexkey": bay_hexkey,
             "bay_image_consumers": bay_image_consumers,
@@ -1881,6 +1882,61 @@ def bay_build_dedup_map(services, service_names):
                 "group_size": len(group),
             }
     return result
+
+
+def bay_first_image_plan(services, targets, default_strategy="local", active=None):
+    """What the first image build of ``bay up`` does on one host (2.27.0).
+
+    ``targets`` is ``bay_first_image``: ``{container: full commit or None}``.
+    ``default_strategy`` is ``git_deploy_build_strategy``; ``active`` the
+    names of this host's active services (None: every service). Only the
+    services named in ``targets`` ever appear in the result:
+
+    * ``strategy``: ``{name: "local" | "remote" | "registry" | ...}``, with
+      ``push`` read as ``remote`` (resolve_strategy.yml).
+    * ``remote``: the remote builds, run once on the build server. A service
+      whose build is ``shared_from`` a named service pushes no image of its own
+      (its image is the main's), so it is left out.
+    * ``pull``: the image refs this host pulls after the remote builds: the
+      service's ``image``, and ``<repo>:<commit12>`` when a commit is given.
+      The repo is the image up to its first ``:``, as remote_build.yml cuts it.
+    * ``local``: the local builds of this host, main containers before the
+      services that share their build (those re-tag the main's image).
+    """
+    targets = dict(targets or {})
+    strategy = {}
+    remote, pull, mains, shared = [], [], [], []
+    for name in sorted(targets):
+        entry = services.get(name) if isinstance(services, dict) else None
+        build = entry.get("build") if isinstance(entry, dict) else None
+        if not isinstance(build, dict):
+            continue
+        raw = build.get("strategy") or default_strategy or "local"
+        value = "remote" if raw == "push" else str(raw)
+        strategy[name] = value
+        here = active is None or name in active
+        is_shared = bool(build.get("shared_from")) and build.get("shared_from") in targets
+        if value == "remote":
+            if not is_shared:
+                remote.append(name)
+            image = entry.get("image")
+            if here and image:
+                pull.append(str(image))
+                commit = targets.get(name)
+                if commit:
+                    pull.append(f"{str(image).split(':', 1)[0]}:{str(commit)[:12]}")
+        elif value == "local" and here:
+            (shared if is_shared else mains).append(name)
+    unique = []
+    for ref in pull:
+        if ref not in unique:
+            unique.append(ref)
+    return {
+        "strategy": strategy,
+        "remote": remote,
+        "pull": unique,
+        "local": mains + shared,
+    }
 
 
 # ── Image consumer mapping ────────────────────────────────────────────

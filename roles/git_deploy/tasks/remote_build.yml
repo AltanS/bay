@@ -2,6 +2,13 @@
 # Build and push Docker images for services using the remote strategy.
 # Runs on the build server (delegate_to: build_server).
 # Called with _svc_name as loop var.
+#
+# _pin_commit (optional, a full or short commit; empty or unset: none): the first image build of
+# `bay up` (first_image_remote.yml, 2.27.0) sets it to the commit the fleet
+# pins. After the fetch the checkout is reset to exactly that commit (the
+# commit is fetched by itself when the branch fetch does not hold it), so the
+# image is <repo>:<commit12> of the pin with that commit in com.bay.commit.
+# Unset (the full `bay deploy` path): the head of the branch, as before.
 
 - name: "{{ _svc_name }} — Resolve remote build config"
   ansible.builtin.set_fact:
@@ -129,6 +136,69 @@
     cmd: git reset --hard FETCH_HEAD
     chdir: "{{ _remote_clone_dir }}/repo"
   when: _remote_repo_stat.stat.exists
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+# ── Commit pin (bay up first image, 2.27.0) ─────────────────────────────
+- name: "{{ _svc_name }} — Check the pinned commit"
+  ansible.builtin.assert:
+    that:
+      - _pin_commit is string
+      - _pin_commit is match('^[0-9a-f]{7,40}$')
+    fail_msg: "{{ _svc_name }}: the pinned commit '{{ _pin_commit }}' is not a commit id"
+    quiet: true
+  when: _pin_commit | default('') | length > 0
+
+- name: "{{ _svc_name }} — Look for the pinned commit in the checkout"
+  ansible.builtin.command:
+    cmd: git cat-file -e {{ _pin_commit }}^{commit}
+    chdir: "{{ _remote_clone_dir }}/repo"
+  register: _pin_present
+  failed_when: false
+  changed_when: false
+  when: _pin_commit | default('') | length > 0
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — Fetch the pinned commit"
+  ansible.builtin.command:
+    cmd: >-
+      git -c url.{{ _build.repo | bay_token_url(_build.token) }}.insteadOf={{ _build.repo }}
+      fetch origin {{ _pin_commit }}
+    chdir: "{{ _remote_clone_dir }}/repo"
+  environment:
+    GIT_ASKPASS: "{{ _remote_askpass }}"
+    GIT_TERMINAL_PROMPT: "0"
+  when:
+    - _pin_commit | default('') | length > 0
+    - _pin_present.rc != 0
+    - _build.token is defined
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+  no_log: true
+
+- name: "{{ _svc_name }} — Fetch the pinned commit (SSH)"
+  ansible.builtin.command:
+    cmd: git fetch origin {{ _pin_commit }}
+    chdir: "{{ _remote_clone_dir }}/repo"
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
+  when:
+    - _pin_commit | default('') | length > 0
+    - _pin_present.rc != 0
+    - _build.token is not defined
+  delegate_to: "{{ build_server }}"
+  become: true
+  become_user: "{{ app_user }}"
+
+- name: "{{ _svc_name }} — Reset to the pinned commit"
+  ansible.builtin.command:
+    cmd: git reset --hard {{ _pin_commit }}
+    chdir: "{{ _remote_clone_dir }}/repo"
+  when: _pin_commit | default('') | length > 0
   delegate_to: "{{ build_server }}"
   become: true
   become_user: "{{ app_user }}"

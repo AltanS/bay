@@ -1,0 +1,202 @@
+---
+# The first image of a new build container, built by `bay up` (2.27.0).
+#
+# `bay up` plans a step `image`/`create` for each build container that has no
+# image yet (bay_cli.plan.first_image_steps). It then runs the playbook with
+# the tag `first_image` and the extra var
+#
+#   bay_first_image: {<container>: <full commit> | null}
+#
+# null builds a project in the fleet at the head of its branch. main.yml
+# includes this file with the tags [never, first_image] and only when the var
+# is not empty, so a full `bay deploy` (which builds through the rest of this
+# role) and every other tag selection never run it.
+#
+# Safety: every task below works on the services named in bay_first_image
+# only. No other service is cloned, fetched, built, pushed or pulled: a full
+# git_deploy run would push :latest of other apps and move their code past the
+# hold guard. tests/test_first_image_role.py checks it.
+#
+# Order: git_deploy runs before deploy_stack in deploy.yml, so the image is on
+# the box before the codepin step and the container pass. A build that fails
+# stops the run there, with a message that names the service and the commit.
+
+- name: First image — resolve the services to build
+  ansible.builtin.set_fact:
+    _fi_targets: "{{ bay_first_image | default({}) }}"
+    _fi_names: "{{ (bay_first_image | default({})).keys() | list | sort }}"
+
+- name: First image — every named container is a service with a build
+  ansible.builtin.assert:
+    that:
+      - item in (services | default({}))
+      - services[item].build is defined
+    fail_msg: >-
+      first image of {{ item }}: the compiled services file has no service
+      {{ item }} with a build block, so bay up cannot build its image.
+    quiet: true
+  loop: "{{ _fi_names }}"
+
+# What this host does (filter_plugins/bay_filters.py, bay_first_image_plan):
+# _fi.remote, the remote builds the build server runs once (a service that
+# shares the build of a named main container pushes no image of its own);
+# _fi.pull, the image refs this host pulls after them; _fi.local, the local
+# builds of this host, main containers first. 'push' reads as 'remote'. A
+# registry build is never named (bay plan leaves it out) and does nothing here.
+- name: First image — group the services by strategy
+  ansible.builtin.set_fact:
+    _fi: >-
+      {{ services | bay_first_image_plan(_fi_targets,
+                                         git_deploy_build_strategy | default('local'),
+                                         (active_services | default(services)).keys() | list) }}
+
+- name: First image — what this host builds
+  ansible.builtin.debug:
+    msg: >-
+      first image: remote {{ _fi.remote | join(', ') or 'none' }}
+      (pull here: {{ _fi.pull | join(', ') or 'none' }}),
+      local {{ _fi.local | join(', ') or 'none' }}
+
+# ── Remote strategy: build on the build server, pull here ──────────────────
+- name: First image — remote builds
+  when: _fi.remote | length > 0 or _fi.pull | length > 0
+  block:
+    - name: First image — build_server is set
+      ansible.builtin.assert:
+        that:
+          - build_server is defined
+          - (build_server | string) | length > 0
+        fail_msg: >-
+          first image of {{ _fi.remote | join(', ') }}: these services use strategy
+          'remote', but build_server is not set. Set build_server in group_vars to the
+          inventory host of the build server.
+        quiet: true
+
+    # The build needs the builder and the select-builder.sh helper that the
+    # full deploy sets up on the build server ("Set up build server for remote
+    # builds" in main.yml). This run does not set them up: a build server that
+    # never had a full deploy stops here, with the way out.
+    - name: First image — look for the builder helper on the build server
+      ansible.builtin.stat:
+        path: "{{ stack_dir }}/bin/select-builder.sh"
+      register: _fi_helper
+      delegate_to: "{{ build_server }}"
+      become: true
+      become_user: "{{ app_user }}"
+      run_once: true
+      when: _fi.remote | length > 0
+
+    - name: First image — the build server is set up for remote builds
+      ansible.builtin.assert:
+        that: _fi_helper.stat.exists
+        fail_msg: >-
+          first image of {{ _fi.remote | join(', ') }}: the build server
+          {{ build_server }} has no {{ stack_dir }}/bin/select-builder.sh, so it was never
+          set up for remote builds. Run bay deploy {{ target_host | default('<env>') }} once
+          with no --tags: it sets up the build server and builds the first image.
+        quiet: true
+      run_once: true
+      when: _fi.remote | length > 0
+
+    # The same login as main.yml ("Log in to Docker registries on build
+    # server"), with the docker CLI, so this file needs no collection.
+    - name: First image — log in to the Docker registries on the build server
+      ansible.builtin.command:
+        cmd: docker login {{ item.domain }} --username {{ item.username }} --password-stdin
+        stdin: "{{ item.password }}"
+      loop: "{{ docker_registries | default([]) }}"
+      loop_control:
+        label: "{{ item.domain }}"
+      delegate_to: "{{ build_server }}"
+      become: true
+      become_user: "{{ app_user }}"
+      run_once: true
+      changed_when: false
+      when:
+        - _fi.remote | length > 0
+        - (item.username | default('')) | length > 0
+      no_log: true
+
+    - name: First image — build and push (remote strategy)
+      ansible.builtin.include_tasks:
+        file: first_image_remote.yml
+        apply:
+          tags: [first_image]
+      loop: "{{ _fi.remote }}"
+      loop_control:
+        loop_var: _svc_name
+        label: "{{ _svc_name }}"
+      vars:
+        _pin_commit: "{{ _fi_targets[_svc_name] | default('', true) }}"
+      run_once: true
+
+    - name: First image — pull the new images on this host
+      ansible.builtin.command:
+        cmd: "docker pull {{ item }}"
+      loop: "{{ _fi.pull }}"
+      loop_control:
+        label: "{{ item }}"
+      register: _fi_pull_result
+      changed_when: "'Downloaded newer image' in (_fi_pull_result.stdout | default(''))"
+      retries: 3
+      delay: 10
+      until: _fi_pull_result.rc == 0
+
+# ── Local strategy: clone and build on this host ───────────────────────────
+- name: First image — local builds
+  when: _fi.local | length > 0
+  block:
+    - name: First image — ensure the bin directory exists
+      ansible.builtin.file:
+        path: "{{ stack_dir }}/bin"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user_group }}"
+        # 0750 app_user, as in main.yml.
+        mode: "0750"
+
+    - name: First image — ensure the build directory exists
+      ansible.builtin.file:
+        path: "{{ git_deploy_build_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        mode: "0700"
+
+    - name: First image — install the pinned github.com host keys
+      ansible.builtin.copy:
+        src: github_known_hosts
+        dest: "{{ git_deploy_known_hosts }}"
+        owner: "{{ app_user }}"
+        mode: "0644"
+
+    # The shared buildx builder of the box. It builds for every app, but this
+    # only makes sure it exists and runs; it builds nothing by itself.
+    - name: First image — provision the buildx builder
+      ansible.builtin.include_tasks:
+        file: setup_builder.yml
+        apply:
+          tags: [first_image]
+
+    - name: First image — the build groups of the named services
+      ansible.builtin.set_fact:
+        _build_dedup_map: "{{ services | bay_build_dedup_map(_fi.local) }}"
+        _fi_skipped: []
+
+    - name: First image — clone and build (local strategy)
+      ansible.builtin.include_tasks:
+        file: first_image_local.yml
+        apply:
+          tags: [first_image]
+      loop: "{{ _fi.local }}"
+      loop_control:
+        loop_var: _svc_name
+        label: "{{ _svc_name }}"
+      vars:
+        _pin_commit: "{{ _fi_targets[_svc_name] | default('', true) }}"
+
+    - name: First image — local builds that were skipped
+      ansible.builtin.debug:
+        msg: >-
+          FIRST IMAGE NOT BUILT: {{ _fi_skipped | join(', ') }}. The container pass cannot
+          create these containers, and bay up exits 40. See the deploy key lines above.
+      when: _fi_skipped | length > 0

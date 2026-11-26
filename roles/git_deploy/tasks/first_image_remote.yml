@@ -1,0 +1,25 @@
+---
+# The first image of one remote-strategy service (2.27.0), from first_image.yml.
+# Called with _svc_name (the service) and _pin_commit (the commit the fleet
+# pins, or '' for the head of the branch). The build itself is the full deploy
+# path, remote_build.yml, with the commit pin. A failure stops the run before
+# the container pass, with a message that names the service and the commit.
+
+- name: "{{ _svc_name }} — First image on the build server"
+  block:
+    - name: "{{ _svc_name }} — Build and push the first image"
+      ansible.builtin.include_tasks:
+        file: remote_build.yml
+        apply:
+          tags: [first_image]
+
+  rescue:
+    - name: "{{ _svc_name }} — The first image build failed"
+      ansible.builtin.fail:
+        msg: >-
+          first image of {{ _svc_name }}: the build of
+          {{ (_pin_commit | length > 0) | ternary(_pin_commit[:12], 'the head of branch '
+          ~ (services[_svc_name].build.branch | default('main'))) }} on the build server
+          {{ build_server }} failed in the task "{{ ansible_failed_task.name | default('?') }}".
+          bay up stops before the container pass. Read the task output above, fix the cause,
+          then run bay up again.

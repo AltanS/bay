@@ -1,0 +1,147 @@
+---
+# The first image of one local-strategy service (2.27.0), from first_image.yml.
+# Called with _svc_name (the service) and _pin_commit (the commit the fleet
+# pins, or '' for the head of the branch). Reuses the full deploy files for
+# this one service only: deploy_keys.yml, clone_repos.yml (its own repo group)
+# and build.yml (with _build_dedup_map of the named services).
+#
+# A clone the git host refuses (most often a deploy key it does not know yet)
+# is not a build failure: the service goes into _fi_skipped, the deploy key is
+# printed, and the run goes on. The container pass then cannot create the
+# container, and bay up exits 40 with the way out. A failed build stops the
+# run before the container pass.
+
+- name: "{{ _svc_name }} — Resolve the first image build"
+  ansible.builtin.set_fact:
+    _fi_group: "{{ (services | bay_repo_groups([_svc_name]))[0] }}"
+    _fi_alias: "{{ not _build_dedup_map[_svc_name].primary }}"
+    _fi_what: >-
+      {{ (_pin_commit | length > 0) | ternary(_pin_commit[:12], 'the head of branch '
+         ~ (services[_svc_name].build.branch | default('main'))) }}
+
+- name: "{{ _svc_name }} — Check the pinned commit"
+  ansible.builtin.assert:
+    that: _pin_commit is match('^[0-9a-f]{7,40}$')
+    fail_msg: "{{ _svc_name }}: the pinned commit '{{ _pin_commit }}' is not a commit id"
+    quiet: true
+  when: _pin_commit | length > 0
+
+# A service that shares the build of a named main container re-tags the
+# main's image (build.yml, "Re-tag from primary"): no key, no clone.
+- name: "{{ _svc_name }} — Deploy key, checkout and commit"
+  when: not (_fi_alias | bool)
+  block:
+    - name: "{{ _svc_name }} — Generate the deploy key (SSH only)"
+      ansible.builtin.include_tasks:
+        file: deploy_keys.yml
+        apply:
+          tags: [first_image]
+      when: services[_svc_name].build.token is not defined
+
+    - name: "{{ _svc_name }} — Clone or pull the repo"
+      block:
+        - name: "{{ _svc_name }} — Clone or pull {{ _fi_group.slug }}"
+          ansible.builtin.include_tasks:
+            file: clone_repos.yml
+            apply:
+              tags: [first_image]
+          vars:
+            _repo_group: "{{ _fi_group }}"
+
+      rescue:
+        - name: "{{ _svc_name }} — Read the deploy key"
+          ansible.builtin.slurp:
+            src: "{{ git_deploy_build_dir }}/{{ _svc_name }}/.deploy_key.pub"
+          register: _fi_pub
+          failed_when: false
+          when: services[_svc_name].build.token is not defined
+
+        - name: "{{ _svc_name }} — The git host refused the clone"
+          ansible.builtin.debug:
+            msg: >-
+              FIRST IMAGE OF {{ _svc_name }} NOT BUILT: the box cannot clone
+              {{ _fi_group.repo }} (branch {{ _fi_group.branch }}).
+              {% if services[_svc_name].build.token is defined %}Give the build token read
+              access to the repo.{% else %}Add this public key as a read-only deploy key of
+              the repo on the git host:
+              {{ (_fi_pub.content | default('') | b64decode | trim) or ('(no key at '
+              ~ git_deploy_build_dir ~ '/' ~ _svc_name ~ '/.deploy_key.pub)') }}{% endif %}
+              Then run bay up again.
+
+        - name: "{{ _svc_name }} — Skip the build"
+          ansible.builtin.set_fact:
+            _fi_skipped: "{{ (_fi_skipped | default([])) + [_svc_name] }}"
+
+    - name: "{{ _svc_name }} — Move the checkout to the pinned commit"
+      when:
+        - _svc_name not in (_fi_skipped | default([]))
+        - _pin_commit | length > 0
+      block:
+        - name: "{{ _svc_name }} — Look for the pinned commit"
+          ansible.builtin.command:
+            cmd: git cat-file -e {{ _pin_commit }}^{commit}
+            chdir: "{{ git_deploy_build_dir }}/shared/{{ _fi_group.slug }}/repo"
+          register: _fi_pin_present
+          failed_when: false
+          changed_when: false
+
+        - name: "{{ _svc_name }} — Fetch the pinned commit (token)"
+          ansible.builtin.command:
+            cmd: >-
+              git -c url.{{ _fi_group.clone_url }}.insteadOf={{ _fi_group.repo }}
+              fetch origin {{ _pin_commit }}
+            chdir: "{{ git_deploy_build_dir }}/shared/{{ _fi_group.slug }}/repo"
+          environment:
+            GIT_ASKPASS: "{{ git_deploy_build_dir }}/.git-askpass-{{ _fi_group.slug }}"
+            GIT_TERMINAL_PROMPT: "0"
+          when:
+            - _fi_pin_present.rc != 0
+            - _fi_group.has_token
+          no_log: true
+
+        - name: "{{ _svc_name }} — Fetch the pinned commit (deploy key)"
+          ansible.builtin.command:
+            cmd: git fetch origin {{ _pin_commit }}
+            chdir: "{{ git_deploy_build_dir }}/shared/{{ _fi_group.slug }}/repo"
+          environment:
+            GIT_SSH_COMMAND: >-
+              ssh -i {{ git_deploy_build_dir }}/{{ _fi_group.auth_svc }}/.deploy_key
+              -o StrictHostKeyChecking=yes
+              -o UserKnownHostsFile={{ git_deploy_known_hosts }}
+            GIT_TERMINAL_PROMPT: "0"
+          when:
+            - _fi_pin_present.rc != 0
+            - not _fi_group.has_token
+
+        # rebuild.sh fetches and resets this checkout itself before every
+        # webhook build, so moving it here changes no later build.
+        - name: "{{ _svc_name }} — Reset the checkout to the pinned commit"
+          ansible.builtin.command:
+            cmd: git reset --hard {{ _pin_commit }}
+            chdir: "{{ git_deploy_build_dir }}/shared/{{ _fi_group.slug }}/repo"
+
+      rescue:
+        - name: "{{ _svc_name }} — The pinned commit cannot be checked out"
+          ansible.builtin.fail:
+            msg: >-
+              first image of {{ _svc_name }}: the box cannot check out {{ _fi_what }} of
+              {{ _fi_group.repo }} (task "{{ ansible_failed_task.name | default('?') }}").
+              bay up stops before the container pass. Push the commit to the repo, then run
+              bay up again.
+
+- name: "{{ _svc_name }} — Build the first image"
+  when: _svc_name not in (_fi_skipped | default([]))
+  block:
+    - name: "{{ _svc_name }} — Build"
+      ansible.builtin.include_tasks:
+        file: build.yml
+        apply:
+          tags: [first_image]
+
+  rescue:
+    - name: "{{ _svc_name }} — The first image build failed"
+      ansible.builtin.fail:
+        msg: >-
+          first image of {{ _svc_name }}: the build of {{ _fi_what }} on this box failed in
+          the task "{{ ansible_failed_task.name | default('?') }}". bay up stops before the
+          container pass. Read the task output above, fix the cause, then run bay up again.
