@@ -120,11 +120,11 @@ cd my-app && bay init --fleet prod
 
 `bay fleet init` writes a `bay.fleet.toml` with one box, `main` (`env = "production"`), `default_box = "main"` and `default_domain = "example.com"`. It runs `git init`. It creates the first commit (`bay: fleet init`) and adds `.vault_pass` to `.gitignore`. This lets `bay init` accept the fleet at once. Commit your edits to `bay.fleet.toml` before running `bay up`. `bay init` requires an `origin` remote in the app repo.
 
-Here `--fleet prod` after `init` is the fleet name: the directory `~/.config/bay/fleets/prod`. It is not the global `--fleet <path>` option, which precedes the verb. `bay init` writes `fleet = "prod"` into the generated `bay.toml`. Later commands in the repo use that line to find the fleet.
+Here `--fleet prod` after `init` is the fleet name: the directory `~/.config/bay/fleets/prod`. It is not the global `--fleet <path>` option, which precedes the verb. `bay init` writes `fleet = "prod"` into a generated `bay.toml`. Later commands in the repo use that line to find the fleet. With a `bay.toml` you wrote yourself, `bay init` uses its `fleet =` line to find the fleet, so you can drop `--fleet prod`.
 
 Read **[docs/install.md](docs/install.md)** for installation steps, updates, and fleet selection. Read **[docs/onboarding.md](docs/onboarding.md)** for a step-by-step guide to your first project.
 
-`bay init` writes `bay.toml` in your app repo. Next, `bay plan` shows pending changes. Then `bay up` pins the commit and deploys the boxes the project needs.
+`bay init` registers your app repo in the fleet. If the repo has no `bay.toml`, it writes a draft. If you wrote `bay.toml` first, it checks the file, registers it and leaves it as it is (since 2.26.0). Next, `bay plan` shows pending changes. Then `bay up` pins the commit and deploys the boxes the project needs.
 
 #### Pre-flight check, provision and rig deploy
 

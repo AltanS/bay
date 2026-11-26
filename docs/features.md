@@ -116,7 +116,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 - **`bay status --json`** -- the deploy receipt of every box (see [deploy-receipt.md](deploy-receipt.md)); plain `bay status` shows the version, the fleet and the feature flags
 - **`bay validate`** -- pre-deploy config checks: YAML syntax, `services.yml` schema, inventory, vault keys (also runs automatically before every deploy)
 - **`bay doctor`** -- environment probes: the fleet it picked, the installed CLI, SSH reachability, vault password, DNS resolution, box receipts, app repos
-- **`bay fleet init`** -- make a fleet, or clone one with `--from`; `bay init` then writes a `bay.toml` in an app repo
+- **`bay fleet init`** -- make a fleet, or clone one with `--from`; `bay init` then registers an app repo, and drafts its `bay.toml` when it has none
 - **Framework versioning** -- Bay releases are semver tags; `bay self update [--to <tag>]` and `bay self version` manage the installed copy
 - **`bay --fleet <path>`** -- point any command at a fleet; the editable install runs a framework change at once, with no tag to cut
 - **Config change detection** -- only redeploy services whose configuration has actually changed

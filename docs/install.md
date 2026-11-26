@@ -172,7 +172,7 @@ exists.
 | Where | Key | What it does |
 |---|---|---|
 | Folder | `~/.config/bay/fleets/<name>` | The key that Bay looks up. `fleet = "<name>"` in a `bay.toml` and `BAY_FLEET_NAME=<name>` both mean this folder. |
-| `bay.fleet.toml` | `name = "<name>"` | The label that Bay prints on the `fleet:` line. `bay init` copies it into the `fleet =` line of the `bay.toml` it drafts. |
+| `bay.fleet.toml` | `name = "<name>"` | The label that Bay prints on the `fleet:` line. `bay init` copies it into the `fleet =` line of the `bay.toml` it drafts, and checks it against the `fleet =` line of a `bay.toml` that already exists. |
 | `bay.toml` | `fleet = "<name>"` | Names the fleet folder. For a project that lives in the fleet, Bay also checks that it equals `name` in `bay.fleet.toml`, and stops on a difference. |
 
 The three must be equal. `bay fleet init <name>` makes the folder and the `name` line equal. `bay fleet init
@@ -268,10 +268,11 @@ command prints that error as one JSON document on stdout: `error`, `hint`, `code
 (`no_fleet`, or `fleet_ambiguous` when a folder holds more than one fleet) and `candidates`
 (the fleets it found, empty for none).
 
-`bay init` and `bay toml move --to repo` (the old `bay adopt`) run in an app repo that has no
-`bay.toml` yet, so rule 3 has nothing to read. They use rules 1, 2 and 4. `bay init` also takes its own `--fleet <name>` (a folder name, not
-a path, and not the global option), which stands in the place of rule 3. `bay toml move` has no such option:
-use the global `--fleet <path>`, `BAY_FLEET` or `BAY_FLEET_NAME`.
+`bay init` and `bay toml move --to repo` (the old `bay adopt`) run in an app repo that may have no
+`bay.toml` yet, and then rule 3 has nothing to read. They use rules 1, 2 and 4. `bay init` also takes its own `--fleet <name>` (a folder name, not
+a path, and not the global option), which stands in the place of rule 3. Since 2.26.0, `bay init` in a repo
+that already has a `bay.toml` does read it: when rules 1 and 2 and its own `--fleet` say nothing, the `fleet =` line of the file picks the fleet (rule 3).
+`bay toml move` has no such option: use the global `--fleet <path>`, `BAY_FLEET` or `BAY_FLEET_NAME`.
 
 `--fleet <path>` is also how you try a fleet that is not under `~/.config/bay/fleets`.
 It works from any directory.

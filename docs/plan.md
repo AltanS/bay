@@ -123,7 +123,7 @@ plan, up, show and rollback work as for any project, with these differences:
 ## The verbs
 
 ```bash
-bay init [--name N] [--fleet NAME] [--box B] [--domain D] [--toml-path P] [--json]   # draft bay.toml, register the project
+bay init [--name N] [--fleet NAME] [--box B] [--domain D] [--toml-path P] [--json]   # register the project; draft bay.toml if there is none
 bay plan [env] [--project P] [--json] [--log PATH] [--at SHA] [--plan-id ID] [--remote] [--no-remote]
          [--data keep] [--allow-unsupported] [--force-code]
 bay approve <plan-id> --reason "<why>"
@@ -159,22 +159,35 @@ really runs.
 
 ### bay init
 
-Run it in an app repo that has no `bay.toml`. Run it only there: in a fleet folder (or below
-one) it stops before it writes anything, with a hint to write `projects/<name>/bay.toml`. For
-a project with no repo see [Projects with no repo](#projects-with-no-repo).
+Run it in an app repo. Run it only there: in a fleet folder (or below one) it stops before it
+writes anything, with a hint to write `projects/<name>/bay.toml`. For a project with no repo see
+[Projects with no repo](#projects-with-no-repo). The file at the target path (`bay.toml` at the
+repo root, or the path of `--toml-path`) decides what `bay init` does:
 
-**The fleet.** There is no `bay.toml` yet, so there is no `fleet =` line to read. `bay init`
-takes the fleet from, in this order: the global `--fleet <path>` (before the verb), `BAY_FLEET`,
-its own `--fleet <name>` (a folder name under `~/.config/bay/fleets`), `BAY_FLEET_NAME`. It
-does not use rule 5 (the fleet you stand in, or the one next to you). The rest of the order is in
-[install.md](install.md#pick-a-fleet). The draft gets `fleet = "<name>"` from the `name` key
-of `bay.fleet.toml`.
+- **No `bay.toml` there.** Bay drafts one and registers the app.
+- **A `bay.toml` there** (since 2.26.0). Bay registers the app and leaves the file as it is,
+  byte for byte. Use this when the author wrote `bay.toml` first.
+
+Both cases write the same lock and make the same fleet commit. The command has no other flag for
+it.
+
+**The fleet.** A new draft has no `fleet =` line to read, so `bay init` takes the fleet from, in
+this order: the global `--fleet <path>` (before the verb), `BAY_FLEET`, its own `--fleet <name>`
+(a folder name under `~/.config/bay/fleets`), `BAY_FLEET_NAME`. It does not use rule 5 (the fleet
+you stand in, or the one next to you). The rest of the order is in
+[install.md](install.md#pick-a-fleet). The draft gets `fleet = "<name>"` from the `name` key of
+`bay.fleet.toml`. An existing `bay.toml` has that line. When none of the first three says which
+fleet, Bay uses the `fleet =` line of the file, before `BAY_FLEET_NAME`. This is the same order
+that `bay plan` uses. After Bay loads the fleet, the line must equal the `name` of
+`bay.fleet.toml`. If it does not, Bay names both and writes nothing.
+
+**New draft.**
 
 1. Bay writes a draft `bay.toml`. It reads three hints from the repo root, the default
    build context (also with `--toml-path`): `EXPOSE` in the `Dockerfile` gives the port, `package.json` gives port 3000 and a commented
    `npm start`, `pyproject.toml` gives port 8000. `access.mode` is `public`.
    There is one `[deploy.<primary env>]` table with the fleet's default box and
-   the domain `<name>.<default_domain>`.
+   the domain `<name>.<default_domain>`. `--name`, `--box` and `--domain` change the draft.
 2. Bay checks the draft with the `bay.toml` validator.
 3. Bay writes `projects/<name>/bay.lock`: `repo` from
    `git remote get-url origin`, `toml_path`, and `commit: null`.
@@ -184,9 +197,27 @@ of `bay.fleet.toml`.
 the repo root, for a repo with several apps. The lock records it as
 `toml_path`. The default is `bay.toml` at the repo root.
 
-Bay refuses when `bay.toml` exists, when the name is taken, and when the repo
-has no `origin` remote: Bay finds the repo by that URL. A name never changes.
-Check the draft, commit it in the app repo, push it, then run `bay plan`.
+**Existing `bay.toml`.**
+
+1. Bay reads the file and checks it with the validator. A syntax error or any problem stops
+   `bay init` with the list of problems. Fix the file (`bay toml validate <path>`) and run `bay init`
+   again. Bay writes nothing.
+2. The project name is `name` from the file. `--name` may repeat it. A different `--name` is
+   an error.
+3. `--box` and `--domain` are errors. They only fill a new draft. Edit the file instead.
+4. Steps 3 and 4 of the new draft run as above. Bay never writes to `bay.toml`.
+5. Bay prints warnings. They never stop the command. One says the file is untracked or has
+   uncommitted changes in the app repo: `bay plan` reads the committed file, so commit and push it.
+   Another names a `[deploy.<env>]` table whose `box` is not in `bay.fleet.toml`: `bay plan`
+   will refuse it.
+
+With `--json` the result has `drafted`: `true` for a new draft, `false` for an existing file. When
+`drafted` is `false`, `env`, `box` and `domain` are `null`, because Bay did not choose them.
+
+Bay refuses when the project is already registered (a lock or a `projects/<name>/` folder exists
+in the fleet: run `bay plan`), when a new draft meets a taken name (pick another with `--name`),
+and when the repo has no `origin` remote: Bay finds the repo by that URL. A name never changes.
+Check the draft, commit `bay.toml` in the app repo, push it, then run `bay plan`.
 
 A project whose lock pins no commit is not deployed. Other projects' plans
 leave it out.
@@ -1655,8 +1686,8 @@ Bay refuses or blocks a remove when:
 
 **The app side.** `bay remove` changes the fleet and the boxes only. It never touches the app
 repo, the GitHub hook or the repo's `bay.toml`. After a full remove the lock is gone, so `bay plan`
-from that repo stops with "project <name> is not in fleet <fleet>". `bay init` refuses a repo that
-has a `bay.toml`, so to register the app again, move the file aside, run `bay init` and restore it.
+from that repo stops with "project <name> is not in fleet <fleet>". To register the
+app again, run `bay init` in the app repo again (since 2.26.0 it keeps the `bay.toml` as it is).
 The compiled file no longer lists the project, so the box's webhook receiver gets an image map
 without it, so a push has no service to build. Whether the old webhook script file on the box is deleted is
 not promised. `bay service prune-webhooks <owner>/<repo>` deletes the GitHub hooks that no service

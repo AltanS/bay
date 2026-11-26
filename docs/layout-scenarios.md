@@ -191,8 +191,9 @@ Bay picks the fleet in one fixed order of five rules: `--fleet <path>`, `BAY_FLE
 the `fleet = "acme"` line of the `bay.toml` you stand in, `BAY_FLEET_NAME=acme`, and last the
 fleet folder you stand in, or the only fleet nearby (every verb except `init`,
 `adopt` and `show --routes`). The rules, and the verbs that skip the last one, are in
-[install.md](install.md#pick-a-fleet). `bay init`
-and `bay adopt` have no `bay.toml` to read yet, so they do not use the third rule. A stray
+[install.md](install.md#pick-a-fleet). `bay adopt`
+has no `bay.toml` to read yet, so it does not use the third rule. `bay init` uses it only when
+the repo already has a `bay.toml` (since 2.26.0). A stray
 `BAY_FLEET` in your shell profile beats the `bay.toml` line. A command that changes something
 prints `fleet: acme (<path>)` first on stderr, so you see which fleet won. A command that
 only reads (`show`, `status`) does not print it. The folder `acme`, the `name` in
@@ -376,6 +377,7 @@ Flow from the app repo:
 cd ~/code/shop
 bay init --fleet acme                     # once: drafts bay.toml, writes projects/shop/bay.lock in the fleet
                                           # (no bay.toml yet, so name the fleet; later commands read `fleet =`)
+                                          # with a bay.toml you wrote: `bay init` alone, it keeps the file
 git add bay.toml && git commit -m "chore: add bay.toml"
 git push                                  # 1. push first: bay up refuses a commit the remote lacks
 bay plan production                       # WANTED (this commit) vs PINNED vs RUNNING
@@ -1378,8 +1380,8 @@ env left, `projects/shop/` leaves the fleet. The volumes and the database stay. 
 **The app side.** `bay remove` changes the fleet and the boxes only. It never touches the app
 repo, the GitHub hook or the `bay.toml` in the repo: they stay as they were. After a full remove
 the lock is gone, so `bay plan` from that repo stops with "project shop is not in fleet acme"
-(`bay init` refuses a repo that still has a `bay.toml`, so to register the app again, move the file
-aside, run `bay init`, and restore it). The compiled file no longer lists the project, so the
+(to register the app again, run `bay init` in the repo again: since 2.26.0 it keeps the `bay.toml`
+as it is). The compiled file no longer lists the project, so the
 box's webhook receiver gets its service list and image map without it, so a push has no service to build. The `bay up`
 of the removal also stops and disables the build trigger `bay-build@<container>.path` of each
 removed container. The docs make no promise that the old webhook script file on the box is deleted. Remove the GitHub hook

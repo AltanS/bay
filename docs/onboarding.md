@@ -32,7 +32,7 @@ git clone https://github.com/AltanS/bay ~/.local/share/bay/framework
 # 2. Make a fleet (it gets its first commit), then check bay.fleet.toml
 bay fleet init prod
 
-# 3. In your app repo, write bay.toml
+# 3. In your app repo, register the app (it drafts bay.toml if there is none)
 cd my-app
 bay init --fleet prod
 ```
@@ -47,9 +47,13 @@ at `~/.config/bay/fleets/<name>`. To clone a fleet you already have, use
 
 ## Your first project
 
-Run `bay init` inside the app repo. It drafts a `bay.toml` there and registers the app in
-the fleet. By default it names the project after the repo directory. Use `--name`, `--box`
-and `--domain` to set them. The file format is in **[bay-toml.md](bay-toml.md)**.
+Run `bay init` inside the app repo. It registers the app in the fleet. If the repo has no
+`bay.toml`, it drafts one. By default it names the project after the repo directory. Use `--name`,
+`--box` and `--domain` to set them. The file format is in **[bay-toml.md](bay-toml.md)**.
+
+If you wrote `bay.toml` first, run the same command. Since 2.26.0 Bay checks the file, registers
+the project it names and leaves the file as it is. The name and the fleet come from the file, so
+`--name`, `--box` and `--domain` do not apply. Commit and push `bay.toml`, then run `bay plan`.
 
 Then:
 
@@ -208,7 +212,7 @@ No role sets a default, so the fleet must set it. The example fleet uses `bay`.
 ### `group_vars/all/services.yml`
 
 Do not write this file. `bay compile` writes it from `bay.fleet.toml` and the `bay.toml` of each
-app. An app gets its `bay.toml` from `bay init` (in its repo) or as `projects/<name>/bay.toml` in
+app. An app gets its `bay.toml` from you or from `bay init` (in its repo) or as `projects/<name>/bay.toml` in
 the fleet. A shared database is a resource in `bay.fleet.toml`. The keys of `bay.toml` are in
 **[bay-toml.md](bay-toml.md)**. Scenario 5 of [layout-scenarios.md](layout-scenarios.md#5-several-boxes-shared-resources-mixed-apps)
 shows a shared resource in `bay.fleet.toml`.
