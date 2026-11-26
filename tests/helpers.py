@@ -53,6 +53,7 @@ def _alert_filters() -> dict:
             "bay_build_context",
             # provision-db.sql.j2: the role password verifier to compare.
             "bay_db_password_verifier",
+            "bay_db_new_bindings",
             # headscale split DNS: the names sent to a box's tailnet address.
             "bay_split_dns_domains",
         )

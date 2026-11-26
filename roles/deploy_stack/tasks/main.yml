@@ -276,6 +276,23 @@
       ansible.builtin.include_tasks: log_retention_boundary_pre.yml
       tags: [deploy_stack]
 
+    # ── Database Provisioning, before pass ──────────────────────────────
+    # Makes the role and database of a NEW binding on an accessory that runs
+    # now, so a new app does not start before them (auth error 28P01 loop)
+    # and a failed container pass does not leave them unmade. Check mode and
+    # plan-only mode skip it: the "after" pass below predicts. Existing roles
+    # (a changed password) wait for the "after" pass. See the header of
+    # database_provision.yml.
+
+    - name: Provision new service databases before the containers start
+      ansible.builtin.include_tasks: database_provision.yml
+      vars:
+        _dbprov_pass: before
+      when:
+        - not ansible_check_mode
+        - not (bay_reconciler_plan_only | default(false) | bool)
+      tags: [deploy_stack]
+
     # ── Deploy Containers ───────────────────────────────────────────────
     # container_lifecycle auto-builds specs from active_services/accessories
     # and infra vars, then deploys: infra → accessories → services → cleanup
@@ -317,6 +334,8 @@
 
     - name: Provision service databases
       ansible.builtin.include_tasks: database_provision.yml
+      vars:
+        _dbprov_pass: after
       tags: [deploy_stack]
 
     # ── Scheduled jobs (bay.toml [[jobs]]) ───────────────────────────────

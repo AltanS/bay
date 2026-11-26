@@ -461,7 +461,9 @@ env = "GF_DATABASE_URL"
 | `redis` | `REDIS_URL` | `env` |
 | any other name | `<NAME>_URL`, or the `env` name instead | `env` (the variable name to use instead of `<NAME>_URL`). The name is a published project, or a shared resource the fleet defines. |
 
-Each environment gets its own database and user. A project cannot need itself. A need of a
+Each environment gets its own database and user. Since 2.27.0 a new database and role are made
+before the containers start, when the postgres accessory already runs (a changed password of an
+existing role is set after the container pass, as before). A project cannot need itself. A need of a
 shared resource that sits on another box than the project's deploy env is (validated, not deployed yet) (it is
 the "cross-box" case of [layout-scenarios.md](layout-scenarios.md#5-several-boxes-shared-resources-mixed-apps)).
 `needs.postgres` on an internal container is (validated, not deployed yet) too. Removing a

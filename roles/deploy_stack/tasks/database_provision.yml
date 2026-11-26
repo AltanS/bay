@@ -40,6 +40,24 @@
 # A failed read (accessory not running yet, a non-superuser POSTGRES_USER)
 # is not an error: every guard falls back to "role exists" and the password
 # is set as it was before the read existed.
+#
+# Two passes (since 2.27.0). main.yml includes this file twice, with
+# `_dbprov_pass` (no value means `after`):
+#
+#   before  ahead of the container pass. It makes only a binding whose role
+#           does not exist yet, on an accessory that runs now, so a new app
+#           finds its role and database at its first start (no auth error
+#           28P01 loop), and a failed container pass cannot leave them
+#           unmade. It does nothing in check mode and in plan-only mode: the
+#           prediction stays in the after pass. A failure here fails the
+#           deploy before any container changes. A role that exists is NOT
+#           handled here: a changed password must reach the database after
+#           the recreate, else the old container loses new connections for
+#           the whole container pass.
+#   after   behind the container pass, for every binding, as before. It reads
+#           the box again, so a role the before pass made shows up with its
+#           verifier and nothing prints CHANGED for it (the script is
+#           idempotent).
 
 - name: Collect services with database bindings
   ansible.builtin.set_fact:
@@ -51,7 +69,10 @@
       }}
 
 - name: Provision databases
-  when: _db_bindings | length > 0
+  when:
+    - _db_bindings | length > 0
+    - (_dbprov_pass | default('after')) == 'after'
+      or not (ansible_check_mode or (bay_reconciler_plan_only | default(false) | bool))
   block:
     - name: Collect the accessories those bindings target
       ansible.builtin.set_fact:
@@ -59,6 +80,34 @@
           {{ _db_bindings
              | map(attribute='value.database.accessory')
              | unique | list }}
+
+    # Before pass only: one read-only call. `status=running` leaves out a
+    # container that is absent, stopped, paused or in a restart loop. A failed
+    # call gives an empty list, so the before pass then does nothing.
+    - name: Find the accessories that run now
+      when: (_dbprov_pass | default('after')) == 'before'
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - --filter
+          - status=running
+          - --format
+          - "{{ '{{' }}.Names{{ '}}' }}"
+      register: _db_running
+      check_mode: false
+      changed_when: false
+      failed_when: false
+
+    - name: Keep only the accessories that run now
+      when: (_dbprov_pass | default('after')) == 'before'
+      ansible.builtin.set_fact:
+        _db_accessories: >-
+          {{ _db_accessories
+             | select('in', (_db_running.stdout_lines | default([]))
+                            if (_db_running is not skipped and (_db_running.rc | default(1)) == 0)
+                            else [])
+             | list }}
 
     # Read-only (the script sets the session read-only), so it runs in check
     # mode as well. `failed_when: false`: a failed read only means no
@@ -89,6 +138,18 @@
       changed_when: false
       failed_when: false
       no_log: "{{ not (provision_db_debug | default(false) | bool) }}"
+
+    # Before pass only: keep the bindings whose role the read proves absent
+    # (filter `bay_db_new_bindings`; a failed, skipped or unreadable read keeps
+    # nothing). The provision task below then runs for these and no others.
+    - name: Keep only the bindings whose role does not exist yet
+      when: (_dbprov_pass | default('after')) == 'before'
+      vars:
+        _kept: "{{ _db_bindings | bay_db_new_bindings(_db_read.results | default([])) }}"
+      ansible.builtin.set_fact:
+        _db_bindings: "{{ _kept }}"
+        _db_accessories: >-
+          {{ _kept | map(attribute='value.database.accessory') | unique | list }}
 
     # Check mode skips the provision task below. This runs the same script in
     # predict mode instead: a read-only session, only the CHANGED lines. A

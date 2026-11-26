@@ -503,6 +503,7 @@ class FilterModule:
             "bay_scram_verifier": bay_scram_verifier,
             "bay_md5_verifier": bay_md5_verifier,
             "bay_db_password_verifier": bay_db_password_verifier,
+            "bay_db_new_bindings": bay_db_new_bindings,
             "bay_egress_network": bay_egress_network,
             "bay_egress_bridge": bay_egress_bridge,
             "bay_egress_sidecars": bay_egress_sidecars,
@@ -2333,3 +2334,58 @@ def bay_db_password_verifier(password, rolname, observed):
         return bay_scram_verifier(password, iterations, salt)
     except ValueError:
         return ""
+
+
+def _db_role_absent(observed, rolname):
+    """True only when the read step proves that `rolname` does not exist yet.
+
+    `observed` is the read step's stdout (one JSON document) or the parsed
+    dict, see `bay_db_password_verifier`. Anything that is not a proof is
+    False: no read result, unreadable JSON, no `roles` map.
+    """
+    import json
+
+    if isinstance(observed, str):
+        if not observed.strip():
+            return False
+        try:
+            observed = json.loads(observed)
+        except ValueError:
+            return False
+    if not isinstance(observed, dict):
+        return False
+    roles = observed.get("roles")
+    if not isinstance(roles, dict):
+        return False
+    return str(rolname) not in roles
+
+
+def bay_db_new_bindings(bindings, read_results):
+    """The `database:` bindings whose role is proven absent from its accessory.
+
+    `bindings` is the `dict2items` list of services with a `database` block
+    (`key`, `value.database.accessory`, optional `value.database.user`).
+    `read_results` is `_db_read.results`: the loop results of the read step,
+    each with `item` (the accessory), `rc`, `stdout` and, when a task was
+    skipped, `skipped`. database_provision.yml, "before" pass: it makes
+    only these, so a role that exists keeps today's timing (a changed
+    password is set after the container pass). A binding with no usable
+    read result is not returned: the "after" pass handles it as before.
+    """
+    stdout_by_accessory = {}
+    for result in read_results or []:
+        if not isinstance(result, dict) or result.get("skipped"):
+            continue
+        if result.get("rc") != 0:
+            continue
+        stdout_by_accessory[result.get("item")] = result.get("stdout") or ""
+    kept = []
+    for binding in bindings or []:
+        database = (binding.get("value") or {}).get("database") or {}
+        observed = stdout_by_accessory.get(database.get("accessory"))
+        if observed is None:
+            continue
+        user = database.get("user") or binding.get("key")
+        if _db_role_absent(observed, user):
+            kept.append(binding)
+    return kept

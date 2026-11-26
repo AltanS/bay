@@ -245,6 +245,18 @@ DB_PASSWORD=<password>
 — the same secret `database_provision.yml` uses to create/alter the role, so
 the two always agree.
 
+#### When the database is made
+
+Since 2.27.0 a new role and database are made before the containers start,
+when their postgres accessory already runs. So a new app finds its database at
+its first start, and it does not restart in a loop on auth error 28P01. A
+failed container pass cannot leave them unmade either. A changed password of
+an existing role is still set after the container pass, as before, so the old
+container keeps its new connections until it is replaced. A postgres that the
+same deploy creates is covered by the pass after the containers. The early
+pass does not run in check mode or with `bay_reconciler_plan_only`: `bay plan
+--remote` predicts each change once, in the later pass.
+
 #### Role passwords: compared, not re-set
 
 The task "Provision databases, roles and grants" reports `changed` only when
