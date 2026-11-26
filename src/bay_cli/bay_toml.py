@@ -392,6 +392,7 @@ def _name_rules(
                 "would collide with a scheduled job",
             )
     yield from _volume_names(doc, envs, services)
+    yield from _owner_ranges(doc, services)
     seen: set[str] = set()
     jobs = doc.get("jobs")
     for i, job in enumerate(jobs if isinstance(jobs, list) else []):
@@ -424,6 +425,27 @@ def _volume_names(
                         f"volume names must not start with {env}-, because volume "
                         f"names for the {env} environment would collide",
                     )
+
+
+#: The largest uid or gid a Linux box accepts: 2^32 - 1 is "no change" to chown.
+MAX_OWNER_ID = 4294967294
+
+
+def _owner_ranges(doc: dict[str, Any], services: dict[str, Any]) -> Iterator[Violation]:
+    levels = [("", doc)] + [
+        (f"services.{n}", s) for n, s in services.items() if isinstance(s, dict)
+    ]
+    for base, level in levels:
+        mounts = level.get("mounts")
+        for i, m in enumerate(mounts if isinstance(mounts, list) else []):
+            owner = m.get("owner") if isinstance(m, dict) else None
+            if not isinstance(owner, str) or not re.fullmatch(r"[0-9]+(:[0-9]+)?", owner):
+                continue  # the schema pattern reports it
+            if any(int(part) > MAX_OWNER_ID for part in owner.split(":")):
+                yield Violation(
+                    _join(base, f"mounts[{i}].owner"),
+                    f"each number in owner must be at most {MAX_OWNER_ID}",
+                )
 
 
 def _needs_rules(doc: dict[str, Any], services: dict[str, Any]) -> Iterator[Violation]:

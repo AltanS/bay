@@ -68,7 +68,7 @@ header = "X-Tailnet-Device"
 [[mounts]]                     # exactly one of volume / from
 path = "/app/data"             # inside the container
 volume = "data"                # bay-managed named volume; backed up; survives recreation
-owner = "472:472"              # default root
+owner = "472:472"              # without it Bay does not change the owner (since 2.26.0)
 [[mounts]]
 path = "/app/cache"
 volume = "cache"

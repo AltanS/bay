@@ -497,11 +497,15 @@ def make_remove_plan(
                 running=None,
                 owners=comp.owners,
             )
+            # What leaves with the project: its containers, and the owner of a volume it
+            # sets (the entry of volume_owners goes with the project; the files stay).
             extra = [
                 s
                 for s in diff
                 if not (s["kind"] == "container" and s["action"] == "remove"
                         and s["container"] in all_names)
+                and not (s["kind"] == "volume" and s["action"] == "update"
+                         and s["risk"] == "safe" and s["container"] in all_names)
             ]
             extra += routes.route_steps(current, wanted_data)
             if extra:

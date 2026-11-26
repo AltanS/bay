@@ -1595,6 +1595,7 @@ def diff_steps(
         )
     steps.extend(_job_steps(current, wanted, project=project, mine=mine, owners=owners))
     steps.extend(_backup_steps(current, wanted, project=project, mine=mine, owners=owners))
+    steps.extend(_volume_owner_steps(current, wanted, project=project, mine=mine, owners=owners))
     for i, step in enumerate(steps, start=1):
         step["id"] = f"s{i}"
     return steps
@@ -1714,6 +1715,68 @@ def _backup_steps(
         else:
             reason = f"database backup of {name} changed"
         steps.append(_step("backup", "update", "safe", reason, container=name, project=who))
+    return steps
+
+
+def _volume_owner_steps(
+    current: Mapping[str, Any],
+    wanted: Mapping[str, Any],
+    *,
+    project: str | None,
+    mine: set[str],
+    owners: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """One ``volume`` step (update) per volume whose ``owner`` is new, changed or gone.
+
+    The owner lives in ``volume_owners``, not in the container entry, so the
+    config hash of the container does not move and no container is recreated.
+    ``bay up`` sets the owner on the box that runs the entry's ``container``.
+    A change of only ``container`` is no step. Risk: ``safe`` when the owner
+    is removed (Bay leaves the files as they are) or the volume is new (no
+    container in ``current`` mounts it); ``destructive`` when a container in
+    ``current`` mounts the volume already, because the deploy then changes
+    the owner of every file in it.
+    """
+    raw_old, raw_new = current.get("volume_owners"), wanted.get("volume_owners")
+    old_all: Mapping[str, Any] = raw_old if isinstance(raw_old, Mapping) else {}
+    new_all: Mapping[str, Any] = raw_new if isinstance(raw_new, Mapping) else {}
+    mounted: set[str] | None = None
+    steps: list[dict[str, Any]] = []
+    for name in sorted(set(old_all) | set(new_all)):
+        old, new = old_all.get(name), new_all.get(name)
+        old_owner = old.get("owner") if isinstance(old, Mapping) else None
+        new_owner = new.get("owner") if isinstance(new, Mapping) else None
+        if old_owner == new_owner:
+            continue
+        container = (new or old or {}).get("container")
+        who = _owner_of(container, project=project, mine=mine, owners=owners)
+        if new_owner is None:
+            risk = "safe"
+            reason = f"the owner of volume {name} is no longer set; Bay leaves the files as they are"
+        else:
+            if mounted is None:
+                mounted = {v for e in _entries(current).values() for v in _named_volumes(e)}
+            if name not in mounted:
+                risk = "safe"
+                reason = f"new volume {name} gets owner {new_owner}"
+            else:
+                risk = "destructive"
+                reason = (
+                    f"volume {name} gets owner {new_owner}; bay up changes the owner of every "
+                    "file in it when its top directory has another owner; the file contents "
+                    "stay; bay rollback does not change the owner back"
+                )
+        steps.append(
+            _step(
+                "volume",
+                "update",
+                risk,
+                reason,
+                container=str(container),
+                resource=str(name),
+                project=who,
+            )
+        )
     return steps
 
 

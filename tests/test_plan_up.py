@@ -649,6 +649,10 @@ def _with(**changes: Any) -> dict[str, Any]:
     return entry
 
 
+def _OWN(owner: str, container: str = "webapp") -> dict[str, Any]:  # noqa: N802
+    return {"webapp-data": {"container": container, "owner": owner}}
+
+
 @pytest.mark.parametrize(
     ("label", "old", "new", "expect"),
     [
@@ -785,6 +789,36 @@ def _with(**changes: Any) -> dict[str, Any]:
             {},
             {("job", "remove", "safe")},
         ),
+        (
+            "volume owner added to a volume that is mounted",
+            {"services": {"webapp": _WEB}},
+            {"services": {"webapp": _WEB}, "volume_owners": _OWN("1000")},
+            {("volume", "update", "destructive")},
+        ),
+        (
+            "volume owner changed on a volume that is mounted",
+            {"services": {"webapp": _WEB}, "volume_owners": _OWN("1000")},
+            {"services": {"webapp": _WEB}, "volume_owners": _OWN("1000:1000")},
+            {("volume", "update", "destructive")},
+        ),
+        (
+            "volume owner on a new volume",
+            {"services": {}},
+            {"services": {"webapp": _WEB}, "volume_owners": _OWN("1000")},
+            {("container", "create", "safe"), ("volume", "update", "safe")},
+        ),
+        (
+            "volume owner removed",
+            {"services": {"webapp": _WEB}, "volume_owners": _OWN("1000")},
+            {"services": {"webapp": _WEB}},
+            {("volume", "update", "safe")},
+        ),
+        (
+            "volume owner entry moves to another container only",
+            {"services": {"webapp": _WEB}, "volume_owners": _OWN("1000")},
+            {"services": {"webapp": _WEB}, "volume_owners": _OWN("1000", "worker")},
+            set(),
+        ),
     ],
 )
 def test_risk_classification(label: str, old: dict, new: dict, expect: set) -> None:
@@ -792,6 +826,36 @@ def test_risk_classification(label: str, old: dict, new: dict, expect: set) -> N
         old, new, project="webapp", mine={"webapp"}, resources={"postgres"}, running={"webapp"}
     )
     assert {(s["kind"], s["action"], s["risk"]) for s in steps} == expect, label
+
+
+def test_volume_owner_step_fields() -> None:
+    """One ``volume`` step names the volume and the container of the entry, and the risk in words."""
+    old = {"services": {"webapp": _WEB}}
+    new = {"services": {"webapp": _WEB}, "volume_owners": _OWN("1000")}
+    (step,) = planmod.diff_steps(
+        old, new, project="webapp", mine={"webapp"}, resources=set(), running={"webapp"}
+    )
+    assert (step["kind"], step["action"], step["risk"]) == ("volume", "update", "destructive")
+    assert (step["resource"], step["container"], step["project"]) == ("webapp-data", "webapp", "webapp")
+    assert "volume webapp-data gets owner 1000" in step["reason"]
+    assert "the file contents stay" in step["reason"]
+    assert "bay rollback does not change the owner back" in step["reason"]
+
+    (gone,) = planmod.diff_steps(
+        new, old, project="webapp", mine={"webapp"}, resources=set(), running={"webapp"}
+    )
+    assert gone["risk"] == "safe"
+    assert gone["reason"] == (
+        "the owner of volume webapp-data is no longer set; Bay leaves the files as they are"
+    )
+
+    (fresh,) = planmod.diff_steps(
+        {"services": {"webapp": _with(volumes=[])}},
+        {"services": {"webapp": _WEB}, "volume_owners": _OWN("1000")},
+        project="webapp", mine={"webapp"}, resources=set(), running={"webapp"},
+    )[-1:]
+    assert fresh["kind"] == "volume" and fresh["risk"] == "safe"
+    assert fresh["reason"] == "new volume webapp-data gets owner 1000"
 
 
 def test_cpus_change_is_named_in_the_container_step() -> None:
@@ -4572,6 +4636,20 @@ def test_remove_plan_names_containers_volumes_database(
     assert f"bay up production --plan-id {plan['plan_id']}" in text
 
 
+def test_remove_of_a_project_with_a_volume_owner_is_not_blocked(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """The owner entry leaves with the project: no extra step, the remove plan stays as it is."""
+    edit_app(world, 'volume = "data"\n', 'volume = "data"\nowner = "1000"\n')
+    do_up(world)
+    result, plan = _remove_json(world, "webapp")
+    assert result.exit_code == 10, result.output
+    assert plan["blockers"] == []
+    assert [(s["kind"], s["container"], s["action"]) for s in plan["steps"]] == [
+        ("container", "webapp", "remove")
+    ]
+
+
 def test_remove_step_reason_grammar_singular_and_plural() -> None:
     from bay_cli import remove as removemod
 
@@ -5278,6 +5356,57 @@ def test_up_runs_backup_tag_on_backup_change(
     # No step any more: the same tags, the backup role still runs.
     assert do_up(world)["deploy_tags"] == "deploy_stack,backup"
     assert tags[-1] is None
+
+
+def test_volume_owner_only_change_plans_and_deploys(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """An owner on a mounted volume is one destructive ``volume`` step and no container change."""
+    import jsonschema
+
+    do_up(world)
+    edit_app(world, 'volume = "data"\n', 'volume = "data"\nowner = "1000:1000"\n')
+    plan = make(world)
+    assert [(s["kind"], s["action"], s["risk"], s["resource"], s["container"], s["project"])
+            for s in plan["steps"]] == [
+        ("volume", "update", "destructive", "webapp-data", "webapp", "webapp")
+    ]
+    assert plan["verdict"] == "approve"
+    assert plan["unsupported"] == []
+    assert plan["blockers"] == []
+    assert plan["scope"]["boxes"] == ["box-1"]
+    schema = json.loads((ROOT / "src/bay_cli/schemas/plan.schema.json").read_text())
+    jsonschema.validate(plan, schema)
+
+    # Not approved: bay up stops. Approved: the box deploys and the file carries the entry.
+    result = cli(world, "up", "--json")
+    assert result.exit_code == 10, result.output
+    cli(world, "approve", plan["plan_id"], "--reason", "owner")
+    do_up(world, plan_id=plan["plan_id"])
+    data = yaml.safe_load((world["fleet"] / GENERATED_SERVICES).read_text().split("\n", 1)[1])
+    assert data["volume_owners"] == {"webapp-data": {"container": "webapp", "owner": "1000:1000"}}
+    # Nothing changed since: no step, the verdict is auto.
+    again = make(world)
+    assert again["steps"] == [] and again["verdict"] == "auto"
+
+    # Removing the owner is safe.
+    edit_app(world, 'owner = "1000:1000"\n', "")
+    plan = make(world)
+    assert [(s["kind"], s["risk"]) for s in plan["steps"]] == [("volume", "safe")]
+    assert plan["verdict"] == "auto"
+
+
+def test_volume_owner_on_a_new_project_is_safe(world: dict[str, Path], box: FakeBox) -> None:
+    """A first plan: the container is created (it has no volume step) and the owner step is safe."""
+    edit_app(world, 'volume = "data"\n', 'volume = "data"\nowner = "1000"\n')
+    plan = make(world)
+    assert plan["verdict"] == "auto"
+    kinds = [(s["kind"], s["action"], s["risk"]) for s in plan["steps"]]
+    assert ("container", "create", "safe") in kinds
+    owner = [s for s in plan["steps"] if s["kind"] == "volume" and s["action"] == "update"]
+    assert [(s["risk"], s["resource"]) for s in owner] == [("safe", "webapp-data")]
+    assert owner[0]["reason"] == "new volume webapp-data gets owner 1000"
+    assert {s["risk"] for s in plan["steps"]} == {"safe"}
 
 
 def _failed_up(result_over: dict[str, Any]) -> Any:

@@ -102,6 +102,31 @@
         }
       }
     },
+    "volume_owners": {
+      "type": "object",
+      "description": "Volume mounts with an owner (since 2.26.0), compiled from bay.toml mounts. Keyed by the volume name. The deploy sets the owner of <stack_name>_<volume> on the box that runs `container`, before and after the container pass, only when the top directory of the volume has another owner.",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]*$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["container", "owner"],
+        "properties": {
+          "container": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,62}$",
+            "description": "The container that mounts the volume. Its box gets the owner change."
+          },
+          "owner": {
+            "type": "string",
+            "pattern": "^[0-9]+(:[0-9]+)?$",
+            "description": "The owner as written in bay.toml: a numeric uid (the group stays) or uid:gid."
+          }
+        }
+      }
+    },
     "tailnet_proxies": {
       "type": "object",
       "description": "Tailnet routes, compiled from [tailnet.routes] in bay.fleet.toml. Read by the traefik, headscale and crowdsec templates on the ingress box.",

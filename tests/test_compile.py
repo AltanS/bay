@@ -909,7 +909,6 @@ def test_webhook_domain_collision(fleet: Path) -> None:
 
 
 UNSUPPORTED = [
-    pytest.param(SHOP, 'volume = "data"\nbackup = false', 'volume = "data"\nbackup = false\nowner = "472:472"', "a volume owner", id="mount-owner"),
     pytest.param(SHOP, "redirect = false\n", "", "alias redirect (HTTP 308); the aliases are served instead", id="alias-redirect"),
     pytest.param(SHOP, 'realm = "Staff only"', 'realm = "Staff only"\n\n[access.identity]\nheader = "X-Tailnet-Device"', "the tailnet identity header", id="identity"),
     pytest.param(SHOP, 'env = "SHOP_DATABASE_URL"', 'env = "SHOP_DATABASE_URL"\nextensions = ["vector"]', "postgres extensions", id="pg-extensions"),
@@ -926,17 +925,17 @@ def test_unsupported_feature_is_reported(fleet: Path, rel: Path, old: str, new: 
 
 
 def test_unsupported_refuses_without_the_flag(fleet: Path, tmp_path: Path) -> None:
-    edit(fleet, SHOP, 'volume = "data"\nbackup = false', 'volume = "data"\nbackup = false\nowner = "472:472"')
+    edit(fleet, SHOP, 'realm = "Staff only"', 'realm = "Staff only"\n\n[access.identity]\nheader = "X-Tailnet-Device"')
     out = tmp_path / "out"
     refused = cli(fleet, "--out", str(out))
     assert refused.exit_code != 0
-    assert "# TODO(role) shop: mounts[0].owner: a volume owner" in refused.output
+    assert "# TODO(role) shop: access.identity: the tailnet identity header" in refused.output
     assert not (out / GENERATED_SERVICES).exists()
 
     allowed = cli(fleet, "--out", str(out), "--allow-unsupported")
     assert allowed.exit_code == 0, allowed.output
     text = (out / GENERATED_SERVICES).read_text()
-    assert "# TODO(role) shop: mounts[0].owner: a volume owner\n" in text
+    assert "# TODO(role) shop: access.identity: the tailnet identity header\n" in text
     digest, body = compiler.split_header(text)
     assert digest == compiler.body_digest(body)
 
@@ -1138,6 +1137,63 @@ def test_compile_volume_backup_entries(fleet: Path) -> None:
     edit(fleet, FLEET, '[defaults.backup]\nkeep = "30d"\nhour = 3\n', "")
     entry = yaml.safe_load(compiled(fleet).body())["volume_backups"]["shop_data"]
     assert entry == {"container": "shop", "path": "/app/data"}
+
+
+def test_compile_volume_owner_entries(fleet: Path) -> None:
+    """A volume mount with owner is a volume_owners entry, as written; none without it."""
+    assert "volume_owners" not in yaml.safe_load(compiled(fleet).body())
+
+    edit(fleet, SHOP, 'volume = "data"\nbackup = false', 'volume = "data"\nbackup = false\nowner = "472:472"')
+    result = compiled(fleet)
+    assert result.unsupported == []
+    out = yaml.safe_load(result.body())
+    assert out["volume_owners"] == {
+        "shop_data": {"container": "shop", "owner": "472:472"},
+        "shop-staging-data": {"container": "shop-staging", "owner": "472:472"},
+    }
+    # The container entry holds no owner: the config hash of the container does not move.
+    assert "owner" not in str(out["services"]["shop"])
+
+    # The uid-only form stays as written.
+    edit(fleet, SHOP, 'owner = "472:472"', 'owner = "1000"')
+    out = yaml.safe_load(compiled(fleet).body())
+    assert out["volume_owners"]["shop_data"] == {"container": "shop", "owner": "1000"}
+
+
+def test_compile_volume_owner_second_mount(fleet: Path) -> None:
+    """Two services of a project may mount one volume: same owner or none is fine, another owner is an error."""
+    edit(fleet, SHOP, 'volume = "data"\nbackup = false', 'volume = "data"\nbackup = false\nowner = "472:472"')
+    shared = 'memory = "128m"\nmounts = [{ path = "/srv/data", volume = "data", backup = false%s }]\n'
+    edit(fleet, SHOP, 'memory = "128m"\n', shared % "")
+    out = yaml.safe_load(compiled(fleet).body())
+    assert out["volume_owners"]["shop_data"] == {"container": "shop", "owner": "472:472"}
+
+    edit(fleet, SHOP, shared % "", shared % ', owner = "472:472"')
+    out = yaml.safe_load(compiled(fleet).body())
+    assert out["volume_owners"]["shop_data"] == {"container": "shop", "owner": "472:472"}
+
+    edit(fleet, SHOP, shared % ', owner = "472:472"', shared % ', owner = "1000"')
+    msgs = problems(fleet)
+    assert any(
+        "shop_data" in m and "472:472" in m and "1000" in m and "a volume has one owner" in m
+        for m in msgs
+    ), msgs
+
+
+def test_volume_owner_range_is_validated(fleet: Path) -> None:
+    """Each number must be at most 4294967294."""
+    from bay_cli import bay_toml
+
+    def violations(owner: str) -> list[str]:
+        doc = {
+            "name": "x", "mounts": [{"path": "/d", "volume": "d", "owner": owner}],
+            "deploy": {"production": {"box": "b"}},
+        }
+        return [v.path + ": " + v.message for v in bay_toml.validate(doc) if "owner" in v.path]
+
+    assert violations("4294967294:4294967294") == []
+    assert any("mounts[0].owner" in m and "4294967294" in m for m in violations("4294967295"))
+    assert any("mounts[0].owner" in m and "4294967294" in m for m in violations("1000:99999999999"))
 
 
 @pytest.mark.parametrize(("line", "want"), [

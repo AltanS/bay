@@ -118,6 +118,9 @@ class CompileResult:
     #: Volume mounts with ``backup`` true, keyed by volume name (see
     #: :meth:`_Compiler._volume_backup`).
     volume_backups: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Volume mounts with ``owner``, keyed by volume name (see
+    #: :meth:`_Compiler._volume_owner`).
+    volume_owners: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: ``[tailnet] allowlist`` of bay.fleet.toml; None when the key is not set.
     tailnet_allowlist: list[str] | None = None
 
@@ -131,6 +134,8 @@ class CompileResult:
             out["jobs"] = self.jobs
         if self.volume_backups:
             out["volume_backups"] = self.volume_backups
+        if self.volume_owners:
+            out["volume_owners"] = self.volume_owners
         if self.tailnet_allowlist is not None:
             # The access gateway makes it the enforced vpn_allowed_ips.
             out["tailnet_allowlist"] = self.tailnet_allowlist
@@ -269,6 +274,7 @@ class _Compiler:
         self.notes: set[str] = set()
         self.jobs: dict[str, dict[str, Any]] = {}
         self.volume_backups: dict[str, dict[str, Any]] = {}
+        self.volume_owners: dict[str, dict[str, Any]] = {}
 
     # ── driver ──────────────────────────────────────────────────────────
     def run(self) -> CompileResult:
@@ -301,6 +307,7 @@ class _Compiler:
             tailnet_proxies=proxies,
             jobs=self.jobs,
             volume_backups=self.volume_backups,
+            volume_owners=self.volume_owners,
             tailnet_allowlist=self._tailnet_allowlist(),
         )
 
@@ -1092,7 +1099,7 @@ class _Compiler:
                     self._err(f"volume {vname} is used by both {first} and {unit.label}")
                 volumes.append(f"{vname}:{mount['path']}")
                 if "owner" in mount:
-                    self._todo(unit, _p(mpath, "owner"), "a volume owner")
+                    self._volume_owner(unit, vname, container, str(mount["owner"]))
                 if mount.get("backup", True):
                     self._volume_backup(unit, vname, container, mount["path"])
                 continue
@@ -1167,6 +1174,24 @@ class _Compiler:
         if "keep" in policy:
             entry["retain"] = _keep_days(str(policy["keep"]))
         self.volume_backups[volume] = entry
+
+    def _volume_owner(self, unit: _Unit, volume: str, container: str, owner: str) -> None:
+        """One ``volume_owners`` entry: ``{container, owner}``.
+
+        ``owner`` is the string of the ``[[mounts]]`` entry (``"1000"`` or
+        ``"1000:1000"``). The deploy sets it on ``<stack_name>_<volume>`` on
+        the box that runs ``container``. The first container that sets an
+        owner names the entry. A volume has one owner: a second mount of it
+        with another owner is an error.
+        """
+        have = self.volume_owners.get(volume)
+        if have is None:
+            self.volume_owners[volume] = {"container": container, "owner": owner}
+        elif have["owner"] != owner:
+            self._err(
+                f"{unit.label}: volume {volume} has owner {have['owner']} on {have['container']} "
+                f"and owner {owner} on {container}; a volume has one owner"
+            )
 
     def _mount_source(self, unit: _Unit, mpath: str, src: str) -> tuple[str, Path] | None:
         """``(target, path to list)`` of one ``from``: where it lands under config/ and files/.
