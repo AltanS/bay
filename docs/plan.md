@@ -409,7 +409,6 @@ that builds from source is left out altogether). The Keys tables of
 [bay-toml.md](bay-toml.md#keys) tag each such key `(validated, not deployed yet)`. These are the
 unsupported cases of 2.3:
 
-- The mount option `owner` of a volume.
 - An internal container (no `domain`, no `path`) that builds from source, or that takes the
   image of the project's own build, has a database (`needs.postgres`), has a health path
   other than `/`, or sets `replicas` other than 1 or `zero_downtime`.
@@ -457,6 +456,9 @@ Risk is set by the data that a step touches.
 | `egress_fleet = "web"` added to an egress service, also on a new container (a second `container` step next to `changed: egress` or `new container`; the reason names the container and says that it may open tcp 80 and 443 on the public address of every fleet box). The box firewall changes; the container is not recreated. See [bay-toml.md](bay-toml.md#egress_fleet-the-fleets-own-websites) | shared |
 | `egress_fleet` removed (the same second step; the reason says that `bay up` closes the ports) | safe |
 | Scheduled job added, changed or removed (`kind: job`) | safe |
+| `owner` set on a new volume (`kind: volume`, action `update`, since 2.26.0). No container is recreated: the owner is not part of the container. `bay up` creates the volume with the owner | safe |
+| `owner` added or changed on a volume that a container already mounts (`kind: volume`, action `update`, since 2.26.0). No container is recreated. `bay up` changes the owner of every file in the volume when its top directory has another owner. The contents stay, and `bay rollback` does not change the owner back. Needs `bay approve` | destructive |
+| `owner` removed from a volume mount (`kind: volume`, action `update`, since 2.26.0). No container is recreated. Bay leaves the files as they are | safe |
 | Volume backup added, changed or removed (`kind: backup`, action `update`; `bay up` runs the `backup` tag on every run since 2.23.2) | safe |
 | Database backup of an accessory added, changed or removed (`[services.<x>.backup]` or a fleet resource `backup`, `kind: backup`, since 2.24.0). A change of only the `backup` block is no container `update` | safe |
 | Container of another project changed or removed | that project's own risk, by the rows above |
@@ -1968,7 +1970,9 @@ know.
   (the code moves, see "Code and config"). A `job` step names the job
   container in `container`. A `backup` step names the container that mounts
   the volume (its reason names the volume), or the accessory of a database
-  backup. `action` is one of `create`,
+  backup. Since 2.26.0 a `volume` step with the action `update` can also be the
+  `owner` of a volume mount: the reason names the owner, `container` holds the container that
+  mounts the volume and `resource` holds the volume. `action` is one of `create`,
   `update`, `remove`, `rename`, `move`, and for a box step also `recreate`
   and `start`. A `route` step has `route_added`, `route_changed` or
   `route_removed`, and names the route in `resource`. A `tailnet_host` step has

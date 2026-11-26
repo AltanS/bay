@@ -251,7 +251,7 @@ Secrets:
 This is the corrected v3 example. It passes `bay toml validate`. The test suite checks
 that this block and `tests/fixtures/bay_toml/corrected-example.toml` stay identical. It is a
 schema example, not a file to deploy as it stands: it uses keys that carry the tag
-`(validated, not deployed yet)` in the Keys tables (`aliases`, `owner`, `extensions`,
+`(validated, not deployed yet)` in the Keys tables (`aliases`, `extensions`,
 `[access.identity]`, a build `memory` and `open` beside a password), so `bay plan` blocks it
 without `--allow-unsupported`.
 
@@ -327,7 +327,7 @@ header = "X-Tailnet-Device"
 [[mounts]]                     # exactly one of volume / from
 path = "/app/data"             # inside the container
 volume = "data"                # bay-managed named volume; backed up; survives recreation
-owner = "472:472"              # default root
+owner = "472:472"              # without it Bay does not change the owner (since 2.26.0)
 [[mounts]]
 path = "/app/cache"
 volume = "cache"
@@ -525,7 +525,7 @@ mount has no backup.
 | `path` | absolute path | required | Where the mount appears inside the container. |
 | `volume` | name | none | A named volume that Bay manages. It survives recreation. |
 | `from` | path | none | A file or directory relative to the directory of this `bay.toml`, read-only. A change recreates the container. No leading `/` and no `..`. `fleet:<path>` mounts the shared fleet file `files/<path>` instead. |
-| `owner` | `uid` or `uid:gid` | root | (validated, not deployed yet) Volume mounts only. |
+| `owner` | `uid` or `uid:gid` | none: Bay does not change the owner | Volume mounts only (since 2.26.0). Numbers only, each at most 4294967294. Bay sets the owner of the volume at every deploy (see [Volume owner](#volume-owner)). |
 | `backup` | bool | `true` | Volume mounts only. `true`: the volume gets a daily backup. `false`: it gets none. |
 | `mode` | octal string | `"0600"` | `from` mounts only. |
 
@@ -605,6 +605,49 @@ to that commit finds its image, also with `track = "pin"`. Run `bay up` to deplo
   [build-pipeline.md](build-pipeline.md#no-input-change-push)). The build log has the line
   `no-input-change push <commit12>: tagged, run bay up`. When no image holds the previous
   commit, the push is skipped as before (`... skipped (as before)`): nothing is built.
+
+#### Volume owner
+
+`owner` (since 2.26.0) sets who owns the files of a volume. Use it when the image runs as a
+user other than root and writes to the volume. You need no `chown` by hand on the box.
+
+```toml
+[[mounts]]
+path = "/app/data"
+volume = "data"
+owner = "1000:1000"
+```
+
+- **When.** Bay sets the owner on every `bay up` and `bay deploy`. It runs on the box that
+  runs the container. It runs before the containers start, and once more after.
+- **What.** Bay looks at the top directory of the volume. If it already has the owner, Bay
+  changes nothing. If not, Bay changes the owner of every file and directory in the volume,
+  then of the top directory. It never follows a symbolic link. File contents and modes stay.
+- **The two forms.** `"1000"` sets the user and leaves the group. `"1000:1000"` sets both.
+  Use numbers only. A name means nothing on the box, because the box does not know the
+  users of the image.
+- **A new volume** is created with the owner before the first start.
+- **Without `owner`** Bay leaves the volume alone. Docker gives a new empty volume the owner
+  of the image path, or root when the image has no such path. Bay does not read the `USER`
+  of the image. It can be a name. An image that starts as root and drops to another user needs
+  that other user. A plan could not show the value before the image is built.
+- **The Docker rule to know.** Each time Docker creates a container on an empty volume, it
+  copies the owner of the image path onto the volume. If the image holds that path with
+  another owner, Bay corrects the volume right after the start and prints a warning. A push
+  build between two `bay up` runs can reset a volume that is still empty. Make the image
+  create that path with the same owner, or not at all.
+- **Taking it away.** Removing `owner` does not change the files back. `bay rollback` does not
+  either.
+- **One owner per volume.** Two mounts of the same volume with different owners are a compile
+  error. A second mount of the volume with no `owner` is fine.
+- **Limits.** It works only for the `local` volume driver. It does not work on a Docker
+  daemon with user namespace remapping or in rootless mode: the deploy stops with an error.
+
+In the plan, an owner is a `volume` step with the action `update`. No container is recreated.
+A new volume, or an owner that you remove, is `safe`. An owner that you add or change on a
+volume that a container already mounts is `destructive`: `bay up` may change the owner of
+every file in it, so the plan needs `bay approve`. See
+[plan.md, the risk table](plan.md#risk).
 
 ### `[backup]`
 

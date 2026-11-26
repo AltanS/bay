@@ -15,6 +15,7 @@
 - [Top-level keys besides services](#top-level-keys-besides-services)
   - [`jobs`](#jobs)
   - [`volume_backups`](#volume_backups)
+  - [`volume_owners`](#volume_owners)
   - [`tailnet_allowlist`](#tailnet_allowlist)
 - [Build from Source](#build-from-source)
   - [Build Strategy](#build-strategy)
@@ -467,6 +468,22 @@ volume_backups:
 
 The backup role adds one restic `file` target `<stack_name>_<volume>` per entry whose
 container runs on the host. See [backups.md](backups.md#volume-backups).
+
+### `volume_owners`
+
+```yaml
+volume_owners:
+  myapp-data:                        # the volume name in services.yml, no stack prefix
+    container: myapp                 # the container that mounts it (the first one that sets owner)
+    owner: "1000:1000"               # as written in bay.toml: "1000" or "1000:1000"
+```
+
+Since 2.26.0. It comes from the `owner` of a `[[mounts]]` entry and is left out when no mount
+sets one. On every deploy, on the box that runs `container`, the deploy sets the owner of
+`<stack_name>_<volume>`, before and after the container pass. It changes the files only when
+the top directory of the volume has another owner. The owner is not part of the container
+entry, so a change of it recreates no container. See
+[bay-toml.md, Volume owner](bay-toml.md#volume-owner).
 
 ### `tailnet_allowlist`
 
