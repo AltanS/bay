@@ -1317,9 +1317,289 @@ def test_init_writes_a_valid_draft_and_registers(
     assert again.exit_code != 0 and "already exists" in str(again.exception)
 
 
-def test_init_refuses_an_existing_bay_toml(world: dict[str, Path], box: FakeBox) -> None:
+def test_init_refuses_a_name_that_differs_from_bay_toml(
+    world: dict[str, Path], box: FakeBox
+) -> None:
     result = cli(world, "init", "--name", "fresh")
-    assert result.exit_code != 0 and "already exists" in str(result.exception)
+    assert_conflict(result, "does not match")
+    assert "comes from bay.toml" in (result.exception.hint or "")  # type: ignore[union-attr]
+
+
+# ── init with a bay.toml that is already there ──────────────────────────────
+
+HAND_TOML = """\
+name = "handmade"
+fleet = "testfleet"
+image = "ghcr.io/acme/handmade:1"
+port = 3000
+
+[access]
+mode = "public"
+
+[deploy.production]
+box = "box-1"
+domain = "handmade.example.com"
+"""
+
+
+def hand_repo(
+    tmp_path: Path,
+    text: str = HAND_TOML,
+    *,
+    rel: str = "bay.toml",
+    folder: str = "handmade",
+    commit: bool = True,
+    origin: bool = True,
+) -> Path:
+    """An app repo with a hand-written bay.toml and an origin remote (a bare repo)."""
+    repo = tmp_path / folder
+    repo.mkdir()
+    git(repo, "init", "-q")
+    if origin:
+        remote = tmp_path / "remotes" / f"{folder}.git"
+        remote.parent.mkdir(exist_ok=True)
+        git(tmp_path, "init", "-q", "--bare", str(remote))
+        git(repo, "remote", "add", "origin", str(remote))
+    (repo / "README.md").write_text("app\n")
+    target = repo / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if commit:
+        target.write_text(text)
+        commit_all(repo, "app")
+    else:
+        commit_all(repo, "app")
+        target.write_text(text)
+    return repo
+
+
+def test_init_registers_an_existing_bay_toml(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox
+) -> None:
+    repo = hand_repo(tmp_path)
+    before = (repo / "bay.toml").read_bytes()
+    fleet_head = git(world["fleet"], "rev-parse", "HEAD")
+
+    result = cli(world, "init", "--json", cwd=repo)
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert (repo / "bay.toml").read_bytes() == before
+    assert git(repo, "status", "--porcelain") == ""
+    assert doc["drafted"] is False
+    assert doc["project"] == "handmade" and doc["fleet"] == "testfleet"
+    assert doc["env"] is None and doc["box"] is None and doc["domain"] is None
+    assert doc["warnings"] == []
+    assert doc["toml_path"] == "bay.toml"
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "handmade"))
+    assert raw is not None and raw["commit"] is None
+    assert raw["repo"] == git(repo, "remote", "get-url", "origin")
+    assert raw["toml_path"] == "bay.toml" and "local_path" not in raw
+    # the lock is the one the draft path writes for the same repo
+    assert raw == lockfile.new_lock("handmade", repo=raw["repo"], toml_path="bay.toml")
+    assert git(world["fleet"], "log", "-1", "--format=%s") == "bay: init handmade"
+    assert git(world["fleet"], "rev-parse", "HEAD") != fleet_head
+    assert doc["fleet_commit"] == git(world["fleet"], "rev-parse", "HEAD")
+    assert git(world["fleet"], "status", "--porcelain") == ""
+
+
+def test_init_existing_bay_toml_human_output(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox
+) -> None:
+    repo = hand_repo(tmp_path)
+    result = cli(world, "init", cwd=repo)
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "registered handmade in fleet testfleet (commit " in out
+    assert "left as it is" in out
+    assert "Next: commit and push bay.toml, then run `bay plan`." in out
+    assert "wrote" not in out
+
+
+def test_init_existing_bay_toml_in_a_monorepo(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox
+) -> None:
+    rel = "services/api/bay.toml"
+    repo = hand_repo(tmp_path, HAND_TOML.replace("handmade", "api"), rel=rel, folder="mono")
+    before = (repo / rel).read_bytes()
+    result = cli(world, "init", "--toml-path", rel, "--json", cwd=repo)
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert doc["project"] == "api" and doc["toml_path"] == rel and doc["drafted"] is False
+    raw = lockfile.read(lockfile.lock_path(world["fleet"], "api"))
+    assert raw is not None and raw["toml_path"] == rel
+    assert (repo / rel).read_bytes() == before
+    assert not (repo / "bay.toml").exists()
+
+
+def test_init_existing_bay_toml_picks_the_fleet_from_its_fleet_line(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No --fleet, no BAY_FLEET: the fleet = line finds the fleet under the config dir."""
+    fleets = tmp_path / "home" / ".config" / "bay" / "fleets"
+    fleets.mkdir(parents=True)
+    (fleets / "testfleet").symlink_to(world["fleet"])
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    repo = hand_repo(tmp_path)
+    old = Path.cwd()
+    os.chdir(repo)
+    try:
+        result = runner.invoke(app, ["init", "--json"])
+    finally:
+        os.chdir(old)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["fleet"] == "testfleet"
+    assert lockfile.read(lockfile.lock_path(world["fleet"], "handmade")) is not None
+
+
+def assert_conflict(result: Any, text: str) -> None:
+    from bay_cli.errors import ErrorCode
+
+    assert result.exit_code != 0
+    assert getattr(result.exception, "code", None) == ErrorCode.CONFLICT, result.output
+    assert text in str(result.exception)
+
+
+def _nothing_written(world: dict[str, Path], repo: Path, name: str, head: str) -> None:
+    assert lockfile.read(lockfile.lock_path(world["fleet"], name)) is None
+    assert git(world["fleet"], "rev-parse", "HEAD") == head
+    assert git(world["fleet"], "status", "--porcelain") == ""
+    assert git(repo, "status", "--porcelain") == ""
+
+
+@pytest.mark.parametrize(
+    "broken, needle",
+    [
+        ('name = "handmade"\nfleet = ', "not valid TOML"),
+        (HAND_TOML.replace('mode = "public"', 'mode = "sideways"'), "access.mode"),
+        (HAND_TOML + "\nbogus_key = 1\n", "bogus_key"),
+    ],
+    ids=["syntax", "rule", "unknown-key"],
+)
+def test_init_refuses_an_invalid_bay_toml(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox, broken: str, needle: str
+) -> None:
+    repo = hand_repo(tmp_path, broken)
+    head = git(world["fleet"], "rev-parse", "HEAD")
+    result = cli(world, "init", cwd=repo)
+    assert result.exit_code != 0
+    assert needle in str(result.exception)
+    assert "bay toml validate" in (result.exception.hint or "")  # type: ignore[union-attr]
+    assert (repo / "bay.toml").read_text() == broken
+    _nothing_written(world, repo, "handmade", head)
+
+
+def test_init_refuses_a_name_that_is_not_the_bay_toml_name(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox
+) -> None:
+    repo = hand_repo(tmp_path)
+    head = git(world["fleet"], "rev-parse", "HEAD")
+    result = cli(world, "init", "--name", "other", cwd=repo)
+    assert_conflict(result, "does not match")
+    assert "comes from bay.toml" in (result.exception.hint or "")  # type: ignore[union-attr]
+    _nothing_written(world, repo, "handmade", head)
+    _nothing_written(world, repo, "other", head)
+    # the same name is fine
+    same = cli(world, "init", "--name", "handmade", cwd=repo)
+    assert same.exit_code == 0, same.output
+
+
+def test_init_refuses_a_fleet_line_that_names_another_fleet(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox
+) -> None:
+    repo = hand_repo(tmp_path, HAND_TOML.replace('fleet = "testfleet"', 'fleet = "elsewhere"'))
+    head = git(world["fleet"], "rev-parse", "HEAD")
+    result = cli(world, "init", cwd=repo)
+    assert_conflict(result, "elsewhere")
+    assert "testfleet" in str(result.exception)
+    _nothing_written(world, repo, "handmade", head)
+
+
+@pytest.mark.parametrize("flags", [["--box", "box-1"], ["--domain", "x.example.com"]])
+def test_init_refuses_box_and_domain_with_a_bay_toml(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox, flags: list[str]
+) -> None:
+    repo = hand_repo(tmp_path)
+    head = git(world["fleet"], "rev-parse", "HEAD")
+    result = cli(world, "init", *flags, cwd=repo)
+    assert result.exit_code != 0
+    assert flags[0] in str(result.exception) and "Edit" in (result.exception.hint or "")  # type: ignore[union-attr]
+    _nothing_written(world, repo, "handmade", head)
+
+
+def test_init_existing_bay_toml_already_registered(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox
+) -> None:
+    repo = hand_repo(tmp_path)
+    assert cli(world, "init", cwd=repo).exit_code == 0
+    head = git(world["fleet"], "rev-parse", "HEAD")
+    again = cli(world, "init", cwd=repo)
+    assert_conflict(again, "already registered")
+    assert "bay plan" in (again.exception.hint or "")  # type: ignore[union-attr]
+    assert git(world["fleet"], "rev-parse", "HEAD") == head
+    # a project folder in the fleet counts as registered too
+    other = hand_repo(tmp_path, HAND_TOML.replace("handmade", "infleet"), folder="infleet")
+    (world["fleet"] / "projects" / "infleet").mkdir()
+    refused = cli(world, "init", cwd=other)
+    assert_conflict(refused, "already registered")
+
+
+def test_init_existing_bay_toml_warns_when_it_is_not_committed(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox
+) -> None:
+    untracked = hand_repo(tmp_path, commit=False)
+    result = cli(world, "init", "--json", cwd=untracked)
+    assert result.exit_code == 0, result.output
+    warnings = json.loads(result.stdout)["warnings"]
+    assert len(warnings) == 1 and "commit and push" in warnings[0]
+
+    edited = hand_repo(tmp_path, folder="edited", text=HAND_TOML.replace("handmade", "edited"))
+    (edited / "bay.toml").write_text(
+        (edited / "bay.toml").read_text().replace("port = 3000", "port = 3001")
+    )
+    result = cli(world, "init", "--json", cwd=edited)
+    assert result.exit_code == 0, result.output
+    assert "commit and push" in json.loads(result.stdout)["warnings"][0]
+
+
+def test_init_existing_bay_toml_warns_about_an_unknown_box(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox
+) -> None:
+    text = HAND_TOML.replace('box = "box-1"', 'box = "box-9"')
+    repo = hand_repo(tmp_path, text)
+    result = cli(world, "init", "--json", cwd=repo)
+    assert result.exit_code == 0, result.output
+    warnings = json.loads(result.stdout)["warnings"]
+    assert len(warnings) == 1
+    assert "deploy.production" in warnings[0] and "box-9" in warnings[0]
+    assert lockfile.read(lockfile.lock_path(world["fleet"], "handmade")) is not None
+
+
+def test_init_existing_bay_toml_still_needs_an_origin(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox
+) -> None:
+    repo = hand_repo(tmp_path, origin=False)
+    head = git(world["fleet"], "rev-parse", "HEAD")
+    result = cli(world, "init", cwd=repo)
+    assert result.exit_code != 0 and "no origin remote" in str(result.exception)
+    _nothing_written(world, repo, "handmade", head)
+
+
+def test_init_draft_reports_drafted_and_the_choices(
+    tmp_path: Path, world: dict[str, Path], box: FakeBox
+) -> None:
+    repo = tmp_path / "plain"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "remote", "add", "origin", "git@example.com:acme/plain.git")
+    (repo / "README.md").write_text("app\n")
+    commit_all(repo, "app")
+    result = cli(world, "init", "--json", cwd=repo)
+    assert result.exit_code == 0, result.output
+    doc = json.loads(result.stdout)
+    assert doc["drafted"] is True
+    assert (doc["env"], doc["box"], doc["domain"]) == ("production", "box-1", "plain.example.com")
+    human = cli(world, "init", "--name", "plain2", "--toml-path", "p2/bay.toml", cwd=repo)
+    assert human.exit_code == 0, human.output
+    assert "wrote" in human.output and "Next: check bay.toml, commit it" in human.output
 
 
 # ── live ────────────────────────────────────────────────────────────────────

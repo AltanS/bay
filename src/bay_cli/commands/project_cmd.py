@@ -284,42 +284,60 @@ def _plan_pull(cx: Context) -> Any:
 def init(
     ctx: typer.Context,
     name: Annotated[
-        str | None, typer.Option("--name", help="Project name. Default: the repo dir.")
+        str | None,
+        typer.Option(
+            "--name",
+            help="Project name for a new draft. Default: the repo dir. "
+            "With a bay.toml, the name comes from the file.",
+        ),
     ] = None,
     fleet: Annotated[
         str | None,
         typer.Option("--fleet", help="Fleet name (~/.config/bay/fleets/<name>)."),
     ] = None,
     box: Annotated[
-        str | None, typer.Option("--box", help="Box. Default: the fleet's default box.")
+        str | None,
+        typer.Option(
+            "--box",
+            help="Box for a new draft. Default: the fleet's default box. "
+            "Not allowed when bay.toml exists.",
+        ),
     ] = None,
     domain: Annotated[
-        str | None, typer.Option("--domain", help="Domain. Default: <name>.<fleet domain>.")
+        str | None,
+        typer.Option(
+            "--domain",
+            help="Domain for a new draft. Default: <name>.<fleet domain>. "
+            "Not allowed when bay.toml exists.",
+        ),
     ] = None,
     toml_path: Annotated[
         str | None,
         typer.Option(
             "--toml-path",
-            help="Where bay.toml goes, relative to the repo root (a monorepo). "
+            help="Where bay.toml is or goes, relative to the repo root (a monorepo). "
             "Default: bay.toml at the repo root.",
         ),
     ] = None,
     as_json: _JsonOpt = False,
 ) -> None:
-    """Draft a bay.toml in this app repo and register the app in the fleet.
+    """Register this app repo in the fleet. Draft a bay.toml if it has none.
 
-    Writes bay.toml here and projects/<name>/bay.lock in the fleet, then
-    commits the fleet repo ("bay: init <name>"). Refuses when the name exists.
-    The lock records the repo's origin URL and the toml path, never a path on
-    this machine.
+    No bay.toml yet: writes a draft here and projects/<name>/bay.lock in the
+    fleet. A bay.toml already there: checks it, leaves it as it is, and
+    registers the project it names. The name, the fleet line and the boxes
+    come from the file. Then commits the fleet repo ("bay: init <name>").
+    Refuses when the project is already registered. The lock records the
+    repo's origin URL and the toml path, never a path on this machine.
 
     Examples:
 
         bay init --fleet myfleet
         bay init --name shop --box eu-1 --domain shop.example.com
         bay init --name api --toml-path services/api/bay.toml
+        bay init      # bay.toml exists: register it, the fleet line picks the fleet
     """
-    from bay_cli.project_init import init_project
+    from bay_cli.project_init import existing_identity, init_project
 
     here = fleet_dir_above(Path.cwd())
     if here is not None:
@@ -328,21 +346,29 @@ def init(
             hint="For an app that lives in the fleet, write projects/<name>/bay.toml "
             "(see docs/layout-scenarios.md).",
         )
-    cx = fleet_context(ctx, fleet)
+    identity = existing_identity(Path.cwd(), toml_path)
+    # The verb's --fleet wins over the fleet line of bay.toml.
+    cx = fleet_context(ctx, fleet or (identity[1] if identity else None))
     result = init_project(
         cx, Path.cwd(), name=name, box=box, domain=domain, toml_path=toml_path
     )
     if as_json:
         _echo_json(result)
         return
-    console.success(f"wrote {result['bay_toml']}")
+    if result["drafted"]:
+        console.success(f"wrote {result['bay_toml']}")
     console.success(
         f"registered {result['project']} in fleet {result['fleet']} "
         f"(commit {result['fleet_commit'][:12]})"
     )
+    if not result["drafted"]:
+        console.info(f"{result['toml_path']} was left as it is.")
     for warning in result["warnings"]:
         console.warning(warning)
-    console.info("Next: check bay.toml, commit it, then run `bay plan`.")
+    if result["drafted"]:
+        console.info("Next: check bay.toml, commit it, then run `bay plan`.")
+    else:
+        console.info("Next: commit and push bay.toml, then run `bay plan`.")
 
 
 #: The note ``bay adopt`` prints on stderr: the verb is an alias now.

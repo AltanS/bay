@@ -1,4 +1,12 @@
-"""``bay init``: draft a bay.toml in an app repo and register the app in the fleet.
+"""``bay init``: register an app repo in the fleet, and draft its bay.toml when it has none.
+
+Two cases, told apart by the file at the target path (``bay.toml`` at the repo
+root, or ``--toml-path``):
+
+* No bay.toml there: draft one and register the app (the rest of this note).
+* A bay.toml there: validate it, register the app and leave the file
+  byte-for-byte as it is (since 2.26.0). The name, the fleet and the boxes
+  come from the file. See :func:`_register_existing`.
 
 The draft is a starting point, never a guess presented as fact. It reads
 three hints from the repo:
@@ -98,6 +106,39 @@ def draft(*, name: str, fleet_name: str, env: str, box: str, domain: str, hints:
     return "\n".join(lines)
 
 
+def existing_identity(repo: Path, toml_path: str | None = None) -> tuple[str, str] | None:
+    """``(name, fleet)`` of the bay.toml at the target path, or None when there is none.
+
+    The file must be valid: a syntax error or a rule problem raises BayError
+    and nothing is written. The command uses the ``fleet`` value to pick the
+    fleet before it loads one.
+    """
+    top = gitrepo._out(repo, "rev-parse", "--show-toplevel") if gitrepo.is_repo(repo) else None
+    toml_file = (Path(top) if top else repo) / _toml_rel(toml_path)
+    if not toml_file.exists():
+        return None
+    doc = _read_existing(toml_file)
+    return str(doc["name"]), str(doc["fleet"])
+
+
+def _read_existing(toml_file: Path) -> dict[str, Any]:
+    """Load and validate an existing bay.toml. Raise one error that lists every problem."""
+    try:
+        doc = bay_toml.load(toml_file)
+    except bay_toml.BayTomlError as exc:
+        problems = [f"{toml_file}: {exc}"]
+    else:
+        problems = [str(v) for v in bay_toml.validate(doc)]
+        if not problems:
+            return doc
+    raise BayError(
+        f"{toml_file} is not a valid bay.toml:\n  " + "\n  ".join(problems),
+        code=ErrorCode.VALIDATION_ERROR,
+        hint="Fix the file (bay toml validate <path>), then run bay init again. "
+        "Nothing was written.",
+    )
+
+
 def init_project(
     cx: Context,
     repo: Path,
@@ -107,11 +148,15 @@ def init_project(
     domain: str | None = None,
     toml_path: str | None = None,
 ) -> dict[str, Any]:
-    """Write ``bay.toml`` and ``projects/<name>/bay.lock``, then commit the fleet.
+    """Register the app in the fleet: write ``projects/<name>/bay.lock``, commit the fleet.
 
     ``toml_path`` is relative to the repo root (a monorepo keeps one bay.toml
     per app). By default it is ``bay.toml`` at the repo root. The lock
     records ``repo`` (the origin URL) and ``toml_path``.
+
+    With no file at that path, draft one and write it (``drafted`` is true).
+    With a file there, read it, change nothing in it and register what it
+    says (``drafted`` is false). The name then comes from the file.
     """
     from bay_cli.plan import load_fleet_doc
 
@@ -121,12 +166,10 @@ def init_project(
     root = Path(top) if top else repo
     rel = _toml_rel(toml_path)
     toml_file = root / rel
+    existing: dict[str, Any] | None = None
     if toml_file.exists():
-        raise BayError(
-            f"{toml_file} already exists",
-            code=ErrorCode.CONFLICT,
-            hint="bay init drafts a new file only. Use bay plan to check it.",
-        )
+        existing = _read_existing(toml_file)
+        _check_existing_args(existing, name=name, box=box, domain=domain)
     if not gitrepo.is_repo(cx.fleet_root) or gitrepo.head(cx.fleet_root) is None:
         raise BayError(f"the fleet {cx.fleet_root} is not a git repo with a commit")
     repo_url = gitrepo.remote_url(root)
@@ -139,18 +182,40 @@ def init_project(
 
     layout.ensure_for_write(cx.fleet_root)
     fleet_doc = load_fleet_doc(cx)
-    project = name or default_name(toml_file.parent if toml_path else root)
+    if existing is not None:
+        project = str(existing["name"])
+        if existing["fleet"] != fleet_doc["name"]:
+            raise BayError(
+                f"{toml_file} names the fleet {existing['fleet']}, "
+                f"but the selected fleet is {fleet_doc['name']}",
+                code=ErrorCode.CONFLICT,
+                hint=f"Change the fleet line of bay.toml to {fleet_doc['name']}, "
+                "or select the fleet it names (--fleet <path> before the verb).",
+            )
+    else:
+        project = name or default_name(toml_file.parent if toml_path else root)
     if not _NAME_RE.match(project):
         raise BayError(
             f"name {project} must use only a-z, 0-9 and -, and start with a letter or digit",
-            hint="Pass --name.",
+            hint="Change name in bay.toml." if existing is not None else "Pass --name.",
         )
     lock_file = lockfile.lock_path(cx.fleet_root, project)
     if lock_file.exists() or (cx.fleet_root / PROJECTS_DIR / project).exists():
+        if existing is not None:
+            raise BayError(
+                f"project {project} is already registered in fleet {fleet_doc['name']}",
+                code=ErrorCode.CONFLICT,
+                hint="Nothing to do. Run bay plan to check it.",
+            )
         raise BayError(
             f"project {project} already exists in fleet {fleet_doc['name']}",
             code=ErrorCode.CONFLICT,
             hint="A name never changes. Pick another name with --name.",
+        )
+
+    if existing is not None:
+        return _register_existing(
+            cx, fleet_doc, existing, root=root, rel=rel, repo_url=repo_url, lock_file=lock_file
         )
 
     boxes = fleet_doc.get("boxes") or {}
@@ -180,10 +245,7 @@ def init_project(
     toml_file.parent.mkdir(parents=True, exist_ok=True)
     toml_file.write_text(text)
     lockfile.write(lock_file, raw)
-    try:
-        fleet_commit = gitrepo.commit_paths(cx.fleet_root, [lock_file], f"bay: init {project}")
-    except gitrepo.GitError as exc:
-        raise BayError(f"cannot commit the fleet repo: {exc}") from None
+    fleet_commit = _commit_lock(cx, lock_file, project)
     warnings: list[str] = []
     if not hints.dockerfile:
         warnings.append("no Dockerfile: add one, or set image in bay.toml")
@@ -195,9 +257,79 @@ def init_project(
         "repo": repo_url,
         "toml_path": rel,
         "fleet_commit": fleet_commit,
+        "drafted": True,
         "env": env,
         "box": chosen_box,
         "domain": chosen_domain,
+        "warnings": warnings,
+    }
+
+
+def _check_existing_args(
+    doc: dict[str, Any], *, name: str | None, box: str | None, domain: str | None
+) -> None:
+    """With a bay.toml in place, the file decides: refuse an option that tries to."""
+    if name is not None and name != doc["name"]:
+        raise BayError(
+            f"--name {name} does not match name = \"{doc['name']}\" in bay.toml",
+            code=ErrorCode.CONFLICT,
+            hint="The name comes from bay.toml. Drop --name, or change the file.",
+        )
+    if box is not None or domain is not None:
+        flags = " and ".join(f for f, v in (("--box", box), ("--domain", domain)) if v is not None)
+        raise BayError(
+            f"{flags} only fill a new draft, and bay.toml exists",
+            hint="Edit the box and domain in bay.toml instead.",
+        )
+
+
+def _commit_lock(cx: Context, lock_file: Path, project: str) -> str:
+    try:
+        return gitrepo.commit_paths(cx.fleet_root, [lock_file], f"bay: init {project}")
+    except gitrepo.GitError as exc:
+        raise BayError(f"cannot commit the fleet repo: {exc}") from None
+
+
+def _register_existing(
+    cx: Context,
+    fleet_doc: dict[str, Any],
+    doc: dict[str, Any],
+    *,
+    root: Path,
+    rel: str,
+    repo_url: str,
+    lock_file: Path,
+) -> dict[str, Any]:
+    """Write the lock for a bay.toml that is already there. The file is never touched."""
+    project = str(doc["name"])
+    lockfile.write(lock_file, lockfile.new_lock(project, repo=repo_url, toml_path=rel))
+    fleet_commit = _commit_lock(cx, lock_file, project)
+    warnings: list[str] = []
+    if not gitrepo.is_tracked(root, rel) or gitrepo.path_dirty(root, rel):
+        warnings.append(
+            f"{rel} is untracked or has uncommitted changes: bay plan reads the committed "
+            "file, so commit and push it"
+        )
+    boxes = fleet_doc.get("boxes") or {}
+    for env, table in (doc.get("deploy") or {}).items():
+        named = table.get("box") if isinstance(table, dict) else None
+        if isinstance(named, str) and named not in boxes:
+            warnings.append(
+                f"[deploy.{env}] names the box {named}, which is not in bay.fleet.toml: "
+                "bay plan will refuse it"
+            )
+    return {
+        "project": project,
+        "fleet": fleet_doc["name"],
+        "bay_toml": str(root / rel),
+        "lock": str(lock_file),
+        "repo": repo_url,
+        "toml_path": rel,
+        "fleet_commit": fleet_commit,
+        "drafted": False,
+        "env": None,
+        "box": None,
+        "domain": None,
         "warnings": warnings,
     }
 

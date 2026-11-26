@@ -282,7 +282,7 @@ to reproduce it. The flags that change what a command *means*:
 
 - `bay adopt <name>` — Deprecated: use `bay toml move <name> --to repo`. It works the same.
 - `bay approve <plan_id>` — Approve a saved plan with destructive or shared steps.
-- `bay init` — Draft a bay.toml in this app repo and register the app in the fleet.
+- `bay init` — Register this app repo in the fleet. Draft a bay.toml if it has none.
 - `bay plan [env]` — Compare WANTED (bay.toml at HEAD), PINNED (the lock) and RUNNING (the box).
 - `bay remove <project>` — Plan the removal of a project: its containers stop, its data stays.
 - `bay rollback [env]` — Return an environment to its previous pin and its previous code, and freeze it.
