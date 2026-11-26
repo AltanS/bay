@@ -18,7 +18,7 @@ Which project and which fleet:
 
 No verb asks a question. Secrets never travel on the command line.
 Plan exit codes: 0 auto, 10 approve, 20 blocked, 30 stale. ``bay up`` also
-exits 40 when the deploy failed only for a first image, 41 when the fleet is
+exits 40 when the deploy failed only for a first image it could not build, 41 when the fleet is
 not in step with its remote (diverged, unreachable), 42 when its claim push
 was refused, 43 when another run holds the fleet, and 44 when it deployed but
 could not push the receipt.
@@ -833,10 +833,17 @@ def _retry_deploy(result: dict[str, Any]) -> str | None:
     The failed up already committed ``services.yml``, so a second ``bay up`` plans
     no step and would leave the extra tags (route, volume backup) out. The
     retry that runs them is ``bay deploy <env> --tags <the tags that up used>``.
+
+    The ``first_image`` tag (2.27.0) is left out: a second ``bay up`` plans the
+    first image again from the receipt, and ``bay deploy`` passes no
+    ``bay_first_image``, so the tag would build nothing there.
     """
     from bay_cli.apply import UP_DEPLOY_TAGS
+    from bay_cli.routes import FIRST_IMAGE_TAG
 
-    tags = str(result.get("deploy_tags") or "")
+    tags = ",".join(
+        t for t in str(result.get("deploy_tags") or "").split(",") if t and t != FIRST_IMAGE_TAG
+    )
     if tags in ("", UP_DEPLOY_TAGS):
         return None
     return (
@@ -880,9 +887,11 @@ def up(
     commits the fleet repo, pushes that commit (the claim; a refused push
     stops before the box, exit 42), deploys, records the receipt, prunes old
     records from plans/ and pushes the fleet repo again (exit 44 when that
-    fails). --no-push skips both pushes. A failed deploy exits 1, or 40 when
-    the only failure is a build container with no image yet (the first
-    deploy of a build app: push so the webhook builds it, then bay up again).
+    fails). --no-push skips both pushes. The first bay up of a build app
+    builds its first image before it creates the container. A failed deploy
+    exits 1, or 40 when the only failure is a build container that still has
+    no image (a registry build, or a deploy key the git host does not know
+    yet: the notes say what to do, then bay up again).
     Exit 41: the fleet and its remote diverged, the remote is down, or the
     fleet has uncommitted files (--allow-dirty deploys them). Exit 43:
     another bay run holds this fleet checkout, or another machine claimed this

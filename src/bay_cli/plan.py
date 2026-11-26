@@ -3302,6 +3302,12 @@ def make_plan(
         notes.extend(code.info)
         blockers.extend(code.blockers)
         keep = code.keep
+    # The first image (2.27.0): bay up builds it before the container pass.
+    diff.steps.extend(
+        first_image_steps(
+            cx, proj, wanted, env, place.box_env, env_names, diff, receipt_entries
+        )
+    )
     moves: list[dict[str, Any]] = []
     if place.move:
         move = move_record(
@@ -3440,6 +3446,140 @@ def project_code(
         for name, box in unknown_code(receipt_entries, built, pin=code_pin)
     )
     return code
+
+
+# ── The first image (2.27.0) ────────────────────────────────────────────────
+
+#: Build strategies ``bay up`` builds a first image for. ``push`` is the old
+#: name of ``remote`` (roles/git_deploy/tasks/resolve_strategy.yml).
+FIRST_IMAGE_STRATEGIES = ("local", "remote", "push")
+
+
+def build_strategy(entry: Mapping[str, Any], default: Any) -> str | None:
+    """The build strategy of a compiled entry, as ``resolve_strategy.yml`` resolves it.
+
+    ``default`` is ``git_deploy_build_strategy`` from plain group_vars (None:
+    unset, so the role default ``local``). ``push`` reads as ``remote``. None
+    when the value is a Jinja expression: only Ansible can resolve it.
+    """
+    build = entry.get("build")
+    strategy = build.get("strategy") if isinstance(build, Mapping) else None
+    value = strategy if strategy is not None else default
+    if value is None:
+        return "local"
+    text = str(value)
+    if "{{" in text:
+        return None
+    return "remote" if text == "push" else text
+
+
+def not_running(
+    entries: list[dict[str, Any]], names: set[str], pin: str | None = None
+) -> set[str] | None:
+    """The ``names`` that no receipt lists as running. None when Bay cannot tell.
+
+    A container runs when a receipt lists it, unless the row is marked
+    ``failed`` and names no commit (a create that failed: the first ``bay up``
+    of a build app before 2.27.0, or a build that made no image). None when no
+    receipt was read, a box could not be read, or a receipt has no container
+    list (a box with no receipt file yet has none, and runs nothing).
+    """
+    if not entries:
+        return None
+    running: set[str] = set()
+    for entry in entries:
+        if entry.get("error"):
+            return None
+        receipt = entry.get("receipt")
+        if receipt is None:
+            continue
+        if not isinstance(receipt, Mapping) or not isinstance(receipt.get("containers"), list):
+            return None
+        for c in receipt["containers"]:
+            if not isinstance(c, Mapping) or c.get("name") not in names:
+                continue
+            if c.get("failed") is True and receipt_row_code(c, pin)[0] is None:
+                continue
+            running.add(str(c["name"]))
+    return set(names) - running
+
+
+def first_image_steps(
+    cx: Context,
+    proj: ProjectRef,
+    wanted: Wanted,
+    env: str,
+    box_env: str | None,
+    env_names: set[str],
+    diff: _Diff,
+    receipt_entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One step ``image``/``create`` per build container of ``proj`` with no image yet.
+
+    A build container is a compiled service with ``build``, strategy ``local``
+    or ``remote``, that does not share the build of another container
+    (``build.shared_from``). It has no image yet when the plan creates it (a
+    ``container``/``create`` step), or when the receipts list no running
+    container of that name (:func:`not_running`): the retry after a failed
+    first ``bay up``, whose compile already holds the container. With no
+    receipt, only the first rule holds.
+
+    ``bay up`` turns these steps into the ``first_image`` tag and the
+    ``bay_first_image`` extra var: the ``git_deploy`` role builds the image
+    before the container pass (roles/git_deploy/tasks/first_image.yml).
+    """
+    if wanted.doc is None or box_env is None:
+        return []
+    services = diff.wanted_data.get("services") or {}
+    default = _group_var(cx, box_env, "git_deploy_build_strategy")
+    built: dict[str, str | None] = {}
+    for name in sorted(env_names):
+        entry = services.get(name)
+        if not isinstance(entry, Mapping) or not isinstance(entry.get("build"), Mapping):
+            continue
+        if entry["build"].get("shared_from"):
+            continue  # it re-tags or pulls the image of its main container
+        strategy = build_strategy(entry, default)
+        if strategy is not None and strategy not in FIRST_IMAGE_STRATEGIES:
+            continue  # registry: Bay does not build it
+        built[name] = strategy
+    if not built:
+        return []
+    created = {
+        str(s["container"])
+        for s in diff.steps
+        if s.get("kind") == "container" and s.get("action") == "create"
+    }
+    code_pin = None if proj.in_fleet else lockfile.env_pin(proj.lock, env)
+    absent = not_running(receipt_entries, set(built), pin=code_pin) or set()
+    branch_head = proj.in_fleet or adopt_pending(proj, env, wanted.commit) or not wanted.commit
+    steps: list[dict[str, Any]] = []
+    for name, strategy in built.items():
+        if name not in created and name not in absent:
+            continue
+        build = services[name]["build"]
+        what = (
+            f"the head of branch {build.get('branch') or 'main'}"
+            if branch_head
+            else str(wanted.commit)[:12]
+        )
+        where = {
+            "remote": "on the build server",
+            "local": "on the box",
+        }.get(str(strategy), "on the build server or on the box")
+        steps.append(
+            _step(
+                "image",
+                "create",
+                "safe",
+                f"first image of {name}: bay up builds {what} {where} before it creates "
+                "the container; this takes as long as a build",
+                container=name,
+                project=proj.name,
+                source="compile" if name in created else "box",
+            )
+        )
+    return steps
 
 
 def _services_blockers(state: str, blockers: list[str]) -> None:
@@ -3636,6 +3776,19 @@ def make_env_plan(
         notes.extend(f"{proj.name}: {line}" for line in code.info)
         blockers.extend(f"{proj.name}: {line}" for line in code.blockers)
         keep.extend(code.keep)
+    for proj, wanted in members:
+        diff.steps.extend(
+            first_image_steps(
+                cx,
+                proj,
+                wanted,
+                env,
+                placements[proj.name].box_env,
+                env_names[proj.name],
+                diff,
+                receipt_entries,
+            )
+        )
     moves: list[dict[str, Any]] = []
     for proj, _ in members:
         place = placements[proj.name]

@@ -156,6 +156,7 @@ def default_deploy(
     code_targets: Mapping[str, Any] | None = None,
     tags: str = UP_DEPLOY_TAGS,
     limit: Mapping[str, Any] | None = None,
+    first_images: Mapping[str, str | None] | None = None,
 ) -> None:
     """Today's ``bay deploy <env> --tags deploy_stack,backup``, without the prompts and the banner.
 
@@ -174,6 +175,12 @@ def default_deploy(
     ``code_targets`` (``{container: {"commit"|"source", "strict"}}``) becomes
     the ``bay_code_targets`` extra var: the box points ``:latest`` at those
     commit images before the reconciler pass (``bay_reconcile.codepin``).
+
+    ``first_images`` (``{container: full commit or None}``, 2.27.0) becomes the
+    ``bay_first_image`` extra var: with the ``first_image`` tag in ``tags``,
+    the git_deploy role builds those images before the container pass
+    (roles/git_deploy/tasks/first_image.yml). None builds a project in the
+    fleet at the head of its branch.
     """
     from bay_cli.commands import ops
     from bay_cli.commands.validate import run_validation
@@ -204,6 +211,8 @@ def default_deploy(
         ]
         if code_targets:
             extra += ["-e", json.dumps({"bay_code_targets": dict(code_targets)})]
+        if first_images:
+            extra += ["-e", json.dumps({"bay_first_image": dict(first_images)})]
         health: dict[str, Any] = {}
         if limit:
             extra += scopemod.limit_args(list(limit["hosts"]))
@@ -1100,8 +1109,15 @@ def _apply_plan_steps(
         from bay_cli import routes
 
         tags = routes.deploy_tags(plan["steps"], UP_DEPLOY_TAGS)
+        firsts = first_image_builds(plan, members, compiled, before)
         if tags != UP_DEPLOY_TAGS:
-            say(f"deploy tags: {tags} (the plan changes a tailnet route)")
+            why = [
+                *(["the plan changes a tailnet route"] if any(
+                    s.get("kind") in routes.ROUTE_KINDS for s in plan["steps"]
+                ) else []),
+                *([f"the first image of {', '.join(sorted(firsts))}"] if firsts else []),
+            ]
+            say(f"deploy tags: {tags}" + (f" ({'; '.join(why)})" if why else ""))
         deploy_envs = [box_env] + sorted(
             {
                 str(m["from_box_env"])
@@ -1116,6 +1132,9 @@ def _apply_plan_steps(
             )
             if target == box_env and tags != UP_DEPLOY_TAGS:
                 extra["tags"] = tags
+            if target == box_env and firsts:
+                # The first image of each new build container (2.27.0).
+                extra["first_images"] = firsts
             # The plan's scope (spec 2026-11-06): only the hosts of its boxes.
             limited = scopemod.limit_for(scope, target)
             if limited:
@@ -1285,6 +1304,7 @@ def _apply_plan_steps(
             before=before,
             after=entries,
             fleet_commit=fleet_commit,
+            asked=firsts,
         )
         notes += first_notes
     applied, stale_boxes = applied_from(entries, fleet_commit)
@@ -2203,6 +2223,62 @@ def _lock_kept(
     ]
 
 
+def first_image_builds(
+    plan: Mapping[str, Any],
+    members: list[tuple[planmod.ProjectRef, str]],
+    compiled: Mapping[str, Any],
+    before: list[dict[str, Any]] | None,
+) -> dict[str, str | None]:
+    """``{container: full commit or None}``: the first images this ``bay up`` builds (2.27.0).
+
+    One entry per plan step ``image``/``create`` (:func:`bay_cli.plan.first_image_steps`)
+    of a member project. The value is the commit the box builds: the pin of an
+    app-repo project. None for a project in the fleet (its pin is a fleet
+    commit) and for the ``bay adopt`` commit (it is not pushed yet): the build
+    takes the head of the deploy branch.
+
+    A service that shares the build of a named container (``build.shared_from``)
+    is added with the same value when the plan creates it too, or the receipt
+    lists it as not running: a local build tags its image as well. The role
+    builds or pulls nothing for any other container.
+    """
+    from bay_cli import routes
+
+    env = str(plan.get("env"))
+    by_name = {p.name: (p, c) for p, c in members}
+    out: dict[str, str | None] = {}
+    for step in plan.get("steps") or []:
+        if not routes.is_first_image(step):
+            continue
+        member = by_name.get(str(step.get("project")))
+        if member is None or not step.get("container"):
+            continue
+        proj, commit = member
+        pinned = not proj.in_fleet and not planmod.adopt_pending(proj, env, commit)
+        out[str(step["container"])] = commit if pinned else None
+    if not out:
+        return out
+    services = compiled.get("services") or {}
+    created = {
+        str(s["container"])
+        for s in plan.get("steps") or []
+        if s.get("kind") == "container" and s.get("action") == "create"
+    }
+    siblings = {
+        str(name): str(entry["build"]["shared_from"])
+        for name, entry in services.items()
+        if isinstance(entry, Mapping)
+        and isinstance(entry.get("build"), Mapping)
+        and entry["build"].get("shared_from") in out
+        and name not in out
+    }
+    absent = planmod.not_running(before or [], set(siblings)) or set()
+    for name, main in sorted(siblings.items()):
+        if name in created or name in absent:
+            out[name] = out[main]
+    return out
+
+
 def first_image(
     cx: Context,
     box_env: str,
@@ -2213,8 +2289,15 @@ def first_image(
     before: list[dict[str, Any]] | None,
     after: list[dict[str, Any]],
     fleet_commit: str,
+    asked: Mapping[str, Any] | None = None,
 ) -> tuple[list[str], bool, list[str]]:
     """``(containers, exit 40, notes)`` after a failed deploy.
+
+    Since 2.27.0 ``bay up`` builds the first image itself (``asked``, from
+    :func:`first_image_builds`), so this is the fallback for what that build
+    cannot cover: a ``registry`` build, a local build whose deploy key the git
+    host does not know yet (the role skips it and prints the key), a build
+    that made no image, and a plan that read no receipt.
 
     A build container of a member project is a first image when RUNNING
     names no commit for it (``before``, the receipt the plan read, or the new
@@ -2278,16 +2361,38 @@ def first_image(
         entry = (compiled.get("services") or {}).get(name) or (
             compiled.get("accessories") or {}
         ).get(name)
-        build = entry.get("build") if isinstance(entry, Mapping) else None
-        branch = str((build or {}).get("branch") or "main")
-        notes.append(
-            f"first deploy of {proj.name}: the box has no image for {what} yet. Push to "
-            f"{branch} so the webhook builds it, wait for the build, then run bay up again. "
-            "If the box builds this app itself and has no clone of its repo yet, run "
-            f"bay deploy {box_env} once with no --tags: it clones the repo, builds the first "
-            "image and deploys."
+        strategy = (
+            planmod.build_strategy(
+                entry, planmod._group_var(cx, box_env, "git_deploy_build_strategy")
+            )
+            if isinstance(entry, Mapping)
+            else None
         )
+        notes.append(_first_image_note(proj.name, name, what, strategy, name in (asked or {})))
     return first, bool(first) and failed <= set(first), notes
+
+
+def _first_image_note(
+    project: str, name: str, what: str, strategy: str | None, asked: bool
+) -> str:
+    """The way out of exit 40, per case (see :func:`first_image`)."""
+    head = f"first deploy of {project}: the box has no image for {what} yet."
+    if strategy == "registry":
+        return (
+            f"{head} Its build strategy is registry, so Bay does not build it: push the image "
+            "to the registry, then run bay up again."
+        )
+    if asked:
+        return (
+            f"{head} bay up asked for the first image of {name}, and no image came out. A "
+            "local build skips it when the git host refuses the deploy key: the deploy output "
+            "shows the key. Add it as a read-only deploy key of the repo (or fix what the "
+            "output names), then run bay up again: it builds the first image again."
+        )
+    return (
+        f"{head} Run bay up again: when its plan reads the box receipt, it builds the first "
+        "image of the container before it creates it."
+    )
 
 
 # ── Code and config: track, freeze, code targets ──────────────────────────

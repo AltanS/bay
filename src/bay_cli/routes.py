@@ -459,11 +459,23 @@ def plan_routes(
 #: The tag of the backup role in deploy.yml.
 BACKUP_TAG = "backup"
 
+#: The tag of the first image build in the git_deploy role
+#: (roles/git_deploy/tasks/first_image.yml, 2.27.0). It is also tagged
+#: ``never``, so only a run that names it builds.
+FIRST_IMAGE_TAG = "first_image"
+
+
+def is_first_image(step: Mapping[str, Any]) -> bool:
+    """A plan step ``image``/``create``: ``bay up`` builds the first image of a container."""
+    return step.get("kind") == "image" and step.get("action") == "create"
+
 
 def deploy_tags(steps: Sequence[Mapping[str, Any]], base: str) -> str:
     """The tags ``bay up`` runs: ``base``, plus headscale and traefik on a route
     or tailnet_host step (both change Headscale's DNS records), plus backup on a
-    backup step (the backup role installs the volume backup scripts and timers).
+    backup step (the backup role installs the volume backup scripts and timers),
+    plus first_image on an ``image``/``create`` step (2.27.0: the git_deploy role
+    builds the first image before the container pass).
 
     Since 2.23.2 ``base`` (:data:`bay_cli.apply.UP_DEPLOY_TAGS`) holds
     ``backup`` already, so the backup role runs on every ``bay up``."""
@@ -472,6 +484,8 @@ def deploy_tags(steps: Sequence[Mapping[str, Any]], base: str) -> str:
         tags += [t for t in ROUTE_TAGS if t not in tags]
     if any(s.get("kind") == "backup" for s in steps) and BACKUP_TAG not in tags:
         tags.append(BACKUP_TAG)
+    if any(is_first_image(s) for s in steps) and FIRST_IMAGE_TAG not in tags:
+        tags.append(FIRST_IMAGE_TAG)
     return ",".join(tags)
 
 

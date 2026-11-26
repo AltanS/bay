@@ -157,6 +157,9 @@ class FakeBox:
         self.limits: list[dict[str, Any] | None] = []
         #: Per receipt read: the ``hosts`` it asked (None: every host).
         self.reads: list[list[str] | None] = []
+        #: Per deploy: the ``tags`` and the ``first_images`` it got (None: not passed).
+        self.tags: list[str | None] = []
+        self.first_images: list[dict[str, Any] | None] = []
 
     def deploy(
         self,
@@ -165,11 +168,19 @@ class FakeBox:
         *,
         config_files_root: Path | None = None,
         limit: dict[str, Any] | None = None,
+        tags: str | None = None,
+        first_images: dict[str, Any] | None = None,
+        code_targets: Any = None,
     ) -> None:
-        """``limit`` (a scoped bay up): only the boxes on those hosts get a new receipt."""
+        """``limit`` (a scoped bay up): only the boxes on those hosts get a new receipt.
+
+        ``tags`` and ``first_images`` (2.27.0) are recorded per deploy.
+        """
         from bay_cli import gitrepo
 
         self.deploys.append(box_env)
+        self.tags.append(tags)
+        self.first_images.append(None if first_images is None else dict(first_images))
         self.limits.append(None if limit is None else dict(limit))
         skipped = (
             set()
@@ -558,8 +569,8 @@ def test_rollback_lists_code_it_kept(
     old_prev = {"containers": [{"name": "webapp", "image": "bay-testfleet-webapp:latest"}]}
 
     def deploy(cx: Context, box_env: str, *, config_files_root: Path | None = None,
-               code_targets: Any = None) -> None:
-        box.deploy(cx, box_env, config_files_root=config_files_root)
+               code_targets: Any = None, **kw: Any) -> None:
+        box.deploy(cx, box_env, config_files_root=config_files_root, **kw)
         rows = [
             {**dict(t), "name": n, "image": "bay-testfleet-webapp:latest"}
             for n, t in (code_targets or {}).items()
@@ -3918,9 +3929,10 @@ def _code_deploys(monkeypatch: pytest.MonkeyPatch, box: FakeBox) -> list[Any]:
         *,
         config_files_root: Path | None = None,
         code_targets: Any = None,
+        **kw: Any,
     ) -> None:
         seen.append(code_targets)
-        box.deploy(cx, box_env, config_files_root=config_files_root)
+        box.deploy(cx, box_env, config_files_root=config_files_root, **kw)
 
     monkeypatch.setattr(applymod, "default_deploy", deploy)
     return seen
@@ -5445,12 +5457,13 @@ def _failing_deploy(
         *,
         config_files_root: Path | None = None,
         code_targets: Any = None,
+        **kw: Any,
     ) -> None:
         if seen is not None:
             seen.append(code_targets)
         box.fail = True
         try:
-            box.deploy(cx, box_env, config_files_root=config_files_root)
+            box.deploy(cx, box_env, config_files_root=config_files_root, **kw)
         finally:
             box.fail = False
             for c in box.receipts[box_env]["containers"]:
@@ -5478,12 +5491,13 @@ def test_first_image_failure_exit_40(
     assert result.exit_code == 40, result.output
     doc = json.loads(result.stdout)
     assert doc["result"] == "failed" and doc["first_image"] == ["webapp"]
+    # Since 2.27.0 bay up asked the box to build it (the fallback note says so).
     message = (
-        f"first deploy of webapp: the box has no image for {commit[:12]} yet. Push to main "
-        "so the webhook builds it, wait for the build, then run bay up again. "
-        "If the box builds this app itself and has no clone of its repo yet, run "
-        "bay deploy production once with no --tags: it clones the repo, builds the first "
-        "image and deploys."
+        f"first deploy of webapp: the box has no image for {commit[:12]} yet. bay up asked "
+        "for the first image of webapp, and no image came out. A local build skips it when "
+        "the git host refuses the deploy key: the deploy output shows the key. Add it as a "
+        "read-only deploy key of the repo (or fix what the output names), then run bay up "
+        "again: it builds the first image again."
     )
     assert message in doc["notes"]
     # The receipt names no image for a build container here: the box's build tag.
@@ -5496,7 +5510,7 @@ def test_first_image_failure_exit_40(
     # The text form says it too.
     said = cli(world, "up")
     assert said.exit_code == 40
-    assert "Push to" in said.output and "run bay up again" in said.output
+    assert "deploy key" in said.output and "run bay up again" in said.output
 
     # Another failed action as well: exit 1.
     monkeypatch.setattr(
