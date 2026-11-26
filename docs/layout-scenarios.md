@@ -69,8 +69,8 @@ on the same box environment as the plan. What gets pinned depends on where you r
 
 `bay plan production` with no project, run in the fleet directory, previews the whole env
 (see [plan.md](plan.md#the-whole-environment)). A fleet inside a bigger repo is not pushed
-(scenario 6). The first image of an app that builds from source is not made by `bay up`
-(see [plan.md](plan.md#the-first-image)).
+(scenario 6). Since 2.27.0 `bay up` also builds the first image of an app that builds from
+source (see [plan.md](plan.md#the-first-image)).
 
 ## Words used in the scenarios
 
@@ -381,46 +381,36 @@ bay init --fleet acme                     # once: drafts bay.toml, writes projec
 git add bay.toml && git commit -m "chore: add bay.toml"
 git push                                  # 1. push first: bay up refuses a commit the remote lacks
 bay plan production                       # WANTED (this commit) vs PINNED vs RUNNING
-bay up production                         # 2. pins this commit, deploys the boxes it needs, registers shop with the webhook
-git commit -am "feat: first build"        # 3. a push that changes code, made AFTER bay up
-git push                                  #    the webhook builds the first image
-bay plan production                       # 4. then see plan.md "The first image" for the last steps
+bay up production                         # 2. pins this commit, builds the first image, deploys, registers shop with the webhook
 ```
 
-Expect step 2 to fail. The first `bay up` of an app that builds from source fails on purpose:
-`bay up` builds no image, and `shop` has none yet, so the box cannot create the container
-([plan.md, The first image](plan.md#the-first-image)). Bay knows this case. `bay up` exits 40, not 1.
-It prints `deploy failed: ... bay show says HALF until a deploy succeeds.` and a note that names the
-way out: `first deploy of shop: the box has no image for <commit12> yet. Push to <branch> so the
-webhook builds it, wait for the build, then run bay up again. If the box builds this app itself and
-has no clone of its repo yet, run bay deploy production once with no --tags: it clones the repo,
-builds the first image and deploys.` The JSON has `"result": "failed"`, an
-`error` text, the same line in `notes`, and `first_image`, the list of the containers with no image.
-Any other failed deploy still exits 1. The lock records `result: failed`, and Bay still commits that
-record and pushes the fleet.
-`bay show` says `HALF` (the last `bay up` failed; all status words are in the
-[bay show table](plan.md#bay-show)). The pin, the webhook script, the receiver entry for `shop` and
-its build trigger are in place, which is what step 2 is for. To be sure that this is the expected failure and not another one, read the Ansible
-log (`--log`) or the receipt on the box: the failed action is the container that has no image. The
-way out is steps 3 and 4: push code, wait for the build, run `bay up` again.
+Since 2.27.0 step 2 builds the first image. The plan shows it as one more step, kind `image`,
+action `create`: `first image of shop: bay up builds <commit12> on the box before it creates the
+container; this takes as long as a build` ([plan.md, The first image](plan.md#the-first-image)).
+`shop` is a `local` build (the default), so the box builds it: it makes the SSH deploy key when the
+repo has no token, clones the repo, resets it to the pinned commit and builds. A `remote` build runs
+on the build server, and the box pulls the image. Then the box creates the container. The lock says
+`result: ok` and `bay show` says `ok`. You run no second `bay up`.
+
+With an SSH repo URL, the first clone needs the deploy key on GitHub, and the box makes that key in
+this very run. So the first `bay up` of `shop` stops at the clone: the deploy output prints
+`FIRST IMAGE OF shop NOT BUILT` and the public key
+(`/opt/<stack>/builds/shop/.deploy_key.pub` on the box). Bay does not register that key: add it to
+the GitHub repo yourself, under Settings > Deploy keys (read-only). The deploy goes on, the box
+cannot create `shop`, and `bay up` exits 40, not 1. It prints `deploy failed: ... bay show says HALF
+until a deploy succeeds.` and a note that starts with `first deploy of shop: the box has no image for
+<commit12> yet.` The JSON has `"result": "failed"`, an `error` text, the note in `notes`, and
+`first_image`, the list of the containers with no image. Add the key, then run `bay up production`
+again: its plan reads the receipt, sees that `shop` does not run, and builds the first image again.
+A repo with a token, or a key that is already on GitHub, needs no second run.
 
 The push of step 1 builds nothing, because the webhook receiver does not know `shop` until
-`bay up` registers it. The first image comes from a push made after `bay up` (step 3), or from a
-`bay deploy production` with no `--tags`, which clones and builds. The push of step 3 builds only
-when the box can read the repo. `shop` is a `local` build (the default) with an SSH repo URL, and
-only the full deploy makes its deploy key, so run it once before step 3 (below). The build script
-clones a missing checkout itself (2.17.1), with the key or token the box already has. Followed in this order, `bay show` says `HALF` until the
-build has finished and a `bay up` has run again ([plan.md](plan.md#the-first-image)). The push
-reaches the box through the webhook receiver: you register the GitHub hook by hand, in the repo
-settings, with the payload URL `https://<webhook domain>/webhook/<container name>` (`shop` here). The
-webhook domain is `[webhook] domain` of `bay.fleet.toml`, or `webhook_domain` of the box that runs
-the container. Bay has no verb that creates the hook; `bay validate --check-webhook-health` probes it.
-Before the first push, run `bay --fleet <path> deploy production` (no `--tags`) once for the box env:
-it clones the repo and builds the first image, and on the box it makes the SSH deploy key
-`/opt/<stack>/builds/shop/.deploy_key.pub` (only when the repo has no token). Bay does not register
-that key: add it to the GitHub repo yourself, under Settings > Deploy keys (read-only). With an SSH
-repo URL, the first such deploy stops at the clone until the key is on GitHub. Add it, then run the
-deploy again.
+`bay up` registers it (it answers 404). The push is not lost: the first `bay up` builds the pinned
+commit itself. Later pushes reach the box through the webhook receiver: you register the GitHub hook
+by hand, in the repo settings, with the payload URL `https://<webhook domain>/webhook/<container
+name>` (`shop` here). The webhook domain is `[webhook] domain` of `bay.fleet.toml`, or
+`webhook_domain` of the box that runs the container. Bay has no verb that creates the hook;
+`bay validate --check-webhook-health` probes it.
 
 Where Bay reads the app code, in this order:
 
@@ -589,14 +579,14 @@ steps 3 and 4 runs on the fleet. Each one names it, so it works from any folder:
    table, and the fleet directory finds `develop` ([plan.md](plan.md#bay-plan), step 1).
 7. `bay plan staging`, then `bay up staging`. This pins the commit, puts the webhook script on
    `eu-2`, builds the receiver image there, registers `shop-staging` with the receiver and enables
-   its build trigger. Expect it to fail, as step 2 of scenario 2 does: `shop-staging` has no image yet.
-8. Build the first image. On this new box a push alone builds nothing yet: `shop-staging` is a
-   `local` build, and its first clone comes only from a `bay deploy <env>` with no `--tags`. Run
-   `bay --fleet $F deploy staging` (no `--tags`)
-   once: it makes the SSH deploy key `/opt/<stack>/builds/shop-staging/.deploy_key.pub`
-   on `eu-2` (when the repo has no token), and clones and builds the first image (see
-   [plan.md](plan.md#the-first-image)). Bay does not register the key: add it to the GitHub repo
-   yourself, under Settings > Deploy keys (read-only). Then run `bay up staging` again. From then on, a push to
+   its build trigger. Since 2.27.0 it also builds the first image of `shop-staging` on `eu-2`
+   before it creates the container (see [plan.md](plan.md#the-first-image)).
+8. The deploy key. `shop-staging` is a `local` build. When its repo has no token, the box makes
+   the SSH deploy key `/opt/<stack>/builds/shop-staging/.deploy_key.pub` on `eu-2` in step 7, and
+   the clone fails until the key is on GitHub: `bay up staging` exits 40 and the deploy output
+   prints the key. Bay does not register the key: add it to the GitHub repo yourself, under
+   Settings > Deploy keys (read-only). Then run `bay up staging` again: it builds the first image
+   and creates the container. From then on, a push to
    `develop` builds: it reaches `eu-2` through the webhook receiver of that box. `eu-2` uses
    `[webhook] domain`, or its own `webhook_domain` (scenario 5 sets one on `infra`). Register the
    GitHub hook for `shop-staging` at `https://<that domain>/webhook/shop-staging`. Staging owns its

@@ -391,7 +391,7 @@ The verb exits with the verdict's code:
 | `approve` | 10 | A step is destructive or shared. Run `bay approve` first. |
 | `blocked` | 20 | Something must be fixed first. `blockers` says what. |
 | `stale` | 30 | With `--plan-id`: PINNED or RUNNING moved since the plan was made. |
-| first image | 40 | Not a verdict. `bay up` exits 40 after a failed deploy when every failed action belongs to a build container that has no image yet. The JSON result lists those containers in `first_image`. See [The first image](#the-first-image). Any other failed deploy exits 1. |
+| first image | 40 | Not a verdict. Since 2.27.0 `bay up` builds the first image itself, so this is the fallback for what that build cannot cover: a `registry` build, a `local` build whose deploy key the git host does not know yet, a build that made no image, and a box whose receipt the plan could not read. `bay up` exits 40 after a failed deploy when every failed action belongs to a build container that has no image yet. The JSON result lists those containers in `first_image`, and a note says the way out. See [The first image](#the-first-image). Any other failed deploy exits 1. |
 | fleet not in step | 41 | Not a verdict. `bay up` and `bay rollback` exit 41 when the plan is blocked because the fleet and its remote diverged (`reason: diverged`), the remote cannot be read (`remote_unreachable`), the branch tracks no remote branch (`no_upstream`), a git command failed (`git_failed`) or the fleet has uncommitted files (`dirty`, see [Several machines, one fleet](#several-machines-one-fleet)). `bay plan` exits 20 for the same plan. `bay deploy`, `bay provision` and `bay fleet status` use 41 too. See [Several machines, one fleet](#several-machines-one-fleet). |
 | claim refused | 42 | Not a verdict. The push before the deploy was refused, or it did not reach the tracked branch. Nothing was deployed. `next` says what to run: `bay up` again (it pulls first), or `bay fleet push` first when the fleet also had local commits. |
 | fleet busy, env busy | 43 | Not a verdict. Another `bay` run on this machine holds the fleet checkout (`fleet_busy`), or another run claimed the box env less than 30 minutes ago and has not reported (`env_busy`). The message names the holder. `bay plan` exits 20 for an `env_busy` plan. |
@@ -487,6 +487,7 @@ Risk is set by the data that a step touches.
 | `egress_fleet = "web"` added to an egress service, also on a new container (a second `container` step next to `changed: egress` or `new container`; the reason names the container and says that it may open tcp 80 and 443 on the public address of every fleet box). The box firewall changes; the container is not recreated. See [bay-toml.md](bay-toml.md#egress_fleet-the-fleets-own-websites) | shared |
 | `egress_fleet` removed (the same second step; the reason says that `bay up` closes the ports) | safe |
 | Scheduled job added, changed or removed (`kind: job`) | safe |
+| First image of a build container that has no image yet (`kind: image`, action `create`, since 2.27.0). `bay up` builds it before it creates the container, see [The first image](#the-first-image) | safe |
 | `owner` set on a new volume (`kind: volume`, action `update`, since 2.26.0). No container is recreated: the owner is not part of the container. `bay up` creates the volume with the owner | safe |
 | `owner` added or changed on a volume that a container already mounts (`kind: volume`, action `update`, since 2.26.0). No container is recreated. `bay up` changes the owner of every file in the volume when its top directory has another owner. The contents stay, and `bay rollback` does not change the owner back. Needs `bay approve` | destructive |
 | `owner` removed from a volume mount (`kind: volume`, action `update`, since 2.26.0). No container is recreated. Bay leaves the files as they are | safe |
@@ -911,7 +912,10 @@ behind its remote, Bay fast-forwards it and prints one line on stderr:
 
    So a push of a new build app reaches its trigger after one `bay up`. The
    tag does not clone an app repo, build an app image or make a deploy key, and
-   it pulls nothing through Ansible (see [The first image](#the-first-image)).
+   it pulls nothing through Ansible. The one exception is the first image:
+   when the plan has an `image` step with the action `create`, Bay adds the
+   tag `first_image` and builds that image before the containers (see
+   [The first image](#the-first-image)).
    The rig roles that carry the same tag run too: Traefik, the access gateway,
    Watchtower, and Zot and the identity sidecar where they are on. The rest of
    the rig (for example the cron jobs, the container monitor and the
@@ -975,54 +979,87 @@ error, carries these fields:
 
 #### The first image
 
-`bay up` builds no image. What it needs on the box depends on the app:
+What the box needs for the first deploy of an app depends on the app:
 
 - **An app with `image`** (no build): the box reconciler pulls the image when it creates or
   recreates the container and the image is not there.
-- **An app that builds from source**: the first image comes from a build that `bay up` does
-  not run. `bay up` registers the container with the webhook receiver and enables its build
-  trigger, so a push to the deploy branch starts a build. The build needs the repo checkout on
-  the box. A `remote` build clones it in the build script, on the build server. Since 2.17.1 a
-  `local` build clones it in the build script too, but its SSH deploy key comes only from a
-  `bay deploy <env>` with no `--tags`, which also clones and builds the first image (`git_deploy`). A `local` app whose repo another
-  app on the box already uses shares that checkout. There is no `bay build` verb that builds: `bay build` has `status` and
-  `reset` only. Until an image exists, the container cannot be created: the receipt has a
-  failed action and `bay show` says `HALF` (the last `bay up` failed, see the status table of
-  [bay show](#bay-show)). `bay plan` does not check for it.
-  **So the first `bay up` of such an app fails, and that is the documented path.** `bay up`
-  then exits 40, not 1. It prints `deploy failed: ... the fleet pins <commit12>; bay show says HALF
-  until a deploy succeeds.` and the way out: `first deploy of <project>: the box has no image for
-  <commit12> yet. Push to <branch> so the webhook builds it, wait for the build, then run bay up
-  again. If the box builds this app itself and has no clone of its repo yet, run bay deploy <env>
-  once with no --tags: it clones the repo, builds the first image and deploys.` The JSON result has `"result": "failed"`, an `error` text, the same line in `notes`, and
-  `first_image`: the list of those containers. The lock keeps the new pin with `result: failed`,
-  and Bay commits and pushes that record.
-  Exit 40 needs all of these. A build container of a project that this `bay up` pins has no
-  commit in RUNNING (it is not in the receipt, or its `commit` is null). The box has no
-  `<image>:<commit12>` for the pin and no `<image>:latest` (Bay asks with `docker image ls`).
-  For a project that lives in the fleet, the pin is a fleet commit and no image carries it, so
-  Bay checks `<image>:latest` only, and the note names the container instead of a commit:
-  `first deploy of <project>: the box has no image for <container> yet.` Every
-  failed action of the deploy belongs to such a container: a container that the receipt marks
-  `failed`, or a `missing` code move. Any other failure exits 1, and so does a box that wrote no
-  receipt for this deploy or a receipt from before 2.2.0, which marks no failed action.
-  The recovery is the list below: build the image with a push, then run `bay up` again.
-- **Later deploys**: in `branch` mode a missing image at the code-target step is skipped and
-  `:latest` stays. In `pin` mode it stops the deploy before any container changes (see
-  [Code and config](#code-and-config)).
+- **An app that builds from source** (`local` or `remote`): since 2.27.0 `bay up` builds the
+  first image itself. The plan has one more step per build container with no image yet:
+  kind `image`, action `create`, risk `safe`. Its reason says what `bay up` builds and where:
+  `first image of webapp: bay up builds 1a2b3c4d5e6f on the build server before it creates the
+  container; this takes as long as a build`. For a project in the fleet (no app commit to pin)
+  it names the head of the deploy branch. The step does not change the verdict.
 
-**After the first build, in order.**
+**When a container has no image yet.** Either the plan creates the container (a `container`
+step with the action `create`), or the receipt that the plan read lists no running container
+of that name: it is not there, or it is marked `failed` and names no commit. The second case is
+the retry after a failed first `bay up`: the compiled file already holds the container, so the
+plan has no create step. When the plan read no receipt (`bay plan --no-remote`), or a box could
+not be read, only the first case counts. A container that shares the build of another container of
+its project (`build.shared_from`) gets no step of its own. A `registry` build gets none either:
+Bay does not build it.
 
-1. Push to the deploy branch. The webhook starts the build on the box.
-2. The build script creates the container and stamps the receipt: it sets the container's
-   `commit` and `image`, and nothing else. The failed action in the receipt and the
-   lock's `result: failed` stay as they were, so `bay show` still says `HALF`. The
-   webhook never reports a deploy.
-3. Run `bay plan <env>`. It shows what Bay still sees. The container that the build made
-   has no config hash from a deploy, so the plan can list one step for it.
-4. Run `bay up <env>`. It applies that step, or none, and writes a new receipt. When it
-   succeeds the lock says `result: ok` and `bay show` says `ok`. If nothing else changed,
-   the second `bay up` recreates nothing. You do not run `bay up` again after that.
+**What `bay up` does.** It adds the tag `first_image` to the deploy and passes
+`bay_first_image`: `{<container>: <commit>}`, the pinned commit of an app-repo project, or
+null for a project in the fleet and for the `bay adopt` commit (the build takes the head of the
+deploy branch). The `git_deploy` role builds before the containers, so the image is on the box
+before the code step and the container pass:
+
+- **`remote`**: the build server clones or fetches the repo, then resets the checkout to the
+  pinned commit (it fetches that commit by itself when the branch does not hold it). It builds
+  and pushes `<repo>:<commit12>` and `<repo>:latest` with the label `com.bay.commit`, as a
+  full `bay deploy` does. An image that the registry already has is not built again. Then the
+  box pulls it. The build server needs no place in the scope: the build is delegated to it. It
+  must have been set up for remote builds by one full `bay deploy <env>`. If it was not, the run
+  stops before the containers and says so.
+- **`local`**: the box makes the deploy key when it has none, clones or pulls the repo, resets
+  it to the pinned commit and builds the image.
+
+These tasks touch only the containers named in `bay_first_image`. No other app is cloned,
+fetched, built, pushed or pulled. They run only with the tag `first_image` and a non-empty
+`bay_first_image`, so a full `bay deploy <env>` (which builds a missing image on its own path)
+does not run them, and `bay plan --remote` builds nothing. A build that fails stops the deploy
+before the containers. The message names the container and the commit. The lock then says
+`result: failed`, and the next `bay up` plans the first image again from the receipt.
+
+After a first `bay up` that works, the container exists with the config hash of the
+reconciler, the receipt names its commit, the lock says `result: ok` and `bay show` says `ok`.
+You do not run a second `bay up`, push or write a trigger file.
+
+A push to the deploy branch before the first `bay up` gets a 404 from the webhook receiver: the
+receiver learns a container from its first deploy. The push is not lost, because the first
+`bay up` builds the pinned commit itself.
+
+**The fallback: exit 40.** `bay up` exits 40, not 1, when the deploy failed and every failed
+action belongs to a build container of a project that this `bay up` pins with no image yet.
+These are the cases the build cannot cover:
+
+- a `registry` build: push the image to the registry, then run `bay up` again;
+- a `local` build whose clone the git host refuses. The role skips that build, prints
+  `FIRST IMAGE OF <container> NOT BUILT` and the public deploy key, and the deploy goes on.
+  Add the key as a read-only deploy key of the repo (or give the token read access), then run
+  `bay up` again;
+- a build that made no image;
+- a box whose receipt the plan could not read: run `bay up` again when the box answers.
+
+`bay up` prints `deploy failed: ... the fleet pins <commit12>; bay show says HALF until a deploy
+succeeds.` and one note per container that starts with `first deploy of <project>: the box has
+no image for <commit12> yet.` For a project in the fleet the note names the container instead of
+a commit. The JSON result has `"result": "failed"`, an `error` text, the notes, and
+`first_image`: the list of those containers. The lock keeps the new pin with `result: failed`,
+and Bay commits and pushes that record.
+
+Exit 40 needs all of these. A build container of a project that this `bay up` pins has no commit
+in RUNNING (it is not in the receipt, or its `commit` is null). The box has no
+`<image>:<commit12>` for the pin and no `<image>:latest` (Bay asks with `docker image ls`). For a
+project in the fleet, Bay checks `<image>:latest` only. Every failed action of the deploy belongs
+to such a container: a container that the receipt marks `failed`, or a `missing` code move. Any
+other failure exits 1, and so does a box that wrote no receipt for this deploy (a build that
+failed stops before the containers, so it exits 1) or a receipt from before 2.2.0.
+
+**Later deploys**: in `branch` mode a missing image at the code-target step is skipped and
+`:latest` stays. In `pin` mode it stops the deploy before any container changes (see
+[Code and config](#code-and-config)).
 
 When the deploy fails, the lock keeps the new pin and records
 `result: failed`. Bay still commits and pushes that record. `bay show` then
@@ -2027,7 +2064,12 @@ know.
   build that stamps a new commit into the receipt is not drift either.
 - `kind` is one of `container`, `volume`, `database`, `database_user`,
   `secret`, `resource`, `tailnet`, `route`, `tailnet_host`, `fleet`, `job`, `backup`, `image`
-  (the code moves, see "Code and config"). A `job` step names the job
+  (the code moves, see "Code and config"). An `image` step with the action
+  `update` moves the code of a running container. Since 2.27.0 an `image` step
+  with the action `create` is the first image of a build container: `bay up`
+  builds it before it creates the container (see [The first image](#the-first-image)).
+  Its `source` is `compile` when the plan creates the container, and `box`
+  when the receipt lists no running container of that name. A `job` step names the job
   container in `container`. A `backup` step names the container that mounts
   the volume (its reason names the volume), or the accessory of a database
   backup. Since 2.26.0 a `volume` step with the action `update` can also be the

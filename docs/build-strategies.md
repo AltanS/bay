@@ -88,6 +88,11 @@ GitHub Push
 - Previous `:latest` preserved as `:previous`
 - Webhook triggers build + deploy in one step
 - Multiple services sharing the same repo+branch+dockerfile are deduplicated: primary builds, aliases retag
+- The first image: since 2.27.0 the first `bay up` of a new app builds it on the box, before it
+  creates the container. It makes the deploy key when the repo has no token, clones the repo,
+  resets it to the pinned commit and builds. Until the deploy key is on the git host, the clone
+  fails, the deploy output prints the key, and `bay up` exits 40: add the key, then run `bay up`
+  again. See [plan.md](plan.md#the-first-image)
 
 ---
 
@@ -192,6 +197,12 @@ GitHub Push
   still sends the signal for a commit that is already in the registry: it
   cannot know what each box runs, and a box that was down needs it.
 - `bay deploy` also pulls remote-built images (manual recovery path)
+- The first image: since 2.27.0 the first `bay up` of a new app builds it on the build server at
+  the pinned commit (`<repo>:<commit12>` and `:latest`, label `com.bay.commit`), and the box
+  pulls it before it creates the container. It builds nothing for any other app. The build server
+  must have been set up by one full `bay deploy <env>`. A push before that first `bay up` gets a
+  404 from the receiver and builds nothing, and that is no loss. See
+  [plan.md](plan.md#the-first-image)
 
 ### Registry layer cache (opt-in)
 
@@ -605,7 +616,7 @@ Watchtower is complementary to webhook auto-deploy. For `registry` strategy serv
 
 There are two distinct paths for creating/restarting containers:
 
-1. **`bay deploy`** and **`bay up`** (the `bay_reconcile` reconciler) -- Creates containers with the Docker API `run` call, the same as `docker run`. Supports zero-downtime canary deploys for services with `zero_downtime: true`. This is the authoritative path. A one-project `bay up` deploys only the boxes it needs; `bay up <env>` in the fleet deploys the whole box environment.
+1. **`bay deploy`** and **`bay up`** (the `bay_reconcile` reconciler) -- Creates containers with the Docker API `run` call, the same as `docker run`. Supports zero-downtime canary deploys for services with `zero_downtime: true`. This is the authoritative path. A one-project `bay up` deploys only the boxes it needs; `bay up <env>` in the fleet deploys the whole box environment. Since 2.27.0 a `bay up` whose plan has a first image (a step `image` with the action `create`) builds that image before this pass, so the pass can create the container (see [plan.md](plan.md#the-first-image)).
 
 2. **Webhook auto-build** (`rebuild.sh`) -- Uses `docker stop/rm/run` directly with all labels, volumes, and env baked in at deploy time. The build path and the pull path (`docker pull`, then `docker stop/rm/run`) work the same way. Brief downtime during restart. No canary logic.
 

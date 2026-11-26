@@ -167,7 +167,7 @@ Each container entry:
 | `commit_tags` | array or null | For a container with no commit label: the sorted own-repo commit tags of the running image (the same rule as `commit`), possibly empty. Null for a labelled container, a removed one, or when the tags could not be read. `bay plan` and `bay show` read it when `commit` is null: when the pinned commit's first 12 characters are in the list, the box runs the pin, with source `tag`. So after a config-only push gives the running image a second tag, `bay show` still prints `code <pin12> (tag)`. Absent in receipts written before 2.5.0. |
 | `config_hash` | string or null | The config hash the deploy compared. Null for a removed container. |
 | `action` | string or null | `noop`, `create`, `recreate`, `start` or `remove`. A zero-downtime swap is `recreate`. Null when the pass crashed before it reported. `start` is reserved; version 1 does not write it. |
-| `failed` | boolean | True when the container pass reported this container's action as failed. `bay up` reads it to tell the first image apart (exit 40, see [plan.md](plan.md#the-first-image)). Absent in receipts written before 2.2.0. |
+| `failed` | boolean | True when the container pass reported this container's action as failed. `bay plan` reads it to plan the first image again after a failed first `bay up`, and `bay up` reads it to tell the first image apart (exit 40). See [plan.md](plan.md#the-first-image). Absent in receipts written before 2.2.0. |
 | `healthy` | boolean or null | Read once, right after the pass. `true`: running and healthy. `false`: not running, or unhealthy. `null`: running with no health check, still starting, removed, or unknown. |
 
 A webhook build changes the code without a deploy. After it recreates a
