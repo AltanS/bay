@@ -258,6 +258,8 @@ def test_new_bindings_filter_proves_absence_per_accessory():
     [
         [],
         [_read("postgres", rc=1)],
+        # A failed run that still printed a valid document proves nothing.
+        [{**_read("postgres", roles=()), "rc": 2}],
         [{**_read("postgres"), "skipped": True}],
         [{"item": "postgres", "rc": 0, "stdout": ""}],
         [{"item": "postgres", "rc": 0, "stdout": "not json"}],
