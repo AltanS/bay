@@ -198,7 +198,8 @@ GitHub Push
   cannot know what each box runs, and a box that was down needs it.
 - `bay deploy` also pulls remote-built images (manual recovery path)
 - The first image: since 2.27.0 the first `bay up` of a new app builds it on the build server at
-  the pinned commit (`<repo>:<commit12>` and `:latest`, label `com.bay.commit`), and the box
+  the pinned commit (`<repo>:<commit12>`, label `com.bay.commit`, and `:latest` only when the
+  registry has none yet), and the box
   pulls it before it creates the container. It builds nothing for any other app. The build server
   must have been set up by one full `bay deploy <env>`. A push before that first `bay up` gets a
   404 from the receiver and builds nothing, and that is no loss. See

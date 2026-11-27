@@ -1007,13 +1007,22 @@ before the code step and the container pass:
 
 - **`remote`**: the build server clones or fetches the repo, then resets the checkout to the
   pinned commit (it fetches that commit by itself when the branch does not hold it). It builds
-  and pushes `<repo>:<commit12>` and `<repo>:latest` with the label `com.bay.commit`, as a
+  and pushes `<repo>:<commit12>` and `<repo>:latest` (only when the registry has no `:latest`
+  yet, see below) with the label `com.bay.commit`, as a
   full `bay deploy` does. An image that the registry already has is not built again. Then the
   box pulls it. The build server needs no place in the scope: the build is delegated to it. It
   must have been set up for remote builds by one full `bay deploy <env>`. If it was not, the run
   stops before the containers and says so.
 - **`local`**: the box makes the deploy key when it has none, clones or pulls the repo, resets
   it to the pinned commit and builds the image.
+
+Bay never moves an existing moving tag (the `image` of the service, usually `:latest`). Before
+a remote build, the build server asks the registry for it. Bay builds the moving tag only when
+the registry has none. When one exists, Bay only adds the image of the pinned commit
+(`<repo>:<commit12>`), pulls only that, and does not move the tag. The code step then decides
+what `:latest` is. With no pinned commit (a project in the fleet), Bay then builds nothing. A
+`local` build follows the same rule with `<image>:latest` on the box. A registry that does not
+answer stops the run.
 
 These tasks touch only the containers named in `bay_first_image`. No other app is cloned,
 fetched, built, pushed or pulled. They run only with the tag `first_image` and a non-empty
