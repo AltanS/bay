@@ -8,6 +8,30 @@ needing manual action is called out under **Upgrade notes**. Entries for
 1.x and older describe the earlier model: a clone of Bay in `.bay/` and a
 `bin/bay` wrapper, which 2.0 removes.
 
+## [2.27.0] - 2026-11-27
+
+The first `bay up` of a new build app now works in one run, and a push of code no longer asks for a `bay up`.
+
+### Added
+- `bay up` builds the first image of a new build container before it creates the container. The plan shows it as a step of kind `image`, action `create`, risk `safe`. A `remote` build runs on the build server, a `local` build on the box. Bay builds the pinned commit. When the registry already has the moving tag, Bay only adds the image of the pinned commit and does not move the tag.
+- `bay service add-webhook <project>` creates or repairs the GitHub push hook, then pings it and reports the answer of the receiver. `--check` only reports. It needs `github_admin_token` in the vault, with write access to webhooks.
+- `bay show` has a new status word, `building`: a push is not on the box yet, and no `bay up` is needed.
+
+### Changed
+- A new role and database are made before the containers start, when their postgres already runs. A new app no longer starts into auth error 28P01.
+- `bay show` judges a pin that is older than WANTED by the settings. After a push that changed code only, it says `building`, then `ok`. `behind` now means that something waits for `bay up`. `bay show --json` has a new key `same_settings`.
+- `bay plan` adds a note when a push changed no settings: `bay up` is not needed.
+- A pull signal for the image that the container already runs leaves the container alone and logs it. A new image, or a stopped or restarting container, recreates as before.
+- `bay up` exits 40 only when it could not build the first image: a `registry` build, or a deploy key that the git host does not know.
+
+### Upgrade notes
+- Move every machine that deploys to 2.27.0.
+- The build server must have had one full `bay deploy <env>` before `bay up` can build a first image on it.
+- A first `bay up` of a build app now lasts as long as a build.
+- Run `bay service add-webhook <project>` once per build project that has no push hook. Check that `github_admin_token` can write webhooks: a classic token needs `admin:repo_hook`.
+- `bay rollback` is unchanged. Since pushes need no `bay up`, plain rollback returns to the state before the last settings change, and its code can be older than the last good push. To undo only a bad push, use `bay rollback --to <good commit>`.
+- The new pull rule reaches a box with the next `bay up` or `bay deploy` of that box, which writes the new build script.
+
 ## [2.26.0] - 2026-11-26
 
 Bay now sets the owner of a volume, and `bay init` registers a repo that already has a `bay.toml`.
