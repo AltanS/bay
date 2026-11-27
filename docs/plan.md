@@ -1037,7 +1037,9 @@ You do not run a second `bay up`, push or write a trigger file.
 
 A push to the deploy branch before the first `bay up` gets a 404 from the webhook receiver: the
 receiver learns a container from its first deploy. The push is not lost, because the first
-`bay up` builds the pinned commit itself.
+`bay up` builds the pinned commit itself. Later pushes need the GitHub push hook: the first `bay up`
+ends with a note that says to run `bay service add-webhook <project>` once (since 2.27.0, see
+[build-pipeline.md](build-pipeline.md#the-push-hook)).
 
 **The fallback: exit 40.** `bay up` exits 40, not 1, when the deploy failed and every failed
 action belongs to a build container of a project that this `bay up` pins with no image yet.

@@ -65,7 +65,9 @@ bay up        # pin this commit in the fleet and deploy it
 `bay plan` prints the steps, the risk of each, and a verdict. A one-project `bay up` deploys only the boxes it needs (`bay up <env>` in the fleet deploys the whole box environment). It refuses a plan that
 needs approval until you run `bay approve`. See **[plan.md](plan.md)**. For an app that builds from
 source, the first `bay up` also builds the first image, before it creates the container (since 2.27.0,
-see [plan.md](plan.md#the-first-image)).
+see [plan.md](plan.md#the-first-image)). Then run `bay service add-webhook <project>` once, so that a
+push builds: it creates the GitHub push hook (see
+[build-pipeline.md](build-pipeline.md#the-push-hook)).
 
 If you already have a fleet in the older YAML layout, `bay import --fleet <path> --out
 <new path>` writes the new files without changing the old ones. `bay compile` turns

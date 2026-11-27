@@ -12,6 +12,7 @@ formal exit-path/severity contract enforced by CI, see
   - [Config-only push](#config-only-push)
   - [No-input-change push](#no-input-change-push)
   - [Order of the guards on a push](#order-of-the-guards-on-a-push)
+- [The push hook](#the-push-hook)
 - [When the repo URL changes](#when-the-repo-url-changes)
 - [Circuit Breaker State (rebuild.sh)](#circuit-breaker-state-rebuildsh)
 - [Webhook Auto-Build Troubleshooting](#webhook-auto-build-troubleshooting)
@@ -452,6 +453,71 @@ In `rebuild.sh`, for a trigger that got through:
 10. Otherwise move `:latest`, recreate the container, run the health check and stamp the
     receipt. A failed health check rolls back on the box and exits 1.
 
+## The push hook
+
+A push reaches Bay through a GitHub hook on the app repo. Since 2.27.0
+`bay service add-webhook <project>` creates or repairs it. `bay init` and `bay up` never do. A hook
+is a write to an outside service with a shared secret. It is outside the plan. And before the first
+`bay up` the receiver does not know the service. So the first `bay up` that builds a first image
+only ends with a note: `push hook: run bay service add-webhook <project> once, so that a push to
+<branch> builds`.
+
+```bash
+bay service add-webhook shop                  # create or repair the hook, then ping it
+bay service add-webhook shop --env staging    # another deploy env (default: the primary env)
+bay service add-webhook shop --check          # read only; exit 1 when a hook is missing or broken
+bay service add-webhook shop --json           # one JSON document on stdout
+```
+
+**Which hooks.** One per build container of the project in the env: a compiled service with
+`build`, a github.com repo and the strategy `local` or `remote`. A `registry` build needs none,
+because an outside CI builds its image. A container that shares the build of another
+(`shared_from`) needs none. The extra services of one `bay.toml` need one hook for the whole group
+(see [Extra services of one repo](#extra-services-of-one-repo)). A repo on another git host is
+refused: register its hook by hand.
+
+**Which URL.** `https://<webhook domain>/webhook/<container>`. The domain depends on the strategy:
+
+- `local`: the receiver of the box that runs the container. Its domain is the `webhook_domain` of
+  a box in the same group, else `[webhook] domain` of `bay.fleet.toml`.
+- `remote`: the receiver of the build server (`build_server`). Only that receiver builds; then it
+  sends the pull signal to the boxes. Its domain is the `webhook_domain` of a box in a group of
+  the build server, else `[webhook] domain`.
+
+**What the hook holds.** It is active, sends the `push` event as `json`, checks TLS
+(`insecure_ssl` is `"0"`) and carries the secret that `[webhook] secret` names. The verb reads that
+secret from the vault of the box env whose receiver gets the push. Every write sends the full
+config. A PATCH with only the URL deletes the secret and sets the content type to form. The hook
+then still delivers, and the receiver answers 401.
+
+**What it does.** It lists the hooks of the repo. With no hook for that URL, it creates one. A hook
+with the right settings whose last delivery got 200 needs nothing. Any other hook for that URL
+(wrong settings, no delivery yet, or another answer) gets one PATCH with the full config. After a
+create or a repair, the verb sends a ping and reads the hook for up to 10 seconds:
+
+| Answer to the ping | Verification | What to do |
+| ------------------ | ------------ | ---------- |
+| 200 | `verified` | Nothing. |
+| 404 | `receiver does not know the service` | Run `bay up` first, then the verb again. The hook stays. |
+| 401 or 403 | `signature refused` | The box may run an older secret: run `bay up`. |
+| none in time | `not verified yet` | Nothing yet. The first push shows it. |
+
+It prints one row per hook: the container, the repo, the URL, the action (`created`, `repaired`,
+`ok`, and with `--check` also `missing` or `broken`), the verification, and a `next` line when
+you must act. Exit 0 when every hook is ok or was made, else 1. A second hook for one group, or a
+hook on an old domain for the same container, gets a warning. The verb removes no hook:
+`bay service prune-webhooks` removes the orphans.
+
+**The token.** `github_admin_token` in the vault, as for `prune-webhooks`. It needs write access to
+the webhooks of the repo: the scope `admin:repo_hook` for a classic token, the repository
+permission Webhooks: Read and write for a fine-grained one. The token goes only into the
+`Authorization` header of the calls to `api.github.com`, and the secret only into the body of the
+create or the repair. The verb prints neither. A missing token or secret stops it before any call.
+
+**By hand.** A fleet with no `github_admin_token` adds the hook in the repo settings, under
+Webhooks: the payload URL above, content type `application/json`, the secret, the push event only.
+GitHub shows the answer to its ping under Recent Deliveries.
+
 ## When the repo URL changes
 
 An app in the fleet names its repo in `[build] repo` of `projects/<name>/bay.toml`. A change
@@ -570,10 +636,11 @@ failed build. A failed fetch outside a repo change ends the same way.
      `repo_tokens` in `bay.fleet.toml` by URL prefix, so a new owner may need a new entry.
    - Remote strategy, SSH URL, no token. The SSH key of the build user on the build server must
      read the new repo.
-2. Create the push webhook on the new repo: payload URL
+2. The push hook of the new repo. Since 2.27.0 run `bay service add-webhook <project>` right
+   after step 3: it reads the repo from the pinned config, so it finds the new repo only after
+   `bay up` (see [The push hook](#the-push-hook)). By hand, before step 3: payload URL
    `https://<webhook domain>/webhook/<container>`, the `[webhook] secret`, content type
-   `application/json`, push events. Bay has no verb that creates it.
-   `bay validate --check-webhook-health` probes it after step 3.
+   `application/json`, push events.
 3. Change `[build] repo`, commit, run `bay up`.
 4. Push to the deploy branch of the new repo, or write a trigger file on the box that builds
    (the build server for a remote build):
@@ -662,6 +729,9 @@ matter to Bay. Only the system that builds the image reads it. `bay plan` adds n
 ## Webhook Auto-Build Troubleshooting
 
 **Build server webhook not receiving pushes:**
+- Run `bay service add-webhook <project> --check`. It reads the hooks of the repo and says, per
+  hook, what is wrong and what the receiver answered last. Run it without `--check` to repair the
+  hook and ping it (see [The push hook](#the-push-hook)).
 - Check `docker logs bay-webhook` on the build server (203.0.113.14)
 - Verify the GitHub hook URL is `https://<webhook domain>/webhook/<container name>`, for example
   `https://deploy.example.com/webhook/shop`. The receiver answers a POST only on

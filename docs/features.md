@@ -113,6 +113,7 @@ See [multi-region.md](multi-region.md) for the full setup guide.
 
 - **`bay` CLI** -- single entry point wrapping plan, up, deploy, provision, validate, gateway, vault, backup, test, and framework management
 - **`bay plan` / `bay approve` / `bay up`** -- the daily flow: `bay plan` compares WANTED with PINNED (and with RUNNING on the box, with `--remote`) and gives a verdict, and `bay up` pins, compiles, commits and deploys: only the boxes it needs for one project, the whole box environment for `bay up <env>` in the fleet (see [plan.md](plan.md))
+- **`bay service add-webhook`** -- creates or repairs the GitHub push hook of a project with the full config and the fleet's webhook secret, then pings it and reports the receiver's answer; `--check` only reads (since 2.27.0, see [build-pipeline.md](build-pipeline.md#the-push-hook))
 - **`bay status --json`** -- the deploy receipt of every box (see [deploy-receipt.md](deploy-receipt.md)); plain `bay status` shows the version, the fleet and the feature flags
 - **`bay validate`** -- pre-deploy config checks: YAML syntax, `services.yml` schema, inventory, vault keys (also runs automatically before every deploy)
 - **`bay doctor`** -- environment probes: the fleet it picked, the installed CLI, SSH reachability, vault password, DNS resolution, box receipts, app repos

@@ -406,11 +406,15 @@ A repo with a token, or a key that is already on GitHub, needs no second run.
 
 The push of step 1 builds nothing, because the webhook receiver does not know `shop` until
 `bay up` registers it (it answers 404). The push is not lost: the first `bay up` builds the pinned
-commit itself. Later pushes reach the box through the webhook receiver: you register the GitHub hook
-by hand, in the repo settings, with the payload URL `https://<webhook domain>/webhook/<container
-name>` (`shop` here). The webhook domain is `[webhook] domain` of `bay.fleet.toml`, or
-`webhook_domain` of the box that runs the container. Bay has no verb that creates the hook;
-`bay validate --check-webhook-health` probes it.
+commit itself. Later pushes reach the box through the webhook receiver, and that needs a GitHub
+push hook. The first `bay up` ends with the note `push hook: run bay service add-webhook shop
+once, so that a push to main builds`. Since 2.27.0 that verb creates the hook with the payload URL
+`https://<webhook domain>/webhook/<container name>` (`shop` here) and the fleet's webhook secret,
+sends a ping and says whether the receiver took it. The webhook domain is `[webhook] domain` of
+`bay.fleet.toml`, or `webhook_domain` of the box that runs the container. For a `remote` build it
+is the domain of the build server. The verb needs `github_admin_token` in the vault (see
+[build-pipeline.md](build-pipeline.md#the-push-hook)). A fleet with no token registers the hook by
+hand, in the repo settings, with the same payload URL.
 
 Where Bay reads the app code, in this order:
 
@@ -588,9 +592,10 @@ steps 3 and 4 runs on the fleet. Each one names it, so it works from any folder:
    Settings > Deploy keys (read-only). Then run `bay up staging` again: it builds the first image
    and creates the container. From then on, a push to
    `develop` builds: it reaches `eu-2` through the webhook receiver of that box. `eu-2` uses
-   `[webhook] domain`, or its own `webhook_domain` (scenario 5 sets one on `infra`). Register the
-   GitHub hook for `shop-staging` at `https://<that domain>/webhook/shop-staging`. Staging owns its
-   data: it starts with an empty database.
+   `[webhook] domain`, or its own `webhook_domain` (scenario 5 sets one on `infra`). Run
+   `bay service add-webhook shop --env staging` once: it creates the GitHub hook
+   `https://<that domain>/webhook/shop-staging` (register it by hand when the fleet has no
+   `github_admin_token`). Staging owns its data: it starts with an empty database.
 
 Scenario 11 shows the box and hosts files in more detail.
 
@@ -918,7 +923,8 @@ other files outside `watch`) reaches none of the other checks: it is not built, 
 logged as config-only.
 
 After a config-only push, nothing alerts you. The signal is `bay show shop`: it says `behind`
-(HEAD is ahead of the pin), and you run `bay up`. On the box, `journalctl -u bay-build@shop` has
+(the settings at HEAD differ from the pinned ones, and the box does not run HEAD), and you run
+`bay up`. On the box, `journalctl -u bay-build@shop` has
 the line `config-only push <commit12>: run bay up`.
 
 A config-only push needs `build.bay_build_hash` to match. `bay_build_hash` is the hash of
@@ -1009,8 +1015,11 @@ A push already holds, so the freeze adds nothing you can see. Plain
 is not on the box. The env is then half rolled back: old config, newer code, frozen. Nothing moves by
 itself, but the code does not say that this mix is safe, so do not leave it if it is not.
 `bay plan` compares the running commit with the HEAD you stand on, not with the pin, and prints no
-check of the image. `bay show` says `behind` while HEAD is ahead of the pin (the status words are
-in the [bay show table](plan.md#bay-show)). `bay rollback --to`
+check of the image. Since 2.27.0 `bay show` judges a pin that is older than HEAD by the settings.
+In this frozen env it says `behind` when the settings at HEAD are the same as the pinned ones, or
+differ and the box does not run HEAD. It says `ahead` when they differ and the box runs the code
+of HEAD. It never says `ok` or `building` here: only `bay up` deploys code in a frozen env (the
+status words are in the [bay show table](plan.md#bay-show)). `bay rollback --to`
 refuses when the image is missing:
 `<image>:<commit12> is not on the box ... Commit tags on the box: ...`. To go forward: push the fix,
 wait for its build, then `bay up` to that commit. In pin mode the image must be on the box, or
