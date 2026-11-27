@@ -1307,6 +1307,8 @@ def _apply_plan_steps(
             asked=firsts,
         )
         notes += first_notes
+    if failure is None and action == "up":
+        notes += push_hook_notes(plan, members, compiled, firsts)
     applied, stale_boxes = applied_from(entries, fleet_commit)
     notes += [
         f"box {b}: the receipt is not from this deploy, so `applied` leaves it out"
@@ -2277,6 +2279,42 @@ def first_image_builds(
         if name in created or name in absent:
             out[name] = out[main]
     return out
+
+
+def push_hook_notes(
+    plan: Mapping[str, Any],
+    members: list[tuple[planmod.ProjectRef, str]],
+    compiled: Mapping[str, Any],
+    firsts: Mapping[str, Any],
+) -> list[str]:
+    """One note per project whose first image this run built (2.27.0).
+
+    ``bay up`` makes no GitHub call: the hook is a write to an outside
+    service with a shared secret, outside the plan. The note names the verb
+    that creates it. ``firsts`` is :func:`first_image_builds`.
+    """
+    from bay_cli import routes
+
+    if not firsts:
+        return []
+    env = str(plan.get("env"))
+    by_name = {p.name: p for p, _ in members}
+    services = compiled.get("services") or {}
+    branches: dict[str, str] = {}
+    for step in plan.get("steps") or []:
+        name, container = str(step.get("project")), step.get("container")
+        if not routes.is_first_image(step) or name not in by_name or container not in firsts:
+            continue
+        build = (services.get(container) or {}).get("build") or {}
+        branches.setdefault(name, str(build.get("branch") or "main"))
+    notes = []
+    for name, branch in sorted(branches.items()):
+        flag = "" if env == by_name[name].primary_env else f" --env {env}"
+        notes.append(
+            f"push hook: run bay service add-webhook {name}{flag} once, so that a push to "
+            f"{branch} builds"
+        )
+    return notes
 
 
 def first_image(

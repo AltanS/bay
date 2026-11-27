@@ -321,3 +321,57 @@ def test_exit_40_note_for_registry_and_for_no_receipt(
         "Run bay up again: when its plan reads the box receipt, it builds the first image "
         "of the container before it creates it."
     )
+
+
+# ── the push hook note (2.27.0) ──────────────────────────────────────────────
+
+HOOK_NOTE = "push hook: run bay service add-webhook webapp once, so that a push to main builds"
+
+
+def test_up_notes_the_push_hook_after_a_first_image(
+    world: dict[str, Path], box: FakeBox
+) -> None:
+    """bay up makes no GitHub call; it names the verb once, after the first image."""
+    _build_app(world)
+    first = do_up(world)
+    assert first["result"] == "ok" and box.first_images[-1]
+    assert first["notes"].count(HOOK_NOTE) == 1
+    # The next run built no first image: no note.
+    again = do_up(world)
+    assert not [n for n in again["notes"] if n.startswith("push hook:")]
+
+
+def test_no_push_hook_note_for_an_image_app(world: dict[str, Path], box: FakeBox) -> None:
+    assert not [n for n in do_up(world)["notes"] if n.startswith("push hook:")]
+
+
+def test_no_push_hook_note_after_a_failed_first_image_run(
+    world: dict[str, Path], box: FakeBox, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _no_image(monkeypatch)
+    _build_app(world)
+    monkeypatch.setattr(applymod, "default_deploy", _failing_deploy(box, {"webapp"}))
+    failed = cli(world, "up", "--json")
+    assert failed.exit_code == 40, failed.output
+    doc = json.loads(failed.stdout)
+    assert "image" in doc["deploy_tags"] or doc["first_image"]  # a first image was asked
+    assert not [n for n in doc["notes"] if n.startswith("push hook:")]
+
+
+def test_push_hook_notes_name_the_env_and_the_branch() -> None:
+    proj = SimpleNamespace(name="shop", primary_env="production")
+    plan = {
+        "env": "staging",
+        "steps": [
+            {"kind": "image", "action": "create", "container": "shop-staging", "project": "shop"},
+            {"kind": "image", "action": "create", "container": "shop-staging-worker",
+             "project": "shop"},
+        ],
+    }
+    compiled = {"services": {"shop-staging": {"build": {"branch": "develop"}}}}
+    firsts = {"shop-staging": None, "shop-staging-worker": None}
+    assert applymod.push_hook_notes(plan, [(proj, "c")], compiled, firsts) == [
+        "push hook: run bay service add-webhook shop --env staging once, so that a push to "
+        "develop builds"
+    ]
+    assert applymod.push_hook_notes(plan, [(proj, "c")], compiled, {}) == []
