@@ -1651,6 +1651,28 @@ if [[ "${PULL_SIGNAL}" -eq 1 && -n "${IMAGE_REF}" ]]; then
   # image just pulled (a re-pull of the running commit): then :previous stays.
   _PREV_DIGEST=$(docker inspect --format '{% raw %}{{.Image}}{% endraw %}' "${SERVICE}" 2>/dev/null || true)
   _PULLED_ID=$(docker image inspect --format '{% raw %}{{.Id}}{% endraw %}' "${IMAGE_REF}" 2>/dev/null || true)
+
+  # The container already runs this image (the build server sends the pull
+  # signal again for a commit that is already built, for instance a push of
+  # another branch at the same commit). There is nothing to deploy: no release,
+  # no stop, no recreate, no :previous move, no alert. Only the bookkeeping that
+  # is true now: the receipt, the failed-commit mark and the circuit breaker.
+  # A stopped, exited or restarting container is not "running this image": it
+  # takes the normal path below, which recreates it.
+  if [[ -n "${_PREV_DIGEST}" && "${_PREV_DIGEST}" == "${_PULLED_ID}" ]]; then
+    _LIVE_STATE=$(docker inspect --type container --format '{% raw %}{{.State.Running}} {{.State.Restarting}}{% endraw %}' "${SERVICE}" 2>/dev/null || true)
+    if [[ "${_LIVE_STATE}" == "true false" ]]; then
+      _SAME_ID="${_PULLED_ID#sha256:}"
+      _log "Pull signal for ${IMAGE_REF}: ${SERVICE} already runs this image (${_SAME_ID:0:12}${EXPECTED_REVISION:+ as ${EXPECTED_REVISION}}); container left alone"
+      _started_commit "${SERVICE}" "${_PULLED_ID}" "${EXPECTED_REVISION}" \
+        "${EXPECTED_REVISION:+${IMAGE_REPO}:${EXPECTED_REVISION}}" "${IMAGE_REF}"
+      _stamp_receipt "${SERVICE}" "${STARTED_COMMIT}" "${STARTED_REF}"
+      _clear_failed_commit "${SERVICE}" "${STARTED_COMMIT}"
+      _reset_cb
+      exit 0
+    fi
+  fi
+
   if [[ -n "${_PREV_DIGEST}" && "${_PREV_DIGEST}" != "${_PULLED_ID}" ]]; then
     docker tag "${_PREV_DIGEST}" "${IMAGE_REPO}:previous" 2>/dev/null || true
     _log "Tagged running image as ${IMAGE_REPO}:previous for rollback"

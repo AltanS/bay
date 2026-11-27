@@ -866,7 +866,10 @@ class TestHealthCheckAndRollback:
             services, ["animals"], git_deploy_services=["animals"]
         )
         pull_start = rendered.index("Pull signal detected")
-        pull_section = rendered[pull_start:]
+        # The recreate path starts at `docker stop`: the 2.27.0 skip for an
+        # image the container already runs resets the breaker before it, with
+        # no health check (nothing was started).
+        pull_section = rendered[rendered.index('docker stop "${SERVICE}"', pull_start):]
         health_idx = pull_section.index("_wait_healthy")
         reset_idx = pull_section.index("_reset_cb")
         assert health_idx < reset_idx

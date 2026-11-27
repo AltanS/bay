@@ -1034,7 +1034,9 @@ def test_failed_health_check_untags_and_records_the_commit(
     assert local_sh.rindex('_clear_failed_commit "${SERVICE}" "${STARTED_COMMIT}"') > local_sh.index(
         '_handle_rollback "${SERVICE}" "${IMAGE_NAME}:previous"'
     )
-    assert remote_sh.count('_clear_failed_commit "${SERVICE}" "${STARTED_COMMIT}"') == 2
+    # Remote: the pull deploy, the build deploy, and (2.27.0) the pull that
+    # finds the container already running the pulled image.
+    assert remote_sh.count('_clear_failed_commit "${SERVICE}" "${STARTED_COMMIT}"') == 3
     assert 'FAILED_COMMITS_DIR="/var/lib/bay/failed-commits"' in local_sh
 
 
