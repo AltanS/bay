@@ -55,6 +55,7 @@ MUTATING_VERBS: frozenset[str] = frozenset(
         "vault encrypt",
         "vault decrypt",
         "vault set",
+        "service add-webhook",
         "service prune-webhooks",
         "server add",
         "server remove",

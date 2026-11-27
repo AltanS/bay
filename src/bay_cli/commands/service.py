@@ -1,4 +1,4 @@
-"""Service commands: list, show, catalog, prune-webhooks."""
+"""Service commands: list, show, catalog, prune-webhooks, add-webhook."""
 
 from __future__ import annotations
 
@@ -15,7 +15,9 @@ from bay_cli import console
 from bay_cli.context import context_or_cwd
 from bay_cli.errors import BayError
 
-app = typer.Typer(help="List services, show the catalog, and prune orphan GitHub webhooks.")
+app = typer.Typer(
+    help="List services, show the catalog, add or repair GitHub push hooks, and prune orphan ones."
+)
 
 
 def _get_config(ctx: typer.Context):
@@ -558,3 +560,301 @@ def prune_webhooks(
             {"repo": repo, "orphans": orphan_summary, "deleted": deleted_ids, "dry_run": False},
             command="service.prune-webhooks",
         )
+
+
+# ── add-webhook command (2.27.0) ───────────────────────────────────────────
+
+
+def _vault_secret(cx: Any, box_env: str, name: str) -> str | None:
+    """The value of ``secrets.<name>`` as the deploy of ``box_env`` reads it. None when unset.
+
+    Ansible replaces a mapping, it does not merge it: a host of ``box_env``
+    sees the ``secrets`` of ``group_vars/<box_env>/secrets.yml`` when that
+    file exists, else those of ``group_vars/all/secrets.yml``. The file is
+    decrypted into memory only; no error text carries its content.
+    """
+    from bay_cli.secrets_check import secrets_file_for
+
+    path = secrets_file_for(cx, box_env)
+    if path is None:
+        return None
+    data: Any = None
+    raw = path.read_text(errors="replace")
+    if raw.lstrip().startswith("$ANSIBLE_VAULT"):
+        if not cx.vault_pass.exists():
+            return None
+        try:
+            proc = subprocess.run(
+                [
+                    _ansible.tool("ansible-vault"), "decrypt",
+                    "--vault-password-file", str(cx.vault_pass),
+                    "--output=-", str(path),
+                ],
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if proc.returncode != 0:
+            return None
+        raw = proc.stdout
+    import yaml
+
+    try:
+        data = yaml.safe_load(raw)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    secrets = data.get("secrets")
+    value = secrets.get(name) if isinstance(secrets, dict) else None
+    return str(value) if value else None
+
+
+def _build_server_place(cx: Any, fleet_doc: dict[str, Any], box_env: str) -> tuple[list[str], str]:
+    """``(inventory groups of the build server host, its box env)``."""
+    from bay_cli import plan as planmod
+    from bay_cli import receipts
+
+    server = planmod._group_var(cx, box_env, "build_server")
+    if not server:
+        raise BayError.config(
+            f"a remote build needs build_server, and group_vars of {box_env} do not set it",
+            hint="Set build_server to the inventory host that builds.",
+        )
+    if "{{" in str(server):
+        raise BayError.config(
+            f"build_server is a Jinja value ({server}); Bay cannot tell where a push must land",
+            hint="Set build_server to the inventory host name itself.",
+        )
+    try:
+        names = receipts.inventory_names(cx.fleet_root, cx.framework_root)
+    except RuntimeError as exc:
+        raise BayError(f"cannot read the inventory to find the build server: {exc}") from None
+    host = str(server)
+    groups = sorted(g for g, hosts in names.items() if host in hosts and g != host)
+    if host not in names:
+        raise BayError.config(
+            f"build_server {host} is not a host of the inventory",
+            hint="Set build_server to a host in hosts/<env>.",
+        )
+    envs = sorted({str(b.get("env")) for b in (fleet_doc.get("boxes") or {}).values()
+                   if isinstance(b, dict) and b.get("env")})
+    env = box_env if box_env in groups else next((e for e in envs if e in groups), None)
+    if env is None:
+        raise BayError.config(
+            f"build_server {host} is in no box env of bay.fleet.toml, so Bay cannot tell "
+            "which vault holds the secret of its receiver",
+        )
+    return groups, env
+
+
+def _render_rows(doc: dict[str, Any]) -> None:
+    for row in doc["hooks"]:
+        built = (
+            f" (also builds {', '.join(row['members'][1:])})" if len(row["members"]) > 1 else ""
+        )
+        line = f"{row['container']}: {row['action']}"
+        if row["verification"]:
+            line += f", {row['verification']}"
+        typer.echo(f"{line}{built}")
+        typer.echo(f"  repo {row['repo']}, url {row['url']}")
+        if row["problems"] and row["action"] in ("broken", "repaired"):
+            typer.echo(f"  {'was' if row['action'] == 'repaired' else 'is'}: "
+                       + "; ".join(row["problems"]))
+        if row["detail"]:
+            typer.echo(f"  {row['detail']}")
+        for url in row["redundant_hooks"]:
+            typer.echo(f"  warning: a second hook {url} is redundant; one hook builds the group")
+        for url in row["stale_hooks"]:
+            typer.echo(f"  warning: an old hook {url} names the same container; remove it "
+                       "in the repo settings")
+        if row["next"]:
+            typer.echo(f"  next: {row['next']}")
+    for skip in doc["skipped"]:
+        typer.echo(f"{skip['container']}: skipped, {skip['reason']}")
+
+
+@app.command("add-webhook")
+def add_webhook(
+    ctx: typer.Context,
+    project: str = typer.Argument(help="The project whose push hooks to create or repair."),
+    env: str | None = typer.Option(
+        None,
+        "--env",
+        "-e",
+        help="The environment (deploy.<env>). Default: the fleet's primary env.",
+    ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="Only read the hooks and report; write nothing. Exit 1 when one is missing "
+        "or broken.",
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Print one JSON document."),
+) -> None:
+    """Create or repair the GitHub push hook of each build container of a project.
+
+    A push reaches Bay through a GitHub hook on the app repo:
+    https://<webhook domain>/webhook/<container>. For a local build that is
+    the domain of the box that runs the container; for a remote build, the
+    domain of the build server. The extra services of one bay.toml need one
+    hook. The hook is active, sends push events as JSON, checks TLS and
+    carries the secret that [webhook] secret of bay.fleet.toml names. Every
+    write sends the full config. After a create or a repair the verb sends
+    a ping and reports the receiver's answer.
+
+    bay init and bay up never create a hook. A hook is a write to an outside
+    service with a shared secret, it is outside the plan, and before the
+    first bay up the receiver does not know the service. Run this verb once
+    after the first bay up of a build project.
+
+    Needs github_admin_token in the vault, with write access to the webhooks
+    of the repo (classic token: admin:repo_hook; fine-grained token:
+    Webhooks read and write). Exit code: 0 when every hook is ok or was
+    made, 1 otherwise.
+
+    Examples:
+
+        bay service add-webhook shop
+        bay service add-webhook shop --env staging --check
+    """
+    from bay_cli.commands.project_cmd import (
+        _echo_json,
+        _json_error,
+        _read_identity,
+        find_bay_toml,
+        fleet_context,
+    )
+
+    try:
+        here = find_bay_toml(Path.cwd())
+        _, fleet_name = _read_identity(here) if here else (None, None)
+        cx = fleet_context(ctx, fleet_name, allow_cwd=True)
+        doc = _add_webhook(cx, project, env, check=check)
+    except BayError as exc:
+        if not as_json and not console.is_json_mode():
+            raise
+        _json_error(exc)
+    if as_json or console.is_json_mode():
+        _echo_json(doc)
+    else:
+        _render_rows(doc)
+    raise typer.Exit(int(doc["exit_code"]))
+
+
+def _add_webhook(
+    cx: Any,
+    project: str,
+    env: str | None,
+    *,
+    check: bool,
+    http: Any = None,
+    sleep: Any = None,
+) -> dict[str, Any]:
+    """The verb without the CLI: resolve everything, then make the GitHub calls.
+
+    ``http`` replaces the ``requests`` module and ``sleep`` the wait between
+    two polls (tests).
+    """
+    import time
+
+    from bay_cli import lockfile
+    from bay_cli import plan as planmod
+    from bay_cli.errors import ErrorCode
+    from bay_cli.github_webhook import GitHubHooks, ensure_hook, hook_targets
+
+    proj = planmod.load_project(cx, project, cwd=Path.cwd(), fetch=False)
+    env = env or proj.primary_env
+    pin = lockfile.env_pin(proj.lock, env)
+    pinned = planmod.doc_at(proj, pin)
+    if pinned is None:
+        raise BayError(
+            f"{project} has no pinned bay.toml for {env}, so Bay does not know its containers yet",
+            hint=f"Run `bay up {env} --project {project}` first, then run this again.",
+        )
+    names = planmod.project_containers(project, pinned, proj.lock, proj.primary_env).get(env)
+    if not names:
+        raise BayError(
+            f"{project} has no [deploy.{env}] in its pinned bay.toml", code=ErrorCode.NOT_FOUND
+        )
+    box, box_env = planmod.resolve_box(proj, env, pinned)
+    if box is None or box_env is None:
+        raise BayError.config(f"{project} {env}: box {box} is not in bay.fleet.toml [boxes]")
+    services, _state = planmod.current_services(cx)
+    services = services.get("services") or {}
+    default = planmod._group_var(cx, box_env, "git_deploy_build_strategy")
+    targets, skipped = hook_targets(
+        proj.fleet,
+        services,
+        sorted(set(names.values())),
+        main=names.get("web"),
+        box=box,
+        box_env=box_env,
+        strategy_of=lambda entry: planmod.build_strategy(entry, default),
+        build_server=lambda: _build_server_place(cx, proj.fleet, box_env),
+    )
+    if not targets:
+        why = "; ".join(f"{s['container']}: {s['reason']}" for s in skipped)
+        raise BayError(
+            f"{project} has no build container in {env} that a push must reach"
+            + (f" ({why})" if why else ""),
+            code=ErrorCode.NOT_FOUND,
+            hint="Only a build with strategy local or remote from a github.com repo needs a hook.",
+        )
+
+    # Every credential before any call: a missing one writes nothing.
+    token = _read_vault_token(cx.fleet_root, box_env, "github_admin_token")
+    if not token:
+        raise BayError.config(
+            f"github_admin_token not found in the vault of {box_env}",
+            hint=f"Add a GitHub token via `bay vault edit {box_env}`. It needs write access to "
+            "the webhooks of the repo: a classic token needs admin:repo_hook, a fine-grained "
+            "token needs Webhooks: Read and write. Without one, register the hook by hand "
+            "(docs/build-pipeline.md).",
+        )
+    secret_name = str((proj.fleet.get("webhook") or {}).get("secret") or "")
+    secrets: dict[str, str] = {}
+    if not check:
+        for target_env in sorted({t.secret_env for t in targets}):
+            value = _vault_secret(cx, target_env, secret_name) if secret_name else None
+            if not value:
+                raise BayError.config(
+                    f"the webhook secret {secret_name or '(none)'} that [webhook] secret names "
+                    f"is not in the vault of {target_env}; no hook was written",
+                    hint=f"Add it via `bay vault edit {target_env}`, run `bay up {env}`, then "
+                    "run this again.",
+                )
+            secrets[target_env] = value
+
+    client = GitHubHooks(token, http=http, secrets=tuple(secrets.values()))
+    listed: dict[str, list[dict[str, Any]]] = {}
+    rows = []
+    for target in targets:
+        if target.repo not in listed:
+            listed[target.repo] = client.list_hooks(target.owner, target.name)
+        rows.append(
+            ensure_hook(
+                client,
+                target,
+                secrets.get(target.secret_env, ""),
+                listed[target.repo],
+                project=project,
+                env=env,
+                check=check,
+                sleep=sleep or time.sleep,
+            )
+        )
+    good = {"ok", "created", "repaired"}
+    failed = any(r["action"] not in good for r in rows)
+    return {
+        "project": project,
+        "env": env,
+        "check": check,
+        "hooks": rows,
+        "skipped": skipped,
+        "result": "failed" if failed else "ok",
+        "exit_code": 1 if failed else 0,
+    }

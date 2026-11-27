@@ -242,7 +242,8 @@ to reproduce it. The flags that change what a command *means*:
 - `bay server inspect [env]` — Inspect live network configuration from servers via SSH.
 - `bay server list [env]` — List servers from the inventory.
 - `bay server remove <ip>` — Remove a server from the inventory.
-- `bay service` — List services, show the catalog, and prune orphan GitHub webhooks.
+- `bay service` — List services, show the catalog, add or repair GitHub push hooks, and prune orphan ones.
+- `bay service add-webhook <project>` — Create or repair the GitHub push hook of each build container of a project.
 - `bay service catalog` — List available service/accessory definitions from the catalog.
 - `bay service list` — List all configured services and accessories.
 - `bay service prune-webhooks <repo>` — List and optionally delete orphan GitHub webhooks for a repository.
