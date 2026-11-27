@@ -19,6 +19,33 @@
       {{ (_pin_commit | length > 0) | ternary(_pin_commit[:12], 'the head of branch '
          ~ (services[_svc_name].build.branch | default('main'))) }}
 
+# Never move an existing moving tag. When <image>:latest is already on the
+# box, this is not a true first image (the CLI guessed wrong): the build tags
+# only <image>:<commit12> and leaves :latest alone, and the codepin step
+# decides what :latest is. With no pinned commit, the service is skipped.
+- name: "{{ _svc_name }} — Look for the moving tag on this box"
+  ansible.builtin.command:
+    argv: [docker, image, inspect, "{{ git_deploy_image_prefix }}-{{ _svc_name }}:latest"]
+  register: _fi_local_latest
+  failed_when: false
+  changed_when: false
+
+- name: "{{ _svc_name }} — The moving tag stays where it is"
+  ansible.builtin.debug:
+    msg: >-
+      first image: {{ git_deploy_image_prefix }}-{{ _svc_name }}:latest is already on this
+      box, so this is not a first image. Bay leaves :latest alone.
+      {% if _pin_commit | length > 0 %}It builds only the image of {{ _pin_commit[:12] }}.
+      {% else %}There is no pinned commit, so it builds nothing for {{ _svc_name }}.{% endif %}
+  when: _fi_local_latest.rc == 0
+
+- name: "{{ _svc_name }} — Skip the build (moving tag there, no pinned commit)"
+  ansible.builtin.set_fact:
+    _fi_kept: "{{ (_fi_kept | default([])) + [_svc_name] }}"
+  when:
+    - _fi_local_latest.rc == 0
+    - _pin_commit | length == 0
+
 - name: "{{ _svc_name }} — Check the pinned commit"
   ansible.builtin.assert:
     that: _pin_commit is match('^[0-9a-f]{7,40}$')
@@ -29,7 +56,9 @@
 # A service that shares the build of a named main container re-tags the
 # main's image (build.yml, "Re-tag from primary"): no key, no clone.
 - name: "{{ _svc_name }} — Deploy key, checkout and commit"
-  when: not (_fi_alias | bool)
+  when:
+    - not (_fi_alias | bool)
+    - _svc_name not in (_fi_kept | default([]))
   block:
     - name: "{{ _svc_name }} — Generate the deploy key (SSH only)"
       ansible.builtin.include_tasks:
@@ -130,13 +159,17 @@
               bay up again.
 
 - name: "{{ _svc_name }} — Build the first image"
-  when: _svc_name not in (_fi_skipped | default([]))
+  when:
+    - _svc_name not in (_fi_skipped | default([]))
+    - _svc_name not in (_fi_kept | default([]))
   block:
     - name: "{{ _svc_name }} — Build"
       ansible.builtin.include_tasks:
         file: build.yml
         apply:
           tags: [first_image]
+      vars:
+        _fi_no_moving: "{{ _fi_local_latest.rc == 0 }}"
 
   rescue:
     - name: "{{ _svc_name }} — The first image build failed"

@@ -9,6 +9,11 @@
 # commit is fetched by itself when the branch fetch does not hold it), so the
 # image is <repo>:<commit12> of the pin with that commit in com.bay.commit.
 # Unset (the full `bay deploy` path): the head of the branch, as before.
+#
+# _fi_no_moving (optional, bool): the registry already holds the moving tag
+# (_image_ref, usually :latest), so this is not a true first image. The build
+# then pushes <repo>:<commit12> only and never moves the moving tag. Unset or
+# false: both tags, as before.
 
 - name: "{{ _svc_name }} — Resolve remote build config"
   ansible.builtin.set_fact:
@@ -276,7 +281,9 @@
           --cache-to type=registry,ref={{ _image_repo }}:buildcache,mode=max
           {% endif %}
           -t {{ _image_repo }}:{{ _remote_sha.stdout }}
+          {% if (_fi_no_moving | default(false) | string | lower) not in ['true', 'yes', '1'] %}
           -t {{ _image_ref }}
+          {% endif %}
           --label org.opencontainers.image.revision={{ _remote_sha.stdout }}
           --label com.bay.commit={{ _remote_sha.stdout }}
           -f {{ _dockerfile }}

@@ -1884,28 +1884,55 @@ def bay_build_dedup_map(services, service_names):
     return result
 
 
-def bay_first_image_plan(services, targets, default_strategy="local", active=None):
+def bay_first_image_plan(
+    services, targets, default_strategy="local", active=None, moving_exists=None
+):
     """What the first image build of ``bay up`` does on one host (2.27.0).
 
     ``targets`` is ``bay_first_image``: ``{container: full commit or None}``.
     ``default_strategy`` is ``git_deploy_build_strategy``; ``active`` the
-    names of this host's active services (None: every service). Only the
+    names of this host's active services (None: every service).
+    ``moving_exists`` is ``{image ref: bool}`` (or the loop results of the
+    registry check, ``[{"item", "rc"}]``, rc 0 = there): whether the registry already
+    holds the moving tag (the service's ``image``, usually ``:latest``). None:
+    not asked yet (first call), which reads as "no moving tag". Only the
     services named in ``targets`` ever appear in the result:
 
     * ``strategy``: ``{name: "local" | "remote" | "registry" | ...}``, with
       ``push`` read as ``remote`` (resolve_strategy.yml).
+    * ``moving``: the moving tags to ask the registry about, once each.
     * ``remote``: the remote builds, run once on the build server. A service
       whose build is ``shared_from`` a named service pushes no image of its own
-      (its image is the main's), so it is left out.
-    * ``pull``: the image refs this host pulls after the remote builds: the
-      service's ``image``, and ``<repo>:<commit12>`` when a commit is given.
-      The repo is the image up to its first ``:``, as remote_build.yml cuts it.
+      (its image is the main's), so it is left out. A service with no pinned
+      commit whose moving tag exists is left out too (``remote_skipped``):
+      it is not a first image, and Bay must not move the tag.
+    * ``keep_moving``: the remote builds whose moving tag exists. They push
+      ``<repo>:<commit12>`` only, never the moving tag.
+    * ``pull``: the image refs this host pulls after the remote builds. With
+      no moving tag yet (a true first image): the service's ``image``, and
+      ``<repo>:<commit12>`` when a commit is given. With a moving tag:
+      ``<repo>:<commit12>`` only, and nothing without a commit. The repo is
+      the image up to its first ``:``, as remote_build.yml cuts it.
     * ``local``: the local builds of this host, main containers before the
       services that share their build (those re-tag the main's image).
     """
     targets = dict(targets or {})
+    if isinstance(moving_exists, list):
+        # The results of the registry check: rc 0 means the tag is there.
+        exists = {
+            str(r.get("item")): r.get("rc") == 0
+            for r in moving_exists
+            if isinstance(r, dict) and not r.get("skipped")
+        }
+    else:
+        exists = dict(moving_exists or {})
     strategy = {}
-    remote, pull, mains, shared = [], [], [], []
+    remote, skipped, keep, pull, moving, mains, shared = [], [], [], [], [], [], []
+
+    def add(items, value):
+        if value not in items:
+            items.append(value)
+
     for name in sorted(targets):
         entry = services.get(name) if isinstance(services, dict) else None
         build = entry.get("build") if isinstance(entry, dict) else None
@@ -1917,24 +1944,32 @@ def bay_first_image_plan(services, targets, default_strategy="local", active=Non
         here = active is None or name in active
         is_shared = bool(build.get("shared_from")) and build.get("shared_from") in targets
         if value == "remote":
-            if not is_shared:
-                remote.append(name)
             image = entry.get("image")
+            commit = targets.get(name)
+            has_moving = bool(image) and bool(exists.get(str(image)))
+            if image:
+                add(moving, str(image))
+            if not is_shared:
+                if has_moving and not commit:
+                    skipped.append(name)
+                else:
+                    remote.append(name)
+                    if has_moving:
+                        keep.append(name)
             if here and image:
-                pull.append(str(image))
-                commit = targets.get(name)
+                if not has_moving:
+                    add(pull, str(image))
                 if commit:
-                    pull.append(f"{str(image).split(':', 1)[0]}:{str(commit)[:12]}")
+                    add(pull, f"{str(image).split(':', 1)[0]}:{str(commit)[:12]}")
         elif value == "local" and here:
             (shared if is_shared else mains).append(name)
-    unique = []
-    for ref in pull:
-        if ref not in unique:
-            unique.append(ref)
     return {
         "strategy": strategy,
+        "moving": moving,
         "remote": remote,
-        "pull": unique,
+        "remote_skipped": skipped,
+        "keep_moving": keep,
+        "pull": pull,
         "local": mains + shared,
     }
 

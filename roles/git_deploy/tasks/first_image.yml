@@ -58,8 +58,11 @@
       local {{ _fi.local | join(', ') or 'none' }}
 
 # ── Remote strategy: build on the build server, pull here ──────────────────
-- name: First image — remote builds
-  when: _fi.remote | length > 0 or _fi.pull | length > 0
+# First the registry, for every remote image a named service uses. This block
+# rewrites _fi, so the build block below is a separate block: a block `when`
+# is evaluated again for each of its tasks.
+- name: First image — remote images, the registry check
+  when: _fi.moving | length > 0
   block:
     - name: First image — build_server is set
       ansible.builtin.assert:
@@ -72,6 +75,74 @@
           inventory host of the build server.
         quiet: true
 
+    # The same login as main.yml ("Log in to Docker registries on build
+    # server"), with the docker CLI, so this file needs no collection. argv,
+    # so a user name with a space or a shell character stays one argument.
+    - name: First image — log in to the Docker registries on the build server
+      ansible.builtin.command:
+        argv:
+          - docker
+          - login
+          - "{{ item.domain }}"
+          - --username
+          - "{{ item.username }}"
+          - --password-stdin
+        stdin: "{{ item.password }}"
+      loop: "{{ docker_registries | default([]) }}"
+      loop_control:
+        label: "{{ item.domain }}"
+      delegate_to: "{{ build_server }}"
+      become: true
+      become_user: "{{ app_user }}"
+      run_once: true
+      changed_when: false
+      when:
+        - (item.username | default('')) | length > 0
+      no_log: true
+
+    # Never move an existing moving tag. The CLI guesses "no image yet" from
+    # the plan and the receipt, and a guess can be wrong (a box whose receipt
+    # file is missing while its containers run). So the build server asks the
+    # registry for the moving tag (the service's image, usually :latest).
+    # None: a true first image, built and pushed with the moving tag. One
+    # there: Bay adds only <repo>:<commit12> and pulls only that; the codepin
+    # step decides what :latest is. With no pinned commit, nothing is built.
+    - name: First image — ask the registry for the moving tags
+      ansible.builtin.command:
+        argv: [docker, manifest, inspect, "{{ item }}"]
+      loop: "{{ _fi.moving }}"
+      register: _fi_moving_check
+      changed_when: false
+      failed_when: >-
+        _fi_moving_check.rc != 0
+        and not ((_fi_moving_check.stderr | default('') | lower) is search('no such manifest|manifest unknown|not found'))
+      delegate_to: "{{ build_server }}"
+      become: true
+      become_user: "{{ app_user }}"
+
+    - name: First image — apply the moving tag rule
+      ansible.builtin.set_fact:
+        _fi: >-
+          {{ services | bay_first_image_plan(_fi_targets,
+                                             git_deploy_build_strategy | default('local'),
+                                             (active_services | default(services)).keys() | list,
+                                             _fi_moving_check.results | default([])) }}
+
+    - name: First image — moving tags that stay where they are
+      ansible.builtin.debug:
+        msg: >-
+          first image: the registry already has the moving tag of
+          {{ (_fi.keep_moving + _fi.remote_skipped) | join(', ') }}, so this is not a first
+          image. Bay leaves the moving tag alone.
+          {% if _fi.keep_moving %}It adds only <repo>:<commit12> for {{ _fi.keep_moving | join(', ') }}
+          and pulls only that.{% endif %}
+          {% if _fi.remote_skipped %}{{ _fi.remote_skipped | join(', ') }} has no pinned commit:
+          Bay builds and pulls nothing for it.{% endif %}
+      when: (_fi.keep_moving + _fi.remote_skipped) | length > 0
+
+- name: First image — remote builds
+  when: _fi.remote | length > 0 or _fi.pull | length > 0
+  block:
     # The build needs the builder and the select-builder.sh helper that the
     # full deploy sets up on the build server ("Set up build server for remote
     # builds" in main.yml). This run does not set them up: a build server that
@@ -98,25 +169,6 @@
       run_once: true
       when: _fi.remote | length > 0
 
-    # The same login as main.yml ("Log in to Docker registries on build
-    # server"), with the docker CLI, so this file needs no collection.
-    - name: First image — log in to the Docker registries on the build server
-      ansible.builtin.command:
-        cmd: docker login {{ item.domain }} --username {{ item.username }} --password-stdin
-        stdin: "{{ item.password }}"
-      loop: "{{ docker_registries | default([]) }}"
-      loop_control:
-        label: "{{ item.domain }}"
-      delegate_to: "{{ build_server }}"
-      become: true
-      become_user: "{{ app_user }}"
-      run_once: true
-      changed_when: false
-      when:
-        - _fi.remote | length > 0
-        - (item.username | default('')) | length > 0
-      no_log: true
-
     - name: First image — build and push (remote strategy)
       ansible.builtin.include_tasks:
         file: first_image_remote.yml
@@ -128,6 +180,7 @@
         label: "{{ _svc_name }}"
       vars:
         _pin_commit: "{{ _fi_targets[_svc_name] | default('', true) }}"
+        _fi_no_moving: "{{ _svc_name in _fi.keep_moving }}"
       run_once: true
 
     - name: First image — pull the new images on this host

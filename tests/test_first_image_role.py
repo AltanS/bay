@@ -93,6 +93,16 @@ def test_every_nested_include_keeps_the_tag() -> None:
             )
 
 
+def test_login_uses_argv() -> None:
+    login = next(
+        t for t in _walk(_load("first_image.yml")) if "log in to the Docker" in t.get("name", "")
+    )
+    command = login["ansible.builtin.command"]
+    assert "cmd" not in command
+    assert command["argv"][:2] == ["docker", "login"]
+    assert command["stdin"] == "{{ item.password }}" and login["no_log"] is True
+
+
 def test_first_image_files_use_no_collection_module() -> None:
     """The files run without vendored collections (the run tests rely on it)."""
     for name in FILES:
@@ -148,6 +158,27 @@ def test_filter_names_only_the_targets() -> None:
     assert dflt["remote"] == ["x"]
 
 
+def test_filter_moving_tag_rule() -> None:
+    services = {
+        "new": _svc("remote", "reg.example/new:latest"),
+        "fl": _svc("remote", "reg.example/fl:latest"),
+    }
+    sha = "a" * 40
+    first = bay_first_image_plan(services, {"new": sha, "fl": None})
+    assert first["moving"] == ["reg.example/fl:latest", "reg.example/new:latest"]
+    results = [
+        {"item": "reg.example/new:latest", "rc": 0},
+        {"item": "reg.example/fl:latest", "rc": 0},
+    ]
+    plan = bay_first_image_plan(services, {"new": sha, "fl": None}, moving_exists=results)
+    assert plan["remote"] == ["new"] and plan["keep_moving"] == ["new"]
+    assert plan["remote_skipped"] == ["fl"]
+    assert plan["pull"] == [f"reg.example/new:{'a' * 12}"]
+    none = bay_first_image_plan(services, {"new": sha}, moving_exists=[
+        {"item": "reg.example/new:latest", "rc": 1}])
+    assert none["keep_moving"] == [] and "reg.example/new:latest" in none["pull"]
+
+
 def test_filter_shared_build_is_pulled_or_retagged_not_built() -> None:
     services = {
         "web": _svc("remote", "reg.example/web:latest"),
@@ -166,9 +197,12 @@ def test_filter_shared_build_is_pulled_or_retagged_not_built() -> None:
 
 _DOCKER_STUB = """#!/bin/sh
 echo "$*" >> "$BAYSCRATCH_DOCKER_LOG"
+has() { for r in $BAYSCRATCH_HAS; do [ "$r" = "$1" ] && return 0; done; return 1; }
 case "$1 $2" in
-  "manifest inspect") exit 1;;
-  "image inspect") exit 1;;
+  "manifest inspect")
+    [ -n "$BAYSCRATCH_REGISTRY_DOWN" ] && { echo "connection refused" >&2; exit 1; }
+    has "$3" && exit 0; echo "no such manifest: $3" >&2; exit 1;;
+  "image inspect") has "$3" && exit 0; exit 1;;
   "buildx build") [ -n "$BAYSCRATCH_BUILD_FAILS" ] && exit 1; exit 0;;
   "tag "*) case "$2" in *:latest) exit 1;; esac; exit 0;;
 esac
@@ -427,9 +461,124 @@ def test_nothing_runs_without_the_var_the_tag_or_in_check_mode(world: World) -> 
     assert not (world.tmp / "stack" / "push-builds").exists()
 
 
+def _buildx(calls: list[str]) -> list[str]:
+    return [c for c in calls if c.startswith("buildx build")]
+
+
+def test_remote_moving_tag_there_adds_only_the_commit_image(world: World) -> None:
+    """Not a true first image: push and pull <repo>:<pin12> only, never :latest."""
+    pin = world.commits["new"][0]
+    moving = "reg.example/bayscratch-newapp:latest"
+    proc = world.run({"newapp": pin}, env={"BAYSCRATCH_HAS": moving})
+    assert proc.returncode == 0, _out(proc)
+    calls = world.calls()
+    (build,) = _buildx(calls)
+    assert f"-t reg.example/bayscratch-newapp:{pin[:12]}" in build
+    assert moving not in build
+    pulls = [c for c in calls if c.startswith("pull ")]
+    assert pulls == [f"pull reg.example/bayscratch-newapp:{pin[:12]}"]
+    assert "the registry already has the moving tag of newapp" in proc.stdout
+    assert "Bay leaves the moving tag alone" in proc.stdout
+
+
+def test_remote_moving_tag_there_and_no_pin_builds_nothing(world: World) -> None:
+    moving = "reg.example/bayscratch-newapp:latest"
+    proc = world.run({"newapp": None}, env={"BAYSCRATCH_HAS": moving})
+    assert proc.returncode == 0, _out(proc)
+    calls = world.calls()
+    assert _buildx(calls) == []
+    assert [c for c in calls if c.startswith("pull ")] == []
+    assert "Bay builds and pulls nothing for it" in proc.stdout
+    assert not (world.tmp / "stack" / "push-builds").exists()
+
+
+def test_remote_registry_check_error_stops(world: World) -> None:
+    """A registry that does not answer is no "no moving tag": the run stops."""
+    proc = world.run({"newapp": world.commits["new"][0]}, env={"BAYSCRATCH_REGISTRY_DOWN": "1"})
+    assert proc.returncode != 0
+    assert _buildx(world.calls()) == []
+
+
+def test_local_latest_there_tags_only_the_commit_image(world: World) -> None:
+    pin = world.commits["newlocal"][0]
+    latest = "argo-bayscratch-newlocal:latest"  # kept-argo: live build tag
+    proc = world.run({"newlocal": pin}, env={"BAYSCRATCH_HAS": latest})
+    assert proc.returncode == 0, _out(proc)
+    calls = world.calls()
+    (build,) = _buildx(calls)
+    assert f"-t argo-bayscratch-newlocal:{pin[:12]}" in build  # kept-argo: live build tag
+    tags = [c for c in calls if c.startswith("tag ")]
+    assert tags == [], tags  # no :latest, no :previous
+    assert "Bay leaves :latest alone" in proc.stdout
+
+    # No pinned commit: nothing is built, cloned or tagged.
+    proc = world.run({"newlocal": None}, env={"BAYSCRATCH_HAS": latest})
+    assert proc.returncode == 0, _out(proc)
+    assert _buildx(world.calls()) == []
+    assert "it builds nothing for newlocal" in proc.stdout
+
+
+def _cmd(task: dict[str, Any]) -> str:
+    return str((task.get("ansible.builtin.command") or {}).get("cmd") or "")
+
+
+def _render_build_cmd(text: str, **extra: Any) -> list[str]:
+    """The argv of the buildx task of remote_build.yml, rendered with plain Jinja."""
+    import shlex
+
+    import jinja2
+
+    tasks = yaml.safe_load(text)
+    block = next(t for t in tasks if t.get("block") and "Build and push image" in t["name"])
+    task = next(t for t in block["block"] if "buildx build" in _cmd(t))
+    env = jinja2.Environment()
+    values = {
+        "_svc_name": "app",
+        "_selected_builder": {"stdout": "argo-builder"},  # kept-argo: live builder name
+        "bay_buildx_builder": "argo-builder",  # kept-argo: live builder name
+        "_image_repo": "reg.example/app",
+        "_image_ref": "reg.example/app:latest",
+        "_remote_sha": {"stdout": "a" * 12},
+        "_dockerfile": "Dockerfile",
+        "_context": ".",
+        "git_deploy_remote_build_dir": "/opt/s/push-builds",
+        "_build": {"args": {"A": "1"}, "secrets": {"S": "x"}},
+        **extra,
+    }
+    return shlex.split(env.from_string(_cmd(task)).render(**values))
+
+
+def test_remote_build_command_unchanged_without_the_new_vars() -> None:
+    """The full bay deploy path: the same argv as before 2.27.0."""
+    before = subprocess.run(
+        ["git", "show", "3bd200e:roles/git_deploy/tasks/remote_build.yml"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    if before.returncode != 0:
+        pytest.skip("the 2.26.0 commit is not in this clone")
+    now = (TASKS / "remote_build.yml").read_text()
+    for cache in (False, True):
+        old = _render_build_cmd(before.stdout, git_deploy_registry_cache=cache)
+        assert _render_build_cmd(now, git_deploy_registry_cache=cache) == old
+        assert _render_build_cmd(now, git_deploy_registry_cache=cache, _fi_no_moving=False) == old
+        assert "reg.example/app:latest" in old
+    kept = _render_build_cmd(now, _fi_no_moving=True)
+    assert "reg.example/app:latest" not in kept and f"reg.example/app:{'a' * 12}" in kept
+
+
+def test_build_yml_latest_tasks_are_gated_only_by_the_new_var() -> None:
+    gate = "not (_fi_no_moving | default(false) | bool)"
+    tasks = list(_walk(_load("build.yml")))
+    moving = [t for t in tasks if ":latest" in _cmd(t) and "docker tag" in _cmd(t)]
+    assert len(moving) == 3  # :previous, :latest, deduped :latest
+    for task in moving:
+        assert gate in _tags(task.get("when")), task.get("name")
+
+
 def test_without_a_set_up_build_server_it_stops_with_the_way_out(world: World) -> None:
     (world.tmp / "stack" / "bin" / "select-builder.sh").unlink()
     proc = world.run({"newapp": world.commits["new"][0]})
     assert proc.returncode != 0
     assert "was never" in proc.stdout and "set up for remote builds" in proc.stdout
-    assert world.calls() == []
+    # Only the registry check ran: nothing was built or pulled.
+    assert all(c.startswith("manifest inspect") for c in world.calls()), world.calls()

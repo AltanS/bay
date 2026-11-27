@@ -2,6 +2,10 @@
 # Build Docker image for a service using the shared repo clone.
 # Called with _svc_name as loop var.
 # Repo is already cloned/pulled by clone_repos.yml.
+#
+# _fi_no_moving (optional, bool, the first image build of bay up, 2.27.0): the
+# box already has <image>:latest, so the build tags only <image>:<sha> and
+# leaves :latest and :previous alone. Unset or false: as before.
 
 - name: "{{ _svc_name }} — Resolve build config"
   ansible.builtin.set_fact:
@@ -46,6 +50,7 @@
     cmd: "docker tag {{ _image_name }}:{{ _git_sha.stdout }} {{ _image_name }}:latest"
   when:
     - _retag_from_primary is changed
+    - not (_fi_no_moving | default(false) | bool)
 
 - name: "{{ _svc_name }} — Build image"
   when:
@@ -68,6 +73,7 @@
       register: _retag
       failed_when: false
       changed_when: _retag.rc == 0
+      when: not (_fi_no_moving | default(false) | bool)
 
     - name: "{{ _svc_name }} — Build Docker image"
       ansible.builtin.command:
@@ -103,6 +109,7 @@
     - name: "{{ _svc_name }} — Tag as :latest"
       ansible.builtin.command:
         cmd: "docker tag {{ _image_name }}:{{ _git_sha.stdout }} {{ _image_name }}:latest"
+      when: not (_fi_no_moving | default(false) | bool)
 
   always:
     - name: "{{ _svc_name }} — Clean up build secret temp files"
