@@ -140,7 +140,14 @@ the push may deploy. The rules for each webhook build:
    `frozen` from its own compiled config (the build server may be behind). A
    held pull fetches `<image>:<commit12>` only, so `bay up` and
    `bay rollback --to` find it, and sends `build.held`. A pull that may deploy
-   also tags the pulled image as `<image>:<commit12>`.
+   also tags the pulled image as `<image>:<commit12>`. Since 2.27.0, a pull
+   for the image that the container already runs (same image id, container
+   running and not restarting) leaves the container alone: no release command,
+   no stop or recreate, `:previous` stays, and no `deploy.pull_complete` alert.
+   `rebuild.sh` logs `<svc> already runs this image ... container left alone`,
+   stamps the receipt, clears a failed-commit mark and resets the circuit
+   breaker. A new image, a stopped or restarting container, or no container
+   recreates as before.
 
 `bay up` releases a hold: it pins the commit, compiles its config and asks the
 box to point `:latest` at that commit's image before the container pass

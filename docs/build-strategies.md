@@ -183,6 +183,14 @@ GitHub Push
 - Image built once on build server, shared across regions
 - One pull signal per unique image per region (not per service)
 - Deployment servers expand image ref to container restarts via `image-map.json`
+- Since 2.27.0, a pull signal for the image that the container already runs
+  leaves the container alone. The box pulls, sees the same image id and a
+  container that is running, and logs
+  `Pull signal for <image>: <svc> already runs this image (<id>); container left alone`.
+  It runs no release command and sends no alert. A new image, a stopped or
+  restarting container, or no container recreates as before. The build server
+  still sends the signal for a commit that is already in the registry: it
+  cannot know what each box runs, and a box that was down needs it.
 - `bay deploy` also pulls remote-built images (manual recovery path)
 
 ### Registry layer cache (opt-in)
